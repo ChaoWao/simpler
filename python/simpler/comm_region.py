@@ -22,6 +22,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _region_counter_notify,
     _region_counter_test,
     _region_counter_wait,
+    _worker_host_mapped_region_close,
 )
 
 from .buffer import AddressSpace, Buffer
@@ -140,23 +141,23 @@ class _PinnedBuffer:
 
 class HostVmmCopyAccess:
     def __init__(self, handle: Any) -> None:
-        self._handle = int(handle)
+        self._handle = handle
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> HostVmmCopyAccess:
-        return cls(getattr(mapping, "handle"))
+        return cls(getattr(mapping, "handle", mapping))
 
     @property
-    def handle(self) -> int:
+    def handle(self) -> Any:
         return self._handle
 
     def write_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
         span.validate_range(offset, nbytes, "region byte write")
-        _host_vmm_copy_to(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+        _host_vmm_copy_to(int(self._handle), int(span.offset) + int(offset), int(host_ptr), int(nbytes))
 
     def read_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
         span.validate_range(offset, nbytes, "region byte read")
-        _host_vmm_copy_from(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+        _host_vmm_copy_from(int(self._handle), int(span.offset) + int(offset), int(host_ptr), int(nbytes))
 
 
 class PayloadPart:
@@ -561,7 +562,11 @@ class RegionInstance:
             if lease is None:
                 continue
             try:
-                lease.close()
+                closer = getattr(lease, "close", None)
+                if closer is not None:
+                    closer()
+                else:
+                    _worker_host_mapped_region_close(int(lease))
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
         if self._release_client is not None and int(self._provider_resource_id) != 0:

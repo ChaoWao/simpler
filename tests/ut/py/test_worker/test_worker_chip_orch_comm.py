@@ -67,6 +67,9 @@ from simpler_setup.runtime_builder import RuntimeBuilder
 
 _task_interface_ext = cast(Any, importlib.import_module("_task_interface"))
 _TASK_INTERFACE_CPP = Path(__file__).resolve().parents[4] / "python" / "bindings" / "task_interface.cpp"
+_WORKER_PY = Path(__file__).resolve().parents[4] / "python" / "simpler" / "worker.py"
+_ACCESS_ONBOARD_VMM = 1
+_ACCESS_SIM_POSIX_SHM = 2
 
 
 def test_worker_host_mapped_backend_types_are_removed_from_native_implementation():
@@ -79,8 +82,26 @@ def test_worker_host_mapped_backend_types_are_removed_from_native_implementation
         "WorkerHostMappedRegionRegistry",
         "WorkerHostMappedRegionHandle",
         "class WorkerHostMappedRegion",
+        "ChipChildOnboardRegionExport",
+        "region_vmm_legacy_create",
+        "_l3_child_onboard_region_create",
+        "_l3_child_onboard_region_close",
     ):
         assert legacy_type not in source
+
+
+def test_combined_host_worker_chip_region_helpers_are_removed():
+    source = _WORKER_PY.read_text(encoding="utf-8")
+    for legacy_name in (
+        "_HostWorkerChipRegion",
+        "_HostWorkerChipRegionStore",
+        "_release_host_worker_chip_region",
+        "_create_sim_worker_chip_region",
+        "_create_onboard_worker_chip_region",
+        "_sweep_host_worker_chip_regions",
+        "_close_worker_host_mapping",
+    ):
+        assert legacy_name not in source
 
 
 class _FakeDirectCWorker:
@@ -89,7 +110,7 @@ class _FakeDirectCWorker:
         *,
         payload_base: int = 0xDEAD_0000,
         counter_base: int = 0xDEAD_1000,
-        access_profile: int = int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM),
+        access_profile: int = _ACCESS_SIM_POSIX_SHM,
         device_id: int = 0,
         shareable_handle: int = 0xABCDEF,
         reply_magic: Optional[int] = None,
@@ -128,7 +149,7 @@ class _FakeDirectCWorker:
             region_id = int(self.region_id) if self.region_id is not None else self.next_region_id
             if self.region_id is None:
                 self.next_region_id += 1
-            sim = self.access_profile == int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM)
+            sim = self.access_profile == _ACCESS_SIM_POSIX_SHM
             if self.corrupt_access_profile:
                 sim = not sim
             payload_bytes = int(spec.payload.logical_bytes)
@@ -241,7 +262,7 @@ def _make_started_onboard_worker(platform: str = "a2a3") -> tuple[Worker, Shared
     assert shm.buf is not None
     _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
     fake_c_worker = _FakeDirectCWorker(
-        access_profile=int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM),
+        access_profile=_ACCESS_ONBOARD_VMM,
         device_id=2,
     )
     worker._lifecycle = worker_module._Lifecycle.READY
@@ -290,9 +311,9 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
         assert 99 not in region.descriptor_scalars()
-        assert region._instance._payload_mapping.handle == 99
-        assert region._instance._counter_mapping.handle == 99
-        assert region._instance._payload_mapping.handle != region.descriptor.payload_base
+        assert region._instance._payload_mapping == 99
+        assert region._instance._counter_mapping == 99
+        assert region._instance._payload_mapping != region.descriptor.payload_base
         assert calls[0] == ("import", "sim-direct-1-p", 64, worker._owner_id)
         assert calls[1] == ("import", "sim-direct-1-c", 128, worker._owner_id)
         assert calls[2][0:3] == ("write", 99, 0)
@@ -330,10 +351,7 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_worker_host
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
         assert 123 not in region.descriptor_scalars()
-        assert (
-            region._instance._payload_mapping.access_profile
-            == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
-        )
+        assert region._instance._payload_mapping == 123
         assert calls[0] == ("import_onboard", 2, 0xABCDEF, 64, worker._owner_id)
         assert calls[1] == ("import_onboard", 2, 0xABCDEF + 1, 128, worker._owner_id)
         assert calls[2] == ("notify", 123, 64, 9, int(NotifyOp.Set))
@@ -390,7 +408,7 @@ def test_sim_direct_create_import_failure_rolls_back_l2_host_region(monkeypatch)
 
 def test_direct_create_decode_failure_rolls_back_l2_host_region():
     worker, shm, fake_c_worker = _make_started_sim_worker()
-    fake_c_worker.access_profile = int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)
+    fake_c_worker.access_profile = _ACCESS_ONBOARD_VMM
     try:
         with pytest.raises(RuntimeError, match="committed import capability does not match"):
             worker._create_worker_chip_region(0, 64, 128)
@@ -409,7 +427,7 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
         ({"reply_magic": 0xBAD}, "unsupported provider control version"),
         ({"region_id": 0}, "SUCCESS requires a resource id"),
         (
-            {"access_profile": int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)},
+            {"access_profile": _ACCESS_ONBOARD_VMM},
             "committed import capability does not match",
         ),
     ],
@@ -448,8 +466,8 @@ def test_onboard_direct_mapping_bytes_cover_each_independent_part(monkeypatch):
             (2, 0xABCDEF, 191, worker._owner_id),
             (2, 0xABCDEF + 1, 191, worker._owner_id),
         ]
-        assert region._instance._payload_mapping.total_bytes == 191
-        assert region._instance._counter_mapping.total_bytes == 191
+        assert region._instance._payload_mapping == 123
+        assert region._instance._counter_mapping == 123
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -473,9 +491,8 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
             (2, 0xABCDEF, 65536, worker._owner_id),
             (2, 0xABCDEF + 1, 65536, worker._owner_id),
         ]
-        assert region._instance._payload_mapping is not None
-        assert region._instance._payload_mapping.total_bytes == 65536
-        assert region._instance._counter_mapping.total_bytes == 65536
+        assert region._instance._payload_mapping == 123
+        assert region._instance._counter_mapping == 123
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -495,7 +512,7 @@ def test_direct_region_create_rolls_back_partially_published_region(monkeypatch,
     close_calls: list[int] = []
     monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
-        worker_chip_orch_comm,
+        comm_region,
         "_worker_host_mapped_region_close",
         lambda handle: close_calls.append(int(handle)),
     )
@@ -532,7 +549,7 @@ def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatc
     worker._live_worker_chip_regions = _AppendThenInterrupt()
     monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
-        worker_chip_orch_comm,
+        comm_region,
         "_worker_host_mapped_region_close",
         lambda _handle: (_ for _ in ()).throw(RuntimeError("mapping close failed")),
     )
@@ -876,7 +893,7 @@ def test_close_replay_does_not_double_release_worker_chip_region_after_mapping_c
             fail_next_mapping_close = False
             raise RuntimeError("mapping close failed")
 
-    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_region_close", close_mapping)
+    monkeypatch.setattr(comm_region, "_worker_host_mapped_region_close", close_mapping)
 
     try:
         region = worker._create_worker_chip_region(0, 64, 128)
@@ -1636,7 +1653,7 @@ def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(mo
             worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 77
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
+            comm_region,
             "_worker_host_mapped_region_close",
             lambda handle: events.append(("close", int(handle))),
         )

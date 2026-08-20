@@ -65,7 +65,6 @@
 #include "data_type.h"
 #include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
-#include "worker_chip_orch_region_access.h"
 #include "worker_bind.h"
 #include "task_args.h"
 #include "tensor.h"
@@ -328,13 +327,6 @@ AclRuntimeApi &acl_api() {
     });
     return *api;
 }
-
-struct ChipChildOnboardRegionExport {
-    uint64_t device_addr{0};
-    uint64_t mapping_bytes{0};
-    uint64_t shareable_handle{0};
-    uint64_t registry_handle{0};
-};
 
 std::string region_shm_name_for_open(const std::string &token) {
     if (token.empty()) {
@@ -1572,26 +1564,6 @@ void region_vmm_test_fail_stage(const std::string &stage, const std::string &whe
 void region_vmm_test_set_unmap_already_gone() {
     std::lock_guard<std::mutex> lk(region_vmm_mu());
     region_vmm_test_hooks().unmap_already_gone = true;
-}
-
-ChipChildOnboardRegionExport region_vmm_legacy_create(uint64_t nbytes) {
-    AclRuntimeApi &api = acl_api();
-    int device_id = api.current_device_with_check();
-    uint64_t handle = region_vmm_begin(device_id);
-    try {
-        RegionVmmExport exported = region_vmm_allocate_export(handle, nbytes);
-        ChipChildOnboardRegionExport legacy{};
-        legacy.device_addr = exported.device_addr;
-        legacy.mapping_bytes = exported.mapping_bytes;
-        legacy.shareable_handle = exported.shareable_handle;
-        legacy.registry_handle = exported.registry_handle;
-        return legacy;
-    } catch (...) {
-        try {
-            region_vmm_release(handle);
-        } catch (...) {}
-        throw;
-    }
 }
 
 // The int wire value of a dtype given either a DataType enumerator or its int value. The nanobind
@@ -3170,12 +3142,6 @@ NB_MODULE(_task_interface, m) {
         "way out. Tags are not preserved (the wire format strips them)."
     );
 
-    nb::class_<ChipChildOnboardRegionExport>(m, "_ChipChildOnboardRegionExport")
-        .def_ro("device_addr", &ChipChildOnboardRegionExport::device_addr)
-        .def_ro("mapping_bytes", &ChipChildOnboardRegionExport::mapping_bytes)
-        .def_ro("shareable_handle", &ChipChildOnboardRegionExport::shareable_handle)
-        .def_ro("registry_handle", &ChipChildOnboardRegionExport::registry_handle);
-
     nb::class_<RegionVmmExport>(m, "_RegionVmmExport")
         .def_ro("device_addr", &RegionVmmExport::device_addr)
         .def_ro("mapping_bytes", &RegionVmmExport::mapping_bytes)
@@ -3591,22 +3557,5 @@ NB_MODULE(_task_interface, m) {
         },
         nb::arg("handle"), "Return fake-driver VA backing bytes for one native VMM record."
     );
-    m.def(
-        "_l3_child_onboard_region_create",
-        [](uint64_t nbytes) -> ChipChildOnboardRegionExport {
-            return region_vmm_legacy_create(nbytes);
-        },
-        nb::arg("nbytes"), nb::call_guard<nb::gil_scoped_release>(),
-        "Temporary compatibility wrapper over the two-phase native VMM registry."
-    );
-    m.def(
-        "_l3_child_onboard_region_close",
-        [](uint64_t registry_handle) {
-            region_vmm_release(registry_handle);
-        },
-        nb::arg("registry_handle"), nb::call_guard<nb::gil_scoped_release>(),
-        "Temporary compatibility wrapper over one-shot native VMM release."
-    );
-
     bind_worker(m);
 }

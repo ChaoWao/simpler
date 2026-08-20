@@ -422,59 +422,6 @@ def test_shape_validation_rejects_duplicate_attachment_members():
     )
 
 
-class _FakeCounter:
-    def __init__(self, calls: list[tuple]) -> None:
-        self._calls = calls
-
-    def notify(self, value: int, op=NotifyOp.Set) -> None:
-        self._calls.append(("notify", value, op))
-
-    def test(self, cmp_value: int, cmp: WaitCmp):
-        self._calls.append(("test", cmp_value, cmp))
-        return True
-
-    def wait(self, cmp_value: int, cmp: WaitCmp, timeout: int):
-        self._calls.append(("wait", cmp_value, cmp, timeout))
-
-
-class _FakeRegion:
-    def __init__(self, calls: list[tuple], *, fail_mapping_close: bool = False) -> None:
-        self._calls = calls
-        self._fail_mapping_close = fail_mapping_close
-        self._worker_id = 1
-        self.region_id = 42
-        self._expired = False
-        self._released = False
-        self._chip_release_committed = False
-
-    @property
-    def expired(self) -> bool:
-        return self._expired
-
-    def payload_write(self, offset: int, host_buffer, nbytes=None) -> None:
-        self._calls.append(("payload_write", offset, host_buffer, nbytes))
-
-    def payload_read(self, offset: int, host_buffer, nbytes=None) -> None:
-        self._calls.append(("payload_read", offset, host_buffer, nbytes))
-
-    def counter(self, offset: int) -> _FakeCounter:
-        self._calls.append(("counter", offset))
-        return _FakeCounter(self._calls)
-
-    def _close_worker_host_mapping(self) -> None:
-        self._calls.append(("mapping_close", self._expired))
-        if self._fail_mapping_close:
-            raise RuntimeError("mapping close failed")
-
-    def free(self) -> None:
-        self._calls.append(("free",))
-        self._released = True
-
-    def _expire(self) -> None:
-        self._calls.append(("expire",))
-        self._expired = True
-
-
 class _FakeLease:
     def __init__(self, calls: list[tuple], name: str, handle: int, *, fail_close: bool = False) -> None:
         self._calls = calls
@@ -759,19 +706,6 @@ def test_region_instance_close_failure_replays_cached_error(region_worker):
         ("mapping_close", "counter"),
         ("release", 1, 42),
     ]
-
-
-def test_close_worker_chip_region_preserves_release_error_cause():
-    worker = _l3(device_ids=[8, 9])
-    calls: list[tuple] = []
-    fake_region = _FakeRegion(calls, fail_mapping_close=True)
-    worker._worker = _FakeNativeWorker(calls, fail_release=True)
-    worker._live_worker_chip_regions.append(fake_region)
-
-    with pytest.raises(RuntimeError, match="mapping close failed") as excinfo:
-        worker._close_worker_chip_region(fake_region, poison_on_error=True)
-
-    assert str(excinfo.value.__cause__) == "release failed"
 
 
 def test_callback_region_close_before_submit_retired_from_run_cleanup(region_worker):

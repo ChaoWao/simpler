@@ -10,14 +10,12 @@
  */
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 #include <gtest/gtest.h>
 
 #include "common/worker_chip_orch_comm.h"
-#include "host/worker_chip_orch_region_access.h"
 
 namespace {
 
@@ -230,26 +228,6 @@ TEST(WorkerChipOrchCommTest, DescriptorAndSignalResultAreFixedSizePodTypes) {
     static_assert(std::is_trivially_copyable<WorkerChipOrchRegionDesc>::value, "descriptor must be fixed-size");
     static_assert(std::is_standard_layout<WorkerChipOrchSignalTestResult>::value, "test result must be POD-like");
     static_assert(std::is_trivially_copyable<WorkerChipOrchSignalTestResult>::value, "test result must be fixed-size");
-}
-
-TEST(WorkerChipOrchCommTest, LifecycleCreateWireStructsHaveFixedLayout) {
-    static_assert(std::is_standard_layout<WorkerChipRegionCreateRequest>::value, "create request must be POD-like");
-    static_assert(
-        std::is_trivially_copyable<WorkerChipRegionCreateRequest>::value, "create request must be fixed-size"
-    );
-    static_assert(std::is_standard_layout<WorkerChipRegionCreateReply>::value, "create reply must be POD-like");
-    static_assert(std::is_trivially_copyable<WorkerChipRegionCreateReply>::value, "create reply must be fixed-size");
-
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateRequest, magic_version), 0u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateRequest, payload_bytes), sizeof(uint64_t) * 2);
-    EXPECT_EQ(sizeof(WorkerChipRegionCreateRequest), 32u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, desc), 0u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, access_profile), sizeof(uint64_t) * 6);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, device_id), sizeof(uint64_t) * 6 + sizeof(uint32_t) * 2);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, backing_shm), sizeof(uint64_t) * 6 + sizeof(uint32_t) * 2 + 4u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, mapping_bytes), 96u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, shareable_handle), 104u);
-    EXPECT_EQ(sizeof(WorkerChipRegionCreateReply), 112u);
 }
 
 }  // namespace

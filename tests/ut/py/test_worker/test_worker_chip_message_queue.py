@@ -16,7 +16,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Optional
 
 import pytest
-from simpler import comm_region, worker_chip_orch_comm
+from simpler import comm_region
 from simpler import worker as worker_module
 from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
 from simpler.comm_provider import (
@@ -301,53 +301,19 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
     fake_client = _FakeClient()
     fake_client.original_helpers = [
         (worker_module, "_worker_host_mapped_region_import_sim", worker_module._worker_host_mapped_region_import_sim),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_payload_write",
-            worker_chip_orch_comm._worker_host_mapped_payload_write,
-        ),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_payload_read",
-            worker_chip_orch_comm._worker_host_mapped_payload_read,
-        ),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_notify",
-            worker_chip_orch_comm._worker_host_mapped_counter_notify,
-        ),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_test",
-            worker_chip_orch_comm._worker_host_mapped_counter_test,
-        ),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_wait",
-            worker_chip_orch_comm._worker_host_mapped_counter_wait,
-        ),
-        (
-            worker_chip_orch_comm,
-            "_worker_host_mapped_region_close",
-            worker_chip_orch_comm._worker_host_mapped_region_close,
-        ),
         (comm_region, "_host_vmm_copy_to", comm_region._host_vmm_copy_to),
         (comm_region, "_host_vmm_copy_from", comm_region._host_vmm_copy_from),
         (comm_region, "_region_counter_notify", comm_region._region_counter_notify),
         (comm_region, "_region_counter_test", comm_region._region_counter_test),
         (comm_region, "_region_counter_wait", comm_region._region_counter_wait),
+        (comm_region, "_worker_host_mapped_region_close", comm_region._worker_host_mapped_region_close),
     ]
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = _FakeCWorker()
     worker._chip_shms = [shm]
     worker._worker_chip_test_fake_client = fake_client
     worker_module._worker_host_mapped_region_import_sim = fake_client.import_region
-    worker_chip_orch_comm._worker_host_mapped_payload_write = fake_client.payload_write
-    worker_chip_orch_comm._worker_host_mapped_payload_read = fake_client.payload_read
-    worker_chip_orch_comm._worker_host_mapped_counter_notify = fake_client.counter_notify
-    worker_chip_orch_comm._worker_host_mapped_counter_test = fake_client.counter_test
-    worker_chip_orch_comm._worker_host_mapped_counter_wait = fake_client.counter_wait
-    worker_chip_orch_comm._worker_host_mapped_region_close = lambda _handle: None
+    comm_region._worker_host_mapped_region_close = lambda _handle: None
     comm_region._host_vmm_copy_to = fake_client.payload_write
     comm_region._host_vmm_copy_from = fake_client.payload_read
     comm_region._region_counter_notify = fake_client.counter_notify

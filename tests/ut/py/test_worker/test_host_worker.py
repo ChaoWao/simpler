@@ -4015,20 +4015,11 @@ class TestRunHandle:
             def __init__(self, region_id):
                 self.region_id = region_id
                 self._worker_id = 0
-                self.mapping_closed = False
                 self._expired = False
-                self._released = False
-                self._chip_release_committed = False
 
             @property
             def expired(self):
                 return self._expired
-
-            def _close_worker_host_mapping(self):
-                self.mapping_closed = True
-
-            def free(self):
-                self._released = True
 
             def _expire(self):
                 self._expired = True
@@ -4097,9 +4088,9 @@ class TestRunHandle:
 
         assert first_ref.releases == 1
         assert second_ref.releases == 0
-        assert native_worker.released_regions == [(0, 11)]
-        assert first_region.mapping_closed and first_region.expired
-        assert not second_region.mapping_closed and not second_region.expired
+        assert native_worker.released_regions == []
+        assert first_region.expired
+        assert not second_region.expired
         assert worker._live_worker_chip_regions == [second_region]
         assert first.worker_chip_orch_comm_host_buffers == {}
         assert second.worker_chip_orch_comm_host_buffers == {0x2000: 128}
@@ -4120,21 +4111,37 @@ class TestRunHandle:
 
             def __init__(self):
                 self._expired = False
-                self._released = False
-                self._chip_release_committed = False
 
             @property
             def expired(self):
                 return self._expired
 
-            def _close_worker_host_mapping(self):
-                raise mapping_error
-
-            def free(self):
-                self._released = True
-
             def _expire(self):
                 self._expired = True
+
+        class FakeInstance:
+            def __init__(self):
+                self._close_attempted = False
+                self._state = worker_mod.RegionInstanceState.LIVE
+                self._cleanup_error = None
+                self._ever_live = True
+                self._provider_release_committed = False
+
+            def _retains_cleanup_only_reachability(self):
+                return False
+
+            def _close_owned(self, *, poison_on_error):
+                self._close_attempted = True
+                native_worker.released_regions.append((0, 11))
+                self._provider_release_committed = True
+                self._state = worker_mod.RegionInstanceState.CLOSE_FAILED
+                if poison_on_error:
+                    worker._record_unreclaimable(
+                        "close_worker_chip_region: region 11 on worker 0 could not be "
+                        "fully reclaimed; no further work is admitted",
+                        mapping_error,
+                    )
+                raise mapping_error
 
         class NativeWorker:
             def __init__(self):
@@ -4157,6 +4164,8 @@ class TestRunHandle:
         region = Region()
         resources.worker_chip_regions.append(region)
         worker._live_worker_chip_regions.append(region)
+        instance = FakeInstance()
+        worker._region_instance_registry.track(instance, resources)
         handle = RunHandle(worker, 1, (), resources)
         worker._accepted_run_handles.add(handle)
 
@@ -4188,20 +4197,11 @@ class TestRunHandle:
             def __init__(self, region_id):
                 self.region_id = region_id
                 self._worker_id = 0
-                self.mapping_closes = 0
                 self.expires = 0
-                self._released = False
-                self._chip_release_committed = False
 
             @property
             def expired(self):
                 return self.expires > 0
-
-            def _close_worker_host_mapping(self):
-                self.mapping_closes += 1
-
-            def free(self):
-                self._released = True
 
             def _expire(self):
                 self.expires += 1
@@ -4225,9 +4225,9 @@ class TestRunHandle:
             worker._cleanup_worker_chip_regions(resources)
 
         assert caught.value is interrupt
-        assert native_worker.released_regions == [(0, 11), (0, 22)]
-        assert (first.mapping_closes, first.expires) == (1, 1)
-        assert (second.mapping_closes, second.expires) == (1, 1)
+        assert native_worker.released_regions == []
+        assert first.expires == 1
+        assert second.expires == 1
         assert resources.worker_chip_regions == []
         assert worker._live_worker_chip_regions == []
 
