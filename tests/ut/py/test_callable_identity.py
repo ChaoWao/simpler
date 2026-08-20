@@ -2892,6 +2892,7 @@ def test_initial_mpi_direct_register_rollback_aborts_only_uncommitted_workers():
                 worker_id=worker_id,
                 mpi_rank=worker_id + 1,
                 session_id=worker_id + 1,
+                host="localhost",
                 comm_profile="sim",
                 platform="a2a3sim",
                 runtime="sim",

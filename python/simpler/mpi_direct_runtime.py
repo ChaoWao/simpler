@@ -270,6 +270,7 @@ class MpiDirectControllerContext:
                     worker_id=executor.worker_id,
                     mpi_rank=executor.rank,
                     session_id=self.session_id,
+                    host=executor.host,
                     comm_profile=executor.comm_profile,
                     platform=executor.platform,
                     runtime=executor.runtime,

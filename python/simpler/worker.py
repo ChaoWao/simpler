@@ -840,6 +840,7 @@ class _MpiDirectWorkerSpec:
     worker_id: int
     mpi_rank: int
     session_id: int
+    host: str
     comm_profile: str
     platform: str
     runtime: str
@@ -6519,6 +6520,11 @@ class Worker:
             mpi_path = _format_worker_path(3, parent_path=path, index=int(child_index))
             entries.append(_EndpointTopologyEntry(mpi_path, HOST_CPU, mpi_node_identity))
             self._append_device_endpoint_topology(entries, mpi_path, rank.spec.device_ids, mpi_node_identity)
+        for spec in worker._mpi_direct_worker_specs:
+            mpi_node_identity = _normalize_node_identity(spec.host)
+            mpi_path = _format_worker_path(3, parent_path=path, index=int(spec.worker_id))
+            entries.append(_EndpointTopologyEntry(mpi_path, HOST_CPU, mpi_node_identity))
+            self._append_device_endpoint_topology(entries, mpi_path, spec.device_ids, mpi_node_identity)
 
     def _append_device_endpoint_topology(
         self,
