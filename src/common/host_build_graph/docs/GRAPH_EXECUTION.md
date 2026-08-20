@@ -355,8 +355,19 @@ For a cache hit, the Host Orchestrator:
    the Definition's `execution_storage_bytes` for the execution the device
    materializes into;
 4. computes only external fanin and boundary tensormap effects;
-5. emits one outer `GRAPH` task;
-6. stages the exact-size POD submission image for upload after orchestration.
+5. emits one outer `GRAPH` task, whose payload carries the boundary args exactly
+   as any other task's payload carries its own;
+6. stages a fixed-size POD submission image for upload after orchestration.
+
+The submission image is a Definition reference — key, content hash, device
+address, the activation gate and the word the device CASes to publish its local
+execution — and nothing else. The boundary args are not on it: `sm_h2d` already
+ships every task's payload, so putting them there sends them once instead of
+twice, and the device reads them from `outer_slot.payload` in the same
+`ChipTensor` form the dispatch path uses everywhere else. They arrive through the
+channel that path already trusts, so the Scheduler validates the pairing — their
+counts against the Definition's boundary counts — rather than re-checking each
+tensor.
 
 Internal nodes consume no ring task-window slots. Their descriptor, payload,
 and slot state live in the tail of the outer `GRAPH` task's own heap block,

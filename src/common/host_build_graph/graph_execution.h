@@ -195,11 +195,7 @@ struct GraphSubmission {
     uint64_t definition_addr;
     uint64_t definition_hash;
     uint32_t activation_gate;
-    uint32_t total_bytes;
-    uint32_t tensors_offset;
-    uint32_t tensor_count;
-    uint32_t scalars_offset;
-    uint32_t scalar_count;
+    uint32_t reserved;
 };
 
 static_assert(std::is_trivially_copyable_v<GraphTensorSourceRef>);
@@ -301,31 +297,18 @@ inline GraphSubmission *graph_submission_from_slot(PTO2TaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH ? static_cast<GraphSubmission *>(slot.graph_context) : nullptr;
 }
 
-inline bool graph_submission_wire_size_valid(const GraphSubmission &submission, size_t available_bytes) {
-    return available_bytes >= sizeof(GraphSubmission) && submission.total_bytes == available_bytes;
+// A replay's boundary args live in the outer GRAPH task's own payload, the same
+// place every other task's args live, so the submission carries no arg region and
+// the args cross the boundary once, in `sm_h2d`, rather than a second time in
+// their own wire form. They arrive through the channel the dispatch path already
+// trusts for every task's args, so they are not re-validated here; what still is
+// checked is the pairing — their counts against the Definition's boundary counts.
+inline const ChipTensor *graph_submission_boundary_tensors(const PTO2TaskSlotState &outer_slot) {
+    return outer_slot.payload != nullptr ? outer_slot.payload->tensors : nullptr;
 }
 
-inline const GraphTensor *graph_submission_tensors(const GraphSubmission &submission) {
-    if (submission.tensors_offset == 0 || submission.tensors_offset % alignof(GraphTensor) != 0 ||
-        submission.tensors_offset > submission.total_bytes ||
-        submission.tensor_count > (submission.total_bytes - submission.tensors_offset) / sizeof(GraphTensor)) {
-        return nullptr;
-    }
-    return reinterpret_cast<const GraphTensor *>(
-        reinterpret_cast<const uint8_t *>(&submission) + submission.tensors_offset
-    );
-}
-
-inline const uint64_t *graph_submission_scalars(const GraphSubmission &submission) {
-    if (submission.scalar_count == 0) return nullptr;
-    if (submission.scalars_offset == 0 || submission.scalars_offset % alignof(uint64_t) != 0 ||
-        submission.scalars_offset > submission.total_bytes ||
-        submission.scalar_count > (submission.total_bytes - submission.scalars_offset) / sizeof(uint64_t)) {
-        return nullptr;
-    }
-    return reinterpret_cast<const uint64_t *>(
-        reinterpret_cast<const uint8_t *>(&submission) + submission.scalars_offset
-    );
+inline const uint64_t *graph_submission_boundary_scalars(const PTO2TaskSlotState &outer_slot) {
+    return outer_slot.payload != nullptr ? outer_slot.payload->scalars : nullptr;
 }
 
 enum class GraphExecutionState : uint8_t {
@@ -373,7 +356,9 @@ struct GraphExecution {
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
-    const GraphTensor *boundary_tensors{nullptr};
+    // Borrowed from the outer GRAPH task's payload, which owns them for the
+    // replay's whole lifetime.
+    const ChipTensor *boundary_tensors{nullptr};
     uint32_t boundary_tensor_count{0};
     const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};

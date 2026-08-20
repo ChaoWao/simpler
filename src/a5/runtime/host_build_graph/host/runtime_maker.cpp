@@ -514,16 +514,12 @@ bool upload_graph_submissions(
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
         if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
-            upload->bytes < sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
+            upload->bytes != sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
             upload->outer_slot->task == nullptr) {
             LOG_ERROR("host-orch: invalid pending Graph POD image");
             return false;
         }
         auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
-        if (!graph_submission_wire_size_valid(*submission, upload->bytes)) {
-            LOG_ERROR("host-orch: Graph submission size does not match its POD image");
-            return false;
-        }
         auto object_it = definition_objects.find(submission->definition_hash);
         if (object_it == definition_objects.end() || object_it->second.device_object == nullptr) {
             LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");

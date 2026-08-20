@@ -317,19 +317,18 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(static_cast<uintptr_t>(submission->definition_addr));
     if (definition_header->magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
-    const GraphTensor *boundary_tensors = graph_submission_tensors(*submission);
-    const uint64_t *boundary_scalars = graph_submission_scalars(*submission);
-    const size_t boundary_tensor_end = static_cast<size_t>(submission->tensors_offset) +
-                                       static_cast<size_t>(submission->tensor_count) * sizeof(GraphTensor);
-    if (boundary_tensors == nullptr || outer_slot.task == nullptr || outer_slot.task->packed_buffer_base == nullptr ||
-        outer_slot.task->packed_buffer_end == nullptr ||
-        (submission->scalar_count != 0 && boundary_scalars == nullptr) ||
-        (submission->scalar_count != 0 && submission->scalars_offset < boundary_tensor_end)) {
+    const ChipTensor *boundary_tensors = graph_submission_boundary_tensors(outer_slot);
+    const uint64_t *boundary_scalars = graph_submission_boundary_scalars(outer_slot);
+    const PTO2TaskPayload *outer_payload = outer_slot.payload;
+    if (boundary_tensors == nullptr || outer_payload == nullptr || outer_slot.task == nullptr ||
+        outer_slot.task->packed_buffer_base == nullptr || outer_slot.task->packed_buffer_end == nullptr ||
+        outer_payload->tensor_count < 0 || outer_payload->tensor_count > MAX_TENSOR_ARGS ||
+        outer_payload->scalar_count < 0 || outer_payload->scalar_count > MAX_SCALAR_ARGS ||
+        (outer_payload->scalar_count != 0 && boundary_scalars == nullptr)) {
         return nullptr;
     }
-    for (uint32_t i = 0; i < submission->tensor_count; ++i) {
-        if (!graph_tensor_wire_valid(boundary_tensors[i])) return nullptr;
-    }
+    const uint32_t boundary_tensor_count = static_cast<uint32_t>(outer_payload->tensor_count);
+    const uint32_t boundary_scalar_count = static_cast<uint32_t>(outer_payload->scalar_count);
 
     uint64_t expected = 0;
     if (!__atomic_compare_exchange_n(
@@ -344,8 +343,8 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     const GraphDefinition *definition = graph_definition_object_verified(*definition_header);
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
         definition->task_count > GRAPH_MAX_NODES || submission->definition_hash != definition->content_hash ||
-        submission->graph_key != definition->full_key || submission->tensor_count != definition->boundary_count ||
-        submission->scalar_count != definition->boundary_scalar_count) {
+        submission->graph_key != definition->full_key || boundary_tensor_count != definition->boundary_count ||
+        boundary_scalar_count != definition->boundary_scalar_count) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
         return nullptr;
     }
@@ -381,9 +380,9 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
         return nullptr;
     }
     execution->boundary_tensors = boundary_tensors;
-    execution->boundary_tensor_count = submission->tensor_count;
+    execution->boundary_tensor_count = boundary_tensor_count;
     execution->boundary_scalars = boundary_scalars;
-    execution->boundary_scalar_count = submission->scalar_count;
+    execution->boundary_scalar_count = boundary_scalar_count;
     execution->outer_slot = &outer_slot;
 
     const uint64_t desired = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(execution));
