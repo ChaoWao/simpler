@@ -72,6 +72,20 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_begin_task(
     uint64_t, bool, bool, const int32_t[3], int32_t, int32_t, const TensorRef *, const TensorArgType *
 ) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {}
+
+// Raises the two edge kinds compute_task_fanin can discover, for the capture
+// instantiation. Shared by the ordinary submit path and the outer GRAPH task so
+// both describe an edge the same way.
+struct DepGraphAnnotate {
+    void creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer) const {
+        dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
+    }
+    void tensormap(
+        int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+    ) const {
+        dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
+    }
+};
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit_edge(uint64_t) {}
 __attribute__((weak, visibility("hidden"))) void
 dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
@@ -1229,16 +1243,6 @@ static TaskOutputTensors submit_task_common(
     // The capture branch instantiates compute_task_fanin with a live Annotate;
     // the plain branch keeps the un-annotated instantiation the hot path had.
     if (capture_dep_graph) {
-        struct DepGraphAnnotate {
-            void creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer) const {
-                dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
-            }
-            void tensormap(
-                int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
-            ) const {
-                dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
-            }
-        };
         const bool ok =
             compute_task_fanin(dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit, DepGraphAnnotate{});
         // STEP 3 is this task's last capture point, so the entry closes here
@@ -1546,7 +1550,32 @@ bool graph_submit_outer(
         PTO2TaskSlotState *producer = &ring.get_slot_state_by_slot(producer_slot);
         return append_fanin_or_fail(orch, producer_id.ring(), producer_slot, producer, producer_id, &fanin_builder);
     };
-    if (!compute_task_fanin(boundary_inputs, orch->tensor_map, orch->in_manual_scope(), emit)) return false;
+    // An outer GRAPH task is a ring task like any other, so the dependency graph
+    // has to carry it: without this the whole Graph — and every edge into it —
+    // is absent from deps.json, leaving a run of 40 replays described by only its
+    // handful of non-Graph tasks. It dispatches no kernel of its own and the
+    // sub-DAG it replays owns no ring slots, so what is captured is its boundary:
+    // the args it consumes and the edges those produce.
+    const bool capture_dep_graph = dep_gen_host_graph_enabled();
+    if (capture_dep_graph) {
+        const std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids_capture{
+            INVALID_KERNEL_ID,
+            INVALID_KERNEL_ID,
+            INVALID_KERNEL_ID,
+        };
+        dep_gen_host_graph_begin_task(
+            task_id.raw, orch->in_manual_scope(), /*early_dispatch=*/false, kernel_ids_capture.data(),
+            slot.logical_block_num, args.tensor_count(), args.tensor_data(), args.tag_data()
+        );
+        const bool ok =
+            compute_task_fanin(boundary_inputs, orch->tensor_map, orch->in_manual_scope(), emit, DepGraphAnnotate{});
+        // The task's last capture point, so the entry closes whether or not the
+        // fanin computation succeeded.
+        dep_gen_host_graph_end_task();
+        if (!ok) return false;
+    } else if (!compute_task_fanin(boundary_inputs, orch->tensor_map, orch->in_manual_scope(), emit)) {
+        return false;
+    }
     register_task_outputs(boundary_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
     payload.fanin_count = fanin_builder.count;
 

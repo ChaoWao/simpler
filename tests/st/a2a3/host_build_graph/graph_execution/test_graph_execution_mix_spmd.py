@@ -9,10 +9,13 @@
 # -----------------------------------------------------------------------------------------------------------
 """Graph Execution preserves MIX active slots and multi-block SPMD metadata."""
 
+import json
+
 import torch
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
@@ -90,6 +93,43 @@ class TestGraphExecutionMixSpmdHostBuildGraph(SceneTestCase):
             begin = block_idx * SLOTS_PER_BLOCK
             expected[begin : begin + SLOTS_PER_BLOCK] = float(block_idx)
         assert torch.equal(cache_line_heads, expected)
+
+    def test_run(self, st_platform, st_worker, request):
+        matched_cases = self._matching_cases(st_platform, request)
+        prior_mtimes = {case["name"]: self._matching_output_mtimes(case) for case in matched_cases}
+        super().test_run(st_platform, st_worker, request)
+        if not self._effective_enable_dep_gen(request):
+            return
+        for case in matched_cases:
+            self._validate_outer_graph_capture(case, prior_mtimes[case["name"]])
+
+    @staticmethod
+    def _matching_output_mtimes(case):
+        safe_label = _sanitize_for_filename(f"TestGraphExecutionMixSpmdHostBuildGraph_{case['name']}")
+        return {path: path.stat().st_mtime_ns for path in _outputs_dir().glob(f"{safe_label}_*")}
+
+    @classmethod
+    def _validate_outer_graph_capture(cls, case, prior_mtimes):
+        matches = [
+            path
+            for path, mtime_ns in cls._matching_output_mtimes(case).items()
+            if path not in prior_mtimes or mtime_ns > prior_mtimes[path]
+        ]
+        assert matches, f"no dep-gen output directory created for {case['name']}"
+        deps_path = max(matches, key=lambda path: path.stat().st_mtime_ns) / "deps.json"
+        assert deps_path.exists(), f"deps.json missing for {case['name']}"
+        with deps_path.open() as f:
+            deps = json.load(f)
+
+        tasks = deps.get("tasks", [])
+        assert [int(task["task_id"]) for task in tasks] == [0, 1, 2]
+        outer_graph_ids = {
+            int(task["task_id"])
+            for task in tasks
+            if task.get("kernel_ids") == [-1, -1, -1] and len(task.get("args", [])) == 1
+        }
+        assert outer_graph_ids == {0, 1, 2}
+        assert deps.get("edges", []) == []
 
 
 if __name__ == "__main__":
