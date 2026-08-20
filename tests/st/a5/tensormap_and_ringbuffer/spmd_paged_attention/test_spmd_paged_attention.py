@@ -50,19 +50,54 @@ class TestSpmdPagedAttentionA5(SceneTestCase):
         ],
     }
 
+    # Same names and shapes as the a2a3 TMR cases. Onboard only: the MIX
+    # kernel's TPUSH/TPOP path does not build for the CPU simulator (PTO-ISA
+    # rejects the ColMajor TMULS in the softmax tail). See #1832.
     CASES = [
         {
-            "name": "TwoWayOneBlockZeroQuery",
-            "platforms": ["a5sim", "a5"],
-            "manual": True,
+            "name": "Case1",
+            "platforms": ["a5"],
             "params": {
-                "batch": 2,
+                "batch": 256,
                 "num_heads": 16,
                 "kv_head_num": 1,
                 "head_dim": 128,
                 "block_size": 128,
-                "context_len": 128,
-                "max_model_len": 256,
+                "context_len": 8192,
+                "max_model_len": 32768,
+                "dtype": "bfloat16",
+            },
+        },
+        {
+            # num_heads == MAX_Q_TILE selects the kernel's q_tile == 64 path.
+            "name": "Case2",
+            "platforms": ["a5"],
+            "manual": True,
+            "params": {
+                "batch": 64,
+                "num_heads": 64,
+                "kv_head_num": 1,
+                "head_dim": 128,
+                "block_size": 64,
+                "context_len": 8192,
+                "max_model_len": 32768,
+                "dtype": "bfloat16",
+            },
+        },
+        {
+            # batch == SPMD_BLOCK_NUM, so every hardware block gets exactly one
+            # logical block.
+            "name": "SmallCase1",
+            "platforms": ["a5"],
+            "manual": True,
+            "params": {
+                "batch": 24,
+                "num_heads": 16,
+                "kv_head_num": 1,
+                "head_dim": 128,
+                "block_size": 128,
+                "context_len": 8192,
+                "max_model_len": 32768,
                 "dtype": "bfloat16",
             },
         },
@@ -71,8 +106,6 @@ class TestSpmdPagedAttentionA5(SceneTestCase):
     def generate_args(self, params):
         specs = []
         for name, value in _pa_generate_inputs(params):
-            if name == "query":
-                value.zero_()
             specs.append(TensorArg(name, value) if isinstance(value, torch.Tensor) else Scalar(name, value))
         return TaskArgsBuilder(*specs)
 

@@ -26,28 +26,13 @@ class TestSpmdPagedAttentionHbgA2A3(_TmrBase):
     for _incore in CALLABLE["incores"]:
         _incore["source"] = str(_SHARED_DIR / "kernels/mix/paged_attention_parallel.cpp")
 
-    CASES = [
-        {
-            "name": "TwoWayOneBlockZeroQuery",
-            "platforms": ["a2a3sim", "a2a3"],
-            "manual": True,
-            "params": {
-                "batch": 2,
-                "num_heads": 16,
-                "kv_head_num": 1,
-                "head_dim": 128,
-                "block_size": 128,
-                "context_len": 128,
-                "max_model_len": 256,
-                "dtype": "bfloat16",
-            },
-        }
-    ]
-
-    def generate_args(self, params):
-        args = super().generate_args(params)
-        args.query.zero_()
-        return args
+    # The TMR shapes, run through host_build_graph. Deep-copied so the two
+    # classes do not share a params dict. Onboard only: the MIX kernel's
+    # TPUSH/TPOP path does not build for the CPU simulator (PTO-ISA rejects the
+    # ColMajor TMULS in the softmax tail), so a2a3sim is out of scope. See
+    # #1832. Every HBG case stays manual; the Per-PR sweep covers these shapes
+    # on the TMR side.
+    CASES = [{**deepcopy(case), "platforms": ["a2a3"], "manual": True} for case in _TmrBase.CASES]
 
 
 if __name__ == "__main__":
