@@ -122,6 +122,13 @@ with the unmodified boundary value.
 - A recorded task may depend on a Graph-external producer when that producer
   is the creator of a boundary ChipTensor. The outer Graph owns that dependency on
   replay; arbitrary cross-boundary explicit dependencies remain unsupported.
+- A recorded task may carry a dispatch predicate. Submit resolves a predicate
+  into an absolute GM address, which no Definition can hold, so the Definition
+  stores the operand tensor's classified source plus the element index within
+  it and materialize resolves the pair per execution. The operand may be a
+  boundary ChipTensor or another node's output; the predicate itself creates no
+  dependency, exactly as on the ordinary path, so the caller still declares one
+  on the operand's producer.
 
 Structural or alias mismatch logs a warning and executes the Graph function
 normally for that invocation. It never reuses heap offsets recorded for a
@@ -410,10 +417,12 @@ sequence, they assert in debug builds and fail the orchestration in release
 builds:
 
 - nested Graph recording;
-- dispatch predicates;
 - cross-boundary explicit dependencies that are not represented by a boundary
   ChipTensor's creator;
-- an unclassifiable internal ChipTensor source;
+- an unclassifiable internal ChipTensor source, including a dispatch
+  predicate's operand tensor;
+- a dispatch predicate whose operand is the predicated node's own output;
+- a dispatch predicate whose index vector leaves the operand tensor's extent;
 - a boundary-derived scalar accessed through mutable `scalar()`;
 - runtime allocation inside the Graph body;
 - more than 1024 internal nodes;
@@ -443,3 +452,7 @@ Graph three times: one recording execution followed by two outer-Graph
 submissions. The full-model example at
 `examples/a2a3/host_build_graph/qwen3_14b_decode` records one Qwen3-14B decoder
 layer and replays its Definition for the remaining 39 layers.
+`tests/st/{a2a3,a5}/host_build_graph/graph_predicated_dispatch` covers dispatch
+predicates on both operand sources, giving each invocation its own gate buffer
+and gate scalar so a replay that reused the recorded operand address would read
+the recording invocation's gates.

@@ -390,3 +390,107 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), allocator.window_size());
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_NONE);
 }
+
+// The constructs a predicate can present that no Definition can express. Each is
+// discovered while recording, after the outer shell is already in the task
+// sequence, so the contract is the one AbortedRecordingLatchesFatalAtCommit
+// states: the recording cannot be published and the commit latches a fatal.
+// There is no re-run on the ordinary path to fall back to.
+//
+// This build keeps assertions enabled, so the unsupported construct surfaces as
+// the throwing debug_assert graph_end() fires on its way out. That assert
+// precedes graph_end()'s own abort, so the abort has to be issued here instead —
+// otherwise this thread's recording stays bound and the next test records into
+// it.
+class HbgGraphPredicateRejectionTest : public HbgGraphSubmitFailureTest {
+protected:
+    // Records one predicated node into a fresh Graph and asserts the recording
+    // refused it. `build_predicate` receives the boundary tensor.
+    template <typename BuildPredicate>
+    void expect_recording_refused(uint64_t graph_key, BuildPredicate build_predicate) {
+        std::array<uint32_t, 16> storage{};
+        uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+        ChipTensor boundary = make_tensor_external(storage.data(), shape, 1, DataType::INT32);
+        GraphTaskArgs boundary_args;
+        boundary_args.add_input(boundary);
+
+        orch.begin_scope();
+        const GraphScopeResult graph = orch.graph_begin(graph_key, boundary_args, 0x1736);
+        EXPECT_TRUE(graph.recording);
+        EXPECT_TRUE(orch.graph_prepare(boundary_args));
+
+        CoreTaskArgs node_args;
+        node_args.add_input(boundary);
+        TensorCreateInfo recorded_output(shape, 1, DataType::INT32);
+        node_args.add_output(recorded_output);
+        MixedKernels mixed{};
+        mixed.aiv0_kernel_id = 0;
+        node_args.set_predicate(build_predicate(boundary));
+        EXPECT_TRUE(orch.submit_task(mixed, node_args).task_id().is_valid());
+
+        EXPECT_THROW(orch.graph_end(), AssertionError) << "an unrecordable predicate must not publish";
+        orch.graph_abort();
+        orch.graph_commit();
+        EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
+    }
+
+    static CoreTaskPredicate predicate_on(const ChipTensor &operand, uint32_t index) {
+        CoreTaskPredicate pred;
+        pred.operand.tensor = &operand;
+        pred.operand.ndims = 1;
+        pred.operand.indices[0] = index;
+        pred.op = PredicateOp::GT;
+        pred.target = 0;
+        return pred;
+    }
+};
+
+TEST_F(HbgGraphPredicateRejectionTest, OperandIndexOutsideTheExtentAbortsTheRecording) {
+    // Index 16 on a 16-element operand: the flat offset is one element past the
+    // extent, so the address it names belongs to whatever follows the buffer.
+    expect_recording_refused(0x2001, [](const ChipTensor &boundary) {
+        return predicate_on(boundary, 16);
+    });
+}
+
+TEST_F(HbgGraphPredicateRejectionTest, OperandOnAnUnclassifiableTensorAbortsTheRecording) {
+    // Neither a boundary tensor nor any recorded node's output, so the recorder
+    // cannot name a base the replay could rebind against.
+    std::array<uint32_t, 16> foreign_storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(foreign_storage.size())};
+    const ChipTensor foreign = make_tensor_external(foreign_storage.data(), shape, 1, DataType::INT32);
+    expect_recording_refused(0x2002, [&foreign](const ChipTensor &) {
+        return predicate_on(foreign, 0);
+    });
+}
+
+// A kernel-less node never dispatches, so submit_dummy_task and alloc_tensors
+// drop the caller's predicate exactly as they do on the ordinary path. Recording
+// must drop it too: a node whose Definition claimed a predicate its own attribute
+// denies is rejected by materialize, on the device, for a value the scheduler was
+// never going to read.
+TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessNodeIsNotRecorded) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1, DataType::INT32);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x2003, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::INT32);
+    node_args.add_output(recorded_output);
+    // Out of extent, which a recorded predicate would reject — proving the
+    // predicate never reached the recorder rather than merely passing its checks.
+    node_args.set_predicate(predicate_on(boundary, 16));
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+
+    EXPECT_TRUE(orch.graph_end()) << "a dropped predicate must not make the body unrecordable";
+    orch.graph_commit();
+    EXPECT_FALSE(orch.fatal);
+}

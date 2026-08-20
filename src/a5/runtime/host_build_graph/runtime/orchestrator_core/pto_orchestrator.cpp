@@ -309,6 +309,18 @@ struct GraphRecordedScalarSourceRef {
     size_t source_index{0};
 };
 
+// A node's dispatch predicate, held as the operand tensor plus the element index
+// within it rather than the absolute address submit would resolve. The tensor is
+// copied because the caller only lends it for the duration of the submit call.
+struct GraphRecordedPredicate {
+    ChipTensor operand;
+    GraphRecordedTensorSourceRef source;
+    uint64_t elem_offset{0};
+    int64_t target{0};
+    uint8_t elem_size{0};
+    PredicateOp op{PredicateOp::NONE};
+};
+
 struct GraphRecordedNode {
     std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids{};
     ActiveMask active_mask{};
@@ -329,6 +341,8 @@ struct GraphRecordedNode {
     uint32_t scalar_count{0};
     uint32_t fanin_offset{0};
     uint32_t fanin_count{0};
+    // Index into the recording's predicates, or -1 when the node carries none.
+    int32_t predicate_index{-1};
     ArgsDumpTaskMetadata dump_metadata;
 };
 
@@ -364,6 +378,9 @@ struct GraphRecording {
     std::vector<GraphRecordedScalarSourceRef> scalar_sources;
     std::vector<size_t> internal_fanins;
     std::vector<GraphRecordedOutputRange> output_ranges;
+    // Indexed by GraphRecordedNode::predicate_index; only predicated nodes
+    // contribute an entry.
+    std::vector<GraphRecordedPredicate> predicates;
 };
 
 struct GraphPendingUpload {
@@ -606,6 +623,8 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     std::vector<GraphTensorSourceRef> tensor_sources;
     std::vector<uint64_t> scalars;
     std::vector<GraphScalarSourceRef> scalar_sources;
+    std::vector<GraphPredicate> predicates;
+    predicates.reserve(recording.predicates.size());
     fanin_indices.reserve(total_fanins);
     roots.reserve(recording.nodes.size());
     tensors.reserve(total_tensors);
@@ -656,6 +675,25 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         node.tensor_offset = static_cast<uint32_t>(tensors.size());
         node.scalar_offset = static_cast<uint32_t>(scalars.size());
         node.dump_metadata = source.dump_metadata;
+        node.predicate_slot = 0;
+        if (source.predicate_index >= 0) {
+            if (static_cast<size_t>(source.predicate_index) >= recording.predicates.size() ||
+                predicates.size() >= static_cast<size_t>(UINT16_MAX)) {
+                return false;
+            }
+            const GraphRecordedPredicate &recorded = recording.predicates[source.predicate_index];
+            std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(recorded.source);
+            if (!packed_source.has_value() || recorded.operand.ndims > MAX_TENSOR_DIMS) return false;
+            GraphPredicate packed{};
+            packed.operand = graph_tensor_pack(recorded.operand);
+            packed.operand_source = *packed_source;
+            packed.elem_offset = recorded.elem_offset;
+            packed.target = recorded.target;
+            packed.elem_size = recorded.elem_size;
+            packed.op = static_cast<uint8_t>(recorded.op);
+            node.predicate_slot = static_cast<uint16_t>(predicates.size() + 1);
+            predicates.push_back(packed);
+        }
         for (const ChipTensor &tensor : source.tensors)
             tensors.push_back(graph_tensor_pack(tensor));
         for (size_t t = 0; t < source.tensors.size(); ++t) {
@@ -721,6 +759,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.boundary_scalar_count = static_cast<uint32_t>(recording.boundary_scalar_count);
     definition.tensor_arg_count = static_cast<uint32_t>(tensors.size());
     definition.scalar_arg_count = static_cast<uint32_t>(scalars.size());
+    definition.predicate_count = static_cast<uint32_t>(predicates.size());
     size_t execution_storage_bytes = 0;
     if (!graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), &execution_storage_bytes) ||
         execution_storage_bytes > UINT32_MAX) {
@@ -745,7 +784,8 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         section_bytes(tensor_sources.size(), sizeof(GraphTensorSourceRef), alignof(GraphTensorSourceRef)) +
         section_bytes(scalars.size(), sizeof(uint64_t), alignof(uint64_t)) +
         section_bytes(scalar_sources.size(), sizeof(GraphScalarSourceRef), alignof(GraphScalarSourceRef)) +
-        section_bytes(signatures.size(), sizeof(GraphBoundarySignature), alignof(GraphBoundarySignature))
+        section_bytes(signatures.size(), sizeof(GraphBoundarySignature), alignof(GraphBoundarySignature)) +
+        section_bytes(predicates.size(), sizeof(GraphPredicate), alignof(GraphPredicate))
     );
     definition.off_fanout_offsets = graph_append_section(image, fanout_offsets);
     definition.off_fanout_indices = graph_append_section(image, fanout_indices);
@@ -759,6 +799,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.off_scalars = graph_append_section(image, scalars);
     definition.off_scalar_sources = graph_append_section(image, scalar_sources);
     definition.off_boundary_signatures = graph_append_section(image, signatures);
+    definition.off_predicates = graph_append_section(image, predicates);
     if (definition.off_fanout_offsets == 0 || definition.off_fanin_offsets == 0 || definition.off_node_offsets == 0 ||
         definition.off_nodes == 0 || definition.off_boundary_signatures == 0 ||
         (!tensors.empty() && definition.off_tensors == 0) ||
@@ -767,7 +808,8 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         (!scalar_sources.empty() && definition.off_scalar_sources == 0) ||
         (!fanout_indices.empty() && definition.off_fanout_indices == 0) ||
         (!fanin_indices.empty() && definition.off_fanin_indices == 0) ||
-        (!roots.empty() && definition.off_root_indices == 0)) {
+        (!roots.empty() && definition.off_root_indices == 0) ||
+        (!predicates.empty() && definition.off_predicates == 0)) {
         return false;
     }
     definition.total_bytes = static_cast<uint32_t>(image->size());
@@ -1671,7 +1713,7 @@ TaskOutputTensors graph_record_submit_node(
         PTO2TaskId::make(0, static_cast<uint32_t>(recording.start_local_task_id) + static_cast<uint32_t>(node_index));
     result.set_task_id(task_id);
 
-    if (node_index >= GRAPH_MAX_NODES || args.has_error || args.predicate().op != PredicateOp::NONE) {
+    if (node_index >= GRAPH_MAX_NODES || args.has_error) {
         recording.unsupported = true;
     }
 
@@ -1765,6 +1807,45 @@ TaskOutputTensors graph_record_submit_node(
             recording.unsupported = true;
         }
     }
+    // A dispatch predicate resolves to an absolute GM address at submit, which a
+    // Definition replayed against fresh buffers cannot carry. Record the operand
+    // the same way a tensor arg is recorded — classified source plus the element
+    // index within that tensor — and let materialize resolve the pair. The
+    // predicate creates no dependency here any more than it does on the ordinary
+    // path: the caller declares one, and the explicit-dep loop below records it.
+    //
+    // Gated on the recorded attribute, not on args: a kernel-less node never
+    // dispatches, so submit_dummy_task and alloc_tensors drop the predicate the
+    // caller set. Reading args here instead would record a predicate the node's
+    // own attribute denies, and materialize rejects a Definition whose two halves
+    // disagree.
+    if (node.task_attrs.has_predicate()) {
+        const CoreTaskPredicate &pred = args.predicate();
+        GraphRecordedPredicate recorded;
+        recorded.op = pred.op;
+        recorded.target = pred.target;
+        const ChipTensor *operand = pred.operand.tensor;
+        // OWN_OUTPUT would read the node's own output before the node runs, so it
+        // names no value the predicate could be evaluating. An index vector that
+        // leaves the operand's extent is caught here too: materialize would
+        // otherwise reject the baked offset on the device, where the failure is a
+        // Scheduler fatal rather than a named unsupported construct.
+        const uint64_t flat_offset =
+            operand == nullptr ? 0 : operand->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
+        if (operand == nullptr || operand->ndims > MAX_TENSOR_DIMS || pred.operand.ndims > operand->ndims ||
+            flat_offset < operand->start_offset || flat_offset - operand->start_offset >= operand->extent_elem_cache ||
+            !graph_classify_tensor(recording, node, static_cast<int32_t>(node_index), *operand, &recorded.source) ||
+            recorded.source.source == GraphRecordedTensorSource::OWN_OUTPUT) {
+            recording.unsupported = true;
+        } else {
+            recorded.operand.copy(*operand);
+            recorded.elem_offset = flat_offset - operand->start_offset;
+            recorded.elem_size = static_cast<uint8_t>(get_element_size(operand->dtype));
+        }
+        node.predicate_index = static_cast<int32_t>(recording.predicates.size());
+        recording.predicates.push_back(recorded);
+    }
+
     node.fanin_offset = static_cast<uint32_t>(recording.internal_fanins.size());
     // Dedup within this node's own range: the flat array's earlier entries belong
     // to earlier nodes.
