@@ -51,7 +51,9 @@ GraphTensor make_test_tensor(uint64_t address) {
     return tensor;
 }
 
-std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundary_address) {
+std::vector<std::byte> make_test_definition(
+    uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_count = 1, uint32_t boundary_scalar_count = 1
+) {
     std::vector<std::byte> image(sizeof(GraphDefinition));
 
     std::vector<uint32_t> fanin_offsets{0, 0, 1};
@@ -94,8 +96,8 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     definition.task_count = 2;
     definition.edge_count = 1;
     definition.root_count = 1;
-    definition.boundary_count = 1;
-    definition.boundary_scalar_count = 1;
+    definition.boundary_count = boundary_count;
+    definition.boundary_scalar_count = boundary_scalar_count;
     definition.tensor_arg_count = 2;
     definition.scalar_arg_count = 2;
     definition.off_fanin_offsets = append_section(image, fanin_offsets);
@@ -215,6 +217,100 @@ private:
 };
 
 }  // namespace
+
+TEST(GraphTaskPayloadSpace, Dsv4BoundaryArgsRoundTrip) {
+    constexpr int32_t TENSOR_COUNT = 118;
+    constexpr int32_t SCALAR_COUNT = 31;
+    size_t payload_bytes = 0;
+    size_t scalars_offset = 0;
+    ASSERT_TRUE(graph_task_payload_layout(TENSOR_COUNT, SCALAR_COUNT, &payload_bytes, &scalars_offset));
+    EXPECT_GT(payload_bytes, sizeof(PTO2TaskPayload));
+    EXPECT_EQ(scalars_offset, sizeof(PTO2TaskPayload) + (TENSOR_COUNT - MAX_TENSOR_ARGS) * sizeof(ChipTensor));
+
+    AlignedStorage storage(payload_bytes);
+    auto &payload = *reinterpret_cast<PTO2TaskPayload *>(storage.data());
+    payload.tensor_count = TENSOR_COUNT;
+    payload.scalar_count = SCALAR_COUNT;
+    for (uint32_t i = 0; i < TENSOR_COUNT; ++i) {
+        ChipTensor *tensor = graph_task_payload_tensor(payload, i);
+        ASSERT_NE(tensor, nullptr);
+        tensor->buffer.addr = 0x1000 + i * 0x100;
+        tensor->start_offset = i * 4;
+    }
+    for (uint32_t i = 0; i < SCALAR_COUNT; ++i) {
+        uint64_t *scalar = graph_task_payload_scalar(payload, i);
+        ASSERT_NE(scalar, nullptr);
+        *scalar = 0xABC000 + i;
+    }
+
+    const PTO2TaskPayload &const_payload = payload;
+    for (uint32_t i = 0; i < TENSOR_COUNT; ++i) {
+        const ChipTensor *tensor = graph_task_payload_tensor(const_payload, i);
+        ASSERT_NE(tensor, nullptr);
+        EXPECT_EQ(tensor->buffer.addr, 0x1000U + i * 0x100U);
+        EXPECT_EQ(tensor->start_offset, i * 4U);
+    }
+    for (uint32_t i = 0; i < SCALAR_COUNT; ++i) {
+        const uint64_t *scalar = graph_task_payload_scalar(const_payload, i);
+        ASSERT_NE(scalar, nullptr);
+        EXPECT_EQ(*scalar, 0xABC000U + i);
+    }
+}
+
+TEST(GraphTaskPayloadSpace, Dsv4BoundaryCountsLocalizeAndMaterialize) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0xD5F4;
+    constexpr int32_t TENSOR_COUNT = 118;
+    constexpr int32_t SCALAR_COUNT = 31;
+    std::array<uint8_t, 64> boundary{};
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), TENSOR_COUNT, SCALAR_COUNT);
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition);
+    std::vector<std::byte> submission_image = make_test_submission(GRAPH_KEY_VALUE);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
+
+    size_t payload_bytes = 0;
+    ASSERT_TRUE(graph_task_payload_layout(TENSOR_COUNT, SCALAR_COUNT, &payload_bytes));
+    AlignedStorage payload_storage(payload_bytes);
+    auto &payload = *reinterpret_cast<PTO2TaskPayload *>(payload_storage.data());
+    payload.tensor_count = TENSOR_COUNT;
+    payload.scalar_count = SCALAR_COUNT;
+    graph_tensor_unpack(
+        make_test_tensor(reinterpret_cast<uint64_t>(boundary.data())), graph_task_payload_tensor(payload, 0)
+    );
+    *graph_task_payload_scalar(payload, 0) = 17;
+
+    PTO2TaskDescriptor outer_task{};
+    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
+    PTO2TaskSlotState outer_slot{};
+    outer_slot.task_kind = TaskKind::GRAPH;
+    outer_slot.task = &outer_task;
+    outer_slot.payload = &payload;
+    outer_slot.graph_context = &submission;
+
+    GraphExecution *execution = graph_execution_localize(outer_slot);
+    ASSERT_NE(execution, nullptr);
+    EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
+    EXPECT_EQ(execution->node_storage[0].payload.scalars[0], 17U);
+    EXPECT_EQ(execution->node_storage[0].payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(boundary.data()));
+}
+
+TEST(GraphTaskPayloadSpace, RelativePayloadReferenceSurvivesWholeImageMove) {
+    struct alignas(64) PayloadImage {
+        PTO2TaskPayload payload{};
+        PTO2TaskSlotState slot{};
+    };
+    PayloadImage source{};
+    source.slot.bind_buffers(&source.payload, nullptr);
+    alignas(PayloadImage) std::array<std::byte, sizeof(PayloadImage)> moved_bytes{};
+    std::memcpy(moved_bytes.data(), &source, sizeof(source));
+    auto *moved = reinterpret_cast<PayloadImage *>(moved_bytes.data());
+    EXPECT_EQ(moved->slot.payload.get(), &moved->payload);
+}
 
 TEST(GraphCache, RejectsEmptyBoundary) {
     GraphTaskArgs args;

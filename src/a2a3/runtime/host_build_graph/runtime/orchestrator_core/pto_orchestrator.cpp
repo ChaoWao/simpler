@@ -972,6 +972,28 @@ struct PTO2PreparedTask {
     PTO2TaskSlotState *slot_state = nullptr;
 };
 
+static PTO2TaskPayload *allocate_task_payload(PTO2OrchestratorState *orch, size_t requested_bytes) {
+    if (orch == nullptr || orch->sm_header == nullptr || requested_bytes < sizeof(PTO2TaskPayload)) return nullptr;
+    PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
+    constexpr uint64_t alignment = alignof(PTO2TaskPayload);
+    const uint64_t capacity = ring.task_window_size * sizeof(PTO2TaskPayload);
+    const uint64_t cursor = orch->task_payload_space_used_bytes;
+    if (cursor > UINT64_MAX - (alignment - 1) || requested_bytes > UINT64_MAX - (alignment - 1)) return nullptr;
+    const uint64_t offset = PTO2_ALIGN_UP(cursor, alignment);
+    const uint64_t bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(requested_bytes), alignment);
+    if (offset > capacity || bytes > capacity - offset) {
+        orch->report_fatal(
+            PTO2_ERROR_FLOW_CONTROL_DEADLOCK, __FUNCTION__,
+            "TaskPayloadSpace exhausted: used=%" PRIu64 " requested=%" PRIu64 " capacity=%" PRIu64, cursor, bytes,
+            capacity
+        );
+        return nullptr;
+    }
+    orch->task_payload_space_used_bytes = offset + bytes;
+    auto *base = reinterpret_cast<std::byte *>(ring.task_payloads);
+    return reinterpret_cast<PTO2TaskPayload *>(base + offset);
+}
+
 static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
     PTO2OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
@@ -1015,7 +1037,10 @@ static bool prepare_task(
     out->task_id = PTO2TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->ring.get_slot_state_by_slot(out->alloc_result.slot);
     out->task = &orch->sm_header->ring.task_descriptors[out->alloc_result.slot];
-    out->payload = &orch->sm_header->ring.task_payloads[out->alloc_result.slot];
+    out->payload = allocate_task_payload(orch, sizeof(PTO2TaskPayload));
+    if (out->payload == nullptr) {
+        return false;
+    }
 
     // Init-on-write: this slot's dynamic scheduling fields and completion flag are
     // initialized here, as the orchestrator claims the slot. whole-graph-resident
@@ -1027,9 +1052,8 @@ static bool prepare_task(
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
-    // Re-bind payload/task pointers each submit. Value is per-slot constant
-    // (same as &task_payloads[slot] / &task_descriptors[slot]), but writing
-    // here lets RingSchedState::init() skip the O(window_size) bind loop.
+    // Bind the payload record selected from TaskPayloadSpace. Its relative
+    // reference remains valid when the complete SM image moves to device GM.
     // Both writes hit the same 64B slot_state cache line we're about to
     // dirty below, so the extra cost is two stores on an already-hot line.
     // Must precede the Orch-side wiring publish at the end of
@@ -1563,10 +1587,14 @@ bool graph_submit_outer(
     const PTO2TaskId task_id = PTO2TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
     PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
     PTO2TaskDescriptor &task = ring.task_descriptors[allocation.slot];
-    PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
+    size_t payload_bytes = 0;
+    if (!graph_task_payload_layout(args.tensor_count(), args.scalar_count(), &payload_bytes)) return false;
+    PTO2TaskPayload *payload_ptr = allocate_task_payload(orch, payload_bytes);
+    if (payload_ptr == nullptr) return false;
+    PTO2TaskPayload &payload = *payload_ptr;
     PTO2TaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
 
-    slot.bind_buffers(&payload, &task);
+    slot.bind_buffers(payload_ptr, &task);
     slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
     slot.last_consumer_local_id = static_cast<int32_t>(task_id.local());
     slot.active_mask = ActiveMask{};
@@ -1582,14 +1610,17 @@ bool graph_submit_outer(
     task.packed_buffer_base = allocation.packed_base;
     task.packed_buffer_end = allocation.packed_end;
     graph_reset_outer_payload(payload);
-    // The replay's boundary args, in the same place and the same form as any
-    // other task's args. graph_execution_localize reads them from here.
     payload.tensor_count = args.tensor_count();
     payload.scalar_count = args.scalar_count();
-    for (int32_t i = 0; i < args.tensor_count(); ++i)
-        payload.tensors[i] = args.tensor(i).ref();
-    if (args.scalar_count() != 0) {
-        std::memcpy(payload.scalars, args.scalar_data(), static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t));
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        ChipTensor *destination = graph_task_payload_tensor(payload, static_cast<uint32_t>(i));
+        if (destination == nullptr) return false;
+        *destination = args.tensor(i).ref();
+    }
+    for (int32_t i = 0; i < args.scalar_count(); ++i) {
+        uint64_t *destination = graph_task_payload_scalar(payload, static_cast<uint32_t>(i));
+        if (destination == nullptr) return false;
+        *destination = args.scalar_data()[i];
     }
 
     PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));

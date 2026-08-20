@@ -55,7 +55,7 @@ void reset_graph_payload(PTO2TaskPayload &payload) {
 bool bind_graph_topology(GraphExecution &execution) {
     if (execution.definition == nullptr) return false;
     const GraphDefinition &definition = *execution.definition;
-    if (definition.boundary_scalar_count > MAX_SCALAR_ARGS) return false;
+    if (definition.boundary_scalar_count > GRAPH_MAX_SCALAR_ARGS) return false;
     const uint32_t *fanin_offsets =
         graph_definition_array<uint32_t>(definition, definition.off_fanin_offsets, definition.task_count + 1);
     const uint16_t *fanin_indices =
@@ -218,18 +218,25 @@ bool graph_rebind_tensor(
     GraphTensor rebound = tensor_template;
     if (!graph_tensor_wire_valid(rebound)) return false;
     if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT)) {
-        if (ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) return false;
-        rebound = execution.boundary_tensors[ref.source_index];
+        const ChipTensor *boundary = execution.boundary_payload == nullptr ?
+                                         nullptr :
+                                         graph_task_payload_tensor(*execution.boundary_payload, ref.source_index);
+        if (boundary == nullptr || ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) {
+            return false;
+        }
+        rebound = graph_tensor_pack(*boundary);
     } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW)) {
-        if (ref.source_index >= execution.boundary_tensor_count) return false;
-        const GraphTensor &boundary = execution.boundary_tensors[ref.source_index];
-        if (ref.packed_offset > UINT64_MAX - boundary.start_offset) return false;
-        rebound.buffer_addr = boundary.buffer_addr;
-        rebound.buffer_size = boundary.buffer_size;
-        rebound.owner_task_id = boundary.owner_task_id;
-        rebound.start_offset = boundary.start_offset + ref.packed_offset;
-        rebound.version = boundary.version;
-        rebound.address_space = boundary.address_space;
+        const ChipTensor *boundary = execution.boundary_payload == nullptr ?
+                                         nullptr :
+                                         graph_task_payload_tensor(*execution.boundary_payload, ref.source_index);
+        if (boundary == nullptr || ref.source_index >= execution.boundary_tensor_count) return false;
+        if (ref.packed_offset > UINT64_MAX - boundary->start_offset) return false;
+        rebound.buffer_addr = boundary->buffer.addr;
+        rebound.buffer_size = boundary->buffer.size;
+        rebound.owner_task_id = boundary->owner_task_id.raw;
+        rebound.start_offset = boundary->start_offset + ref.packed_offset;
+        rebound.version = boundary->version;
+        rebound.address_space = static_cast<uint8_t>(boundary->address_space);
     } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||
                ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT)) {
         const bool own_output = ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
@@ -317,14 +324,12 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(static_cast<uintptr_t>(submission->definition_addr));
     if (definition_header->magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
-    const ChipTensor *boundary_tensors = graph_submission_boundary_tensors(outer_slot);
-    const uint64_t *boundary_scalars = graph_submission_boundary_scalars(outer_slot);
     const PTO2TaskPayload *outer_payload = outer_slot.payload;
-    if (boundary_tensors == nullptr || outer_payload == nullptr || outer_slot.task == nullptr ||
-        outer_slot.task->packed_buffer_base == nullptr || outer_slot.task->packed_buffer_end == nullptr ||
-        outer_payload->tensor_count < 0 || outer_payload->tensor_count > MAX_TENSOR_ARGS ||
-        outer_payload->scalar_count < 0 || outer_payload->scalar_count > MAX_SCALAR_ARGS ||
-        (outer_payload->scalar_count != 0 && boundary_scalars == nullptr)) {
+    size_t payload_bytes = 0;
+    if (outer_payload == nullptr || outer_slot.task == nullptr || outer_slot.task->packed_buffer_base == nullptr ||
+        outer_slot.task->packed_buffer_end == nullptr ||
+        !graph_task_payload_layout(outer_payload->tensor_count, outer_payload->scalar_count, &payload_bytes) ||
+        payload_bytes < sizeof(PTO2TaskPayload)) {
         return nullptr;
     }
     const uint32_t boundary_tensor_count = static_cast<uint32_t>(outer_payload->tensor_count);
@@ -379,9 +384,8 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
         return nullptr;
     }
-    execution->boundary_tensors = boundary_tensors;
+    execution->boundary_payload = outer_payload;
     execution->boundary_tensor_count = boundary_tensor_count;
-    execution->boundary_scalars = boundary_scalars;
     execution->boundary_scalar_count = boundary_scalar_count;
     execution->outer_slot = &outer_slot;
 
@@ -530,11 +534,14 @@ GraphMaterializeResult graph_execution_materialize_slice(
             if (ref.source == static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE)) {
                 payload.scalars[j] = definition_scalars[scalar_index];
             } else if (ref.source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY)) {
-                if (ref.source_index >= execution.boundary_scalar_count || execution.boundary_scalars == nullptr) {
+                const uint64_t *boundary = execution.boundary_payload == nullptr ?
+                                               nullptr :
+                                               graph_task_payload_scalar(*execution.boundary_payload, ref.source_index);
+                if (ref.source_index >= execution.boundary_scalar_count || boundary == nullptr) {
                     execution.materialize_busy.store(0, std::memory_order_release);
                     return GraphMaterializeResult::INVALID;
                 }
-                payload.scalars[j] = execution.boundary_scalars[ref.source_index];
+                payload.scalars[j] = *boundary;
             } else {
                 execution.materialize_busy.store(0, std::memory_order_release);
                 return GraphMaterializeResult::INVALID;

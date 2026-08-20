@@ -410,8 +410,8 @@ static bool relocate_host_orch_image(
         const int32_t count = ring.fc.current_task_index.load(std::memory_order_acquire);
         for (int32_t slot = 0; slot < count; ++slot) {
             PTO2TaskSlotState *state = &ring.slot_states[slot];
+            // payload is relative to its slot and moves with the SM image.
             relocate(state->task);
-            relocate(state->payload);
         }
     }
     return ok;
@@ -684,18 +684,17 @@ int32_t run_host_orchestration(
     }
     record_bind_phase(HostPhaseKind::BindRelocate, t_reloc_ns);
 
-    // Ship only the live prefix of each segment: the device reads no slot past
-    // total_tasks, so upload header + descriptors[0,N), payloads[0,N),
+    // Ship descriptors[0,N), the live TaskPayloadSpace prefix,
     // slot_states[0,N) and completion_flags[0,N) — never the ring-sized tails.
     // header + descriptors[0,N) are contiguous, so that is a single copy.
     const uint64_t nt = static_cast<uint64_t>(total_tasks);
     const uint64_t hdr_desc_bytes = sm_segs.descriptors + nt * sizeof(PTO2TaskDescriptor);
+    const uint64_t payload_bytes = rt->orchestrator.task_payload_space_used_bytes;
     char *host_base = static_cast<char *>(host_sm);
     char *dev_base = static_cast<char *>(device_sm);
     const int64_t t_sm_h2d_ns = bind_now_ns();
     if (api->copy_to_device(dev_base, host_base, hdr_desc_bytes) != 0 ||
-        api->copy_to_device(dev_base + sm_segs.payloads, host_base + sm_segs.payloads, nt * sizeof(PTO2TaskPayload)) !=
-            0 ||
+        api->copy_to_device(dev_base + sm_segs.payloads, host_base + sm_segs.payloads, payload_bytes) != 0 ||
         api->copy_to_device(
             dev_base + sm_segs.slot_states, host_base + sm_segs.slot_states, nt * sizeof(PTO2TaskSlotState)
         ) != 0 ||
@@ -706,8 +705,8 @@ int32_t run_host_orchestration(
         return -1;
     }
     {
-        const uint64_t sm_h2d_bytes = hdr_desc_bytes + nt * sizeof(PTO2TaskPayload) + nt * sizeof(PTO2TaskSlotState) +
-                                      nt * sizeof(std::atomic<uint8_t>);
+        const uint64_t sm_h2d_bytes =
+            hdr_desc_bytes + payload_bytes + nt * sizeof(PTO2TaskSlotState) + nt * sizeof(std::atomic<uint8_t>);
         char attrs[96];
         snprintf(attrs, sizeof(attrs), "nt=%" PRIu64 " bytes=%" PRIu64, nt, sm_h2d_bytes);
         record_bind_phase(HostPhaseKind::BindSmH2d, t_sm_h2d_ns, attrs, sm_h2d_bytes);

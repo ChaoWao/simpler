@@ -297,18 +297,57 @@ inline GraphSubmission *graph_submission_from_slot(PTO2TaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH ? static_cast<GraphSubmission *>(slot.graph_context) : nullptr;
 }
 
-// A replay's boundary args live in the outer GRAPH task's own payload, the same
-// place every other task's args live, so the submission carries no arg region and
-// the args cross the boundary once, in `sm_h2d`, rather than a second time in
-// their own wire form. They arrive through the channel the dispatch path already
-// trusts for every task's args, so they are not re-validated here; what still is
-// checked is the pairing — their counts against the Definition's boundary counts.
-inline const ChipTensor *graph_submission_boundary_tensors(const PTO2TaskSlotState &outer_slot) {
-    return outer_slot.payload != nullptr ? outer_slot.payload->tensors : nullptr;
+// Graph tasks share the ordinary scheduling payload prefix. Boundary args that
+// exceed the AICore ABI capacities continue in the same TaskPayloadSpace record:
+// [PTO2TaskPayload][extra ChipTensor...][extra uint64_t...], rounded to a cache
+// line. Ordinary kernel payloads remain exactly sizeof(PTO2TaskPayload).
+inline bool graph_task_payload_layout(
+    int32_t tensor_count, int32_t scalar_count, size_t *payload_bytes, size_t *extra_scalars_offset = nullptr
+) {
+    if (payload_bytes == nullptr || tensor_count < 0 || scalar_count < 0 ||
+        tensor_count > static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS) ||
+        scalar_count > static_cast<int32_t>(GRAPH_MAX_SCALAR_ARGS)) {
+        return false;
+    }
+    const size_t extra_tensors =
+        tensor_count > MAX_TENSOR_ARGS ? static_cast<size_t>(tensor_count - MAX_TENSOR_ARGS) : 0;
+    const size_t extra_scalars =
+        scalar_count > MAX_SCALAR_ARGS ? static_cast<size_t>(scalar_count - MAX_SCALAR_ARGS) : 0;
+    if (extra_tensors > (SIZE_MAX - sizeof(PTO2TaskPayload)) / sizeof(ChipTensor)) return false;
+    const size_t scalars_offset = sizeof(PTO2TaskPayload) + extra_tensors * sizeof(ChipTensor);
+    if (extra_scalars > (SIZE_MAX - scalars_offset) / sizeof(uint64_t)) return false;
+    const size_t end = scalars_offset + extra_scalars * sizeof(uint64_t);
+    if (end > SIZE_MAX - (alignof(PTO2TaskPayload) - 1)) return false;
+    *payload_bytes = PTO2_ALIGN_UP(end, alignof(PTO2TaskPayload));
+    if (extra_scalars_offset != nullptr) *extra_scalars_offset = scalars_offset;
+    return true;
 }
 
-inline const uint64_t *graph_submission_boundary_scalars(const PTO2TaskSlotState &outer_slot) {
-    return outer_slot.payload != nullptr ? outer_slot.payload->scalars : nullptr;
+inline ChipTensor *graph_task_payload_tensor(PTO2TaskPayload &payload, uint32_t index) {
+    if (payload.tensor_count < 0 || index >= static_cast<uint32_t>(payload.tensor_count)) return nullptr;
+    if (index < MAX_TENSOR_ARGS) return &payload.tensors[index];
+    auto *extra = reinterpret_cast<ChipTensor *>(reinterpret_cast<std::byte *>(&payload) + sizeof(payload));
+    return &extra[index - MAX_TENSOR_ARGS];
+}
+
+inline const ChipTensor *graph_task_payload_tensor(const PTO2TaskPayload &payload, uint32_t index) {
+    return graph_task_payload_tensor(const_cast<PTO2TaskPayload &>(payload), index);
+}
+
+inline uint64_t *graph_task_payload_scalar(PTO2TaskPayload &payload, uint32_t index) {
+    if (payload.scalar_count < 0 || index >= static_cast<uint32_t>(payload.scalar_count)) return nullptr;
+    if (index < MAX_SCALAR_ARGS) return &payload.scalars[index];
+    size_t payload_bytes = 0;
+    size_t scalars_offset = 0;
+    if (!graph_task_payload_layout(payload.tensor_count, payload.scalar_count, &payload_bytes, &scalars_offset)) {
+        return nullptr;
+    }
+    auto *extra = reinterpret_cast<uint64_t *>(reinterpret_cast<std::byte *>(&payload) + scalars_offset);
+    return &extra[index - MAX_SCALAR_ARGS];
+}
+
+inline const uint64_t *graph_task_payload_scalar(const PTO2TaskPayload &payload, uint32_t index) {
+    return graph_task_payload_scalar(const_cast<PTO2TaskPayload &>(payload), index);
 }
 
 enum class GraphExecutionState : uint8_t {
@@ -356,11 +395,10 @@ struct GraphExecution {
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
-    // Borrowed from the outer GRAPH task's payload, which owns them for the
-    // replay's whole lifetime.
-    const ChipTensor *boundary_tensors{nullptr};
+    // Borrowed for the replay lifetime; accessors resolve its fixed prefix and
+    // variable overflow tail without requiring the args to be contiguous.
+    const PTO2TaskPayload *boundary_payload{nullptr};
     uint32_t boundary_tensor_count{0};
-    const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};
 };
 
