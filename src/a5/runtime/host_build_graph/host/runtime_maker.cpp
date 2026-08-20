@@ -462,55 +462,54 @@ static bool relocate_host_orch_image(
     return ok;
 }
 
-bool upload_graph_submissions(
-    Runtime *runtime, const HostApi *api, GraphHostState &graph_state, uint64_t &uploaded_bytes
-) {
+bool upload_graph_block(const HostApi *api, GraphHostState &graph_state, uint64_t &uploaded_bytes) {
     uploaded_bytes = 0;
     const size_t count = graph_host_upload_count(graph_state);
-    // Pass 1: upload each distinct Definition once as a shared device object
-    // ([GraphDefinitionHeader][Definition image]) keyed by content identity.
-    // Submissions reference the object's GM address, so this pass completing
-    // before any submission is uploaded is what makes the reference safe —
-    // the device boots only after both passes.
-    GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
-    struct UploadedDefinition {
-        void *device_object;               // GM address; host must not dereference
-        const GraphDefinition *host_view;  // the host-side image the object was built from
+    struct PackedDefinition {
+        const GraphHostDefinition *entry;
+        const GraphDefinition *definition;
+        size_t offset;
     };
-    std::unordered_map<uint64_t, UploadedDefinition> definition_objects;
+    struct PackedSubmission {
+        PTO2TaskSlotState *outer_slot;
+        const GraphSubmission *submission;
+        size_t definition_index;
+        size_t offset;
+    };
+    auto reserve_region = [](size_t bytes, size_t alignment, size_t *cursor, size_t *offset) -> bool {
+        if (cursor == nullptr || offset == nullptr || alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+            *cursor > SIZE_MAX - (alignment - 1)) {
+            return false;
+        }
+        const size_t aligned = (*cursor + alignment - 1) & ~(alignment - 1);
+        if (bytes > SIZE_MAX - aligned) return false;
+        *offset = aligned;
+        *cursor = aligned + bytes;
+        return true;
+    };
+
+    // Compute and validate the complete layout before asking the arena bank to
+    // allocate. Definitions lead the block; fixed-size submissions follow and
+    // refer to their Definition by device_base + offset.
+    GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
+    std::vector<PackedDefinition> packed_definitions;
+    packed_definitions.reserve(definitions.entries.size());
+    std::unordered_map<uint64_t, size_t> definition_indices;
+    size_t block_bytes = 0;
     for (const GraphHostDefinition &entry : definitions.entries) {
         if (entry.data == nullptr || entry.bytes < sizeof(GraphDefinition)) continue;
         const auto *definition = reinterpret_cast<const GraphDefinition *>(entry.data);
         if (definition->total_bytes != entry.bytes || definition->full_key != entry.full_key) continue;
+        if (entry.bytes > SIZE_MAX - sizeof(GraphDefinitionHeader)) return false;
         const size_t object_bytes = sizeof(GraphDefinitionHeader) + entry.bytes;
-        void *object =
-            api->acquire_graph_definition_buffer(entry.full_key, object_bytes, alignof(GraphDefinitionHeader));
-        if (object == nullptr) {
-            LOG_ERROR(
-                "host-orch: failed to retain %zu bytes for Graph Definition key=%#llx", object_bytes,
-                static_cast<unsigned long long>(entry.full_key)
-            );
-            return false;
-        }
-        std::vector<std::byte> staging(object_bytes, std::byte{0});
-        auto *header = reinterpret_cast<GraphDefinitionHeader *>(staging.data());
-        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-        header->verify_state.store(
-            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
-        );
-        header->definition_bytes = static_cast<uint32_t>(entry.bytes);
-        header->content_hash = definition->content_hash;
-        header->full_key = definition->full_key;
-        std::memcpy(staging.data() + sizeof(GraphDefinitionHeader), entry.data, entry.bytes);
-        if (api->copy_to_device(object, staging.data(), object_bytes) != 0) {
-            LOG_ERROR("host-orch: failed to upload Graph Definition object");
-            return false;
-        }
-        definition_objects.emplace(definition->content_hash, UploadedDefinition{object, definition});
-        uploaded_bytes += object_bytes;
+        size_t offset = 0;
+        if (!reserve_region(object_bytes, alignof(GraphDefinitionHeader), &block_bytes, &offset)) return false;
+        definition_indices.emplace(definition->content_hash, packed_definitions.size());
+        packed_definitions.push_back(PackedDefinition{&entry, definition, offset});
     }
 
-    // Pass 2: per-submission execution storage + the small reference image.
+    std::vector<PackedSubmission> packed_submissions;
+    packed_submissions.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
         if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
@@ -519,41 +518,65 @@ bool upload_graph_submissions(
             LOG_ERROR("host-orch: invalid pending Graph POD image");
             return false;
         }
-        auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
-        auto object_it = definition_objects.find(submission->definition_hash);
-        if (object_it == definition_objects.end() || object_it->second.device_object == nullptr) {
-            LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
+        const auto *submission = reinterpret_cast<const GraphSubmission *>(upload->data);
+        auto object_it = definition_indices.find(submission->definition_hash);
+        if (object_it == definition_indices.end()) {
+            LOG_ERROR("host-orch: Graph submission has no packed Definition object");
             return false;
         }
-        // Checked against the host-side Definition image the device object was
-        // built from; the GM object itself is never dereferenced on the host.
-        // Execution storage needs no retained buffer: it is the tail of the
-        // outer task's own heap allocation, which graph_submit_definition sized
-        // to required_heap + execution_storage_bytes.
-        const GraphDefinition *definition = object_it->second.host_view;
+        const PackedDefinition &packed_definition = packed_definitions[object_it->second];
+        const GraphDefinition *definition = packed_definition.definition;
         if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
             definition->full_key != submission->graph_key || definition->execution_storage_bytes == 0) {
             LOG_ERROR("host-orch: invalid Graph Definition for submission");
             return false;
         }
-        submission->definition_addr = reinterpret_cast<uint64_t>(object_it->second.device_object);
-        submission->local_execution = 0;
-        submission->activation_gate = 0;
-
-        void *device_submission = api->device_malloc(upload->bytes);
-        if (device_submission == nullptr) {
-            LOG_ERROR("host-orch: failed to allocate %zu bytes for Graph submission", upload->bytes);
-            return false;
-        }
-        if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
-            LOG_ERROR("host-orch: failed to upload Graph submission POD image");
-            api->device_free(device_submission);
-            return false;
-        }
-        upload->outer_slot->graph_context = device_submission;
-        runtime->tensor_pairs_.push_back({nullptr, device_submission, upload->bytes, false});
-        uploaded_bytes += static_cast<uint64_t>(upload->bytes);
+        size_t offset = 0;
+        if (!reserve_region(sizeof(GraphSubmission), alignof(GraphSubmission), &block_bytes, &offset)) return false;
+        packed_submissions.push_back({upload->outer_slot, submission, object_it->second, offset});
     }
+    if (block_bytes == 0) return true;
+
+    constexpr size_t block_alignment = alignof(GraphDefinitionHeader) > alignof(GraphSubmission) ?
+                                           alignof(GraphDefinitionHeader) :
+                                           alignof(GraphSubmission);
+    void *block = api->acquire_graph_block(block_bytes, block_alignment);
+    if (block == nullptr) {
+        LOG_ERROR("host-orch: failed to acquire %zu bytes for the arena-bank GraphBlock", block_bytes);
+        return false;
+    }
+
+    std::vector<std::byte> staging(block_bytes, std::byte{0});
+    auto *device_base = static_cast<std::byte *>(block);
+    for (const PackedDefinition &packed : packed_definitions) {
+        auto *header = reinterpret_cast<GraphDefinitionHeader *>(staging.data() + packed.offset);
+        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+        header->verify_state.store(
+            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
+        );
+        header->definition_bytes = static_cast<uint32_t>(packed.entry->bytes);
+        header->content_hash = packed.definition->content_hash;
+        header->full_key = packed.definition->full_key;
+        std::memcpy(
+            staging.data() + packed.offset + sizeof(GraphDefinitionHeader), packed.entry->data, packed.entry->bytes
+        );
+    }
+    for (const PackedSubmission &packed : packed_submissions) {
+        GraphSubmission submission = *packed.submission;
+        submission.definition_addr =
+            reinterpret_cast<uint64_t>(device_base + packed_definitions[packed.definition_index].offset);
+        submission.local_execution = 0;
+        submission.activation_gate = 0;
+        std::memcpy(staging.data() + packed.offset, &submission, sizeof(submission));
+    }
+
+    if (api->copy_to_device(block, staging.data(), block_bytes) != 0) {
+        LOG_ERROR("host-orch: failed to upload the packed GraphBlock");
+        return false;
+    }
+    for (const PackedSubmission &packed : packed_submissions)
+        packed.outer_slot->graph_context = device_base + packed.offset;
+    uploaded_bytes = block_bytes;
     return true;
 }
 
@@ -683,7 +706,7 @@ int32_t run_host_orchestration(
 
     const int64_t t_graph_ns = bind_now_ns();
     uint64_t graph_bytes = 0;
-    if (!upload_graph_submissions(runtime, api, *graph_state, graph_bytes)) return -1;
+    if (!upload_graph_block(api, *graph_state, graph_bytes)) return -1;
     {
         char attrs[96];
         snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(*graph_state), graph_bytes);
