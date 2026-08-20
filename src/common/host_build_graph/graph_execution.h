@@ -73,13 +73,35 @@ struct GraphScalarSourceRef {
     uint8_t reserved;
 };
 
+// Wire representation of a node's dispatch predicate. The operand's absolute GM
+// address is not replay-invariant, so the Definition names the tensor the
+// operand element sits in plus its element offset within that tensor;
+// materialize rebinds the tensor for the execution and resolves the pair into
+// the address the scheduler reads at the dispatch point.
+struct GraphPredicate {
+    GraphTensor operand;
+    GraphTensorSourceRef operand_source;
+    // Element index into the rebound operand tensor, added to its start_offset.
+    // Fixed at record time: a Graph with a variable ChipTensor shape is rejected
+    // before recording, so the operand's strides cannot change across replays.
+    uint64_t elem_offset;
+    int64_t target;
+    uint8_t elem_size;
+    uint8_t op;
+    uint8_t reserved[6];
+};
+
 struct GraphNodeDefinition {
     int32_t kernel_id[PTO2_SUBTASK_SLOT_COUNT];
     uint8_t active_mask;
     uint8_t task_attrs;
     int16_t logical_block_num;
     int16_t total_required_subtasks;
-    uint16_t reserved;
+    // One-based index into the Definition's predicate array; 0 means the node
+    // carries no dispatch predicate. Biased so that a zeroed GraphNodeDefinition
+    // is a valid predicate-free node. Predicated nodes are rare, so the
+    // predicates live in their own array rather than inline.
+    uint16_t predicate_slot;
     int32_t tensor_count;
     int32_t scalar_count;
     int32_t total_output_size;
@@ -136,6 +158,7 @@ struct GraphDefinition {
     uint32_t boundary_scalar_count;
     uint32_t tensor_arg_count;
     uint32_t scalar_arg_count;
+    uint32_t predicate_count;
     // Bytes an execution of this Definition needs for its GraphExecution header,
     // node storage and patch arrays. Derived from task_count / tensor_arg_count /
     // scalar_arg_count, so host and device read one value instead of each
@@ -155,6 +178,7 @@ struct GraphDefinition {
     uint32_t off_scalars;
     uint32_t off_scalar_sources;
     uint32_t off_boundary_signatures;
+    uint32_t off_predicates;
 };
 
 // One submission of a Graph. The static Definition is a shared device object
@@ -186,6 +210,8 @@ static_assert(std::is_trivially_copyable_v<GraphScalarSourceRef>);
 static_assert(std::is_standard_layout_v<GraphScalarSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphNodeDefinition>);
 static_assert(std::is_standard_layout_v<GraphNodeDefinition>);
+static_assert(std::is_trivially_copyable_v<GraphPredicate>);
+static_assert(std::is_standard_layout_v<GraphPredicate>);
 static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);
 static_assert(std::is_standard_layout_v<GraphBoundarySignature>);
 static_assert(std::is_trivially_copyable_v<GraphDefinition>);

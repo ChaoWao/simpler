@@ -205,6 +205,99 @@ GraphDefinition *graph_definition_object_verified(GraphDefinitionHeader &header)
     return matched ? definition : nullptr;
 }
 
+// Rebind one Definition tensor template onto this execution. A BOUNDARY_* ref
+// takes the invocation's boundary tensor; an INTERNAL / OWN_OUTPUT ref takes the
+// producer node's materialized output base. `node_index` is the consuming node,
+// which bounds a producer reference to a node that is already constructed.
+// Returns false when the ref addresses no valid source — the Definition is then
+// invalid, since every ref is written by the recorder from a classified source.
+bool graph_rebind_tensor(
+    const GraphExecution &execution, const GraphNodeDefinition *nodes, const uint64_t *node_offsets,
+    const GraphTensor &tensor_template, const GraphTensorSourceRef &ref, int32_t node_index, GraphTensor *rebound_out
+) {
+    GraphTensor rebound = tensor_template;
+    if (!graph_tensor_wire_valid(rebound)) return false;
+    if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT)) {
+        if (ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) return false;
+        rebound = execution.boundary_tensors[ref.source_index];
+    } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW)) {
+        if (ref.source_index >= execution.boundary_tensor_count) return false;
+        const GraphTensor &boundary = execution.boundary_tensors[ref.source_index];
+        if (ref.packed_offset > UINT64_MAX - boundary.start_offset) return false;
+        rebound.buffer_addr = boundary.buffer_addr;
+        rebound.buffer_size = boundary.buffer_size;
+        rebound.owner_task_id = boundary.owner_task_id;
+        rebound.start_offset = boundary.start_offset + ref.packed_offset;
+        rebound.version = boundary.version;
+        rebound.address_space = boundary.address_space;
+    } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||
+               ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT)) {
+        const bool own_output = ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
+        const int32_t producer_index = own_output ? node_index : static_cast<int32_t>(ref.source_index);
+        if (producer_index < 0 || producer_index > node_index || (own_output && ref.source_index != node_index) ||
+            (!own_output && producer_index == node_index)) {
+            return false;
+        }
+        PTO2TaskDescriptor &producer = execution.node_storage[producer_index].task;
+        const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
+        const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
+        if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
+            ref.packed_offset > UINTPTR_MAX - producer_base ||
+            ref.packed_offset > UINT64_MAX - node_offsets[producer_index]) {
+            return false;
+        }
+        rebound.buffer_addr = producer_base + ref.packed_offset;
+        rebound.owner_task_id = producer.task_id.raw;
+    } else {
+        return false;
+    }
+    if (!graph_tensor_wire_valid(rebound)) return false;
+    *rebound_out = rebound;
+    return true;
+}
+
+// Turn a Definition predicate plus its rebound operand tensor into the address
+// the scheduler reads at the dispatch point. start_offset and elem_offset are
+// element counts, so the byte offset is their sum scaled by the element width —
+// the same arithmetic the ordinary submit path runs on ChipTensor.
+// The Definition crossed the host boundary, so every field it contributes is
+// range-checked here: pass() memcpys elem_size bytes into an int64_t, and the
+// address must land inside the operand's own buffer.
+bool graph_predicate_resolve(
+    const GraphTensor &operand, const GraphPredicate &predicate, DispatchPredicate *resolved_out
+) {
+    // pass() treats an operator it does not recognize as "always dispatch", so an
+    // unknown code from the image must not reach it. Enumerating the operators
+    // without a default makes a newly added one a build warning here rather than
+    // a silent pass.
+    bool operator_known = false;
+    switch (static_cast<PredicateOp>(predicate.op)) {
+    case PredicateOp::EQ:
+    case PredicateOp::NE:
+    case PredicateOp::GT:
+    case PredicateOp::LT:
+    case PredicateOp::GE:
+    case PredicateOp::LE:
+        operator_known = true;
+        break;
+    case PredicateOp::NONE:
+        break;
+    }
+    if (!operator_known) return false;
+    const uint64_t element_size = get_element_size(static_cast<DataType>(operand.dtype));
+    if (element_size != 1 && element_size != 2 && element_size != 4 && element_size != 8) return false;
+    if (predicate.elem_size != element_size || predicate.elem_offset >= operand.extent_elem) return false;
+    // graph_tensor_wire_valid bounds start_offset + extent_elem by the buffer's
+    // element count, so the scaled sum cannot leave the buffer.
+    const uint64_t byte_offset = (operand.start_offset + predicate.elem_offset) * element_size;
+
+    resolved_out->addr = operand.buffer_addr + byte_offset;
+    resolved_out->target = predicate.target;
+    resolved_out->elem_size = predicate.elem_size;
+    resolved_out->op = static_cast<PredicateOp>(predicate.op);
+    return true;
+}
+
 }  // namespace
 
 GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
@@ -361,9 +454,14 @@ GraphMaterializeResult graph_execution_materialize_slice(
                                            graph_definition_array<GraphScalarSourceRef>(
                                                definition, definition.off_scalar_sources, definition.scalar_arg_count
                                            );
+    const GraphPredicate *predicates =
+        definition.predicate_count == 0 ?
+            nullptr :
+            graph_definition_array<GraphPredicate>(definition, definition.off_predicates, definition.predicate_count);
     if (nodes == nullptr || node_offsets == nullptr ||
         (definition.tensor_arg_count != 0 && (definition_tensors == nullptr || tensor_sources == nullptr)) ||
-        (definition.scalar_arg_count != 0 && (definition_scalars == nullptr || scalar_sources == nullptr))) {
+        (definition.scalar_arg_count != 0 && (definition_scalars == nullptr || scalar_sources == nullptr)) ||
+        (definition.predicate_count != 0 && predicates == nullptr)) {
         execution.materialize_busy.store(0, std::memory_order_release);
         return GraphMaterializeResult::INVALID;
     }
@@ -416,65 +514,16 @@ GraphMaterializeResult graph_execution_materialize_slice(
         }
         for (int32_t j = 0; j < source.tensor_count; ++j) {
             const uint32_t tensor_index = source.tensor_offset + static_cast<uint32_t>(j);
-            ChipTensor &tensor = payload.tensors[j];
-            GraphTensor rebound = definition_tensors[tensor_index];
-            if (!graph_tensor_wire_valid(rebound)) {
-                execution.materialize_busy.store(0, std::memory_order_release);
-                return GraphMaterializeResult::INVALID;
-            }
-            const GraphTensorSourceRef &ref = tensor_sources[tensor_index];
-            if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT)) {
-                if (ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) {
-                    execution.materialize_busy.store(0, std::memory_order_release);
-                    return GraphMaterializeResult::INVALID;
-                }
-                rebound = execution.boundary_tensors[ref.source_index];
-            } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW)) {
-                if (ref.source_index >= execution.boundary_tensor_count) {
-                    execution.materialize_busy.store(0, std::memory_order_release);
-                    return GraphMaterializeResult::INVALID;
-                }
-                const GraphTensor &boundary = execution.boundary_tensors[ref.source_index];
-                if (ref.packed_offset > UINT64_MAX - boundary.start_offset) {
-                    execution.materialize_busy.store(0, std::memory_order_release);
-                    return GraphMaterializeResult::INVALID;
-                }
-                rebound.buffer_addr = boundary.buffer_addr;
-                rebound.buffer_size = boundary.buffer_size;
-                rebound.owner_task_id = boundary.owner_task_id;
-                rebound.start_offset = boundary.start_offset + ref.packed_offset;
-                rebound.version = boundary.version;
-                rebound.address_space = boundary.address_space;
-            } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||
-                       ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT)) {
-                const bool own_output = ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
-                const int32_t producer_index = own_output ? i : static_cast<int32_t>(ref.source_index);
-                if (producer_index < 0 || producer_index > i || (own_output && ref.source_index != i) ||
-                    (!own_output && producer_index == i)) {
-                    execution.materialize_busy.store(0, std::memory_order_release);
-                    return GraphMaterializeResult::INVALID;
-                }
-                PTO2TaskDescriptor &producer = execution.node_storage[producer_index].task;
-                const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
-                const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
-                if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
-                    ref.packed_offset > UINTPTR_MAX - producer_base ||
-                    ref.packed_offset > UINT64_MAX - node_offsets[producer_index]) {
-                    execution.materialize_busy.store(0, std::memory_order_release);
-                    return GraphMaterializeResult::INVALID;
-                }
-                rebound.buffer_addr = producer_base + ref.packed_offset;
-                rebound.owner_task_id = producer.task_id.raw;
-            } else {
-                execution.materialize_busy.store(0, std::memory_order_release);
-                return GraphMaterializeResult::INVALID;
-            }
-            if (!graph_tensor_wire_valid(rebound)) {
+            GraphTensor rebound;
+            if (!graph_rebind_tensor(
+                    execution, nodes, node_offsets, definition_tensors[tensor_index], tensor_sources[tensor_index], i,
+                    &rebound
+                )) {
                 execution.materialize_busy.store(0, std::memory_order_release);
                 return GraphMaterializeResult::INVALID;
             }
             execution.consumed_tensor_args++;
-            graph_tensor_unpack(rebound, &tensor);
+            graph_tensor_unpack(rebound, &payload.tensors[j]);
         }
         for (int32_t j = 0; j < source.scalar_count; ++j) {
             const uint32_t scalar_index = source.scalar_offset + static_cast<uint32_t>(j);
@@ -493,6 +542,34 @@ GraphMaterializeResult graph_execution_materialize_slice(
             }
         }
         reset_graph_payload(payload);
+        // The attribute bit and the predicate slot are written together by the
+        // recorder. A Definition where they disagree would either route the node
+        // through a predicate the scheduler never reads, or leave a resolved
+        // predicate that no dispatch consults.
+        if (slot.task_attrs.has_predicate() != (source.predicate_slot != 0)) {
+            execution.materialize_busy.store(0, std::memory_order_release);
+            return GraphMaterializeResult::INVALID;
+        }
+        // Resolved after the reset, which clears the predicate every node starts from.
+        if (source.predicate_slot != 0) {
+            const uint32_t predicate_index = static_cast<uint32_t>(source.predicate_slot) - 1;
+            GraphTensor operand;
+            // OWN_OUTPUT is a valid source for a tensor arg but never for an
+            // operand: it would bind the predicate to the buffer this node has
+            // yet to write, so the dispatch decision would read whatever the heap
+            // last held. The recorder refuses it; so does the image reader.
+            if (predicate_index >= definition.predicate_count ||
+                predicates[predicate_index].operand_source.source ==
+                    static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT) ||
+                !graph_rebind_tensor(
+                    execution, nodes, node_offsets, predicates[predicate_index].operand,
+                    predicates[predicate_index].operand_source, i, &operand
+                ) ||
+                !graph_predicate_resolve(operand, predicates[predicate_index], &payload.predicate)) {
+                execution.materialize_busy.store(0, std::memory_order_release);
+                return GraphMaterializeResult::INVALID;
+            }
+        }
     }
     execution.materialized_nodes = last;
     if (nodes_materialized != nullptr) *nodes_materialized = last - first;
