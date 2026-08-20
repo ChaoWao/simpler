@@ -303,12 +303,30 @@ struct GraphRecordedNode {
     int16_t total_required_subtasks{0};
     size_t total_output_size{0};
     uintptr_t record_packed_base{0};
+    // Element addresses are handed to the caller through TaskOutputTensors, so
+    // this one stays per node: its heap buffer has to outlive every later node's
+    // recording. The arrays whose addresses are never borrowed live flat on the
+    // recording instead — see GraphRecording.
     std::vector<ChipTensor> tensors;
-    std::vector<GraphRecordedTensorSourceRef> tensor_sources;
-    std::vector<uint64_t> scalars;
-    std::vector<GraphRecordedScalarSourceRef> scalar_sources;
-    std::vector<size_t> internal_fanins;
+    // Ranges into the recording's flat arrays. tensor_sources has one entry per
+    // tensor, so tensors.size() is its count.
+    uint32_t tensor_source_offset{0};
+    uint32_t scalar_offset{0};
+    uint32_t scalar_count{0};
+    uint32_t fanin_offset{0};
+    uint32_t fanin_count{0};
     ArgsDumpTaskMetadata dump_metadata;
+};
+
+// One recorded node's scratch output window. reserve_heap_scratch is a pure bump
+// and a node stores the aligned size it advanced by, so consecutive windows abut:
+// held in record order these are sorted and disjoint, which is what lets an
+// address lookup binary search instead of walking every producer. A node with no
+// output advances nothing and owns no entry.
+struct GraphRecordedOutputRange {
+    uintptr_t begin;
+    uintptr_t end;
+    uint32_t node_index;
 };
 
 struct GraphRecording {
@@ -324,6 +342,14 @@ struct GraphRecording {
     std::vector<ChipTensor> boundary_tensors;
     std::vector<TensorArgType> boundary_types;
     std::vector<GraphRecordedNode> nodes;
+    // Flat per-node arrays, indexed by the ranges on GraphRecordedNode. Held
+    // here rather than on each node so recording a graph pays a handful of
+    // amortized growths instead of one allocation per node per array.
+    std::vector<GraphRecordedTensorSourceRef> tensor_sources;
+    std::vector<uint64_t> scalars;
+    std::vector<GraphRecordedScalarSourceRef> scalar_sources;
+    std::vector<size_t> internal_fanins;
+    std::vector<GraphRecordedOutputRange> output_ranges;
 };
 
 struct GraphPendingUpload {
@@ -439,24 +465,35 @@ bool graph_classify_tensor(
     GraphRecordedTensorSourceRef *source
 ) {
     if (graph_tensor_from_boundary(recording, tensor, source)) return true;
-    const uint64_t tensor_addr = tensor.buffer.addr;
-    for (int32_t producer_index = task_index; producer_index >= 0; --producer_index) {
-        const GraphRecordedNode &producer =
-            producer_index == task_index ? current : recording.nodes[static_cast<size_t>(producer_index)];
-        if (producer.record_packed_base == 0 || producer.total_output_size == 0 ||
-            producer.total_output_size > UINTPTR_MAX - producer.record_packed_base) {
-            continue;
+    const uintptr_t tensor_addr = static_cast<uintptr_t>(tensor.buffer.addr);
+    // The node being recorded is not in output_ranges yet — its entry is appended
+    // once its own tensors are classified — so its window is tested here, and a
+    // hit is OWN_OUTPUT rather than a dependency.
+    if (current.record_packed_base != 0 && current.total_output_size != 0 &&
+        current.total_output_size <= UINTPTR_MAX - current.record_packed_base) {
+        const uintptr_t begin = current.record_packed_base;
+        if (tensor_addr >= begin && tensor_addr < begin + current.total_output_size) {
+            source->source = GraphRecordedTensorSource::OWN_OUTPUT;
+            source->source_index = static_cast<size_t>(task_index);
+            source->packed_offset = tensor_addr - begin;
+            return true;
         }
-        const uintptr_t begin = producer.record_packed_base;
-        const uintptr_t end = begin + producer.total_output_size;
-        if (tensor_addr < begin || tensor_addr >= end) continue;
-        source->source =
-            producer_index == task_index ? GraphRecordedTensorSource::OWN_OUTPUT : GraphRecordedTensorSource::INTERNAL;
-        source->source_index = static_cast<size_t>(producer_index);
-        source->packed_offset = tensor_addr - begin;
-        return true;
     }
-    return false;
+    // Sorted and disjoint, so the only window that can hold the address is the
+    // last one starting at or below it.
+    const auto after = std::upper_bound(
+        recording.output_ranges.begin(), recording.output_ranges.end(), tensor_addr,
+        [](uintptr_t addr, const GraphRecordedOutputRange &range) {
+            return addr < range.begin;
+        }
+    );
+    if (after == recording.output_ranges.begin()) return false;
+    const GraphRecordedOutputRange &range = *(after - 1);
+    if (tensor_addr >= range.end) return false;
+    source->source = GraphRecordedTensorSource::INTERNAL;
+    source->source_index = range.node_index;
+    source->packed_offset = tensor_addr - range.begin;
+    return true;
 }
 
 void graph_record_mark_unsupported(PTO2OrchestratorState *orch) {
@@ -537,6 +574,16 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         return false;
     }
 
+    // Every per-node array is grown by push_back below, and the recording
+    // already knows how many entries each node contributes, so size them once
+    // here. Left unreserved, packing 277 nodes' args reallocates each vector a
+    // dozen times and copies its whole contents each time.
+    size_t total_tensors = 0;
+    for (const GraphRecordedNode &source : recording.nodes) {
+        total_tensors += source.tensors.size();
+    }
+    const size_t total_scalars = recording.scalars.size();
+    const size_t total_fanins = recording.internal_fanins.size();
     std::vector<uint32_t> fanout_counts(recording.nodes.size(), 0);
     std::vector<uint32_t> fanin_offsets(recording.nodes.size() + 1, 0);
     std::vector<uint16_t> fanin_indices;
@@ -547,6 +594,12 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     std::vector<GraphTensorSourceRef> tensor_sources;
     std::vector<uint64_t> scalars;
     std::vector<GraphScalarSourceRef> scalar_sources;
+    fanin_indices.reserve(total_fanins);
+    roots.reserve(recording.nodes.size());
+    tensors.reserve(total_tensors);
+    tensor_sources.reserve(total_tensors);
+    scalars.reserve(total_scalars);
+    scalar_sources.reserve(total_scalars);
 
     uint64_t required_heap = 0;
     uint32_t edge_count = 0;
@@ -554,13 +607,11 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         const GraphRecordedNode &source = recording.nodes[i];
         if (source.total_output_size > static_cast<size_t>(INT32_MAX) ||
             source.tensors.size() > static_cast<size_t>(INT32_MAX) ||
-            source.scalars.size() > static_cast<size_t>(INT32_MAX) || source.internal_fanins.size() > UINT16_MAX ||
-            source.tensors.size() != source.tensor_sources.size() ||
-            source.scalars.size() != source.scalar_sources.size() ||
+            source.scalar_count > static_cast<uint32_t>(INT32_MAX) || source.fanin_count > UINT16_MAX ||
             tensors.size() > UINT32_MAX - source.tensors.size() ||
-            tensor_sources.size() > UINT32_MAX - source.tensor_sources.size() ||
-            scalars.size() > UINT32_MAX - source.scalars.size() ||
-            scalar_sources.size() > UINT32_MAX - source.scalar_sources.size() ||
+            tensor_sources.size() > UINT32_MAX - source.tensors.size() ||
+            scalars.size() > UINT32_MAX - source.scalar_count ||
+            scalar_sources.size() > UINT32_MAX - source.scalar_count ||
             std::any_of(source.tensors.begin(), source.tensors.end(), [](const ChipTensor &tensor) {
                 return tensor.ndims > MAX_TENSOR_DIMS;
             })) {
@@ -571,9 +622,10 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         if (required_heap > UINT64_MAX - output_bytes) return false;
         required_heap += output_bytes;
 
-        fanin_offsets[i + 1] = fanin_offsets[i] + static_cast<uint32_t>(source.internal_fanins.size());
-        if (source.internal_fanins.empty()) roots.push_back(static_cast<uint16_t>(i));
-        for (size_t producer : source.internal_fanins) {
+        fanin_offsets[i + 1] = fanin_offsets[i] + source.fanin_count;
+        if (source.fanin_count == 0) roots.push_back(static_cast<uint16_t>(i));
+        for (uint32_t f = 0; f < source.fanin_count; ++f) {
+            const size_t producer = recording.internal_fanins[source.fanin_offset + f];
             if (producer >= i) return false;
             fanout_counts[producer]++;
             fanin_indices.push_back(static_cast<uint16_t>(producer));
@@ -587,21 +639,22 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         node.logical_block_num = source.logical_block_num;
         node.total_required_subtasks = source.total_required_subtasks;
         node.tensor_count = static_cast<int32_t>(source.tensors.size());
-        node.scalar_count = static_cast<int32_t>(source.scalars.size());
+        node.scalar_count = static_cast<int32_t>(source.scalar_count);
         node.total_output_size = static_cast<int32_t>(source.total_output_size);
         node.tensor_offset = static_cast<uint32_t>(tensors.size());
         node.scalar_offset = static_cast<uint32_t>(scalars.size());
         node.dump_metadata = source.dump_metadata;
         for (const ChipTensor &tensor : source.tensors)
             tensors.push_back(graph_tensor_pack(tensor));
-        for (const GraphRecordedTensorSourceRef &tensor_source : source.tensor_sources) {
-            std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(tensor_source);
+        for (size_t t = 0; t < source.tensors.size(); ++t) {
+            std::optional<GraphTensorSourceRef> packed_source =
+                graph_pack_tensor_source(recording.tensor_sources[source.tensor_source_offset + t]);
             if (!packed_source.has_value()) return false;
             tensor_sources.push_back(*packed_source);
         }
-        for (size_t scalar_index = 0; scalar_index < source.scalars.size(); ++scalar_index) {
+        for (size_t scalar_index = 0; scalar_index < source.scalar_count; ++scalar_index) {
             std::optional<GraphScalarSourceRef> packed_source =
-                graph_pack_scalar_source(source.scalar_sources[scalar_index]);
+                graph_pack_scalar_source(recording.scalar_sources[source.scalar_offset + scalar_index]);
             if (!packed_source.has_value() ||
                 (packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) &&
                  packed_source->source_index >= recording.boundary_args->scalar_count())) {
@@ -611,7 +664,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
             scalars.push_back(
                 packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) ?
                     0 :
-                    source.scalars[scalar_index]
+                    recording.scalars[source.scalar_offset + scalar_index]
             );
         }
     }
@@ -622,7 +675,9 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     std::vector<uint16_t> fanout_indices(edge_count);
     std::vector<uint32_t> cursors(fanout_offsets.begin(), fanout_offsets.end() - 1);
     for (size_t consumer = 0; consumer < recording.nodes.size(); ++consumer) {
-        for (size_t producer : recording.nodes[consumer].internal_fanins) {
+        const GraphRecordedNode &consumer_node = recording.nodes[consumer];
+        for (uint32_t f = 0; f < consumer_node.fanin_count; ++f) {
+            const size_t producer = recording.internal_fanins[consumer_node.fanin_offset + f];
             fanout_indices[cursors[producer]++] = static_cast<uint16_t>(consumer);
         }
     }
@@ -660,6 +715,26 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         return false;
     }
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
+    // Every section's byte count is known now, so the image grows once instead of
+    // resizing eleven times. Each append aligns its start, hence the per-section
+    // alignment slack.
+    auto section_bytes = [](size_t count, size_t elem_size, size_t align) {
+        return count == 0 ? size_t{0} : (align - 1) + count * elem_size;
+    };
+    image->reserve(
+        image->size() + section_bytes(fanout_offsets.size(), sizeof(uint32_t), alignof(uint32_t)) +
+        section_bytes(fanout_indices.size(), sizeof(uint16_t), alignof(uint16_t)) +
+        section_bytes(fanin_offsets.size(), sizeof(uint32_t), alignof(uint32_t)) +
+        section_bytes(fanin_indices.size(), sizeof(uint16_t), alignof(uint16_t)) +
+        section_bytes(roots.size(), sizeof(uint16_t), alignof(uint16_t)) +
+        section_bytes(node_offsets.size(), sizeof(uint64_t), alignof(uint64_t)) +
+        section_bytes(nodes.size(), sizeof(GraphNodeDefinition), alignof(GraphNodeDefinition)) +
+        section_bytes(tensors.size(), sizeof(GraphTensor), alignof(GraphTensor)) +
+        section_bytes(tensor_sources.size(), sizeof(GraphTensorSourceRef), alignof(GraphTensorSourceRef)) +
+        section_bytes(scalars.size(), sizeof(uint64_t), alignof(uint64_t)) +
+        section_bytes(scalar_sources.size(), sizeof(GraphScalarSourceRef), alignof(GraphScalarSourceRef)) +
+        section_bytes(signatures.size(), sizeof(GraphBoundarySignature), alignof(GraphBoundarySignature))
+    );
     definition.off_fanout_offsets = graph_append_section(image, fanout_offsets);
     definition.off_fanout_indices = graph_append_section(image, fanout_indices);
     definition.off_fanin_offsets = graph_append_section(image, fanin_offsets);
@@ -1630,7 +1705,9 @@ TaskOutputTensors graph_record_submit_node(
     for (int32_t i = 0; i < tensor_count; ++i) {
         if (args.tag(i) == TensorArgType::OUTPUT) result.materialize_output(node.tensors[static_cast<size_t>(i)]);
     }
-    node.scalars.assign(args.scalars(), args.scalars() + args.scalar_count());
+    node.scalar_offset = static_cast<uint32_t>(recording.scalars.size());
+    node.scalar_count = static_cast<uint32_t>(args.scalar_count());
+    recording.scalars.insert(recording.scalars.end(), args.scalars(), args.scalars() + args.scalar_count());
 #if SIMPLER_DFX
     node.dump_metadata.dump_arg_mask = args.dump_arg_mask();
     node.dump_metadata.dump_arg_flags = args.dump_arg_index_ambiguous_mask();
@@ -1640,31 +1717,38 @@ TaskOutputTensors graph_record_submit_node(
     // Classify each scalar's source: a plain literal is static Definition data,
     // while a value copied from a boundary scalar is refreshed on replay. A
     // mutable tracked boundary scalar is not supported and falls back.
-    node.scalar_sources.resize(static_cast<size_t>(args.scalar_count()));
+    recording.scalar_sources.resize(static_cast<size_t>(node.scalar_offset) + node.scalar_count);
     for (int32_t i = 0; i < args.scalar_count(); ++i) {
         GraphRecordedScalarSourceRef source = graph_classify_scalar(recording, args, i);
         if (source.source == GraphRecordedScalarSource::INVALIDATED_BOUNDARY) recording.unsupported = true;
-        node.scalar_sources[static_cast<size_t>(i)] = source;
+        recording.scalar_sources[static_cast<size_t>(node.scalar_offset) + static_cast<size_t>(i)] = source;
     }
 
     // Classify each tensor's source, then derive internal fanins from the
     // INTERNAL classifications plus any explicit internal dependency.
-    node.tensor_sources.resize(static_cast<size_t>(tensor_count));
+    node.tensor_source_offset = static_cast<uint32_t>(recording.tensor_sources.size());
+    recording.tensor_sources.resize(static_cast<size_t>(node.tensor_source_offset) + tensor_count);
     for (int32_t i = 0; i < tensor_count; ++i) {
+        // The out-pointer is used only for the duration of the call, so pointing
+        // it into the flat array is safe even though a later node grows that array.
         if (!graph_classify_tensor(
                 recording, node, static_cast<int32_t>(node_index), node.tensors[static_cast<size_t>(i)],
-                &node.tensor_sources[static_cast<size_t>(i)]
+                &recording.tensor_sources[static_cast<size_t>(node.tensor_source_offset) + static_cast<size_t>(i)]
             )) {
             recording.unsupported = true;
         }
     }
-    auto add_fanin = [&node](size_t producer) {
-        if (std::find(node.internal_fanins.begin(), node.internal_fanins.end(), producer) ==
-            node.internal_fanins.end()) {
-            node.internal_fanins.push_back(producer);
+    node.fanin_offset = static_cast<uint32_t>(recording.internal_fanins.size());
+    // Dedup within this node's own range: the flat array's earlier entries belong
+    // to earlier nodes.
+    auto add_fanin = [&recording, &node](size_t producer) {
+        const auto begin = recording.internal_fanins.begin() + node.fanin_offset;
+        if (std::find(begin, recording.internal_fanins.end(), producer) == recording.internal_fanins.end()) {
+            recording.internal_fanins.push_back(producer);
         }
     };
-    for (const GraphRecordedTensorSourceRef &source : node.tensor_sources) {
+    for (uint32_t i = 0; i < static_cast<uint32_t>(tensor_count); ++i) {
+        const GraphRecordedTensorSourceRef &source = recording.tensor_sources[node.tensor_source_offset + i];
         if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(source.source_index);
     }
     for (uint32_t i = 0; i < args.explicit_dep_count(); ++i) {
@@ -1686,6 +1770,17 @@ TaskOutputTensors graph_record_submit_node(
         }
     }
 
+    node.fanin_count = static_cast<uint32_t>(recording.internal_fanins.size() - node.fanin_offset);
+    if (node.record_packed_base != 0 && node.total_output_size != 0 &&
+        node.total_output_size <= UINTPTR_MAX - node.record_packed_base) {
+        const uintptr_t begin = node.record_packed_base;
+        const uintptr_t end = begin + node.total_output_size;
+        // The sorted-and-disjoint property the lookup depends on, checked rather
+        // than assumed: a mid-recording heap rollback would break it, and today
+        // the only rollback is graph_end's, after every node is recorded.
+        always_assert(recording.output_ranges.empty() || recording.output_ranges.back().end <= begin);
+        recording.output_ranges.push_back({begin, end, static_cast<uint32_t>(node_index)});
+    }
     recording.nodes.push_back(std::move(node));
     ORCH_PHASE_END(HostOrchPhase::RecordNode, task_id.raw);
     return result;
