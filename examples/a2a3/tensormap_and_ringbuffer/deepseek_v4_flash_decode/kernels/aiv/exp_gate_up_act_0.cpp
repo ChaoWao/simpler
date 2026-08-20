@@ -840,12 +840,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ float *>(routed_w3_scale_l1_inline689__ssa_v0_tensor->buffer.addr) +
         routed_w3_scale_l1_inline689__ssa_v0_tensor->start_offset;
 
+    // Unpack tensor: recv_count_out
+    __gm__ ChipTensor *recv_count_out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[6]);
+    __gm__ int32_t *recv_count_out =
+        reinterpret_cast<__gm__ int32_t *>(recv_count_out_tensor->buffer.addr) + recv_count_out_tensor->start_offset;
+
     // Unpack scalar: local_i_inline2779_inline9945__idx_v0
     union {
         uint64_t u64;
         int64_t val;
     } local_i_inline2779_inline9945__idx_v0_conv;
-    local_i_inline2779_inline9945__idx_v0_conv.u64 = args[6];
+    local_i_inline2779_inline9945__idx_v0_conv.u64 = args[7];
     int64_t local_i_inline2779_inline9945__idx_v0 = local_i_inline2779_inline9945__idx_v0_conv.val;
 
     // Unpack scalar: t0_inline2784_inline10206__ssa_v0
@@ -853,16 +858,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         uint64_t u64;
         int64_t val;
     } t0_inline2784_inline10206__ssa_v0_conv;
-    t0_inline2784_inline10206__ssa_v0_conv.u64 = args[7];
+    t0_inline2784_inline10206__ssa_v0_conv.u64 = args[8];
     int64_t t0_inline2784_inline10206__ssa_v0 = t0_inline2784_inline10206__ssa_v0_conv.val;
 
-    // Unpack scalar: valid_rows_inline2759_inline10208__ssa_v0
-    union {
-        uint64_t u64;
-        int64_t val;
-    } valid_rows_inline2759_inline10208__ssa_v0_conv;
-    valid_rows_inline2759_inline10208__ssa_v0_conv.u64 = args[8];
-    int64_t valid_rows_inline2759_inline10208__ssa_v0 = valid_rows_inline2759_inline10208__ssa_v0_conv.val;
+    // Rows of this tile that carry data. recv_count_out is [32, 1] INT32,
+    // one row per expert, written on the device by dispatch_meta. The line is
+    // invalidated before the load: the count lives in the ring heap, so an
+    // address this core cached under an earlier tensor could otherwise serve
+    // it. The task's dispatch predicate is recv_count_out[expert] > t0, so the
+    // difference is at least 1 whenever this kernel runs.
+    PTOAS__DCCI_SINGLE_CACHE_LINE(&recv_count_out[local_i_inline2779_inline9945__idx_v0]);
+    int64_t valid_rows_inline2759_inline10208__ssa_v0 =
+        static_cast<int64_t>(recv_count_out[local_i_inline2779_inline9945__idx_v0]) - t0_inline2784_inline10206__ssa_v0;
+    if (valid_rows_inline2759_inline10208__ssa_v0 > 16) valid_rows_inline2759_inline10208__ssa_v0 = 16;
 
     // Forward to ptoas-generated function
     exp_gate_up_act_0(

@@ -17,15 +17,17 @@ and ships the built SM image to the device, which boots scheduler-only.
 with the runtime untouched, recast as a Graph: the 20-iteration decoder layer
 loop (40 of the 43 layers) submits one ``rt_submit_graph`` per iteration whose
 body is the layer's full task set, so the host records a 744-node Definition
-once and the 15991-task network collapses to 1131 host-submitted tasks. The ten
-``get_tensor_data`` reads of ``recv_count_out`` (a task-produced tensor,
-unreadable while the host builds the graph) stand in a constant. Tensor
-initialization is shared with the TMR case and runs in AIV kernels, and the
-attention/FFN scale factors travel as kernel tensor inputs read from GM, so
-the host never writes a GM-heap device address and never copies tensor data
-into task scalars. The graph therefore keeps the size and
-shape of the real one but not the fixture's routing — hence ``skip_golden``.
-``manual`` because the 368-kernel compile takes minutes.
+once and the full network collapses to 1131 host-submitted tasks. The ten
+``recv_count_out`` reads that drove the MoE per-expert tile loops (a
+task-produced tensor, unreadable while the host builds the graph) are now
+dispatch predicates the scheduler evaluates on device. Tensor initialization is
+shared with the TMR case and runs in AIV kernels, and the attention/FFN scale
+factors travel as kernel tensor inputs read from GM, so the host never writes a
+GM-heap device address and never copies tensor data into task scalars. The
+orchestration source is therefore the TMR one recast as a Graph, with no
+runtime-specific rewrite. ``skip_golden`` is inherited from the TMR case, which
+is itself a completion/smoke case; ``manual`` because the 368-kernel compile
+takes minutes.
 
 Host construction and Graph recording complete (1131 tasks on host). An
 unskipped device run is currently blocked in Graph activation, so the recorded
@@ -67,20 +69,22 @@ def _host_build_graph_callable():
     and the orchestration swapped for the Graph-form variant.
 
     ``decode_fwd_graph.cpp`` is the tensormap_and_ringbuffer orchestration with
-    one runtime-specific rewrite and the runtime untouched. HBG runs the
+    the runtime untouched and no runtime-specific rewrite. HBG runs the
     orchestrator on the host before the device executes anything, so the ten
-    ``get_tensor_data(recv_count_out)`` reads (a task-produced tensor driving the
-    MoE per-expert tile loops) have no value to return; they are replaced by
-    ``HBG_RECV_ROWS_PER_EXPERT``, which holds the tile loops at their real trip
-    count. The one other ``get_tensor_data`` read (``ext_num_tokens_per_owner``)
-    drives tile counts and launch block numbers and stays host-side; the former
-    30 scale reads are gone — the consuming kernels read the scale tensors from
-    GM directly. The shared orchestration submits the same device-side
+    ``get_tensor_data(recv_count_out)`` reads (a task-produced tensor that drove
+    the MoE per-expert tile loops) had no value to return; both runtimes now use
+    a static per-expert tile grid whose tasks carry a dispatch predicate on
+    ``recv_count_out[expert][0]``, read by the scheduler on device, and the
+    ``exp_gate_up_act*`` kernels derive ``valid_rows`` from the count tensor in
+    ``kernel_entry``. The one ``get_tensor_data`` read left
+    (``ext_num_tokens_per_owner``) is an external tensor and drives
+    ``set_block_num``, which a predicate cannot express; the former 30 scale
+    reads are gone — the consuming kernels read the scale tensors from GM
+    directly. The shared orchestration submits the same device-side
     initialization kernels under both runtimes.
 
-    The graph therefore keeps the size and shape of the real one but not the
-    fixture's routing, which is why the case is ``skip_golden``: it measures
-    host-side graph construction and device execution, not numerics.
+    The case is ``skip_golden`` because the TMR case it is derived from is: it
+    measures host-side graph construction and device execution, not numerics.
     """
     callable_config = copy.deepcopy(_TMR.TestDeepseekV4FlashDecode.CALLABLE)
     chip = callable_config["callables"][0]
@@ -104,11 +108,9 @@ class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
             "config": {
                 "device_count": N_RANKS,
                 "num_sub_workers": 0,
-                # Ring task window matches the TMR case (HBG_RECV_ROWS_PER_EXPERT
-                # materializes the same per-expert tile count the dynamic loops
-                # produced in-regime). The heap grows 2x: a constant trip count
-                # allocates tile scratch for all 32 experts per MoE layer, while
-                # the dynamic loops allocated only for experts that received rows.
+                # Ring sizing matches the TMR case: both runtimes now build the
+                # same static per-expert tile grid, so both allocate tile scratch
+                # for all 32 experts of every MoE layer.
                 "runtime_env": {
                     "ring_task_window": 16384,
                     "ring_heap": 2 << 30,
