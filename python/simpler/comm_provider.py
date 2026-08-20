@@ -23,7 +23,13 @@ from enum import Enum, IntEnum
 from multiprocessing.shared_memory import SharedMemory
 from typing import Callable, Protocol, Union
 
-from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
+from _task_interface import (  # pyright: ignore[reportMissingImports]
+    BackendKind,
+    _region_vmm_allocate_export,
+    _region_vmm_begin,
+    _region_vmm_release,
+    _region_vmm_zero_bytes,
+)
 
 _UINT64_MAX = (1 << 64) - 1
 _INT32_MIN = -(1 << 31)
@@ -669,17 +675,155 @@ class SimPosixShmAllocation:
             )
 
 
+class VmmAllocation:
+    """One native VMM owner record for a single PAYLOAD or COUNTER part."""
+
+    def __init__(
+        self,
+        context: RegionAllocationContext,
+        part: RegionPartKind,
+        spec: RegionPartAllocationSpec,
+    ) -> None:
+        self._part = _require_part(part)
+        if not isinstance(spec, RegionPartAllocationSpec):
+            raise TypeError("spec must be RegionPartAllocationSpec")
+        if not isinstance(context.target, DeviceAllocationTarget):
+            raise TypeError("VmmAllocation requires DeviceAllocationTarget")
+        self._spec = spec
+        self._device_id = context.target.device_id
+        self._handle: int | None = None
+        self._device_addr: int | None = None
+        self._mapping_bytes: int | None = None
+        self._shareable_handle: int | None = None
+        self._mapping_available = False
+        self._release_once_count = 0
+        self._first_cleanup_failure: ProviderCleanupFailure | None = None
+        self.local_cleanup_details: list[tuple[str, BaseException]] = []
+
+    @property
+    def registry_handle(self) -> int | None:
+        return self._handle
+
+    def materialize(self) -> None:
+        try:
+            handle = _region_vmm_begin(self._device_id)
+            self._handle = handle
+            export = _region_vmm_allocate_export(handle, self._spec.logical_bytes)
+        except RegionControlError:
+            raise
+        except BaseException as exc:
+            raise RegionControlError(
+                RegionControlErrorKind.BACKEND_FAILURE,
+                str(exc) or "VMM materialize failed",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.MATERIALIZE,
+            ) from exc
+        self._device_addr = int(export.device_addr)
+        self._mapping_bytes = int(export.mapping_bytes)
+        self._shareable_handle = int(export.shareable_handle)
+        self._mapping_available = True
+
+    def mapping_bytes(self) -> int:
+        self._require_mapping("mapping_bytes")
+        assert self._mapping_bytes is not None
+        return self._mapping_bytes
+
+    def import_capability(self) -> VmmShareableHandleImport:
+        self._require_mapping("import_capability")
+        assert self._shareable_handle is not None
+        return VmmShareableHandleImport(device_id=self._device_id, shareable_handle=self._shareable_handle)
+
+    def local_base(self) -> int:
+        self._require_mapping("local_base")
+        if self._device_addr is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "VMM mapping has no local base",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.LOCAL_VIEW,
+            )
+        return self._device_addr
+
+    def zero_bytes(self, offset: int, nbytes: int) -> None:
+        self._require_mapping("zero_bytes")
+        if type(offset) is not int or type(nbytes) is not int:
+            raise TypeError("zero_bytes offset and nbytes must be int")
+        if offset < 0 or nbytes < 0:
+            raise ValueError("zero_bytes offset and nbytes must be non-negative")
+        end = offset + nbytes
+        if end > self._spec.logical_bytes:
+            raise ValueError("zero_bytes range exceeds logical_bytes")
+        assert self._handle is not None
+        try:
+            _region_vmm_zero_bytes(self._handle, offset, nbytes)
+        except RegionControlError:
+            raise
+        except BaseException as exc:
+            raise RegionControlError(
+                RegionControlErrorKind.BACKEND_FAILURE,
+                str(exc) or "VMM zero_bytes failed",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.ZERO_BYTES,
+            ) from exc
+
+    def release_once(self) -> ProviderCleanupFailure | None:
+        self._release_once_count += 1
+        if self._release_once_count > 1:
+            return self._first_cleanup_failure
+        if self._handle is None:
+            return None
+        try:
+            _region_vmm_release(self._handle)
+        except BaseException as exc:
+            self._record_cleanup_failure("release", exc)
+            return self._first_cleanup_failure
+        self._handle = None
+        self._mapping_available = False
+        return self._first_cleanup_failure
+
+    def _record_cleanup_failure(self, step: str, exc: BaseException) -> None:
+        cause = RegionCleanupCause.INTERRUPTED if _interrupt_like(exc) else RegionCleanupCause.BACKEND_ERROR
+        failure = ProviderCleanupFailure(
+            part=self._part,
+            backend_operation=RegionOperationKind.RELEASE,
+            typed_cause=cause,
+        )
+        self.local_cleanup_details.append((step, exc))
+        if self._first_cleanup_failure is None:
+            self._first_cleanup_failure = failure
+
+    def _require_mapping(self, operation: str) -> None:
+        if not self._mapping_available or self._handle is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                f"{operation} requires a materialized VMM mapping",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.DESCRIBE
+                if operation in {"mapping_bytes", "import_capability"}
+                else RegionOperationKind.LOCAL_VIEW
+                if operation == "local_base"
+                else RegionOperationKind.ZERO_BYTES,
+            )
+
+
 def _closed_part_dispatcher(
     context: RegionAllocationContext,
     part: RegionPartKind,
     spec: RegionPartAllocationSpec,
 ) -> RegionPartAllocation:
-    if (
-        spec.planned_backing_kind is BackendKind.VMM_WINDOW
-        and context.environment_kind is RegionEnvironmentKind.SIM
-        and isinstance(context.target, DeviceAllocationTarget)
+    if spec.planned_backing_kind is not BackendKind.VMM_WINDOW or not isinstance(
+        context.target, DeviceAllocationTarget
     ):
+        raise RegionControlError(
+            RegionControlErrorKind.INTERNAL_INVARIANT,
+            "admitted allocation combination has no provider backend",
+            failed_part=part,
+            failed_operation=RegionOperationKind.NONE,
+        )
+    if context.environment_kind is RegionEnvironmentKind.SIM:
         return SimPosixShmAllocation(context, part, spec)
+    if context.environment_kind is RegionEnvironmentKind.ONBOARD:
+        return VmmAllocation(context, part, spec)
     raise RegionControlError(
         RegionControlErrorKind.INTERNAL_INVARIANT,
         "admitted allocation combination has no provider backend",

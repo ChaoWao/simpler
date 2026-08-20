@@ -31,12 +31,15 @@
 
 #include <chrono>
 #include <cerrno>
+#include <cstddef>
 #include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <cstdint>
+#include <algorithm>
 #include <exception>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -247,6 +250,18 @@ public:
         return handle;
     }
 
+    int vmm_unmap(void *va) const { return aclrtUnmapMem(va); }
+
+    int vmm_release_address(void *va) const { return aclrtReleaseMemAddress(va); }
+
+    int vmm_free_physical(void *handle) const { return aclrtFreePhysical(handle); }
+
+    void vmm_zero_bytes(void *va, uint64_t offset, uint64_t nbytes) const {
+        std::vector<uint8_t> zeros(static_cast<size_t>(nbytes), 0);
+        void *dst = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(va) + static_cast<uintptr_t>(offset));
+        memcpy_h2d_with_check(dst, static_cast<size_t>(nbytes), zeros.data(), static_cast<size_t>(nbytes));
+    }
+
     void vmm_release_collecting(void *va, void *handle, std::string &cleanup_error) const {
         if (va != nullptr) {
             int rc = aclrtUnmapMem(va);
@@ -313,22 +328,6 @@ AclRuntimeApi &acl_api() {
     });
     return *api;
 }
-
-class ChipChildOnboardRegion {
-public:
-    int device_id{-1};
-    uint64_t device_addr{0};
-    uint64_t mapping_bytes{0};
-    uint64_t shareable_handle{0};
-    void *vmm_handle{nullptr};
-
-    void bind_acl_device() const {
-        if (device_id < 0) {
-            throw std::runtime_error("L3-L2 onboard child region has no device id");
-        }
-        acl_api().bind_device_with_check(device_id);
-    }
-};
 
 struct ChipChildOnboardRegionExport {
     uint64_t device_addr{0};
@@ -880,34 +879,6 @@ RegionHandle import_onboard_region(
     return RegionHandle(handle, std::move(handle_owner_token));
 }
 
-class ChipChildOnboardRegionRegistry {
-public:
-    uint64_t emplace(ChipChildOnboardRegion region) {
-        std::lock_guard<std::mutex> lk(mu_);
-        uint64_t handle = next_handle_++;
-        regions_.emplace(handle, std::move(region));
-        return handle;
-    }
-
-    std::optional<ChipChildOnboardRegion> remove(uint64_t handle) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = regions_.find(handle);
-        if (it == regions_.end()) {
-            return std::nullopt;
-        }
-        ChipChildOnboardRegion region = std::move(it->second);
-        regions_.erase(it);
-        return region;
-    }
-
-private:
-    mutable std::mutex mu_;
-    std::unordered_map<uint64_t, ChipChildOnboardRegion> regions_;
-    uint64_t next_handle_{1};
-};
-
-ChipChildOnboardRegionRegistry g_chip_child_onboard_regions;
-
 uint64_t align_vmm_bytes(uint64_t bytes, uint64_t granularity) {
     if (bytes == 0 || bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
         throw std::invalid_argument("L3-L2 onboard VMM region requires a positive mapping size");
@@ -931,6 +902,696 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
         cleanup_error += "; ";
     }
     cleanup_error += message;
+}
+
+enum class RegionVmmStage {
+    None = 0,
+    PhysicalAlloc,
+    VaReserve,
+    Map,
+    SetAccess,
+    Export,
+    Unmap,
+    VaRelease,
+    PhysicalFree,
+    ZeroBytes,
+};
+
+enum class RegionVmmFailWhen { Before, After };
+
+enum class RegionVmmUnmapClass { Success, AlreadyGone, Failed };
+
+struct RegionVmmExport {
+    uint64_t device_addr{0};
+    uint64_t mapping_bytes{0};
+    uint64_t shareable_handle{0};
+    uint64_t registry_handle{0};
+};
+
+struct RegionVmmInspect {
+    bool present{false};
+    int device_id{-1};
+    uint64_t device_addr{0};
+    uint64_t mapping_bytes{0};
+    uint64_t shareable_handle{0};
+    uint64_t physical_handle{0};
+    bool physical_allocated{false};
+    bool va_reserved{false};
+    bool mapped{false};
+    bool access_set{false};
+    bool exported{false};
+    bool unmap_attempted{false};
+    bool unmap_complete{false};
+    bool va_release_attempted{false};
+    bool va_release_complete{false};
+    bool physical_free_attempted{false};
+    bool physical_free_complete{false};
+    bool release_once_done{false};
+    std::string first_cleanup_failure;
+    std::vector<std::string> local_cleanup_details;
+};
+
+struct RegionVmmAllocation {
+    int device_id{-1};
+    void *physical_handle{nullptr};
+    void *va{nullptr};
+    uint64_t mapping_bytes{0};
+    uint64_t shareable_handle{0};
+    bool physical_allocated{false};
+    bool va_reserved{false};
+    bool mapped{false};
+    bool access_set{false};
+    bool exported{false};
+    bool unmap_attempted{false};
+    bool unmap_complete{false};
+    bool va_release_attempted{false};
+    bool va_release_complete{false};
+    bool physical_free_attempted{false};
+    bool physical_free_complete{false};
+    bool release_once_done{false};
+    std::string first_cleanup_failure;
+    std::vector<std::string> local_cleanup_details;
+};
+
+struct RegionVmmTestHooks {
+    bool use_fake{false};
+    std::optional<RegionVmmStage> fail_stage;
+    RegionVmmFailWhen fail_when{RegionVmmFailWhen::Before};
+    bool unmap_already_gone{false};
+    std::vector<std::string> issued_ops;
+    uint64_t fake_granularity{64};
+    uint64_t next_fake_id{1};
+    uint64_t next_shareable{1};
+    std::unordered_map<uint64_t, std::vector<uint8_t>> fake_va_bytes;
+};
+
+std::mutex &region_vmm_mu() {
+    static auto *mu = new std::mutex();
+    return *mu;
+}
+
+RegionVmmTestHooks &region_vmm_test_hooks() {
+    static auto *hooks = new RegionVmmTestHooks();
+    return *hooks;
+}
+
+std::unordered_map<uint64_t, RegionVmmAllocation> &g_region_vmm_allocations() {
+    static auto *allocations = new std::unordered_map<uint64_t, RegionVmmAllocation>();
+    return *allocations;
+}
+
+uint64_t &region_vmm_next_handle() {
+    static auto *next = new uint64_t(1);
+    return *next;
+}
+
+const char *region_vmm_stage_name(RegionVmmStage stage) {
+    switch (stage) {
+    case RegionVmmStage::PhysicalAlloc:
+        return "physical_alloc";
+    case RegionVmmStage::VaReserve:
+        return "va_reserve";
+    case RegionVmmStage::Map:
+        return "map";
+    case RegionVmmStage::SetAccess:
+        return "set_access";
+    case RegionVmmStage::Export:
+        return "export";
+    case RegionVmmStage::Unmap:
+        return "unmap";
+    case RegionVmmStage::VaRelease:
+        return "va_release";
+    case RegionVmmStage::PhysicalFree:
+        return "physical_free";
+    case RegionVmmStage::ZeroBytes:
+        return "zero_bytes";
+    case RegionVmmStage::None:
+        return "none";
+    }
+    return "none";
+}
+
+RegionVmmStage region_vmm_parse_stage(const std::string &name) {
+    if (name == "physical_alloc") {
+        return RegionVmmStage::PhysicalAlloc;
+    }
+    if (name == "va_reserve") {
+        return RegionVmmStage::VaReserve;
+    }
+    if (name == "map") {
+        return RegionVmmStage::Map;
+    }
+    if (name == "set_access") {
+        return RegionVmmStage::SetAccess;
+    }
+    if (name == "export") {
+        return RegionVmmStage::Export;
+    }
+    if (name == "unmap") {
+        return RegionVmmStage::Unmap;
+    }
+    if (name == "va_release") {
+        return RegionVmmStage::VaRelease;
+    }
+    if (name == "physical_free") {
+        return RegionVmmStage::PhysicalFree;
+    }
+    if (name == "zero_bytes") {
+        return RegionVmmStage::ZeroBytes;
+    }
+    throw std::invalid_argument("unknown region VMM stage: " + name);
+}
+
+void region_vmm_record_issued(const char *op) { region_vmm_test_hooks().issued_ops.emplace_back(op); }
+
+bool region_vmm_consume_fail(RegionVmmStage stage, RegionVmmFailWhen when) {
+    RegionVmmTestHooks &hooks = region_vmm_test_hooks();
+    if (!hooks.fail_stage.has_value() || *hooks.fail_stage != stage || hooks.fail_when != when) {
+        return false;
+    }
+    hooks.fail_stage.reset();
+    return true;
+}
+
+void region_vmm_throw_stage_failure(RegionVmmStage stage, const char *when) {
+    throw std::runtime_error(
+        std::string("injected region VMM ") + when + " " + region_vmm_stage_name(stage) + " failure"
+    );
+}
+
+void *region_vmm_next_fake_ptr() {
+    RegionVmmTestHooks &hooks = region_vmm_test_hooks();
+    uint64_t id = hooks.next_fake_id++;
+    return reinterpret_cast<void *>(static_cast<uintptr_t>(id) << 12);
+}
+
+void region_vmm_bind_device(int device_id) {
+    region_vmm_record_issued("bind_device");
+    if (region_vmm_test_hooks().use_fake) {
+        if (device_id < 0) {
+            throw std::runtime_error("region VMM fake driver requires a non-negative device id");
+        }
+        return;
+    }
+    acl_api().bind_device_with_check(device_id);
+}
+
+uint64_t region_vmm_granularity(int device_id) {
+    region_vmm_record_issued("granularity");
+    if (region_vmm_test_hooks().use_fake) {
+        return region_vmm_test_hooks().fake_granularity;
+    }
+    return acl_api().vmm_granularity_with_check(device_id);
+}
+
+void *region_vmm_malloc_physical(uint64_t bytes, int device_id) {
+    region_vmm_record_issued("physical_alloc");
+    if (region_vmm_test_hooks().use_fake) {
+        (void)bytes;
+        (void)device_id;
+        return region_vmm_next_fake_ptr();
+    }
+    return acl_api().vmm_malloc_physical_with_check(bytes, device_id);
+}
+
+void *region_vmm_reserve(uint64_t bytes) {
+    region_vmm_record_issued("va_reserve");
+    if (region_vmm_test_hooks().use_fake) {
+        void *va = region_vmm_next_fake_ptr();
+        region_vmm_test_hooks().fake_va_bytes[reinterpret_cast<uint64_t>(va)] =
+            std::vector<uint8_t>(static_cast<size_t>(bytes), 0xff);
+        return va;
+    }
+    return acl_api().vmm_reserve_with_check(bytes);
+}
+
+void region_vmm_map(void *va, uint64_t bytes, void *handle) {
+    region_vmm_record_issued("map");
+    if (region_vmm_test_hooks().use_fake) {
+        (void)va;
+        (void)bytes;
+        (void)handle;
+        return;
+    }
+    acl_api().vmm_map_with_check(va, bytes, handle);
+}
+
+void region_vmm_set_access(void *va, uint64_t bytes, int device_id) {
+    region_vmm_record_issued("set_access");
+    if (region_vmm_test_hooks().use_fake) {
+        (void)va;
+        (void)bytes;
+        (void)device_id;
+        return;
+    }
+    acl_api().vmm_set_access_with_check(va, bytes, device_id);
+}
+
+uint64_t region_vmm_export_shareable(void *handle) {
+    region_vmm_record_issued("export");
+    if (region_vmm_test_hooks().use_fake) {
+        (void)handle;
+        return region_vmm_test_hooks().next_shareable++;
+    }
+    return acl_api().vmm_export_shareable_with_check(handle);
+}
+
+int region_vmm_unmap(void *va) {
+    region_vmm_record_issued("unmap");
+    RegionVmmTestHooks &hooks = region_vmm_test_hooks();
+    if (hooks.use_fake) {
+        (void)va;
+        if (std::exchange(hooks.unmap_already_gone, false)) {
+            return 2;
+        }
+        return 0;
+    }
+    return acl_api().vmm_unmap(va);
+}
+
+int region_vmm_release_address(void *va) {
+    region_vmm_record_issued("va_release");
+    if (region_vmm_test_hooks().use_fake) {
+        region_vmm_test_hooks().fake_va_bytes.erase(reinterpret_cast<uint64_t>(va));
+        return 0;
+    }
+    return acl_api().vmm_release_address(va);
+}
+
+int region_vmm_free_physical(void *handle) {
+    region_vmm_record_issued("physical_free");
+    if (region_vmm_test_hooks().use_fake) {
+        (void)handle;
+        return 0;
+    }
+    return acl_api().vmm_free_physical(handle);
+}
+
+void region_vmm_zero_bytes(void *va, uint64_t offset, uint64_t nbytes) {
+    region_vmm_record_issued("zero_bytes");
+    if (region_vmm_test_hooks().use_fake) {
+        auto &backing = region_vmm_test_hooks().fake_va_bytes;
+        auto it = backing.find(reinterpret_cast<uint64_t>(va));
+        if (it == backing.end()) {
+            throw std::runtime_error("region VMM fake zero_bytes has no reserved VA");
+        }
+        uint64_t end = offset + nbytes;
+        if (end < offset || end > static_cast<uint64_t>(it->second.size())) {
+            throw std::invalid_argument("region VMM fake zero_bytes range exceeds mapping");
+        }
+        std::fill(
+            it->second.begin() + static_cast<std::ptrdiff_t>(offset),
+            it->second.begin() + static_cast<std::ptrdiff_t>(end), static_cast<uint8_t>(0)
+        );
+        return;
+    }
+    acl_api().vmm_zero_bytes(va, offset, nbytes);
+}
+
+RegionVmmUnmapClass region_vmm_classify_unmap(int rc) {
+    if (rc == 0) {
+        return RegionVmmUnmapClass::Success;
+    }
+    if (region_vmm_test_hooks().use_fake && rc == 2) {
+        return RegionVmmUnmapClass::AlreadyGone;
+    }
+    return RegionVmmUnmapClass::Failed;
+}
+
+void region_vmm_note_cleanup_failure(RegionVmmAllocation &record, const std::string &detail) {
+    record.local_cleanup_details.push_back(detail);
+    if (record.first_cleanup_failure.empty()) {
+        record.first_cleanup_failure = detail;
+    }
+}
+
+bool region_vmm_cleanup_complete(const RegionVmmAllocation &record) {
+    if (record.mapped && !record.unmap_complete) {
+        return false;
+    }
+    if (record.va_reserved && !record.va_release_complete) {
+        return false;
+    }
+    if (record.physical_allocated && !record.physical_free_complete) {
+        return false;
+    }
+    return record.first_cleanup_failure.empty();
+}
+
+RegionVmmInspect region_vmm_inspect_record(uint64_t handle, const RegionVmmAllocation *record) {
+    RegionVmmInspect inspect{};
+    if (record == nullptr) {
+        return inspect;
+    }
+    inspect.present = true;
+    inspect.device_id = record->device_id;
+    inspect.device_addr = reinterpret_cast<uint64_t>(record->va);
+    inspect.mapping_bytes = record->mapping_bytes;
+    inspect.shareable_handle = record->shareable_handle;
+    inspect.physical_handle = reinterpret_cast<uint64_t>(record->physical_handle);
+    inspect.physical_allocated = record->physical_allocated;
+    inspect.va_reserved = record->va_reserved;
+    inspect.mapped = record->mapped;
+    inspect.access_set = record->access_set;
+    inspect.exported = record->exported;
+    inspect.unmap_attempted = record->unmap_attempted;
+    inspect.unmap_complete = record->unmap_complete;
+    inspect.va_release_attempted = record->va_release_attempted;
+    inspect.va_release_complete = record->va_release_complete;
+    inspect.physical_free_attempted = record->physical_free_attempted;
+    inspect.physical_free_complete = record->physical_free_complete;
+    inspect.release_once_done = record->release_once_done;
+    inspect.first_cleanup_failure = record->first_cleanup_failure;
+    inspect.local_cleanup_details = record->local_cleanup_details;
+    (void)handle;
+    return inspect;
+}
+
+uint64_t region_vmm_begin(int device_id) {
+    if (device_id < 0) {
+        throw std::invalid_argument("region VMM begin requires a non-negative device id");
+    }
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    uint64_t handle = region_vmm_next_handle();
+    if (handle == 0) {
+        throw std::overflow_error("region VMM handle space is exhausted");
+    }
+    RegionVmmAllocation record{};
+    record.device_id = device_id;
+    auto inserted = g_region_vmm_allocations().emplace(handle, record);
+    if (!inserted.second) {
+        throw std::overflow_error("region VMM handle space is exhausted");
+    }
+    region_vmm_next_handle() = handle + 1;
+    return handle;
+}
+
+void region_vmm_run_allocate_stage(
+    RegionVmmStage stage, const std::function<void()> &issue, const std::function<void()> &commit
+) {
+    if (region_vmm_consume_fail(stage, RegionVmmFailWhen::Before)) {
+        region_vmm_throw_stage_failure(stage, "before");
+    }
+    issue();
+    commit();
+    if (region_vmm_consume_fail(stage, RegionVmmFailWhen::After)) {
+        region_vmm_throw_stage_failure(stage, "after");
+    }
+}
+
+RegionVmmExport region_vmm_allocate_export(uint64_t handle, uint64_t logical_bytes) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    auto it = g_region_vmm_allocations().find(handle);
+    if (it == g_region_vmm_allocations().end()) {
+        throw std::runtime_error("region VMM allocate_export handle is unknown");
+    }
+    RegionVmmAllocation &record = it->second;
+    if (record.physical_allocated || record.va_reserved || record.mapped || record.exported) {
+        throw std::runtime_error("region VMM allocate_export already has partial or complete state");
+    }
+    region_vmm_bind_device(record.device_id);
+    uint64_t mapping_bytes = align_vmm_bytes(logical_bytes, region_vmm_granularity(record.device_id));
+    record.mapping_bytes = mapping_bytes;
+
+    region_vmm_run_allocate_stage(
+        RegionVmmStage::PhysicalAlloc,
+        [&]() {
+            record.physical_handle = region_vmm_malloc_physical(mapping_bytes, record.device_id);
+        },
+        [&]() {
+            record.physical_allocated = true;
+        }
+    );
+    region_vmm_run_allocate_stage(
+        RegionVmmStage::VaReserve,
+        [&]() {
+            record.va = region_vmm_reserve(mapping_bytes);
+        },
+        [&]() {
+            record.va_reserved = true;
+        }
+    );
+    region_vmm_run_allocate_stage(
+        RegionVmmStage::Map,
+        [&]() {
+            region_vmm_map(record.va, mapping_bytes, record.physical_handle);
+        },
+        [&]() {
+            record.mapped = true;
+        }
+    );
+    region_vmm_run_allocate_stage(
+        RegionVmmStage::SetAccess,
+        [&]() {
+            region_vmm_set_access(record.va, mapping_bytes, record.device_id);
+        },
+        [&]() {
+            record.access_set = true;
+        }
+    );
+    region_vmm_run_allocate_stage(
+        RegionVmmStage::Export,
+        [&]() {
+            record.shareable_handle = region_vmm_export_shareable(record.physical_handle);
+        },
+        [&]() {
+            record.exported = true;
+        }
+    );
+
+    RegionVmmExport exported{};
+    exported.device_addr = reinterpret_cast<uint64_t>(record.va);
+    exported.mapping_bytes = record.mapping_bytes;
+    exported.shareable_handle = record.shareable_handle;
+    exported.registry_handle = handle;
+    return exported;
+}
+
+bool region_vmm_run_cleanup_stage(
+    RegionVmmAllocation &record, RegionVmmStage stage, bool &attempted, bool &complete,
+    const std::function<int()> &issue, const std::function<void()> &commit_success
+) {
+    attempted = true;
+    if (region_vmm_consume_fail(stage, RegionVmmFailWhen::Before)) {
+        region_vmm_note_cleanup_failure(
+            record, std::string("injected region VMM before ") + region_vmm_stage_name(stage) + " failure"
+        );
+        return false;
+    }
+    int rc = issue();
+    if (stage == RegionVmmStage::Unmap) {
+        RegionVmmUnmapClass classified = region_vmm_classify_unmap(rc);
+        if (classified == RegionVmmUnmapClass::Failed) {
+            region_vmm_note_cleanup_failure(record, std::string("unmap failed with code ") + std::to_string(rc));
+            return false;
+        }
+        commit_success();
+        complete = true;
+        if (region_vmm_consume_fail(stage, RegionVmmFailWhen::After)) {
+            region_vmm_note_cleanup_failure(
+                record, std::string("injected region VMM after ") + region_vmm_stage_name(stage) + " failure"
+            );
+        }
+        return true;
+    }
+    if (rc != 0) {
+        region_vmm_note_cleanup_failure(
+            record, std::string(region_vmm_stage_name(stage)) + " failed with code " + std::to_string(rc)
+        );
+        return false;
+    }
+    commit_success();
+    complete = true;
+    if (region_vmm_consume_fail(stage, RegionVmmFailWhen::After)) {
+        region_vmm_note_cleanup_failure(
+            record, std::string("injected region VMM after ") + region_vmm_stage_name(stage) + " failure"
+        );
+        return false;
+    }
+    return true;
+}
+
+void region_vmm_release(uint64_t handle) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    auto it = g_region_vmm_allocations().find(handle);
+    if (it == g_region_vmm_allocations().end()) {
+        return;
+    }
+    RegionVmmAllocation &record = it->second;
+    if (record.release_once_done) {
+        if (!record.first_cleanup_failure.empty()) {
+            throw std::runtime_error(record.first_cleanup_failure);
+        }
+        return;
+    }
+    record.release_once_done = true;
+    region_vmm_bind_device(record.device_id);
+
+    bool unmap_ok = true;
+    if (record.mapped) {
+        unmap_ok = region_vmm_run_cleanup_stage(
+            record, RegionVmmStage::Unmap, record.unmap_attempted, record.unmap_complete,
+            [&]() {
+                return region_vmm_unmap(record.va);
+            },
+            [&]() {
+                record.mapped = false;
+            }
+        );
+    }
+
+    if (record.mapped && !unmap_ok) {
+        throw std::runtime_error(record.first_cleanup_failure);
+    }
+
+    if (record.va_reserved && !record.va_release_attempted) {
+        region_vmm_run_cleanup_stage(
+            record, RegionVmmStage::VaRelease, record.va_release_attempted, record.va_release_complete,
+            [&]() {
+                return region_vmm_release_address(record.va);
+            },
+            [&]() {
+                record.va_reserved = false;
+                record.va = nullptr;
+            }
+        );
+    }
+    if (record.physical_allocated && !record.physical_free_attempted) {
+        region_vmm_run_cleanup_stage(
+            record, RegionVmmStage::PhysicalFree, record.physical_free_attempted, record.physical_free_complete,
+            [&]() {
+                return region_vmm_free_physical(record.physical_handle);
+            },
+            [&]() {
+                record.physical_allocated = false;
+                record.physical_handle = nullptr;
+            }
+        );
+    }
+
+    if (region_vmm_cleanup_complete(record)) {
+        g_region_vmm_allocations().erase(it);
+        return;
+    }
+    throw std::runtime_error(
+        record.first_cleanup_failure.empty() ? "region VMM release left uncleared ledger state" :
+                                               record.first_cleanup_failure
+    );
+}
+
+void region_vmm_zero_range(uint64_t handle, uint64_t offset, uint64_t nbytes) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    auto it = g_region_vmm_allocations().find(handle);
+    if (it == g_region_vmm_allocations().end()) {
+        throw std::runtime_error("region VMM zero_bytes handle is unknown");
+    }
+    RegionVmmAllocation &record = it->second;
+    if (!record.mapped || record.va == nullptr) {
+        throw std::runtime_error("region VMM zero_bytes requires a mapped VA");
+    }
+    uint64_t end = offset + nbytes;
+    if (end < offset || end > record.mapping_bytes) {
+        throw std::invalid_argument("region VMM zero_bytes range exceeds mapping_bytes");
+    }
+    if (region_vmm_consume_fail(RegionVmmStage::ZeroBytes, RegionVmmFailWhen::Before)) {
+        region_vmm_throw_stage_failure(RegionVmmStage::ZeroBytes, "before");
+    }
+    region_vmm_zero_bytes(record.va, offset, nbytes);
+    if (region_vmm_consume_fail(RegionVmmStage::ZeroBytes, RegionVmmFailWhen::After)) {
+        region_vmm_throw_stage_failure(RegionVmmStage::ZeroBytes, "after");
+    }
+}
+
+RegionVmmInspect region_vmm_inspect(uint64_t handle) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    auto it = g_region_vmm_allocations().find(handle);
+    if (it == g_region_vmm_allocations().end()) {
+        return RegionVmmInspect{};
+    }
+    return region_vmm_inspect_record(handle, &it->second);
+}
+
+std::vector<uint64_t> region_vmm_live_handles() {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    std::vector<uint64_t> handles;
+    handles.reserve(g_region_vmm_allocations().size());
+    for (const auto &entry : g_region_vmm_allocations()) {
+        handles.push_back(entry.first);
+    }
+    return handles;
+}
+
+std::vector<uint8_t> region_vmm_test_fake_bytes(uint64_t handle) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    if (!region_vmm_test_hooks().use_fake) {
+        throw std::runtime_error("region VMM fake bytes require the fake driver");
+    }
+    auto it = g_region_vmm_allocations().find(handle);
+    if (it == g_region_vmm_allocations().end() || it->second.va == nullptr) {
+        throw std::runtime_error("region VMM fake bytes require a reserved VA");
+    }
+    auto bytes_it = region_vmm_test_hooks().fake_va_bytes.find(reinterpret_cast<uint64_t>(it->second.va));
+    if (bytes_it == region_vmm_test_hooks().fake_va_bytes.end()) {
+        throw std::runtime_error("region VMM fake bytes have no reserved VA backing");
+    }
+    return bytes_it->second;
+}
+
+std::vector<std::string> region_vmm_issued_ops() {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    return region_vmm_test_hooks().issued_ops;
+}
+
+void region_vmm_test_use_fake_driver() {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    region_vmm_test_hooks().use_fake = true;
+}
+
+void region_vmm_test_reset_hooks() {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    RegionVmmTestHooks &hooks = region_vmm_test_hooks();
+    hooks.fail_stage.reset();
+    hooks.fail_when = RegionVmmFailWhen::Before;
+    hooks.unmap_already_gone = false;
+    hooks.issued_ops.clear();
+}
+
+void region_vmm_test_fail_stage(const std::string &stage, const std::string &when) {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    RegionVmmTestHooks &hooks = region_vmm_test_hooks();
+    hooks.fail_stage = region_vmm_parse_stage(stage);
+    if (when == "before") {
+        hooks.fail_when = RegionVmmFailWhen::Before;
+    } else if (when == "after") {
+        hooks.fail_when = RegionVmmFailWhen::After;
+    } else {
+        throw std::invalid_argument("region VMM fail when must be before or after");
+    }
+}
+
+void region_vmm_test_set_unmap_already_gone() {
+    std::lock_guard<std::mutex> lk(region_vmm_mu());
+    region_vmm_test_hooks().unmap_already_gone = true;
+}
+
+ChipChildOnboardRegionExport region_vmm_legacy_create(uint64_t nbytes) {
+    AclRuntimeApi &api = acl_api();
+    int device_id = api.current_device_with_check();
+    uint64_t handle = region_vmm_begin(device_id);
+    try {
+        RegionVmmExport exported = region_vmm_allocate_export(handle, nbytes);
+        ChipChildOnboardRegionExport legacy{};
+        legacy.device_addr = exported.device_addr;
+        legacy.mapping_bytes = exported.mapping_bytes;
+        legacy.shareable_handle = exported.shareable_handle;
+        legacy.registry_handle = exported.registry_handle;
+        return legacy;
+    } catch (...) {
+        try {
+            region_vmm_release(handle);
+        } catch (...) {}
+        throw;
+    }
 }
 
 // The int wire value of a dtype given either a DataType enumerator or its int value. The nanobind
@@ -2515,6 +3176,34 @@ NB_MODULE(_task_interface, m) {
         .def_ro("shareable_handle", &ChipChildOnboardRegionExport::shareable_handle)
         .def_ro("registry_handle", &ChipChildOnboardRegionExport::registry_handle);
 
+    nb::class_<RegionVmmExport>(m, "_RegionVmmExport")
+        .def_ro("device_addr", &RegionVmmExport::device_addr)
+        .def_ro("mapping_bytes", &RegionVmmExport::mapping_bytes)
+        .def_ro("shareable_handle", &RegionVmmExport::shareable_handle)
+        .def_ro("registry_handle", &RegionVmmExport::registry_handle);
+
+    nb::class_<RegionVmmInspect>(m, "_RegionVmmInspect")
+        .def_ro("present", &RegionVmmInspect::present)
+        .def_ro("device_id", &RegionVmmInspect::device_id)
+        .def_ro("device_addr", &RegionVmmInspect::device_addr)
+        .def_ro("mapping_bytes", &RegionVmmInspect::mapping_bytes)
+        .def_ro("shareable_handle", &RegionVmmInspect::shareable_handle)
+        .def_ro("physical_handle", &RegionVmmInspect::physical_handle)
+        .def_ro("physical_allocated", &RegionVmmInspect::physical_allocated)
+        .def_ro("va_reserved", &RegionVmmInspect::va_reserved)
+        .def_ro("mapped", &RegionVmmInspect::mapped)
+        .def_ro("access_set", &RegionVmmInspect::access_set)
+        .def_ro("exported", &RegionVmmInspect::exported)
+        .def_ro("unmap_attempted", &RegionVmmInspect::unmap_attempted)
+        .def_ro("unmap_complete", &RegionVmmInspect::unmap_complete)
+        .def_ro("va_release_attempted", &RegionVmmInspect::va_release_attempted)
+        .def_ro("va_release_complete", &RegionVmmInspect::va_release_complete)
+        .def_ro("physical_free_attempted", &RegionVmmInspect::physical_free_attempted)
+        .def_ro("physical_free_complete", &RegionVmmInspect::physical_free_complete)
+        .def_ro("release_once_done", &RegionVmmInspect::release_once_done)
+        .def_ro("first_cleanup_failure", &RegionVmmInspect::first_cleanup_failure)
+        .def_ro("local_cleanup_details", &RegionVmmInspect::local_cleanup_details);
+
     nb::class_<RegionHandle>(m, "_RegionHandle").def("__int__", &RegionHandle::value);
 
     m.def(
@@ -2815,59 +3504,108 @@ NB_MODULE(_task_interface, m) {
         nb::call_guard<nb::gil_scoped_release>(), "Poll one L3 Host-side L3-L2 signal counter until match or timeout."
     );
     m.def(
+        "_region_vmm_begin",
+        [](int device_id) -> uint64_t {
+            return region_vmm_begin(device_id);
+        },
+        nb::arg("device_id"), nb::call_guard<nb::gil_scoped_release>(),
+        "Insert an empty native VMM owner record with no physical side effect."
+    );
+    m.def(
+        "_region_vmm_allocate_export",
+        [](uint64_t handle, uint64_t logical_bytes) -> RegionVmmExport {
+            return region_vmm_allocate_export(handle, logical_bytes);
+        },
+        nb::arg("handle"), nb::arg("logical_bytes"), nb::call_guard<nb::gil_scoped_release>(),
+        "Physically allocate, map, and export one native VMM record without rollback."
+    );
+    m.def(
+        "_region_vmm_release",
+        [](uint64_t handle) {
+            region_vmm_release(handle);
+        },
+        nb::arg("handle"), nb::call_guard<nb::gil_scoped_release>(),
+        "Make one dependency-aware cleanup pass and delete the record only after complete success."
+    );
+    m.def(
+        "_region_vmm_zero_bytes",
+        [](uint64_t handle, uint64_t offset, uint64_t nbytes) {
+            region_vmm_zero_range(handle, offset, nbytes);
+        },
+        nb::arg("handle"), nb::arg("offset"), nb::arg("nbytes"), nb::call_guard<nb::gil_scoped_release>(),
+        "Zero a mapped native VMM byte range."
+    );
+    m.def(
+        "_region_vmm_inspect",
+        [](uint64_t handle) -> RegionVmmInspect {
+            return region_vmm_inspect(handle);
+        },
+        nb::arg("handle"), "Inspect one native VMM ledger record."
+    );
+    m.def(
+        "_region_vmm_test_use_fake_driver",
+        []() {
+            region_vmm_test_use_fake_driver();
+        },
+        "Route native VMM physical calls through the in-process fake driver."
+    );
+    m.def(
+        "_region_vmm_test_reset_hooks",
+        []() {
+            region_vmm_test_reset_hooks();
+        },
+        "Clear native VMM fail-injection and issued-op logs without dropping live records."
+    );
+    m.def(
+        "_region_vmm_test_fail_stage",
+        [](const std::string &stage, const std::string &when) {
+            region_vmm_test_fail_stage(stage, when);
+        },
+        nb::arg("stage"), nb::arg("when"), "Fail one named native VMM stage before or after ledger mutation."
+    );
+    m.def(
+        "_region_vmm_test_set_unmap_already_gone",
+        []() {
+            region_vmm_test_set_unmap_already_gone();
+        },
+        "Make the next fake unmap report a backend-defined already-gone outcome."
+    );
+    m.def(
+        "_region_vmm_test_issued_ops",
+        []() -> std::vector<std::string> {
+            return region_vmm_issued_ops();
+        },
+        "Return native VMM driver operations issued since the last hook reset."
+    );
+    m.def(
+        "_region_vmm_test_live_handles",
+        []() -> std::vector<uint64_t> {
+            return region_vmm_live_handles();
+        },
+        "Return currently retained native VMM registry handles."
+    );
+    m.def(
+        "_region_vmm_test_fake_bytes",
+        [](uint64_t handle) -> std::vector<uint8_t> {
+            return region_vmm_test_fake_bytes(handle);
+        },
+        nb::arg("handle"), "Return fake-driver VA backing bytes for one native VMM record."
+    );
+    m.def(
         "_l3_child_onboard_region_create",
         [](uint64_t nbytes) -> ChipChildOnboardRegionExport {
-            if (nbytes == 0 || nbytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                throw std::invalid_argument("L3-L2 onboard child region requires a positive mapping size");
-            }
-            AclRuntimeApi &api = acl_api();
-            int device_id = api.current_device_with_check();
-            uint64_t mapping_bytes = align_vmm_bytes(nbytes, api.vmm_granularity_with_check(device_id));
-            ChipChildOnboardRegion region{};
-            region.device_id = device_id;
-            region.mapping_bytes = mapping_bytes;
-            region.vmm_handle = api.vmm_malloc_physical_with_check(mapping_bytes, device_id);
-            void *mapped_addr = nullptr;
-            try {
-                mapped_addr = api.vmm_reserve_with_check(mapping_bytes);
-                api.vmm_map_with_check(mapped_addr, mapping_bytes, region.vmm_handle);
-                api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-                region.shareable_handle = api.vmm_export_shareable_with_check(region.vmm_handle);
-            } catch (...) {
-                std::string cleanup_error;
-                api.vmm_release_collecting(mapped_addr, region.vmm_handle, cleanup_error);
-                throw;
-            }
-            region.device_addr = reinterpret_cast<uint64_t>(mapped_addr);
-            uint64_t registry_handle = g_chip_child_onboard_regions.emplace(region);
-            return ChipChildOnboardRegionExport{
-                region.device_addr,
-                region.mapping_bytes,
-                region.shareable_handle,
-                registry_handle,
-            };
+            return region_vmm_legacy_create(nbytes);
         },
         nb::arg("nbytes"), nb::call_guard<nb::gil_scoped_release>(),
-        "Create and export a child-owned onboard VMM region."
+        "Temporary compatibility wrapper over the two-phase native VMM registry."
     );
     m.def(
         "_l3_child_onboard_region_close",
         [](uint64_t registry_handle) {
-            std::optional<ChipChildOnboardRegion> removed = g_chip_child_onboard_regions.remove(registry_handle);
-            if (!removed.has_value()) {
-                return;
-            }
-            ChipChildOnboardRegion region = *removed;
-            region.bind_acl_device();
-            std::string cleanup_error;
-            acl_api().vmm_release_collecting(
-                reinterpret_cast<void *>(static_cast<uintptr_t>(region.device_addr)), region.vmm_handle, cleanup_error
-            );
-            if (!cleanup_error.empty()) {
-                throw std::runtime_error(cleanup_error);
-            }
+            region_vmm_release(registry_handle);
         },
-        nb::arg("registry_handle"), nb::call_guard<nb::gil_scoped_release>(), "Close a child-owned onboard VMM region."
+        nb::arg("registry_handle"), nb::call_guard<nb::gil_scoped_release>(),
+        "Temporary compatibility wrapper over one-shot native VMM release."
     );
 
     bind_worker(m);

@@ -45,6 +45,7 @@ from simpler.comm_provider import (
     RegionPartKind,
     RegionPartLocalView,
     SimPosixShmAllocation,
+    VmmAllocation,
     VmmShareableHandleImport,
     validate_independent_local_views,
 )
@@ -1016,3 +1017,325 @@ def test_sim_posix_first_cleanup_failure_is_close_when_both_steps_fail():
         pass
     with pytest.raises(FileNotFoundError):
         SharedMemory(name=_posix_shm_create_name(token))
+
+
+def _onboard_context(device_id: int = 0) -> RegionAllocationContext:
+    return RegionAllocationContext(
+        environment_kind=RegionEnvironmentKind.ONBOARD,
+        target=DeviceAllocationTarget(device_id=device_id),
+    )
+
+
+@pytest.fixture
+def fake_vmm():
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_release,
+        _region_vmm_test_live_handles,
+        _region_vmm_test_reset_hooks,
+        _region_vmm_test_use_fake_driver,
+    )
+
+    _region_vmm_test_use_fake_driver()
+    _region_vmm_test_reset_hooks()
+    before = set(_region_vmm_test_live_handles())
+    yield
+    _region_vmm_test_reset_hooks()
+    for handle in _region_vmm_test_live_handles():
+        if handle in before:
+            continue
+        try:
+            _region_vmm_release(handle)
+        except Exception:
+            try:
+                _region_vmm_release(handle)
+            except Exception:
+                pass
+
+
+def test_region_vmm_begin_has_no_physical_side_effect(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_live_handles,
+    )
+
+    before = set(_region_vmm_test_live_handles())
+    handle = _region_vmm_begin(3)
+    inspect = _region_vmm_inspect(handle)
+    try:
+        assert handle not in before
+        assert inspect.present is True
+        assert inspect.device_id == 3
+        assert inspect.physical_allocated is False
+        assert inspect.va_reserved is False
+        assert inspect.mapped is False
+        assert inspect.exported is False
+        assert inspect.mapping_bytes == 0
+        assert _region_vmm_test_issued_ops() == []
+        assert handle in _region_vmm_test_live_handles()
+    finally:
+        _region_vmm_release(handle)
+    assert _region_vmm_inspect(handle).present is False
+
+
+@pytest.mark.parametrize(
+    ("stage", "when", "allocated", "reserved", "mapped", "exported"),
+    [
+        ("physical_alloc", "before", False, False, False, False),
+        ("physical_alloc", "after", True, False, False, False),
+        ("va_reserve", "before", True, False, False, False),
+        ("va_reserve", "after", True, True, False, False),
+        ("map", "before", True, True, False, False),
+        ("map", "after", True, True, True, False),
+        ("set_access", "before", True, True, True, False),
+        ("set_access", "after", True, True, True, False),
+        ("export", "before", True, True, True, False),
+        ("export", "after", True, True, True, True),
+    ],
+)
+def test_region_vmm_allocate_failure_retains_record_without_rollback(
+    fake_vmm, stage, when, allocated, reserved, mapped, exported
+):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage(stage, when)
+    with pytest.raises(RuntimeError, match="injected region VMM"):
+        _region_vmm_allocate_export(handle, 8)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    try:
+        assert inspect.present is True
+        assert inspect.physical_allocated is allocated
+        assert inspect.va_reserved is reserved
+        assert inspect.mapped is mapped
+        assert inspect.exported is exported
+        if when == "before":
+            assert stage not in issued
+        else:
+            assert stage in issued
+    finally:
+        _region_vmm_test_reset_hooks()
+        _region_vmm_release(handle)
+    assert _region_vmm_inspect(handle).present is False
+
+
+def test_region_vmm_failed_unmap_skips_va_and_physical(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("unmap", "before")
+    with pytest.raises(RuntimeError, match="before unmap"):
+        _region_vmm_release(handle)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    assert inspect.present is True
+    assert inspect.mapped is True
+    assert inspect.va_reserved is True
+    assert inspect.physical_allocated is True
+    assert inspect.unmap_attempted is True
+    assert inspect.unmap_complete is False
+    assert inspect.release_once_done is True
+    assert "unmap" not in issued
+    assert "va_release" not in issued
+    assert "physical_free" not in issued
+    _region_vmm_test_reset_hooks()
+    with pytest.raises(RuntimeError, match="before unmap"):
+        _region_vmm_release(handle)
+    assert _region_vmm_test_issued_ops() == []
+    assert _region_vmm_inspect(handle).mapped is True
+
+
+def test_region_vmm_successful_unmap_attempts_va_and_physical_independently(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("va_release", "before")
+    with pytest.raises(RuntimeError, match="before va_release"):
+        _region_vmm_release(handle)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    assert inspect.present is True
+    assert inspect.mapped is False
+    assert inspect.unmap_complete is True
+    assert inspect.va_reserved is True
+    assert inspect.physical_allocated is False
+    assert inspect.physical_free_complete is True
+    assert inspect.first_cleanup_failure
+    assert inspect.local_cleanup_details == [inspect.first_cleanup_failure]
+    assert issued.count("unmap") == 1
+    assert "va_release" not in issued
+    assert issued.count("physical_free") == 1
+    _region_vmm_test_reset_hooks()
+    with pytest.raises(RuntimeError, match="before va_release"):
+        _region_vmm_release(handle)
+    assert _region_vmm_test_issued_ops() == []
+
+
+def test_region_vmm_already_gone_unmap_still_releases_va_and_physical(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+        _region_vmm_test_set_unmap_already_gone,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_set_unmap_already_gone()
+    _region_vmm_release(handle)
+    assert _region_vmm_inspect(handle).present is False
+    assert _region_vmm_test_issued_ops() == ["bind_device", "unmap", "va_release", "physical_free"]
+
+
+def test_region_vmm_two_handles_are_independent(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+    )
+
+    first = _region_vmm_allocate_export(_region_vmm_begin(1), 8)
+    second = _region_vmm_allocate_export(_region_vmm_begin(2), 64)
+    try:
+        assert first.registry_handle != second.registry_handle
+        assert first.shareable_handle != second.shareable_handle
+        assert first.device_addr != second.device_addr
+        assert first.mapping_bytes == 64
+        assert second.mapping_bytes == 64
+        assert _region_vmm_inspect(first.registry_handle).device_id == 1
+        assert _region_vmm_inspect(second.registry_handle).device_id == 2
+    finally:
+        _region_vmm_release(first.registry_handle)
+        _region_vmm_release(second.registry_handle)
+
+
+def test_vmm_allocation_stores_handle_before_allocate_and_zeros_only_logical_bytes(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_inspect,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_fake_bytes,
+        _region_vmm_test_reset_hooks,
+    )
+
+    shell = VmmAllocation(_onboard_context(4), RegionPartKind.COUNTER, _counter_spec(8))
+    assert shell.registry_handle is None
+    _region_vmm_test_fail_stage("export", "before")
+    with pytest.raises(RegionControlError) as exc_info:
+        shell.materialize()
+    assert exc_info.value.kind is RegionControlErrorKind.BACKEND_FAILURE
+    handle = shell.registry_handle
+    assert handle is not None
+    inspect = _region_vmm_inspect(handle)
+    assert inspect.present is True
+    assert inspect.mapped is True
+    assert inspect.exported is False
+    _region_vmm_test_reset_hooks()
+    assert shell.release_once() is None
+    assert _region_vmm_inspect(handle).present is False
+    assert shell.release_once() is None
+
+    ready = VmmAllocation(_onboard_context(4), RegionPartKind.COUNTER, _counter_spec(8))
+    ready.materialize()
+    try:
+        ready.zero_bytes(0, 8)
+        backing = bytes(_region_vmm_test_fake_bytes(ready.registry_handle))
+        assert backing[:8] == b"\x00" * 8
+        assert backing[8:] == b"\xff" * (len(backing) - 8)
+        capability = ready.import_capability()
+        assert capability.device_id == 4
+        assert ready.mapping_bytes() == 64
+        assert ready.local_base() == int(_region_vmm_inspect(ready.registry_handle).device_addr)
+    finally:
+        assert ready.release_once() is None
+
+
+def test_onboard_store_creates_two_independent_vmm_handles_and_zeros_only_counter(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_inspect,
+        _region_vmm_test_fake_bytes,
+    )
+
+    store = ProviderRegionStore(_onboard_context(5))
+    result = store.allocate_and_export(_allocation_spec())
+    resource = store._resources[result.provider_resource_id]
+    payload_shell = resource.parts[RegionPartKind.PAYLOAD].allocation
+    counter_shell = resource.parts[RegionPartKind.COUNTER].allocation
+    assert isinstance(payload_shell, VmmAllocation)
+    assert isinstance(counter_shell, VmmAllocation)
+    payload_handle = payload_shell.registry_handle
+    counter_handle = counter_shell.registry_handle
+    try:
+        payload = result.export_descriptor.payload.import_capability
+        counter = result.export_descriptor.counter.import_capability
+        assert isinstance(payload, VmmShareableHandleImport)
+        assert isinstance(counter, VmmShareableHandleImport)
+        assert payload.shareable_handle != counter.shareable_handle
+        assert payload.device_id == 5
+        assert payload_handle != counter_handle
+        payload_view = store.local_view(result.provider_resource_id, RegionPartKind.PAYLOAD)
+        counter_view = store.local_view(result.provider_resource_id, RegionPartKind.COUNTER)
+        validate_independent_local_views(payload_view, counter_view)
+        payload_bytes = bytes(_region_vmm_test_fake_bytes(payload_handle))
+        counter_bytes = bytes(_region_vmm_test_fake_bytes(counter_handle))
+        assert payload_bytes[:64] == b"\xff" * 64
+        assert counter_bytes[:8] == b"\x00" * 8
+        assert counter_bytes[8:] == b"\xff" * (len(counter_bytes) - 8)
+    finally:
+        released = store.release(result.provider_resource_id)
+    assert released.status is ProviderReleaseStatus.RELEASED
+    assert _region_vmm_inspect(payload_handle).present is False
+    assert _region_vmm_inspect(counter_handle).present is False
+
+
+def test_closed_dispatcher_routes_onboard_vmm_window_to_vmm_allocation():
+    payload = comm_provider_module._closed_part_dispatcher(
+        _onboard_context(),
+        RegionPartKind.PAYLOAD,
+        _payload_spec(),
+    )
+    sim = comm_provider_module._closed_part_dispatcher(
+        _sim_context(),
+        RegionPartKind.PAYLOAD,
+        _payload_spec(),
+    )
+    assert isinstance(payload, VmmAllocation)
+    assert isinstance(sim, SimPosixShmAllocation)
+    assert payload.registry_handle is None
+
