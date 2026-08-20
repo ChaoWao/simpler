@@ -182,6 +182,49 @@ def test_sorting_uses_function_level_metadata():
     assert [item.nodeid for item in items] == ["tests::host", "tests::l2"]
 
 
+def test_multi_round_chip_swimlane_does_not_reject_l3_items():
+    @scene_level(SceneTestLevel.NODE)
+    def host_fn():
+        return None
+
+    items = [_FakeItem("tests::host", function=host_fn)]
+    config = _FakeConfig(
+        platform="a2a3",
+        level=None,
+        **{
+            "exclude-level": None,
+            "runtime": None,
+            "rounds": 5,
+            "enable-chip-swimlane": 4,
+        },
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, config, items)
+
+    assert [item.nodeid for item in items] == ["tests::host"]
+
+
+def test_single_round_chip_swimlane_rejects_l3_items():
+    @scene_level(SceneTestLevel.NODE)
+    def host_fn():
+        return None
+
+    items = [_FakeItem("tests::host", function=host_fn)]
+    config = _FakeConfig(
+        platform="a2a3",
+        level=None,
+        **{
+            "exclude-level": None,
+            "runtime": None,
+            "rounds": 1,
+            "enable-chip-swimlane": 4,
+        },
+    )
+
+    with pytest.raises(pytest.UsageError, match="not supported for L3 tests"):
+        root_conftest.pytest_collection_modifyitems(None, config, items)
+
+
 def test_level_filters_are_mutually_exclusive():
     config = _FakeConfig(level=4, **{"exclude-level": 4})
 

@@ -35,11 +35,13 @@ pytest examples/my_example --platform a2a3 --device 4 --dump-args
 `--enable-swimlane-overhead` requires `--enable-chip-swimlane` plus a `deps.json`;
 if it is absent, re-run adding `--enable-dep-gen`.
 
-**`--enable-chip-swimlane` is L2-only.** Asking for it on an L3 test is rejected
-up front — scope to a single chip with `--level 2`, or drop the flag.
+**For single-round runs, `--enable-chip-swimlane` is L2-only.** Asking for it
+on an L3 test is rejected up front — scope to a single chip with `--level 2`,
+or drop the flag.
 
-Use `--rounds N` when you want several iterations, so first-run effects (binary
-load, cold arena) do not dominate what you measure.
+Use `--rounds N` for repeated non-diagnostic timing. All diagnostic flags above
+are disabled when `N > 1`; warm up separately, then collect diagnostics with a
+single round.
 
 ## Enabling from your own code
 

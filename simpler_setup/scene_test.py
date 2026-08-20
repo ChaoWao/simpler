@@ -1160,7 +1160,14 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     """
     cls_name = type(cls_inst).__name__
     callable_spec = getattr(type(cls_inst), "CALLABLE", None)
-    diagnostics_on = enable_chip_swimlane or enable_dump_args or enable_pmu or enable_dep_gen or enable_scope_stats
+    diagnostics_on = (
+        enable_chip_swimlane
+        or enable_dump_args
+        or enable_pmu
+        or enable_dep_gen
+        or enable_scope_stats
+        or enable_swimlane_overhead
+    )
     for case in cases:
         case_label = f"{cls_name}_{case['name']}"
         # Per-case directory the runtime writes into. Required (non-empty) when
@@ -1746,13 +1753,11 @@ class SceneTestCase:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _effective_enable_dep_gen(request, *, warn: bool = False) -> bool:
+    def _effective_enable_dep_gen(request) -> bool:
         """Return the multi-round-safe dep-gen setting for extension hooks.
 
-        Shares the gating rule with ``test_run`` so a subclass hook (e.g.
-        ``TestDepGenCapture``'s post-validate step) cannot drift from it.
-        ``warn`` stays off by default because ``test_run`` already emitted the
-        user-facing "disabled: --rounds > 1" line before any hook runs.
+        Subclass hooks use the same effective-value rule as the main run path
+        without emitting an additional user-facing warning.
         """
         return _effective_diagnostic_options(
             request.config.getoption("--rounds", default=1),
@@ -1762,7 +1767,7 @@ class SceneTestCase:
             dep_gen=request.config.getoption("--enable-dep-gen", default=False),
             scope_stats=False,
             swimlane_overhead=False,
-            warn=warn,
+            warn=False,
         ).dep_gen
 
     def test_run(self, st_platform, st_worker, request):
