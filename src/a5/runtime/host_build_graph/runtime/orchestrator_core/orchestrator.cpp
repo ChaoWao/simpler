@@ -1337,9 +1337,9 @@ static TaskOutputTensors submit_task_common(
 
     for (uint32_t i = 0; i < args.explicit_dep_count(); i++) {
         TaskId dep_task_id = args.explicit_dep(i);
-        if (!dep_task_id.is_valid()) {
+        if (!dep_task_id.is_valid() || dep_task_id.ring() != 0) {
             orch->report_fatal(
-                SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "Arg.set_dependencies(...) requires valid task ids"
+                SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "Arg.set_dependencies(...) requires valid ring-zero task ids"
             );
             return result;
         }

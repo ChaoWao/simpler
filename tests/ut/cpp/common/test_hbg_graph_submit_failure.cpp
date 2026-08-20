@@ -13,6 +13,7 @@
 
 #include <array>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -25,6 +26,20 @@
 #include "shared_memory.h"
 #include "task_interface/assert_compat.h"
 #include "utils/device_arena.h"
+
+TEST(HbgRuntimeBoundaryTest, SharedMemoryRejectsInvalidTaskWindowBeforePointerSetup) {
+    alignas(PTO2_ALIGN_SIZE) std::array<std::byte, 4096> storage{};
+    constexpr std::array<uint64_t, 3> kInvalidTaskWindows{0, 3, 5};
+
+    for (uint64_t task_window_size : kInvalidTaskWindows) {
+        SCOPED_TRACE(task_window_size);
+        PTO2SharedMemoryHandle handle{};
+        EXPECT_FALSE(handle.init(storage.data(), storage.size(), task_window_size, 4096));
+        EXPECT_EQ(handle.sm_base, nullptr);
+        EXPECT_FALSE(handle.attach_populated(storage.data(), storage.size(), task_window_size, 1, storage.size()));
+        EXPECT_EQ(handle.sm_base, nullptr);
+    }
+}
 
 class HbgGraphSubmitFailureTest : public ::testing::Test {
 protected:
@@ -69,6 +84,28 @@ protected:
         sm_arena.release();
     }
 };
+
+TEST_F(HbgGraphSubmitFailureTest, ExplicitDependencyRejectsNonzeroRingId) {
+    orch.begin_scope();
+
+    CoreTaskArgs producer_args;
+    const TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    const TaskId invalid_dep = TaskId::make(1, producer.task_id().local());
+    CoreTaskArgs consumer_args;
+    consumer_args.set_dependencies(&invalid_dep, 1);
+    orch.submit_dummy_task(consumer_args);
+
+    EXPECT_TRUE(orch.fatal);
+    EXPECT_EQ(
+        sm_handle->header->orch_error_code.load(std::memory_order_acquire),
+        static_cast<int32_t>(SIMPLER_ERROR_INVALID_ARGS)
+    );
+    const auto &producer_slot =
+        sm_handle->header->ring.get_slot_state_by_task_id(static_cast<int32_t>(producer.task_id().local()));
+    EXPECT_EQ(producer_slot.last_consumer_local_id, static_cast<int32_t>(producer.task_id().local()));
+}
 
 TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommit) {
     std::array<uint32_t, 16> storage{};

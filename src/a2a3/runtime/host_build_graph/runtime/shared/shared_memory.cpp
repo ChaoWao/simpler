@@ -23,6 +23,15 @@
 #include <string.h>
 #include "common/unified_log.h"
 
+namespace {
+
+bool is_valid_task_window_size(uint64_t task_window_size) {
+    return task_window_size >= 4 && task_window_size <= static_cast<uint64_t>(INT32_MAX) &&
+           (task_window_size & (task_window_size - 1)) == 0;
+}
+
+}  // namespace
+
 // =============================================================================
 // Size Calculation
 // =============================================================================
@@ -60,6 +69,7 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
 bool PTO2SharedMemoryHandle::init(
     void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t heap_size
 ) {
+    if (!is_valid_task_window_size(task_window_size)) return false;
     if (!sm_base_arg || sm_size_arg == 0) return false;
     const uint64_t mirror_bytes = calculate_size(task_window_size);
     // The mirror has to stay inside an int32 delta's reach: a payload names its
@@ -83,6 +93,7 @@ bool PTO2SharedMemoryHandle::init(
 bool PTO2SharedMemoryHandle::attach_populated(
     void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t live_slots, uint64_t image_bytes
 ) {
+    if (!is_valid_task_window_size(task_window_size)) return false;
     if (!sm_base_arg || sm_size_arg == 0) return false;
     // A pitch above the capacity would name a slot the ring cannot address, and one
     // below what the host used would place every segment past the descriptors
