@@ -26,9 +26,9 @@ shape of the real one but not the fixture's routing — hence ``skip_golden``.
 ``manual`` because the 368-kernel compile takes minutes.
 
 Host construction and Graph recording complete (1131 tasks on host). An
-unskipped Graph-form device run is currently blocked earlier, during Graph
-activation; the non-Graph baseline completes its device body. See README.md for
-the measurements and remaining Graph-runtime limitation.
+unskipped device run is currently blocked in Graph activation, so the recorded
+bodies never replay. See README.md for the measurements and the remaining
+Graph-runtime limitation.
 
     python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\\
 test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
@@ -64,8 +64,8 @@ def _host_build_graph_callable():
     """Same CALLABLE as the TMR case, with kernel sources re-pointed at the TMR dir
     and the orchestration swapped for the Graph-form variant.
 
-    ``decode_fwd_hostbuild.cpp`` is the tensormap_and_ringbuffer orchestration
-    with one runtime-specific rewrite and the runtime untouched. HBG runs the
+    ``decode_fwd_graph.cpp`` is the tensormap_and_ringbuffer orchestration with
+    one runtime-specific rewrite and the runtime untouched. HBG runs the
     orchestrator on the host before the device executes anything, so the ten
     ``get_tensor_data(recv_count_out)`` reads (a task-produced tensor driving the
     MoE per-expert tile loops) have no value to return; they are replaced by
