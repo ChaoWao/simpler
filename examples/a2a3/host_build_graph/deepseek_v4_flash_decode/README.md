@@ -2,7 +2,7 @@
 
 The `tensormap_and_ringbuffer` DeepSeek-V4 case
 (`examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/`) run under
-`host_build_graph`: same 43-layer network, same 367 kernels, same fixture, same
+`host_build_graph`: same 43-layer network, same 368 kernels, same fixture, same
 comm-window protocol. Only the runtime changes — HBG compiles the orchestration
 with the host `g++`, runs it on the host CPU instead of the AICPU, and ships the
 built shared-memory image to the device, which then boots scheduler-only.
@@ -13,9 +13,9 @@ device can execute what the host built. It is deliberately not a numerics test.
 ## What differs from the TMR case
 
 `kernels/orchestration/decode_fwd_hostbuild.cpp` is the TMR orchestration with
-two edits, **51 lines in all**, kept as the non-Graph baseline.
+one runtime-specific rewrite, kept as the non-Graph baseline.
 `kernels/orchestration/decode_fwd_graph.cpp` — the file the test points at —
-carries the same two edits and additionally recasts the 20-iteration decoder
+carries the same rewrite and additionally recasts the 20-iteration decoder
 layer loop (40 of the 43 layers) as one `rt_submit_graph` per iteration: the
 layer's task set becomes the Graph body (a free function reading its per-layer
 views, scales and indices through `GraphTaskArgs`, positionally), and the host
@@ -25,11 +25,16 @@ tasks individually. The runtime is untouched.
 | Edit | Sites | Why |
 | ---- | ----- | --- |
 | `get_tensor_data(recv_count_out, …)` → `HBG_RECV_ROWS_PER_EXPERT` | 10 | HBG builds the whole graph before the device runs anything, so a read of a **task-produced** tensor has no value to return. The constant holds the per-expert tile loops at their real trip count (`ceil(16/16) == 1`, which is what the `h_i8 [512, 2048]` layout budgets per expert). |
-| `set_initial_value(0)` dropped | 6 | The fill target is a GM-heap **device** address and the host orchestrator cannot store to it. Leaving the call in place segfaults the chip subprocess — see "Runtime gaps" below. |
 
 The other **31** `get_tensor_data` reads are left alone: they read external
 tensors (`ext_num_tokens_per_owner`, `hc_attn_scale_*`, `hc_ffn_scale_*`), which
 the runtime stages with a host view and which therefore return real values.
+
+The six former orchestration-side initializations are now identical under both
+runtimes. Each `sh_gate_up_act_q*` producer clears its own two padded
+`h_tile_i8` rows, while a dedicated AIV seed task clears `mixes_raw` before the
+split-K `hc_head_linear` AtomicAdds. The host therefore never writes a GM-heap
+device address.
 
 Everything else — submit order, dependencies, scope nesting,
 `valid_rows = min(n_rows - t0, 16)` — is byte-identical to the TMR source inside
@@ -73,7 +78,7 @@ network on hardware. The stall reproduced at the identical task, core count and
 | --------- | --- |
 | pto-isa version | Stalls identically on `83d01313`, `0cefc9a5` and `f51c92f6`. (The *earlier* stall at task 2307 — issue #1839 — is a genuine ISA regression and **is** fixed by `f51c92f6`; it is a different stall.) |
 | The orchestration edits above | An earlier variant that instead used dispatch predicates and a static tile grid stalls at the same task. So does one with the predicate rewrite removed. |
-| `set_initial_value` | Present and absent both stall identically. |
+| `set_initial_value` | Present and absent both stall identically. The calls have since been replaced with device-side initialization kernels. |
 | Runtime modifications | A `host_tensor_fill` seam was written to support `set_initial_value` on HBG and later reverted; the stall is identical with it, without it, and on a pristine tree. |
 | The kernel itself | `hc_head_linear` completes normally under TMR on the same branch, ISA and build. |
 | Kernel-internal spin | All loop bounds in `hc_head_linear` are compile-time constants; `t_dim`/`t_linear` are unused in the body. `ptoas_auto_sync_tail(kBarrierAll)` expands to `pipe_barrier(PIPE_ALL)` — intra-core, not cross-core. There is no cross-block synchronization to deadlock on. |
@@ -105,18 +110,11 @@ Two threads worth pulling:
    only thirteen were ever placed and the remaining three can never get a core.
    Distinguishing these two is the cheapest next measurement.
 
-## Runtime gaps this case exposed
+## Runtime gap this case exposed
 
-Neither is required for this case as it stands, but both are real and neither has
-test coverage on `host_build_graph`:
+This gap is independent of the stall above, and has no test coverage on
+`host_build_graph`:
 
-- **`TensorCreateInfo::set_initial_value()` segfaults.** `alloc_tensors` hands
-  out GM-heap **device** addresses while `fill_tensor_initial_value` performs a
-  plain host `memcpy`. Under TMR the orchestrator runs on the AICPU where GM is
-  directly addressable, so the same code is fine. Backtrace:
-  `PTO2OrchestratorState::alloc_tensors+0x798` ← `aicpu_orchestration_entry`,
-  faulting on a device VA. No HBG scene test uses the API, which is why it went
-  unnoticed.
 - **`get_tensor_data` on a task-produced tensor burns its full timeout.** The
   wait can never be satisfied in this runtime — the device does not execute until
   orchestration finishes — yet `wait_for_tensor_ready` spins the whole 15 s before
@@ -134,7 +132,7 @@ pytest examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
     --platform a2a3 --device <d0>,<d1> --manual only
 ```
 
-`manual` because the 367-kernel compile takes minutes; `skip_golden` because the
+`manual` because the 368-kernel compile takes minutes; `skip_golden` because the
 routing is stood in, not computed.
 
 To exercise only the host side while the stall below is unresolved, set
@@ -161,7 +159,7 @@ Kernels, fixture and orchestration come from the TMR case; see its
 [README](../../tensormap_and_ringbuffer/deepseek_v4_flash_decode/README.md) for
 network shape, regeneration steps and cost. Two orchestration files are specific
 to this case: `kernels/orchestration/decode_fwd_hostbuild.cpp` (the TMR
-orchestration with the two edits in the table above — the host-orchestration
+orchestration with the rewrite in the table above — the host-orchestration
 baseline the investigation was run against) and
 `kernels/orchestration/decode_fwd_graph.cpp` (the same program recast as a
 Graph, which the test points at). The Graph variant is derivable from the
