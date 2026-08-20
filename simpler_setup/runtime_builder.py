@@ -463,11 +463,25 @@ class RuntimeBuilder:
         without it the first TPREFETCH_ASYNC pays the cold SDMA control path
         (~4.4 ms) but nothing breaks, so this is deliberately not validated the
         way ``_resolve_dispatcher_path`` is.
+
+        A missing ELF for an arch that *does* carry the source is a build or
+        staging regression, and every consumer of it degrades silently, so it is
+        warned about here rather than left to be noticed as lost performance.
         """
         if self._variant == "sim":
             return None
         path = self._LIB_DIR / self._arch / "sdma_warmup" / "sdma_warmup_kernel.o"
-        return path if path.is_file() else None
+        if path.is_file():
+            return path
+        source = PROJECT_ROOT / "src" / self._arch / "platform" / "onboard" / "aicore" / "sdma_warmup_kernel.cpp"
+        if source.is_file():
+            logger.warning(
+                "SDMA warmup ELF not staged at %s though %s carries its source; "
+                "an enable_sdma Worker will pay the cold SDMA control path on its first TPREFETCH_ASYNC",
+                path,
+                self._arch,
+            )
+        return None
 
     def _resolve_dispatcher_path(self) -> Optional[Path]:
         """Return path to libsimpler_aicpu_dispatcher.so for onboard variants.

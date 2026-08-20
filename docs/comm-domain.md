@@ -236,6 +236,20 @@ the resident `KernelArgs`, and injects it into every run's kernel
 `GlobalContext` (`get_dma_workspace`). A Worker without `enable_sdma` creates no
 SDMA streams and its kernels read a zero workspace address. The workspace is
 released at Worker finalize by ordinary stream/manager teardown.
+
+Provisioning also warms the SDMA control path once, in the same call: a
+vector-only AICore ELF (`sdma_warmup_kernel.o`, staged per arch under
+`build/lib/<arch>/sdma_warmup/`) walks every channel so the first
+`TPREFETCH_ASYNC` of a run does not pay the cold STARS submit-queue publication
+(~92 µs per channel, ~4.4 ms of init for all 48). Either way the Worker comes
+up; the two ways of not having the ELF differ only in what says so. An arch that
+carries no `sdma_warmup_kernel.cpp` builds none by design and reports nothing —
+a5 is that case, so its first `TPREFETCH_ASYNC` still pays the cold path. An arch
+that carries the source but staged no object is a build or staging regression,
+and is warned about twice: by the runtime builder and again at Worker init. A
+warmup whose device launch or sync *fails* is not in this category at all — it
+fails Worker init, because the card it faulted on must not reach the first run.
+
 Communication-domain allocation does not create SDMA streams or carry the
 workspace through `CommContext`. Because an SDMA-enabled Worker's 48 STARS
 streams sit in the device fault/sync domain, a fault on that Worker slows its

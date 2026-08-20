@@ -86,7 +86,8 @@ uint32_t dma_workspace_supported_mask(void);
 /**
  * Number of SDMA channels the provisioned workspace describes, i.e. how many
  * channels the control-path warmup must walk. Exposed through the comm seam
- * because it comes from a PTO constant (kSdmaMaxChannel) and src/common must
+ * because it comes from a PTO constant (kSdmaMaxChannelGroups, the count
+ * SdmaWorkspaceManager::Init actually creates streams for) and src/common must
  * not include PTO headers.
  */
 uint32_t dma_workspace_channel_count(void);

@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for RuntimeBuilder class."""
 
+import logging
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -295,6 +296,41 @@ class TestRuntimeBuilderGetBinaries:
         builder, _ = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3")
 
         assert builder.get_binaries("test_rt", build=True).sdma_warmup_path is None
+
+    def _make_warmup_source(self, tmp_path, arch):
+        """Create the arch's warmup kernel source, the 'this arch builds one' marker."""
+        source = tmp_path / "src" / arch / "platform" / "onboard" / "aicore" / "sdma_warmup_kernel.cpp"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("// fake warmup kernel\n")
+        return source
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_warns_when_an_arch_with_warmup_source_staged_nothing(self, MockCompiler, tmp_path, monkeypatch, caplog):
+        """A build/staging regression must be visible, not just slower.
+
+        Every consumer of the warmup ELF degrades silently when it is missing, so
+        an arch that carries the source but staged no object is the one case that
+        has to say something.
+        """
+        self._make_runtime(tmp_path, "a2a3")
+        self._make_warmup_source(tmp_path, "a2a3")
+        builder, _ = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3")
+
+        with caplog.at_level(logging.WARNING, logger="simpler_setup.runtime_builder"):
+            assert builder.get_binaries("test_rt", build=True).sdma_warmup_path is None
+
+        assert "SDMA warmup ELF not staged" in caplog.text
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_no_warning_for_an_arch_that_builds_no_warmup(self, MockCompiler, tmp_path, monkeypatch, caplog):
+        """Absent source means the arch never builds one, which is not a regression."""
+        self._make_runtime(tmp_path, "a5")
+        builder, _ = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a5")
+
+        with caplog.at_level(logging.WARNING, logger="simpler_setup.runtime_builder"):
+            assert builder.get_binaries("test_rt", build=True).sdma_warmup_path is None
+
+        assert "SDMA warmup ELF not staged" not in caplog.text
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_resolves_staged_sdma_warmup_elf(self, MockCompiler, tmp_path, monkeypatch):

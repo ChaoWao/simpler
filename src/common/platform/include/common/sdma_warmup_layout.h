@@ -14,8 +14,7 @@
  * launcher (DeviceRunnerBase::launch_sdma_warmup_kernel).
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_COMMON_SDMA_WARMUP_LAYOUT_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_COMMON_SDMA_WARMUP_LAYOUT_H_
+#pragma once
 
 #include <cstdint>
 
@@ -27,8 +26,8 @@
 constexpr uint32_t kSdmaWarmupStatusStrideBytes = 64U;
 
 // Slot values. 0 (the host-side zero fill) therefore means "no core reached this
-// channel", which is a distinct failure from the warmup declining its
-// preconditions.
+// channel", which the launcher reports separately from the warmup declining its
+// preconditions on a channel it did reach.
 constexpr uint32_t kSdmaWarmupStatusOk = 1U;
 constexpr uint32_t kSdmaWarmupStatusFailed = 2U;
 
@@ -39,5 +38,3 @@ constexpr uint32_t kSdmaWarmupStatusFailed = 2U;
 // copies serialize behind the engine instead of overlapping it. 8 clears that
 // cliff and, unlike a channel-count-derived value, stays valid on any AIV count.
 constexpr uint32_t kSdmaWarmupBlockDim = 8U;
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_COMMON_SDMA_WARMUP_LAYOUT_H_

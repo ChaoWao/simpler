@@ -263,7 +263,7 @@ private:
     // enqueue on the same DeviceRunner can recover in place; if the drain itself
     // errors the context is unrecoverable without a full reset, so flip
     // device_unusable_ and let admission/enqueue fail fast.
-    void recover_device_or_mark_unusable(int aicore_rc);
+    void recover_device_or_mark_unusable(int aicore_rc) override;
 
     // Force-reset the card via aclrtResetDeviceForce to clear an op-timeout
     // sticky-error that the soft rtDeviceReset cannot (a soft reset + fresh
