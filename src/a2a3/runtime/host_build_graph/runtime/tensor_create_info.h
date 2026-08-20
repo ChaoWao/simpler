@@ -14,9 +14,15 @@
  * Runtime-only: this header (and the materialization helpers below) are NOT
  * part of the wire/host-facing ChipTensor in src/common/task_interface/tensor.h.
  * It carries the metadata required to materialize a fresh contiguous output:
- * dtype, ndims, shapes, manual_dep, and an optional initial value fill. Its
- * 64B layout mirrors ChipTensor cache line 1 so init_tensor_from_create_info() can
- * copy the whole line with a single memcpy.
+ * dtype, ndims, shapes, manual_dep. Its 64B layout mirrors ChipTensor cache
+ * line 1 so init_tensor_from_create_info() can copy the whole line with a
+ * single memcpy.
+ *
+ * There is no initial-value fill here, unlike the tensormap_and_ringbuffer
+ * copy of this header. That fill stores to ChipTensor::buffer.addr, which is a
+ * GM-heap device address: the AICPU orchestrator can write it, the host
+ * orchestrator this runtime uses cannot. An orchestration that needs a defined
+ * starting content has a task write it. See docs/SCALAR_DATA_ACCESS.md.
  */
 
 #pragma once
@@ -33,8 +39,7 @@ public:
     TensorCreateInfo(
         const uint32_t shapes_in[], uint32_t ndims_in, DataType dtype_in = DataType::FLOAT32, bool manual_dep_in = false
     ) :
-        initial_value(0),
-        has_initial_value(false),
+        __pad0__{0, 0},
         __pad2__(0),
         start_offset(0),  // mirrors ChipTensor::start_offset; pre-zeroed for create-info outputs
         version(0),
@@ -54,12 +59,6 @@ public:
 
     void copy(const TensorCreateInfo &other) { memcpy(this, &other, sizeof(other)); }
 
-    template <typename T = uint64_t>
-    void set_initial_value(T value) {
-        has_initial_value = true;
-        initial_value = to_u64(value);
-    }
-
     uint64_t buffer_size_bytes() const {
         uint64_t total = 1;
         for (uint32_t i = 0; i < ndims; i++) {
@@ -73,9 +72,7 @@ public:
     // These occupy the same positions as ChipTensor::buffer, ChipTensor::owner_task_id,
     // and ChipTensor::start_offset. The runtime overwrites owner metadata after the
     // memcpy and recomputes start_offset / stride during payload materialization.
-    uint64_t initial_value;
-    bool has_initial_value;
-    uint8_t __pad1__[7];
+    uint64_t __pad0__[2];   // → ChipTensor::buffer (overwritten post-memcpy)
     uint64_t __pad2__;      // → ChipTensor::owner_task_id (overwritten post-memcpy)
     uint64_t start_offset;  // mirrors ChipTensor::start_offset; always 0 for create-info outputs
 
@@ -93,6 +90,7 @@ public:
 
 // TensorCreateInfo layout must match ChipTensor cacheline 1 for memcpy optimization
 static_assert(sizeof(TensorCreateInfo) == 64, "TensorCreateInfo must match ChipTensor cacheline 1 size (64 bytes)");
+static_assert(offsetof(TensorCreateInfo, __pad0__) == offsetof(ChipTensor, buffer));
 static_assert(offsetof(TensorCreateInfo, start_offset) == offsetof(ChipTensor, start_offset));
 static_assert(offsetof(TensorCreateInfo, version) == offsetof(ChipTensor, version));
 static_assert(offsetof(TensorCreateInfo, ndims) == offsetof(ChipTensor, ndims));
@@ -107,24 +105,6 @@ static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(ChipTensor, shapes)
 // Factored out of ChipTensor (which now lives in the wire/host-facing common
 // header) so the create-info dependency stays runtime-only.
 // ============================================================================
-
-/// Fill the entire backing buffer of `t` with `initial_value` (doubling memcpy).
-inline void fill_tensor_initial_value(ChipTensor &t, uint64_t initial_value) {
-    always_assert(reinterpret_cast<char *>(t.buffer.addr) != nullptr);
-    uint64_t elem_size = get_element_size(t.dtype);
-    char *dst = reinterpret_cast<char *>(t.buffer.addr);
-    constexpr uint64_t blk_size = 64;
-    uint64_t blk = (t.buffer.size < blk_size) ? t.buffer.size : blk_size;
-    for (uint64_t b = 0; b < blk; b += elem_size) {
-        memcpy(dst + b, &initial_value, elem_size);
-    }
-    uint64_t filled = blk;
-    while (filled < t.buffer.size) {
-        uint64_t copy_size = ((t.buffer.size - filled) < filled) ? (t.buffer.size - filled) : filled;
-        memcpy(dst + filled, dst, copy_size);
-        filled += copy_size;
-    }
-}
 
 /// Materialize a TensorCreateInfo into `t` (fresh contiguous output).
 /// Single 64B memcpy covers cache line 1; `ci` pre-initialises start_offset (=0)
@@ -141,7 +121,4 @@ inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &
         s *= t.shapes[i];
     }
     t.extent_elem_cache = s;
-    if (ci.has_initial_value) {
-        fill_tensor_initial_value(t, ci.initial_value);
-    }
 }
