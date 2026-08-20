@@ -726,7 +726,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     # that all write chip_swimlane_records_<ts>.json to the same directory with
     # second-precision timestamps, so they trample each other. Block the
     # combination up front; waiting for a proper device-id-in-filename fix.
-    if config.getoption("--enable-chip-swimlane", default=0):
+    if config.getoption("--enable-chip-swimlane", default=0) and config.getoption("--rounds", default=1) <= 1:
         l3_items = [
             i
             for i in items

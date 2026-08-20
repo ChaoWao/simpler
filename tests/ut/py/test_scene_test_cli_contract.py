@@ -18,7 +18,12 @@ from types import SimpleNamespace
 import pytest
 
 from simpler_setup import parallel_scheduler
-from simpler_setup.scene_test import SceneTestCase, _dispatch_test_phases_standalone, _effective_diagnostic_options
+from simpler_setup.scene_test import (
+    SceneTestCase,
+    _dispatch_test_phases_standalone,
+    _effective_diagnostic_options,
+    run_class_cases,
+)
 
 
 def test_multi_rounds_disable_every_diagnostic() -> None:
@@ -62,6 +67,36 @@ def test_dep_gen_extension_hook_uses_the_shared_multi_round_gate() -> None:
     request = SimpleNamespace(config=SimpleNamespace(getoption=lambda name, default=None: options.get(name, default)))
 
     assert not SceneTestCase._effective_enable_dep_gen(request)
+
+
+def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    output_prefix = scene_test_module.Path("diagnostic-output")
+    captured = {}
+
+    class FakeScene:
+        def _run_and_validate(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(scene_test_module, "_build_output_prefix", lambda _case_label: output_prefix)
+
+    run_class_cases(
+        object(),
+        FakeScene(),
+        [{"name": "overhead"}],
+        callable_obj=object(),
+        sub_handles={},
+        rounds=1,
+        skip_golden=False,
+        enable_chip_swimlane=0,
+        enable_dump_args=0,
+        enable_pmu=0,
+        enable_dep_gen=False,
+        enable_scope_stats=False,
+        enable_swimlane_overhead=True,
+    )
+
+    assert captured["output_prefix"] == str(output_prefix)
 
 
 def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None:
