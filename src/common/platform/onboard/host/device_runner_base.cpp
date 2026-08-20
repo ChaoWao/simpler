@@ -971,9 +971,19 @@ int DeviceRunnerBase::provision_dma_workspace(
         return rc;
     }
 
-    // Best-effort, and deliberately after the re-latch: warming needs the live
-    // workspace, and its outcome must not gate provisioning.
-    (void)launch_sdma_warmup_kernel(sdma_warmup_binary, sdma_warmup_size);
+    // Deliberately after the re-latch: warming needs the live workspace. An
+    // unavailable warmup leaves provisioning successful, because the only cost is
+    // first-call latency. A device error does not: the card the warmup just faulted
+    // on would otherwise reach the first run. No dma_workspace_release() on that
+    // path — launch_sdma_warmup_kernel() has marked the runner unusable, and
+    // per-resource release on a faulted card is exactly what finalize()'s fatal
+    // path exists to avoid. The workspace handle stays set so that path still sees
+    // an SDMA generation and applies its handoff delay.
+    rc = launch_sdma_warmup_kernel(sdma_warmup_binary, sdma_warmup_size);
+    if (rc != 0) {
+        LOG_ERROR("provision_dma_workspace: sdma warmup left the device unusable: %d", rc);
+        return rc;
+    }
     return 0;
 }
 
@@ -1054,9 +1064,13 @@ int DeviceRunnerBase::launch_sdma_warmup_kernel(const void *binary, size_t size)
     const double elapsed_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (rc != 0) {
-        LOG_WARN("sdma warmup: launch/sync failed: %d; first TPREFETCH_ASYNC will pay the cold path", rc);
-        free_tensor(status_dev);
-        return 0;
+        LOG_ERROR("sdma warmup: launch/sync failed: %d; the card is left poisoned", rc);
+        // No free_tensor(status_dev): rtFree on a card that just failed an AICore
+        // operation can block in DEV_RUNNING_DOWN. The allocation stays tracked by
+        // mem_alloc_ and is forgotten wholesale by the fatal teardown the mark
+        // below routes finalize() into.
+        recover_device_or_mark_unusable(rc);
+        return rc;
     }
 
     report_sdma_warmup_status(status_dev, channel_count, elapsed_ms);
@@ -1074,12 +1088,17 @@ void DeviceRunnerBase::report_sdma_warmup_status(void *status_dev, uint32_t chan
     }
 
     uint32_t warmed = 0;
+    uint32_t declined = 0;
     for (uint32_t channel = 0; channel < channel_count; ++channel) {
         uint32_t slot = 0;
         std::memcpy(
             &slot, status_host.data() + static_cast<size_t>(channel) * kSdmaWarmupStatusStrideBytes, sizeof(slot)
         );
-        if (slot == kSdmaWarmupStatusOk) ++warmed;
+        if (slot == kSdmaWarmupStatusOk) {
+            ++warmed;
+        } else if (slot == kSdmaWarmupStatusFailed) {
+            ++declined;
+        }
     }
     // TIMING, not INFO: this is a one-off multi-millisecond init cost paid to
     // remove the same cost from the first run, so it belongs with the other
@@ -1087,9 +1106,13 @@ void DeviceRunnerBase::report_sdma_warmup_status(void *status_dev, uint32_t chan
     if (warmed == channel_count) {
         LOG_TIMING("sdma warmup: %u/%u channels warmed in %.2f ms", warmed, channel_count, elapsed_ms);
     } else {
+        // The two shortfalls have different causes: a declined channel was reached
+        // but failed the warmup's preconditions (unpopulated SQ, non-empty queue),
+        // while an unreached one means the walk itself did not cover the channel.
         LOG_WARN(
-            "sdma warmup: only %u/%u channels warmed in %.2f ms; the rest keep their cold-start cost", warmed,
-            channel_count, elapsed_ms
+            "sdma warmup: only %u/%u channels warmed in %.2f ms (%u declined, %u unreached); "
+            "the rest keep their cold-start cost",
+            warmed, channel_count, elapsed_ms, declined, channel_count - warmed - declined
         );
     }
 }

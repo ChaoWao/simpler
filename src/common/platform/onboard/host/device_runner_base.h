@@ -402,8 +402,9 @@ public:
      * by finalize_common().
      *
      * `sdma_warmup_binary` / `sdma_warmup_size`, when non-empty, are handed to
-     * launch_sdma_warmup_kernel() once the workspace is live. A failed or absent
-     * warmup does NOT fail provisioning.
+     * launch_sdma_warmup_kernel() once the workspace is live. An absent or
+     * unrunnable warmup does NOT fail provisioning; a warmup whose device launch or
+     * sync fails does, and leaves the runner marked unusable.
      *
      * @return 0 on success, negative on unsupported/failed provisioning.
      */
@@ -516,11 +517,20 @@ public:
 
     /**
      * Whether this runner may start another run without first being finalized.
-     * The shared c_api checks this before attaching the thread or provisioning
-     * optional resources, so a poisoned runner cannot create SDMA streams on
-     * its way to the arch-specific enqueue fail-fast guard.
+     * The shared c_api checks this at every run boundary (prepare / launch /
+     * finalize), so a poisoned runner fails admission ahead of the arch-specific
+     * enqueue fail-fast guard.
      */
     virtual bool can_accept_run() const = 0;
+
+    /**
+     * An AICore launch or stream sync failed outside the per-run path. The arch
+     * runner drains what it can and flips its device-unusable flag, so the next
+     * admission fails fast and finalize() takes its fatal teardown path instead of
+     * per-resource release on a faulted card. The base default is a no-op for
+     * runners that track no such state.
+     */
+    virtual void recover_device_or_mark_unusable(int /*aicore_rc*/) {}
 
     /** Invalidate retained run streams after new AICore code is published. */
     virtual void mark_run_streams_stale() {}
@@ -677,19 +687,24 @@ public:
      * (`RT_DEV_BINARY_MAGIC_ELF_AIVEC`, its own handle) because the executor is a
      * resident loop launched per run with a `block_dim_` that is still 0 here.
      *
-     * Best-effort by design: an absent binary, a launch failure or a channel that
-     * declines to warm are all logged and swallowed, since the only consequence is
-     * first-call latency.
+     * Unavailability is best-effort and returns 0: an absent binary, no channels,
+     * a failed registration or allocation, and a channel that declines to warm all
+     * cost only first-call latency. A failed launch or stream sync is not, because
+     * it means an AICore operation faulted on this card; that marks the runner
+     * unusable and returns the error so the caller does not hand a poisoned device
+     * to the first run.
      *
-     * @return 0 always.
+     * @return 0 when the warmup ran or was unavailable, the device error otherwise.
      */
     int launch_sdma_warmup_kernel(const void *binary, size_t size);
 
     /**
      * Read back the warmup kernel's per-channel status slots and report how many
-     * channels came up warm. Takes ownership of `status_dev` and frees it.
-     * `elapsed_ms` is the launch-to-sync wall time, reported alongside the count
-     * because it is the init-time cost being traded for first-run latency.
+     * channels came up warm, splitting the remainder into channels that declined
+     * the warmup's preconditions and channels no core reached. Takes ownership of
+     * `status_dev` and frees it. `elapsed_ms` is the launch-to-sync wall time,
+     * reported alongside the count because it is the init-time cost being traded
+     * for first-run latency.
      */
     void report_sdma_warmup_status(void *status_dev, uint32_t channel_count, double elapsed_ms);
 
