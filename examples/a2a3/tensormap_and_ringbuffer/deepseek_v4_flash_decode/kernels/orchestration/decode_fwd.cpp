@@ -1166,12 +1166,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline14027 = (((t_dim_inline14009 + 15) / 16) * 16);
         uint32_t x_flat_inline14022_shapes[2] = {static_cast<uint32_t>(t_dim_inline14009), 16384};
         ChipTensor x_flat_inline14022 = x_hc_inline711.reshape(x_flat_inline14022_shapes, 2);
-        uint32_t indices_scale0_inline14016[1] = {0};
-        float scale0_inline14016 = get_tensor_data<float>(hc_attn_scale_l0_inline660, 1, indices_scale0_inline14016);
-        uint32_t indices_scale1_inline14036[1] = {1};
-        float scale1_inline14036 = get_tensor_data<float>(hc_attn_scale_l0_inline660, 1, indices_scale1_inline14036);
-        uint32_t indices_scale2_inline14002[1] = {2};
-        float scale2_inline14002 = get_tensor_data<float>(hc_attn_scale_l0_inline660, 1, indices_scale2_inline14002);
         uint32_t hc_base_2d_inline14037_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline14037 = hc_attn_base_l0_inline688.reshape(hc_base_2d_inline14037_shapes, 2);
         uint32_t inv_rms_inline13977_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14027), 1};
@@ -1227,8 +1221,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t7.add_input(mixes_raw_inline14000);
         params_t7.add_inout(pre_val_store_inline14005);
         params_t7.add_inout(post_t_inline8947);
-        params_t7.add_scalar(to_u64(scale0_inline14016));
-        params_t7.add_scalar(to_u64(scale1_inline14036));
+        params_t7.add_input(hc_attn_scale_l0_inline660);
         params_t7.launch_spec.set_block_num((t_dim_inline14009 / 8));
         params_t7.set_allow_early_resolve(true);
         TaskOutputTensors task_7_outs = rt_submit_aiv_task(7, params_t7);
@@ -1239,7 +1232,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t8.add_input(mixes_raw_inline14000);
         params_t8.add_input(hc_base_2d_inline14037);
         params_t8.add_inout(comb_t_inline9086);
-        params_t8.add_scalar(to_u64(scale2_inline14002));
+        params_t8.add_input(hc_attn_scale_l0_inline660);
         params_t8.launch_spec.set_block_num((t_dim_inline14009 / 8));
         params_t8.set_allow_early_resolve(true);
         TaskOutputTensors task_8_outs = rt_submit_aiv_task(8, params_t8);
@@ -1788,12 +1781,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline14154 = (((t_dim_inline14136 + 15) / 16) * 16);
         uint32_t x_flat_inline14149_shapes[2] = {static_cast<uint32_t>(t_dim_inline14136), 16384};
         ChipTensor x_flat_inline14149 = x_attn0_inline706.reshape(x_flat_inline14149_shapes, 2);
-        uint32_t indices_scale0_inline14143[1] = {0};
-        float scale0_inline14143 = get_tensor_data<float>(hc_ffn_scale_l0_inline583, 1, indices_scale0_inline14143);
-        uint32_t indices_scale1_inline14163[1] = {1};
-        float scale1_inline14163 = get_tensor_data<float>(hc_ffn_scale_l0_inline583, 1, indices_scale1_inline14163);
-        uint32_t indices_scale2_inline14129[1] = {2};
-        float scale2_inline14129 = get_tensor_data<float>(hc_ffn_scale_l0_inline583, 1, indices_scale2_inline14129);
         uint32_t hc_base_2d_inline14164_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline14164 = hc_ffn_base_l0_inline629.reshape(hc_base_2d_inline14164_shapes, 2);
         uint32_t inv_rms_inline14104_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14154), 1};
@@ -1849,8 +1836,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t34.add_input(mixes_raw_inline14127);
         params_t34.add_inout(pre_val_store_inline14132);
         params_t34.add_inout(post_ffn_inline9241);
-        params_t34.add_scalar(to_u64(scale0_inline14143));
-        params_t34.add_scalar(to_u64(scale1_inline14163));
+        params_t34.add_input(hc_ffn_scale_l0_inline583);
         params_t34.launch_spec.set_block_num((t_dim_inline14136 / 8));
         params_t34.set_allow_early_resolve(true);
         TaskOutputTensors task_34_outs = rt_submit_aiv_task(35, params_t34);
@@ -1861,7 +1847,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t35.add_input(mixes_raw_inline14127);
         params_t35.add_input(hc_base_2d_inline14164);
         params_t35.add_inout(comb_ffn_inline9269);
-        params_t35.add_scalar(to_u64(scale2_inline14129));
+        params_t35.add_input(hc_ffn_scale_l0_inline583);
         params_t35.launch_spec.set_block_num((t_dim_inline14136 / 8));
         params_t35.set_allow_early_resolve(true);
         TaskOutputTensors task_35_outs = rt_submit_aiv_task(36, params_t35);
@@ -2592,12 +2578,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline14281 = (((t_dim_inline14263 + 15) / 16) * 16);
         uint32_t x_flat_inline14276_shapes[2] = {static_cast<uint32_t>(t_dim_inline14263), 16384};
         ChipTensor x_flat_inline14276 = hidden_inline709.reshape(x_flat_inline14276_shapes, 2);
-        uint32_t indices_scale0_inline14270[1] = {0};
-        float scale0_inline14270 = get_tensor_data<float>(hc_attn_scale_l1_inline676, 1, indices_scale0_inline14270);
-        uint32_t indices_scale1_inline14290[1] = {1};
-        float scale1_inline14290 = get_tensor_data<float>(hc_attn_scale_l1_inline676, 1, indices_scale1_inline14290);
-        uint32_t indices_scale2_inline14256[1] = {2};
-        float scale2_inline14256 = get_tensor_data<float>(hc_attn_scale_l1_inline676, 1, indices_scale2_inline14256);
         uint32_t hc_base_2d_inline14291_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline14291 = hc_attn_base_l1_inline675.reshape(hc_base_2d_inline14291_shapes, 2);
         uint32_t inv_rms_inline14231_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14281), 1};
@@ -2653,8 +2633,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t64.add_input(mixes_raw_inline14254);
         params_t64.add_inout(pre_val_store_inline14259);
         params_t64.add_inout(post_t_inline9709);
-        params_t64.add_scalar(to_u64(scale0_inline14270));
-        params_t64.add_scalar(to_u64(scale1_inline14290));
+        params_t64.add_input(hc_attn_scale_l1_inline676);
         params_t64.launch_spec.set_block_num((t_dim_inline14263 / 8));
         params_t64.set_allow_early_resolve(true);
         TaskOutputTensors task_64_outs = rt_submit_aiv_task(66, params_t64);
@@ -2665,7 +2644,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t65.add_input(mixes_raw_inline14254);
         params_t65.add_input(hc_base_2d_inline14291);
         params_t65.add_inout(comb_t_inline9848);
-        params_t65.add_scalar(to_u64(scale2_inline14256));
+        params_t65.add_input(hc_attn_scale_l1_inline676);
         params_t65.launch_spec.set_block_num((t_dim_inline14263 / 8));
         params_t65.set_allow_early_resolve(true);
         TaskOutputTensors task_65_outs = rt_submit_aiv_task(67, params_t65);
@@ -3218,12 +3197,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline14408 = (((t_dim_inline14390 + 15) / 16) * 16);
         uint32_t x_flat_inline14403_shapes[2] = {static_cast<uint32_t>(t_dim_inline14390), 16384};
         ChipTensor x_flat_inline14403 = x_attn1_inline694.reshape(x_flat_inline14403_shapes, 2);
-        uint32_t indices_scale0_inline14397[1] = {0};
-        float scale0_inline14397 = get_tensor_data<float>(hc_ffn_scale_l1_inline644, 1, indices_scale0_inline14397);
-        uint32_t indices_scale1_inline14417[1] = {1};
-        float scale1_inline14417 = get_tensor_data<float>(hc_ffn_scale_l1_inline644, 1, indices_scale1_inline14417);
-        uint32_t indices_scale2_inline14383[1] = {2};
-        float scale2_inline14383 = get_tensor_data<float>(hc_ffn_scale_l1_inline644, 1, indices_scale2_inline14383);
         uint32_t hc_base_2d_inline14418_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline14418 = hc_ffn_base_l1_inline720.reshape(hc_base_2d_inline14418_shapes, 2);
         uint32_t inv_rms_inline14358_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14408), 1};
@@ -3279,8 +3252,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t91.add_input(mixes_raw_inline14381);
         params_t91.add_inout(pre_val_store_inline14386);
         params_t91.add_inout(post_ffn_inline10003);
-        params_t91.add_scalar(to_u64(scale0_inline14397));
-        params_t91.add_scalar(to_u64(scale1_inline14417));
+        params_t91.add_input(hc_ffn_scale_l1_inline644);
         params_t91.launch_spec.set_block_num((t_dim_inline14390 / 8));
         params_t91.set_allow_early_resolve(true);
         TaskOutputTensors task_91_outs = rt_submit_aiv_task(94, params_t91);
@@ -3291,7 +3263,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t92.add_input(mixes_raw_inline14381);
         params_t92.add_input(hc_base_2d_inline14418);
         params_t92.add_inout(comb_ffn_inline10031);
-        params_t92.add_scalar(to_u64(scale2_inline14383));
+        params_t92.add_input(hc_ffn_scale_l1_inline644);
         params_t92.launch_spec.set_block_num((t_dim_inline14390 / 8));
         params_t92.set_allow_early_resolve(true);
         TaskOutputTensors task_92_outs = rt_submit_aiv_task(95, params_t92);
@@ -4849,15 +4821,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             int64_t t_linear_inline14535 = (((t_dim_inline14517 + 15) / 16) * 16);
             uint32_t x_flat_inline14530_shapes[2] = {static_cast<uint32_t>(t_dim_inline14517), 16384};
             ChipTensor x_flat_inline14530 = hidden_inline709.reshape(x_flat_inline14530_shapes, 2);
-            uint32_t indices_scale0_inline14524[1] = {0};
-            float scale0_inline14524 =
-                get_tensor_data<float>(hc_attn_scale_csa_inline626, 1, indices_scale0_inline14524);
-            uint32_t indices_scale1_inline14544[1] = {1};
-            float scale1_inline14544 =
-                get_tensor_data<float>(hc_attn_scale_csa_inline626, 1, indices_scale1_inline14544);
-            uint32_t indices_scale2_inline14510[1] = {2};
-            float scale2_inline14510 =
-                get_tensor_data<float>(hc_attn_scale_csa_inline626, 1, indices_scale2_inline14510);
             uint32_t hc_base_2d_inline14545_shapes[2] = {1, 24};
             ChipTensor hc_base_2d_inline14545 = hc_attn_base_csa_inline593.reshape(hc_base_2d_inline14545_shapes, 2);
             uint32_t inv_rms_inline14485_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14535), 1};
@@ -4915,8 +4878,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t121.add_input(mixes_raw_inline14508);
             params_t121.add_inout(pre_val_store_inline14513);
             params_t121.add_inout(post_t_inline10558);
-            params_t121.add_scalar(to_u64(scale0_inline14524));
-            params_t121.add_scalar(to_u64(scale1_inline14544));
+            params_t121.add_input(hc_attn_scale_csa_inline626);
             params_t121.launch_spec.set_block_num((t_dim_inline14517 / 8));
             params_t121.set_allow_early_resolve(true);
             TaskOutputTensors task_121_outs = rt_submit_aiv_task(125, params_t121);
@@ -4927,7 +4889,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t122.add_input(mixes_raw_inline14508);
             params_t122.add_input(hc_base_2d_inline14545);
             params_t122.add_inout(comb_t_inline10315);
-            params_t122.add_scalar(to_u64(scale2_inline14510));
+            params_t122.add_input(hc_attn_scale_csa_inline626);
             params_t122.launch_spec.set_block_num((t_dim_inline14517 / 8));
             params_t122.set_allow_early_resolve(true);
             TaskOutputTensors task_122_outs = rt_submit_aiv_task(126, params_t122);
@@ -5826,15 +5788,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             int64_t t_linear_inline14782 = (((t_dim_inline14764 + 15) / 16) * 16);
             uint32_t x_flat_inline14777_shapes[2] = {static_cast<uint32_t>(t_dim_inline14764), 16384};
             ChipTensor x_flat_inline14777 = x_attn_csa_inline721.reshape(x_flat_inline14777_shapes, 2);
-            uint32_t indices_scale0_inline14771[1] = {0};
-            float scale0_inline14771 =
-                get_tensor_data<float>(hc_ffn_scale_csa_inline543, 1, indices_scale0_inline14771);
-            uint32_t indices_scale1_inline14791[1] = {1};
-            float scale1_inline14791 =
-                get_tensor_data<float>(hc_ffn_scale_csa_inline543, 1, indices_scale1_inline14791);
-            uint32_t indices_scale2_inline14757[1] = {2};
-            float scale2_inline14757 =
-                get_tensor_data<float>(hc_ffn_scale_csa_inline543, 1, indices_scale2_inline14757);
             uint32_t hc_base_2d_inline14792_shapes[2] = {1, 24};
             ChipTensor hc_base_2d_inline14792 = hc_ffn_base_csa_inline542.reshape(hc_base_2d_inline14792_shapes, 2);
             uint32_t inv_rms_inline14732_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14782), 1};
@@ -5892,8 +5845,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t170.add_input(mixes_raw_inline14755);
             params_t170.add_inout(pre_val_store_inline14760);
             params_t170.add_inout(post_ffn_inline11048);
-            params_t170.add_scalar(to_u64(scale0_inline14771));
-            params_t170.add_scalar(to_u64(scale1_inline14791));
+            params_t170.add_input(hc_ffn_scale_csa_inline543);
             params_t170.launch_spec.set_block_num((t_dim_inline14764 / 8));
             params_t170.set_allow_early_resolve(true);
             TaskOutputTensors task_170_outs = rt_submit_aiv_task(176, params_t170);
@@ -5904,7 +5856,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t171.add_input(mixes_raw_inline14755);
             params_t171.add_input(hc_base_2d_inline14792);
             params_t171.add_inout(comb_ffn_inline11076);
-            params_t171.add_scalar(to_u64(scale2_inline14757));
+            params_t171.add_input(hc_ffn_scale_csa_inline543);
             params_t171.launch_spec.set_block_num((t_dim_inline14764 / 8));
             params_t171.set_allow_early_resolve(true);
             TaskOutputTensors task_171_outs = rt_submit_aiv_task(177, params_t171);
@@ -7213,15 +7165,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             int64_t t_linear_inline14909 = (((t_dim_inline14891 + 15) / 16) * 16);
             uint32_t x_flat_inline14904_shapes[2] = {static_cast<uint32_t>(t_dim_inline14891), 16384};
             ChipTensor x_flat_inline14904 = hidden_mid_inline726.reshape(x_flat_inline14904_shapes, 2);
-            uint32_t indices_scale0_inline14898[1] = {0};
-            float scale0_inline14898 =
-                get_tensor_data<float>(hc_attn_scale_hca_inline587, 1, indices_scale0_inline14898);
-            uint32_t indices_scale1_inline14918[1] = {1};
-            float scale1_inline14918 =
-                get_tensor_data<float>(hc_attn_scale_hca_inline587, 1, indices_scale1_inline14918);
-            uint32_t indices_scale2_inline14884[1] = {2};
-            float scale2_inline14884 =
-                get_tensor_data<float>(hc_attn_scale_hca_inline587, 1, indices_scale2_inline14884);
             uint32_t hc_base_2d_inline14919_shapes[2] = {1, 24};
             ChipTensor hc_base_2d_inline14919 = hc_attn_base_hca_inline567.reshape(hc_base_2d_inline14919_shapes, 2);
             uint32_t inv_rms_inline14859_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14909), 1};
@@ -7279,8 +7222,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t201.add_input(mixes_raw_inline14882);
             params_t201.add_inout(pre_val_store_inline14887);
             params_t201.add_inout(post_t_inline11780);
-            params_t201.add_scalar(to_u64(scale0_inline14898));
-            params_t201.add_scalar(to_u64(scale1_inline14918));
+            params_t201.add_input(hc_attn_scale_hca_inline587);
             params_t201.launch_spec.set_block_num((t_dim_inline14891 / 8));
             params_t201.set_allow_early_resolve(true);
             TaskOutputTensors task_201_outs = rt_submit_aiv_task(208, params_t201);
@@ -7291,7 +7233,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t202.add_input(mixes_raw_inline14882);
             params_t202.add_input(hc_base_2d_inline14919);
             params_t202.add_inout(comb_t_inline11617);
-            params_t202.add_scalar(to_u64(scale2_inline14884));
+            params_t202.add_input(hc_attn_scale_hca_inline587);
             params_t202.launch_spec.set_block_num((t_dim_inline14891 / 8));
             params_t202.set_allow_early_resolve(true);
             TaskOutputTensors task_202_outs = rt_submit_aiv_task(209, params_t202);
@@ -7980,15 +7922,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             int64_t t_linear_inline15036 = (((t_dim_inline15018 + 15) / 16) * 16);
             uint32_t x_flat_inline15031_shapes[2] = {static_cast<uint32_t>(t_dim_inline15018), 16384};
             ChipTensor x_flat_inline15031 = x_attn_hca_inline723.reshape(x_flat_inline15031_shapes, 2);
-            uint32_t indices_scale0_inline15025[1] = {0};
-            float scale0_inline15025 =
-                get_tensor_data<float>(hc_ffn_scale_hca_inline517, 1, indices_scale0_inline15025);
-            uint32_t indices_scale1_inline15045[1] = {1};
-            float scale1_inline15045 =
-                get_tensor_data<float>(hc_ffn_scale_hca_inline517, 1, indices_scale1_inline15045);
-            uint32_t indices_scale2_inline15011[1] = {2};
-            float scale2_inline15011 =
-                get_tensor_data<float>(hc_ffn_scale_hca_inline517, 1, indices_scale2_inline15011);
             uint32_t hc_base_2d_inline15046_shapes[2] = {1, 24};
             ChipTensor hc_base_2d_inline15046 = hc_ffn_base_hca_inline541.reshape(hc_base_2d_inline15046_shapes, 2);
             uint32_t inv_rms_inline14986_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15036), 1};
@@ -8046,8 +7979,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t235.add_input(mixes_raw_inline15009);
             params_t235.add_inout(pre_val_store_inline15014);
             params_t235.add_inout(post_ffn_inline11927);
-            params_t235.add_scalar(to_u64(scale0_inline15025));
-            params_t235.add_scalar(to_u64(scale1_inline15045));
+            params_t235.add_input(hc_ffn_scale_hca_inline517);
             params_t235.launch_spec.set_block_num((t_dim_inline15018 / 8));
             params_t235.set_allow_early_resolve(true);
             TaskOutputTensors task_235_outs = rt_submit_aiv_task(243, params_t235);
@@ -8058,7 +7990,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t236.add_input(mixes_raw_inline15009);
             params_t236.add_input(hc_base_2d_inline15046);
             params_t236.add_inout(comb_ffn_inline11955);
-            params_t236.add_scalar(to_u64(scale2_inline15011));
+            params_t236.add_input(hc_ffn_scale_hca_inline517);
             params_t236.launch_spec.set_block_num((t_dim_inline15018 / 8));
             params_t236.set_allow_early_resolve(true);
             TaskOutputTensors task_236_outs = rt_submit_aiv_task(244, params_t236);
@@ -9606,12 +9538,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline15163 = (((t_dim_inline15145 + 15) / 16) * 16);
         uint32_t x_flat_inline15158_shapes[2] = {static_cast<uint32_t>(t_dim_inline15145), 16384};
         ChipTensor x_flat_inline15158 = hidden_inline709.reshape(x_flat_inline15158_shapes, 2);
-        uint32_t indices_scale0_inline15152[1] = {0};
-        float scale0_inline15152 = get_tensor_data<float>(hc_attn_scale_last_inline641, 1, indices_scale0_inline15152);
-        uint32_t indices_scale1_inline15172[1] = {1};
-        float scale1_inline15172 = get_tensor_data<float>(hc_attn_scale_last_inline641, 1, indices_scale1_inline15172);
-        uint32_t indices_scale2_inline15138[1] = {2};
-        float scale2_inline15138 = get_tensor_data<float>(hc_attn_scale_last_inline641, 1, indices_scale2_inline15138);
         uint32_t hc_base_2d_inline15173_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline15173 = hc_attn_base_last_inline509.reshape(hc_base_2d_inline15173_shapes, 2);
         uint32_t inv_rms_inline15113_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15163), 1};
@@ -9667,8 +9593,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t265.add_input(mixes_raw_inline15136);
         params_t265.add_inout(pre_val_store_inline15141);
         params_t265.add_inout(post_t_inline12482);
-        params_t265.add_scalar(to_u64(scale0_inline15152));
-        params_t265.add_scalar(to_u64(scale1_inline15172));
+        params_t265.add_input(hc_attn_scale_last_inline641);
         params_t265.launch_spec.set_block_num((t_dim_inline15145 / 8));
         params_t265.set_allow_early_resolve(true);
         TaskOutputTensors task_265_outs = rt_submit_aiv_task(274, params_t265);
@@ -9679,7 +9604,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t266.add_input(mixes_raw_inline15136);
         params_t266.add_input(hc_base_2d_inline15173);
         params_t266.add_inout(comb_t_inline12239);
-        params_t266.add_scalar(to_u64(scale2_inline15138));
+        params_t266.add_input(hc_attn_scale_last_inline641);
         params_t266.launch_spec.set_block_num((t_dim_inline15145 / 8));
         params_t266.set_allow_early_resolve(true);
         TaskOutputTensors task_266_outs = rt_submit_aiv_task(275, params_t266);
@@ -10560,12 +10485,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int64_t t_linear_inline15410 = (((t_dim_inline15392 + 15) / 16) * 16);
         uint32_t x_flat_inline15405_shapes[2] = {static_cast<uint32_t>(t_dim_inline15392), 16384};
         ChipTensor x_flat_inline15405 = x_attn_last_inline539.reshape(x_flat_inline15405_shapes, 2);
-        uint32_t indices_scale0_inline15399[1] = {0};
-        float scale0_inline15399 = get_tensor_data<float>(hc_ffn_scale_last_inline496, 1, indices_scale0_inline15399);
-        uint32_t indices_scale1_inline15419[1] = {1};
-        float scale1_inline15419 = get_tensor_data<float>(hc_ffn_scale_last_inline496, 1, indices_scale1_inline15419);
-        uint32_t indices_scale2_inline15385[1] = {2};
-        float scale2_inline15385 = get_tensor_data<float>(hc_ffn_scale_last_inline496, 1, indices_scale2_inline15385);
         uint32_t hc_base_2d_inline15420_shapes[2] = {1, 24};
         ChipTensor hc_base_2d_inline15420 = hc_ffn_base_last_inline495.reshape(hc_base_2d_inline15420_shapes, 2);
         uint32_t inv_rms_inline15360_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15410), 1};
@@ -10621,8 +10540,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t314.add_input(mixes_raw_inline15383);
         params_t314.add_inout(pre_val_store_inline15388);
         params_t314.add_inout(post_ffn_inline12972);
-        params_t314.add_scalar(to_u64(scale0_inline15399));
-        params_t314.add_scalar(to_u64(scale1_inline15419));
+        params_t314.add_input(hc_ffn_scale_last_inline496);
         params_t314.launch_spec.set_block_num((t_dim_inline15392 / 8));
         params_t314.set_allow_early_resolve(true);
         TaskOutputTensors task_314_outs = rt_submit_aiv_task(325, params_t314);
@@ -10633,7 +10551,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t315.add_input(mixes_raw_inline15383);
         params_t315.add_input(hc_base_2d_inline15420);
         params_t315.add_inout(comb_ffn_inline13000);
-        params_t315.add_scalar(to_u64(scale2_inline15385));
+        params_t315.add_input(hc_ffn_scale_last_inline496);
         params_t315.launch_spec.set_block_num((t_dim_inline15392 / 8));
         params_t315.set_allow_early_resolve(true);
         TaskOutputTensors task_315_outs = rt_submit_aiv_task(326, params_t315);

@@ -25,9 +25,12 @@ tasks individually. The runtime is untouched.
 | ---- | ----- | --- |
 | `get_tensor_data(recv_count_out, …)` → `HBG_RECV_ROWS_PER_EXPERT` | 10 | HBG builds the whole graph before the device runs anything, so a read of a **task-produced** tensor has no value to return. The constant holds the per-expert tile loops at their real trip count (`ceil(16/16) == 1`, which is what the `h_i8 [512, 2048]` layout budgets per expert). |
 
-The other **31** `get_tensor_data` reads are left alone: they read external
-tensors (`ext_num_tokens_per_owner`, `hc_attn_scale_*`, `hc_ffn_scale_*`), which
-the runtime stages with a host view and which therefore return real values.
+The only other `get_tensor_data` read left is `ext_num_tokens_per_owner`: its
+value feeds tile counts and launch block numbers — orchestration control flow
+that must run where the graph is built. The 30 former `hc_attn_scale_*` /
+`hc_ffn_scale_*` reads moved data, not control flow, and are gone from both
+runtimes: each `split_pre_post*` / `comb_sinkhorn*` kernel now takes the scale
+view as an extra tensor input and reads its elements from GM itself.
 
 The six former orchestration-side initializations are now identical under both
 runtimes. Each `sh_gate_up_act_q*` producer clears its own two padded

@@ -20,8 +20,10 @@ body is the layer's full task set, so the host records a 744-node Definition
 once and the 15991-task network collapses to 1131 host-submitted tasks. The ten
 ``get_tensor_data`` reads of ``recv_count_out`` (a task-produced tensor,
 unreadable while the host builds the graph) stand in a constant. Tensor
-initialization is shared with the TMR case and runs in AIV kernels, so the host
-never writes a GM-heap device address. The graph therefore keeps the size and
+initialization is shared with the TMR case and runs in AIV kernels, and the
+attention/FFN scale factors travel as kernel tensor inputs read from GM, so
+the host never writes a GM-heap device address and never copies tensor data
+into task scalars. The graph therefore keeps the size and
 shape of the real one but not the fixture's routing — hence ``skip_golden``.
 ``manual`` because the 368-kernel compile takes minutes.
 
@@ -70,9 +72,11 @@ def _host_build_graph_callable():
     ``get_tensor_data(recv_count_out)`` reads (a task-produced tensor driving the
     MoE per-expert tile loops) have no value to return; they are replaced by
     ``HBG_RECV_ROWS_PER_EXPERT``, which holds the tile loops at their real trip
-    count. The other 31 ``get_tensor_data`` reads are external tensors the
-    runtime stages with a host view, and are left alone. The shared orchestration
-    submits the same device-side initialization kernels under both runtimes.
+    count. The one other ``get_tensor_data`` read (``ext_num_tokens_per_owner``)
+    drives tile counts and launch block numbers and stays host-side; the former
+    30 scale reads are gone — the consuming kernels read the scale tensors from
+    GM directly. The shared orchestration submits the same device-side
+    initialization kernels under both runtimes.
 
     The graph therefore keeps the size and shape of the real one but not the
     fixture's routing, which is why the case is ``skip_golden``: it measures
