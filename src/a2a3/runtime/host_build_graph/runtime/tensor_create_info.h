@@ -108,28 +108,15 @@ static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(ChipTensor, shapes)
 // header) so the create-info dependency stays runtime-only.
 // ============================================================================
 
-/// Fill the entire backing buffer of `t` with `initial_value` (doubling memcpy).
-inline void fill_tensor_initial_value(ChipTensor &t, uint64_t initial_value) {
-    always_assert(reinterpret_cast<char *>(t.buffer.addr) != nullptr);
-    uint64_t elem_size = get_element_size(t.dtype);
-    char *dst = reinterpret_cast<char *>(t.buffer.addr);
-    constexpr uint64_t blk_size = 64;
-    uint64_t blk = (t.buffer.size < blk_size) ? t.buffer.size : blk_size;
-    for (uint64_t b = 0; b < blk; b += elem_size) {
-        memcpy(dst + b, &initial_value, elem_size);
-    }
-    uint64_t filled = blk;
-    while (filled < t.buffer.size) {
-        uint64_t copy_size = ((t.buffer.size - filled) < filled) ? (t.buffer.size - filled) : filled;
-        memcpy(dst + filled, dst, copy_size);
-        filled += copy_size;
-    }
-}
-
 /// Materialize a TensorCreateInfo into `t` (fresh contiguous output).
 /// Single 64B memcpy covers cache line 1; `ci` pre-initialises start_offset (=0)
 /// and is_contiguous (=true) in its line-1 slots so they need no reset here.
 /// Cache line 2 (stride/extent) is computed from `ci.shapes` in a single reverse pass.
+///
+/// Metadata only: `ci.initial_value` is not applied here. The buffer lives in
+/// the GM heap, which the host orchestrator reaches only through the run's
+/// HostTensorAccessor, so the fill belongs to the orchestrator call sites that
+/// hold that accessor and can report a failure.
 inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &ci, void *addr, uint64_t buffer_size) {
     always_assert(ci.ndims > 0 && ci.ndims <= MAX_TENSOR_DIMS);
     memcpy(&t, &ci, 64);
@@ -141,7 +128,4 @@ inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &
         s *= t.shapes[i];
     }
     t.extent_elem_cache = s;
-    if (ci.has_initial_value) {
-        fill_tensor_initial_value(t, ci.initial_value);
-    }
 }

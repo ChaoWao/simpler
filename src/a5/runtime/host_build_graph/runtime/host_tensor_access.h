@@ -54,6 +54,29 @@
 
 struct HostApi;  // common/host_api.h — fwd-declared so this header stays out of platform includes
 
+// What a region backs, and therefore which lookups may resolve to it. The two
+// kinds never overlap: a staged tensor is its own device allocation and the GM
+// heap is another, so a device address belongs to at most one region.
+enum class HostTensorRegionKind : uint8_t {
+    StagedTensor,
+    GmHeap,
+};
+
+// Why a fill did not happen. The cases are distinct enough to lead a reader in
+// different directions — a bad element width is a malformed create-info, an
+// unresolved span is an address outside the heap, and a failed push is a device
+// copy error — so the caller reports which one occurred rather than guessing.
+//
+// A region without a host view is not among them: that is the ordinary state on
+// a platform with no host-map path, where `fill` stages the bytes and pushes
+// them, and the outcome is an ordinary Ok or PushFailed.
+enum class HostTensorFillStatus : uint8_t {
+    Ok,
+    BadElementSize,
+    NoRegion,
+    PushFailed,
+};
+
 /**
  * The registered regions of one orchestration run, and the mappings that run
  * installed to serve them.
@@ -64,14 +87,23 @@ struct HostApi;  // common/host_api.h — fwd-declared so this header stays out 
  * are isolated by each owning a separate accessor, which is what makes two runs
  * unable to see or drop each other's regions.
  *
- * `add` is the only producer of mappings and the only caller of
- * `register_device_memory_to_host`; `close` unregisters exactly the mappings
+ * `add` and `add_heap` are the only producers of mappings and the only callers
+ * of `register_device_memory_to_host`; `close` unregisters exactly the mappings
  * this accessor installed and nothing else. Both are reached on every return
  * path — `close` is idempotent and the destructor calls it — so a mapping
  * cannot outlive the run that made it.
  *
- * A null `api` makes every `add` fail, so a registered region always implies a
- * usable `api`; `write`'s mirror push-back relies on that and does not re-check.
+ * A null `api` makes every registration fail, so a registered region always
+ * implies a usable `api`; `write`'s mirror push-back relies on that and does
+ * not re-check.
+ *
+ * Regions come in two kinds and the lookups are kind-scoped. `read` / `write`
+ * serve the orchestration scalar-access API and see staged-tensor regions only,
+ * so a device address outside a staged tensor — a GM-heap buffer, a
+ * pass-through child-memory buffer — resolves to nothing there, which is what
+ * makes runtime-created outputs unreadable during host orchestration. `fill`
+ * serves `TensorCreateInfo::set_initial_value`, whose target is always a
+ * runtime allocation, and sees GM-heap regions only.
  *
  * The state lives behind `Impl` because this header is also compiled by the
  * AICPU build (through `orchestrator_core/pto_runtime2.cpp`, which resolves the
@@ -95,8 +127,37 @@ public:
      *         mapping nor a fallback view is available.
      */
     bool add(uint64_t dev_base, uint64_t size, void *fallback_host_view);
+
+    /**
+     * Register the GM heap `[dev_base, dev_base + size)` as the region serving
+     * runtime allocations, reachable through `fill` alone.
+     *
+     * Recording the span is all this does. Mapping it is deferred to the first
+     * `fill` that needs one, because the heap runs to hundreds of MB (2 GiB on
+     * the dsv4 case) and a run that sets no initial value never reads or writes
+     * it — paying `halHostRegister` over that span at every bind would buy
+     * nothing. Where no host-map path exists (a5 onboard, whose
+     * `DeviceRunnerBase` default returns nullptr) the mapping stays absent and
+     * `fill` stages the bytes and pushes them with `copy_to_device` instead.
+     */
+    bool add_heap(uint64_t dev_base, uint64_t size);
+
     bool read(uint64_t dev_addr, void *dst, uint64_t bytes) const;
     bool write(uint64_t dev_addr, const void *src, uint64_t bytes) const;
+
+    /**
+     * Fill `[dev_addr, dev_addr + bytes)` with `elem_size`-wide `value`,
+     * leaving the bytes visible to the device. `bytes` need not be a multiple
+     * of `elem_size`; the tail is a partial element.
+     *
+     * Maps the GM heap on the first call that needs it, so a run that sets no
+     * initial value never pays for a mapping of the whole heap.
+     *
+     * The write lands immediately, never deferred to a flush: the GM heap is
+     * reclaimed and re-let within one orchestration, so two fills can name the
+     * same address and only the order they were issued in is correct.
+     */
+    HostTensorFillStatus fill(uint64_t dev_addr, uint64_t bytes, uint64_t value, uint64_t elem_size) const;
 
     /** Drop every region and unregister every mapping this accessor installed. */
     void close() noexcept;
@@ -108,6 +169,10 @@ public:
     uint64_t mapped_bytes() const noexcept;
 
 private:
+    bool add_region(uint64_t dev_base, uint64_t size, void *fallback_host_view, HostTensorRegionKind kind);
+    void ensure_region_mapped(struct HostTensorRegion *region) const;
+    bool fill_staged(uint64_t dev_addr, uint64_t bytes, uint64_t value, uint64_t elem_size) const;
+
     struct Impl;
     Impl *impl_;
 };
@@ -124,7 +189,19 @@ bool host_tensor_read(HostTensorAccessor *accessor, uint64_t dev_addr, void *dst
  * Write `bytes` from `src` to device address `dev_addr`, leaving the bytes
  * visible to the device.
  *
- * @return false when no registered region covers the whole span, or when the
+ * @return false when no staged-tensor region covers the whole span, or when the
  *         push-back to the device fails.
  */
 bool host_tensor_write(HostTensorAccessor *accessor, uint64_t dev_addr, const void *src, uint64_t bytes);
+
+/**
+ * Fill `bytes` at device address `dev_addr` with `elem_size`-wide `value`,
+ * leaving the bytes visible to the device.
+ *
+ * @return what stopped the fill, or `Ok`.
+ */
+HostTensorFillStatus
+host_tensor_fill(HostTensorAccessor *accessor, uint64_t dev_addr, uint64_t bytes, uint64_t value, uint64_t elem_size);
+
+/** Short, stable label for `status`, for a diagnostic naming what failed. */
+const char *host_tensor_fill_status_name(HostTensorFillStatus status);

@@ -49,6 +49,7 @@
 #include "pto_dep_compute.h"
 #include "graph_execution.h"
 #include "graph_host_state.h"
+#include "host_tensor_access.h"
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
 #include "pto_tensormap.h"
@@ -78,6 +79,32 @@ dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
     uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
 ) {}
+
+// Initial-value fill for a caller that can store to a device address directly.
+// It lives here rather than beside the host_tensor_read / host_tensor_write
+// fallbacks in pto_runtime2.cpp because apply_initial_values below is its only
+// caller, and the unit tests that link this translation unit do not link that
+// one. libhost_runtime.so overrides it with host/host_tensor_access.cpp, where
+// a device address is not loadable in general.
+__attribute__((weak, visibility("hidden"))) HostTensorFillStatus
+host_tensor_fill(HostTensorAccessor *, uint64_t dev_addr, uint64_t bytes, uint64_t value, uint64_t elem_size) {
+    if (bytes == 0) return HostTensorFillStatus::Ok;
+    if (elem_size == 0 || elem_size > sizeof(value)) return HostTensorFillStatus::BadElementSize;
+    char *dst = reinterpret_cast<char *>(dev_addr);
+    uint64_t seed = (elem_size < bytes) ? elem_size : bytes;
+    memcpy(dst, &value, seed);
+    uint64_t filled = seed;
+    while (filled < bytes) {
+        uint64_t copy_size = ((bytes - filled) < filled) ? (bytes - filled) : filled;
+        memcpy(dst + filled, dst, copy_size);
+        filled += copy_size;
+    }
+    return HostTensorFillStatus::Ok;
+}
+
+__attribute__((weak, visibility("hidden"))) const char *host_tensor_fill_status_name(HostTensorFillStatus) {
+    return "unavailable";
+}
 
 // Scope_stats enable gate, queried via the same predicate idiom as
 // dep_gen_host_graph_enabled above. The AICPU collector links the strong definition;
@@ -1141,6 +1168,37 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
     return false;
 }
 
+// Write each output create-info's initial value into the buffer just
+// materialized for it. `tensors` is the payload's tensor array, parallel to
+// `args`, so slot i's buffer address and size are the ones the device will see.
+//
+// The buffer is in the GM heap, which the host reaches only through the run's
+// registered host view; a platform that cannot map the heap latches a fatal
+// here rather than storing to a device address. Returns false once it has.
+static bool apply_initial_values(
+    PTO2OrchestratorState *orch, const CoreTaskArgs &args, const ChipTensor *tensors, const char *caller
+) {
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        if (args.tag(i) != TensorArgType::OUTPUT) continue;
+        const TensorCreateInfo &ci = args.tensor(i).create_info();
+        if (!ci.has_initial_value) continue;
+        const ChipTensor &t = tensors[i];
+        const uint64_t elem_size = get_element_size(t.dtype);
+        const HostTensorFillStatus status =
+            host_tensor_fill(orch->tensor_access, t.buffer.addr, t.buffer.size, ci.initial_value, elem_size);
+        if (status != HostTensorFillStatus::Ok) {
+            orch->report_fatal(
+                PTO2_ERROR_INVALID_ARGS, caller,
+                "set_initial_value: %s (addr=%#llx bytes=%llu dtype=%d elem_size=%llu)",
+                host_tensor_fill_status_name(status), (unsigned long long)t.buffer.addr,
+                (unsigned long long)t.buffer.size, static_cast<int>(t.dtype), (unsigned long long)elem_size
+            );
+            return false;
+        }
+    }
+    return true;
+}
+
 // Shared body for submit_task / submit_dummy_task. Caller has already validated
 // args.has_error, decided active_mask (empty for dummy), and resolved the per-slot
 // kernel_ids (all INVALID_KERNEL_ID for dummy). Performs tensormap sync, fanin
@@ -1284,6 +1342,9 @@ static TaskOutputTensors submit_task_common(
     // payload.fanin_local_ids and bumped its last_consumer_local_id; the count is
     // published in STEP 6 below. payload.init does not touch the fanin region.
     payload.init(args, result, prepared.alloc_result, layout);
+    if (!apply_initial_values(orch, args, payload.tensors, __FUNCTION__)) {
+        return result;
+    }
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
@@ -1693,9 +1754,16 @@ TaskOutputTensors graph_record_submit_node(
         if (args.tag(i) != TensorArgType::OUTPUT) {
             slot_tensor.copy(args.tensor(i).ref());
         } else {
+            const TensorCreateInfo &ci = args.tensor(i).create_info();
+            // An initial value cannot survive into a replay: recording addresses
+            // this output in the private range based at GRAPH_RECORD_VIRTUAL_BASE,
+            // while every submission materializes its own from a heap block whose
+            // prior contents it never reads. Mark the recording unsupported so
+            // commit reports it, rather than letting a Definition replay outputs
+            // the orchestration believes it initialized.
+            if (ci.has_initial_value) recording.unsupported = true;
             init_tensor_from_create_info(
-                slot_tensor, args.tensor(i).create_info(),
-                reinterpret_cast<void *>(packed_base_addr + layout.offsets[i]), layout.buffer_sizes[i]
+                slot_tensor, ci, reinterpret_cast<void *>(packed_base_addr + layout.offsets[i]), layout.buffer_sizes[i]
             );
             slot_tensor.owner_task_id = task_id;
         }
@@ -2216,6 +2284,9 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
     TaskOutputTensors outputs;
     outputs.set_task_id(prepared.task_id);
     payload.init(args, outputs, prepared.alloc_result, layout);
+    if (!apply_initial_values(orch, args, payload.tensors, __FUNCTION__)) {
+        return TaskOutputTensors{};
+    }
     payload.fanin_count = 0;  // hidden-alloc tasks have no producer dependencies
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 

@@ -39,6 +39,7 @@
 #include "pto_types.h"
 
 struct GraphHostState;
+class HostTensorAccessor;
 
 /**
  * Layout descriptor produced by PTO2OrchestratorState::reserve_layout(). Holds
@@ -99,6 +100,13 @@ struct PTO2OrchestratorState {
     // === GM HEAP (for output buffers) ===
     void *gm_heap_base;     // Base address of GM heap
     uint64_t gm_heap_size;  // Total size of GM heap (all rings)
+
+    // Host views registered for this run, borrowed from PTO2Runtime. The
+    // orchestrator reaches GM-heap bytes only through this: `gm_heap_base` is a
+    // device address, loadable by the AICPU but not by the host. Null on the
+    // AICPU path and whenever the platform cannot map the heap, which makes an
+    // initial-value fill fail closed rather than store to a device address.
+    HostTensorAccessor *tensor_access{nullptr};
 
     // === FATAL ERROR ===
     // Fatal error flag (single-thread access by orchestrator, no atomic needed)

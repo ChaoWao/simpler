@@ -525,11 +525,28 @@ struct GraphHostStateBinding {
     PTO2OrchestratorState &orchestrator;
 };
 
+// The accessor lives on run_host_orchestration's frame while `rt` lives in an
+// arena that outlives the call, so both pointers to it are cleared on the way
+// out rather than left dangling for the next run to find.
+struct HostTensorAccessBinding {
+    HostTensorAccessBinding(PTO2Runtime &rt, HostTensorAccessor &accessor) :
+        rt(rt) {
+        rt.tensor_access = &accessor;
+        rt.orchestrator.tensor_access = &accessor;
+    }
+    ~HostTensorAccessBinding() {
+        rt.tensor_access = nullptr;
+        rt.orchestrator.tensor_access = nullptr;
+    }
+
+    PTO2Runtime &rt;
+};
+
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
-    const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
-    void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
+    uint64_t total_heap_size, const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH],
+    const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH], void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     dep_gen_host_graph_begin_capture();
 
@@ -582,7 +599,15 @@ int32_t run_host_orchestration(
         return -1;
     }
     rt->active_callable_hash = reinterpret_cast<uint64_t>(entry_points->entry);
-    rt->tensor_access = &tensor_access;
+    HostTensorAccessBinding tensor_access_binding(*rt, tensor_access);
+    // The GM heap backs every runtime-allocated output, so an initial value the
+    // orchestration asks for lands here. Registering only records the span; the
+    // host mapping of it waits for a fill to need one, so a run that sets no
+    // initial value pays nothing for this.
+    if (!tensor_access.add_heap(reinterpret_cast<uint64_t>(gm_heap), total_heap_size)) {
+        LOG_ERROR("host-orch: failed to register the GM heap (%" PRIu64 " bytes)", total_heap_size);
+        return -1;
+    }
     // Binds the orchestration .so's own framework_current_runtime, which its
     // inline rt_submit_* read. The host library links a same-named copy from
     // orchestration/common.cpp, but nothing outside the .so includes
@@ -1043,7 +1068,7 @@ extern "C" int bind_callable_to_runtime_impl(
         orch_l2.create_from_chip_args(device_args);
         int32_t total_tasks = run_host_orchestration(
             runtime, api, tensor_access, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap,
-            eff_heap_sizes, eff_task_window_sizes, host_orch_func_ptr, orch_l2
+            total_heap_size, eff_heap_sizes, eff_task_window_sizes, host_orch_func_ptr, orch_l2
         );
         // The orchestrator is the only host-view reader; from here the device
         // owns these buffers, so drop the window on both exits.

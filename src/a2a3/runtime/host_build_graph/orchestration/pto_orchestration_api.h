@@ -518,8 +518,9 @@ static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const 
  * This API updates the registered host view used to stage an external tensor.
  * The updated value becomes part of the graph's initial device data. It is not
  * a synchronization barrier for submitted readers or writers. A tensor with a
- * submitted producer, or a runtime-created output with no registered host view,
- * is rejected as an invalid argument.
+ * submitted producer, or a runtime-created output, which is not a staged tensor,
+ * is rejected as an invalid argument; give a runtime allocation its starting
+ * content with TensorCreateInfo::set_initial_value instead.
  */
 template <typename T = uint64_t>
 static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {

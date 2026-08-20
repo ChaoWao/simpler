@@ -243,10 +243,14 @@ struct alignas(64) ChipTensor {
     void copy(const ChipTensor &other) { init_from(other); }
 
     // Materialization from a TensorCreateInfo (runtime-allocated outputs) lives
-    // in the runtime tensor_create_info.h as the free functions
-    // init_tensor_from_create_info() / fill_tensor_initial_value(); they operate
-    // on a ChipTensor& through its public members. Kept out of the wire/host-facing
-    // ChipTensor so this header has no dependency on the runtime-only create-info.
+    // in the runtime tensor_create_info.h as the free function
+    // init_tensor_from_create_info(), which operates on a ChipTensor& through its
+    // public members. Kept out of the wire/host-facing ChipTensor so this header
+    // has no dependency on the runtime-only create-info. Applying the create-info's
+    // initial value is separate and runtime-specific: tensormap_and_ringbuffer
+    // stores to the buffer directly from the AICPU orchestrator, while
+    // host_build_graph routes it through the orchestrating host's view of the GM
+    // heap, which only the orchestrator holds.
 
     // ========================================================================
     // Address / offset computation
