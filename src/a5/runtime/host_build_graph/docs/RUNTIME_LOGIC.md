@@ -247,7 +247,10 @@ Submit does not push tasks into ready queues. After the graph arrives on device,
 boot classification scans every submitted task exactly once:
 
 - a task whose fanins are all complete is routed to its shape queue;
-- otherwise it registers on the first unmet producer's intrusive wake list; and
+- otherwise it registers on its latest-submitted unmet producer's intrusive
+  wake list -- the producer likeliest to complete last, which minimises how
+  often a waiter is transferred between wake lists and the CAS contention
+  those transfers cause; and
 - producer completion reclassifies every detached waiter.
 
 Completion flags are monotonic, so this consumer-pull scheme cannot miss a
