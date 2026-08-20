@@ -95,7 +95,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphSubmissionsReserveHeapOnlyAtCommi
     EXPECT_EQ(orch.ring.task_allocator.heap_top(), 0u);
     EXPECT_EQ(graph_host_upload_count(*graph_state), 2u);
 
-    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    ASSERT_TRUE(orch.graph_prepare(first.recording_handle, boundary_args));
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
@@ -175,7 +175,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
         // anchors scalar sources into it and stores its address.
         GraphTaskArgs worker_args;
         worker_args.add_input(boundary);
-        prepare_ok = orch.graph_prepare(worker_args);
+        prepare_ok = orch.graph_prepare(first.recording_handle, worker_args);
         {
             std::lock_guard<std::mutex> lock(gate_mutex);
             prepared = true;
@@ -274,7 +274,7 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     const GraphScopeResult graph = orch.graph_begin(0x1717, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(graph.task_id.is_valid());
-    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
@@ -282,7 +282,7 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     node_args.add_output(recorded_output);
     ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
 
-    orch.graph_abort();
+    orch.graph_abort(graph.recording_handle);
     ASSERT_FALSE(orch.fatal) << "Abort alone must not latch; the shell is still finalizable in principle";
 
     orch.graph_commit();
@@ -302,7 +302,7 @@ TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernelle
     orch.begin_scope();
     const GraphScopeResult graph = orch.graph_begin(0x1718, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
-    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
     CoreTaskArgs alloc_args;
     TensorCreateInfo allocated(shape, 1, DataType::UINT32);
@@ -326,7 +326,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1715, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
-    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
@@ -368,7 +368,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1716, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
-    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
@@ -389,4 +389,160 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     EXPECT_EQ(allocator.active_count(), allocator.window_size());
     EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), allocator.window_size());
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_NONE);
+}
+
+// Distinct Graph keys record concurrently. A Definition the run has not seen
+// before must open its own recording even while another is in flight — the
+// alternative is that it is turned away, replays nothing for the rest of the run,
+// and every occurrence of it submits its whole body as ordinary tasks.
+TEST_F(HbgGraphSubmitFailureTest, ASecondKeyRecordsAlongsideTheFirst) {
+    std::array<uint32_t, 16> storage_a{};
+    std::array<uint32_t, 16> storage_b{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage_a.size())};
+    ChipTensor boundary_a = make_tensor_external(storage_a.data(), shape, 1);
+    ChipTensor boundary_b = make_tensor_external(storage_b.data(), shape, 1);
+    GraphTaskArgs args_a;
+    args_a.add_input(boundary_a);
+    GraphTaskArgs args_b;
+    args_b.add_input(boundary_b);
+
+    orch.begin_scope();
+    const GraphScopeResult first = orch.graph_begin(0x1901, args_a, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_NE(first.recording_handle, nullptr);
+
+    const GraphScopeResult second = orch.graph_begin(0x1902, args_b, 0x1736);
+    EXPECT_TRUE(second.recording) << "a distinct key must not be demoted by a busy recorder";
+    EXPECT_FALSE(second.execute_block);
+    ASSERT_NE(second.recording_handle, nullptr);
+    EXPECT_NE(second.recording_handle, first.recording_handle);
+
+    // Record both from this thread; concurrency of the threads is the pool's
+    // concern, and interleaving the two recordings is what the runtime must
+    // tolerate. Each bind goes through its own handle.
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+
+    ASSERT_TRUE(orch.graph_prepare(first.recording_handle, args_a));
+    CoreTaskArgs node_a;
+    node_a.add_input(boundary_a);
+    node_a.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_a).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+
+    ASSERT_TRUE(orch.graph_prepare(second.recording_handle, args_b));
+    CoreTaskArgs node_b;
+    node_b.add_input(boundary_b);
+    node_b.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_b).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+
+    // One commit drains and back-patches both keys' deferred shells.
+    orch.graph_commit();
+    EXPECT_FALSE(orch.fatal);
+
+    const GraphScopeResult replay_a = orch.graph_begin(0x1901, args_a, 0x1736);
+    EXPECT_FALSE(replay_a.execute_block) << "the first key's Definition must be cached";
+    EXPECT_FALSE(replay_a.recording);
+    const GraphScopeResult replay_b = orch.graph_begin(0x1902, args_b, 0x1736);
+    EXPECT_FALSE(replay_b.execute_block) << "the second key's Definition must be cached";
+    EXPECT_FALSE(replay_b.recording);
+}
+
+// A published Definition is immutable, so replaying it needs nothing from an
+// unrelated recording. Gating the cache lookup on an idle recorder made an
+// already-built Graph wait for a Definition it has no relationship with.
+TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
+    std::array<uint32_t, 16> storage_a{};
+    std::array<uint32_t, 16> storage_b{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage_a.size())};
+    ChipTensor boundary_a = make_tensor_external(storage_a.data(), shape, 1);
+    ChipTensor boundary_b = make_tensor_external(storage_b.data(), shape, 1);
+    GraphTaskArgs args_a;
+    args_a.add_input(boundary_a);
+    GraphTaskArgs args_b;
+    args_b.add_input(boundary_b);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+
+    orch.begin_scope();
+    const GraphScopeResult first = orch.graph_begin(0x1903, args_a, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_TRUE(orch.graph_prepare(first.recording_handle, args_a));
+    CoreTaskArgs node_a;
+    node_a.add_input(boundary_a);
+    node_a.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_a).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+    ASSERT_FALSE(orch.fatal);
+
+    // Key B is now recording and stays that way for the rest of the test.
+    const GraphScopeResult second = orch.graph_begin(0x1904, args_b, 0x1736);
+    ASSERT_TRUE(second.recording);
+
+    const GraphScopeResult replay = orch.graph_begin(0x1903, args_a, 0x1736);
+    EXPECT_FALSE(replay.execute_block) << "a cache hit must not wait for an unrelated recording";
+    EXPECT_FALSE(replay.recording);
+    ASSERT_TRUE(replay.task_id.is_valid());
+    // A replay off the cache carries its own heap, unlike the zero-heap shells
+    // key B is still deferring.
+    EXPECT_GT(orch.ring.task_allocator.heap_top(), 0u);
+
+    ASSERT_TRUE(orch.graph_prepare(second.recording_handle, args_b));
+    CoreTaskArgs node_b;
+    node_b.add_input(boundary_b);
+    node_b.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_b).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+    EXPECT_FALSE(orch.fatal);
+}
+
+// An ordinary task submitted while a recording is in flight takes its heap
+// immediately, so the shell's deferred block lands after it and heap-address order
+// stops matching task-id order. Nothing depends on that correspondence — each
+// reservation is an independent bump and HBG retires nothing during a run — which
+// is what lets an ordinary submission proceed without joining the recorders.
+TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredShell) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x1905, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), 0u) << "the shell defers its heap";
+
+    // The ordinary task goes first, from the base of the heap.
+    CoreTaskArgs ordinary_args;
+    TensorCreateInfo ordinary_output(shape, 1, DataType::UINT32);
+    ordinary_args.add_output(ordinary_output);
+    const TaskOutputTensors ordinary = orch.alloc_tensors(ordinary_args);
+    ASSERT_TRUE(ordinary.task_id().is_valid());
+    const uint64_t heap_after_ordinary = orch.ring.task_allocator.heap_top();
+    EXPECT_GT(heap_after_ordinary, 0u);
+
+    // Only then does the recording finish and the shell claim its block.
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+
+    EXPECT_FALSE(orch.fatal);
+    EXPECT_GT(orch.ring.task_allocator.heap_top(), heap_after_ordinary)
+        << "the shell's block sits above the ordinary task's, not before it";
+    PTO2SharedMemoryRingHeader &ring = sm_handle->header->ring;
+    const int32_t shell_slot = ring.get_slot_by_task_id(static_cast<int32_t>(graph.task_id.local()));
+    const PTO2TaskDescriptor *shell = ring.slot_states[shell_slot].task;
+    ASSERT_NE(shell, nullptr);
+    ASSERT_NE(shell->packed_buffer_base, nullptr);
+    EXPECT_GE(
+        reinterpret_cast<uintptr_t>(shell->packed_buffer_base),
+        reinterpret_cast<uintptr_t>(gm_heap.data()) + heap_after_ordinary
+    ) << "the two reservations must be disjoint";
 }

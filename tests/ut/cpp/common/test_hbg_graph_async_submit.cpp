@@ -54,6 +54,7 @@ struct FakeRuntime {
     // What graph_prepare actually received, so the deep copy GraphOwnedArgs makes
     // can be compared against the boundary the caller passed.
     bool prepare_saw_args{false};
+    const void *prepare_handle{nullptr};
     int32_t recorded_tensor_count{-1};
     int32_t recorded_scalar_count{-1};
     uint64_t recorded_tensor_addr{0};
@@ -79,6 +80,8 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs
     GraphScopeResult result;
     result.execute_block = false;
     result.recording = fake.begin_calls == 1;
+    // The handle the recording thread must hand back to graph_prepare.
+    if (result.recording) result.recording_handle = &fake;
     if (!result.recording) {
         fake.later_submit_entered = true;
         fake.cv.notify_all();
@@ -86,10 +89,11 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs
     return result;
 }
 
-bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
+bool fake_graph_prepare(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args) {
     FakeRuntime &fake = *as_fake(rt);
     std::unique_lock<std::mutex> lock(fake.mutex);
     fake.prepare_calls++;
+    fake.prepare_handle = recording_handle;
     fake.prepare_thread = std::this_thread::get_id();
     fake.prepare_saw_args = true;
     fake.recorded_tensor_count = args.tensor_count();
@@ -116,7 +120,7 @@ bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
     return true;
 }
 
-void fake_graph_abort(PTO2Runtime *) {}
+void fake_graph_abort(PTO2Runtime *, void *) {}
 
 bool fake_graph_end(PTO2Runtime *rt) {
     FakeRuntime &fake = *as_fake(rt);
@@ -223,6 +227,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     EXPECT_EQ(body_calls, 2);
     EXPECT_EQ(fake.prepare_calls, 2);
     EXPECT_EQ(fake.prepare_overlaps, 2) << "main-thread Graph submission must not wait for worker graph_prepare";
+    EXPECT_EQ(fake.prepare_handle, &fake) << "the recording thread must bind through the handle graph_begin returned";
     EXPECT_EQ(fake.end_calls, 2);
     EXPECT_EQ(fake.commit_calls, 4);
     EXPECT_EQ(fake.scope_begin_calls, 4);

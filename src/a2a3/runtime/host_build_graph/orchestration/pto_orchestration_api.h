@@ -31,8 +31,10 @@
 #include <stdint.h>
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -40,10 +42,12 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 // Type headers needed by orchestration
 #include "common.h"              // framework_bind_runtime / framework_current_runtime
 #include "graph_cache.h"         // Graph Execution key and result helpers
+#include "graph_host_state.h"    // GRAPH_MAX_DEFINITIONS
 #include "pto_runtime2_types.h"  // PTO2_ERROR_*
 #include "pto_submit_types.h"    // MixedKernels, INVALID_KERNEL_ID, subtask slots
 #include "pto_types.h"           // Arg, TaskOutputTensors, TensorArgType
@@ -102,8 +106,8 @@ typedef struct PTO2RuntimeOps {
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
     GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args);
-    bool (*graph_prepare)(PTO2Runtime *rt, const GraphTaskArgs &args);
-    void (*graph_abort)(PTO2Runtime *rt);
+    bool (*graph_prepare)(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args);
+    void (*graph_abort)(PTO2Runtime *rt, void *recording_handle);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
 
@@ -172,6 +176,18 @@ private:
     GraphTaskArgs args_;
 };
 
+// Runs Graph recording jobs off the submitting thread. Several Definitions may
+// record at once — one per Graph key, which the runtime's in-flight map enforces
+// — so this holds a queue and grows a thread per job that has no free worker,
+// up to GRAPH_MAX_DEFINITIONS. Growth is lazy and self-sizing: a run with one
+// Definition creates exactly one thread.
+//
+// Growth is eager and on the submitting thread. Deferring it to a worker — each
+// one spawning the next after it dequeues — under-provisions: thread creation is
+// serialized against jobs that last well under a millisecond, so the chain stops
+// growing once an earlier worker goes idle. Measured on the four-Definition
+// DeepSeek-V4 decode, that reactive policy produced three recording threads and
+// 1.6-1.7x concurrency where eager growth produces four and 2.2-2.5x.
 class GraphAsyncRecordingState {
 public:
     GraphAsyncRecordingState() = default;
@@ -185,64 +201,93 @@ public:
         std::function<void()> next;
         try {
             next = std::forward<Job>(job);
-            ensure_worker();
         } catch (...) {
             return false;
         }
 
         std::unique_lock<std::mutex> lock(mutex_);
-        debug_assert(done_ && !pending_ && "Only one Graph recording may be in flight");
-        if (!done_ || pending_ || stopping_) return false;
-        job_ = std::move(next);
-        done_ = false;
-        pending_ = true;
+        if (stopping_) return false;
+        try {
+            queue_.push_back(std::move(next));
+        } catch (...) {
+            return false;
+        }
+        outstanding_.store(queue_.size() + running_, std::memory_order_release);
+        // One thread can only serve one recording, so a job that would otherwise
+        // queue behind another Definition gets a thread of its own. With no thread
+        // at all there is nobody to run it, so that case fails back to the caller;
+        // a thread that merely could not be created is a scheduling loss.
+        if (queue_.size() > idle_workers_ && !grow_locked() && workers_.empty()) {
+            queue_.pop_back();
+            outstanding_.store(queue_.size() + running_, std::memory_order_release);
+            return false;
+        }
         cv_.notify_one();
-        // graph_begin() has already installed the hash-keyed RECORDING entry
-        // and submitted the zero-heap outer shell. Enqueuing the private job is
+        // graph_begin() has already installed the keyed in-flight entry and
+        // submitted the zero-heap outer shell. Enqueuing the private job is
         // therefore the last dependency of the caller; graph_prepare() and all
-        // node recording may start after later same-hash shells are submitted.
+        // node recording may start after later shells are submitted.
         return true;
     }
 
+    // Wait for every queued and running recording. A recording thread returns
+    // immediately: it may reach this through rt_orchestration_done in a Graph body
+    // and must never wait for its own job, nor for a sibling's — the sibling makes
+    // progress independently and waiting on it would trade a recording thread for
+    // nothing.
     void wait() {
+        // The idle case — no Graph recorded yet, or all of them already committed —
+        // no Graph recorded yet, or all of them already committed — answers
+        // without taking the pool's mutex.
+        if (outstanding_.load(std::memory_order_acquire) == 0) return;
         std::unique_lock<std::mutex> lock(mutex_);
-        // Recording invokes the same public task wrappers as the outer
-        // orchestration. Those wrappers call rt_graph_commit() before a
-        // non-Graph operation. The recorder must never wait for its own job.
-        if (worker_.joinable() && worker_.get_id() == std::this_thread::get_id()) return;
-        cv_.wait(lock, [&]() {
-            return done_;
+        if (is_worker_thread()) return;
+        idle_cv_.wait(lock, [&]() {
+            return queue_.empty() && running_ == 0;
         });
     }
 
 private:
-    void ensure_worker() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!worker_.joinable()) {
-            worker_ = std::thread([this]() {
+    bool is_worker_thread() const {
+        const std::thread::id self = std::this_thread::get_id();
+        for (const std::thread &worker : workers_) {
+            if (worker.get_id() == self) return true;
+        }
+        return false;
+    }
+
+    // Caller holds mutex_. A thread this pass cannot create is a scheduling loss,
+    // not a correctness one — the job still runs behind an existing worker.
+    bool grow_locked() {
+        if (stopping_ || workers_.size() >= GRAPH_MAX_DEFINITIONS) return false;
+        try {
+            workers_.emplace_back([this]() {
                 run();
             });
+        } catch (...) {
+            return false;
         }
+        return true;
     }
 
     void run() {
+        std::unique_lock<std::mutex> lock(mutex_);
         for (;;) {
-            std::function<void()> current;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&]() {
-                    return pending_ || stopping_;
-                });
-                if (stopping_) return;
-                current = std::move(job_);
-                pending_ = false;
-            }
+            ++idle_workers_;
+            cv_.wait(lock, [&]() {
+                return !queue_.empty() || stopping_;
+            });
+            --idle_workers_;
+            if (stopping_) return;
+            std::function<void()> current = std::move(queue_.front());
+            queue_.pop_front();
+            ++running_;
+            lock.unlock();
             current();
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                done_ = true;
-            }
-            cv_.notify_all();
+            lock.lock();
+            --running_;
+            outstanding_.store(queue_.size() + running_, std::memory_order_release);
+            if (queue_.empty() && running_ == 0) idle_cv_.notify_all();
         }
     }
 
@@ -253,27 +298,32 @@ private:
             stopping_ = true;
         }
         cv_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        for (std::thread &worker : workers_) {
+            if (worker.joinable()) worker.join();
+        }
     }
 
-    std::thread worker_;
+    std::vector<std::thread> workers_;
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::function<void()> job_;
-    bool pending_{false};
-    bool done_{true};
+    std::condition_variable idle_cv_;
+    std::deque<std::function<void()>> queue_;
+    // queue_.size() + running_, published for wait()'s lock-free idle test.
+    std::atomic<size_t> outstanding_{0};
+    size_t idle_workers_{0};
+    size_t running_{0};
     bool stopping_{false};
 };
 
 // External linkage on purpose: `static inline` would give every translation
-// unit that submits a Graph its own recorder and its own worker thread, so a
+// unit that submits a Graph its own recorder and its own worker threads, so a
 // commit reached from one TU would not wait for a recording another TU started.
-// Vague linkage keeps one instance — and one worker — per loaded SO.
+// Vague linkage keeps one instance — and one pool — per loaded SO.
 inline GraphAsyncRecordingState &rt_graph_async_recording() {
     // One orchestration SO is invoked serially by its ChipWorker. Keep its
     // recorder alive across runs so steady-state misses pay only a condition-
     // variable wakeup, not a fresh pthread create/join. The SO's destructor
-    // stops the idle worker before dlclose unmaps its code.
+    // stops the idle workers before dlclose unmaps their code.
     static GraphAsyncRecordingState state;
     return state;
 }
@@ -285,8 +335,15 @@ inline GraphAsyncRecordingState &rt_graph_async_recording() {
 static inline PTO2Runtime *current_runtime() { return framework_current_runtime(); }
 static inline void rt_graph_commit();
 
+// An ordinary submission depends on nothing a recording produces. The outer
+// Graph shell entered the task sequence and registered its TensorMap producers
+// at graph_begin, so fanin against it is already correct; the recording only
+// builds the Definition image, and the deferred heap block a shell still needs is
+// an independent bump allocation that orchestration completion reserves. So none
+// of the three wrappers below joins the recorders — a barrier here stalls the
+// submitting thread for the rest of every recording in flight, which on the
+// four-Definition DeepSeek-V4 decode was a third of the orchestration window.
 static inline TaskOutputTensors alloc_tensors(const CoreTaskArgs &args) {
-    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -337,7 +394,6 @@ static inline TaskOutputTensors alloc_tensors(const CIs &...cis) {
 }
 
 static inline TaskOutputTensors rt_submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
-    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -371,7 +427,6 @@ static inline TaskOutputTensors rt_submit_aiv_task(int32_t kernel_id, const Core
  * barrier or as a placeholder producer for tests / dep-graph wiring.
  */
 static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
-    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -387,14 +442,17 @@ static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTas
     return rt->ops->graph_begin(rt, graph_key, args);
 }
 
-static inline bool rt_graph_prepare(const GraphTaskArgs &args) {
+// Bind the calling thread to the recording `graph_key` opened. The handle comes
+// from the GraphScopeResult that opened it, so a thread can only ever record
+// into the recording it was handed.
+static inline bool rt_graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
     PTO2Runtime *rt = current_runtime();
-    return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, args);
+    return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, recording_handle, args);
 }
 
-static inline void rt_graph_abort() {
+static inline void rt_graph_abort(void *recording_handle) {
     PTO2Runtime *rt = current_runtime();
-    if (rt->ops->graph_abort != nullptr) rt->ops->graph_abort(rt);
+    if (rt->ops->graph_abort != nullptr) rt->ops->graph_abort(rt, recording_handle);
 }
 
 // Finish the recording pass and publish its Definition. The calling thread
@@ -566,10 +624,10 @@ static inline uint64_t rt_graph_function_id(Function function) {
     return function_id;
 }
 
-// `invoke` is copied into the recording job and runs on the recording worker,
-// which outlives this call: the caller returns as soon as the outer shell is
-// submitted, and the body runs until the next rt_graph_commit(). So `invoke` must
-// own everything it needs by value. Capturing caller-frame storage by reference —
+// `invoke` is copied into the recording job and runs on a recording thread, which
+// outlives this call: the caller returns as soon as the outer shell is submitted,
+// and the body runs until orchestration completion joins it. So `invoke` must own
+// everything it needs by value. Capturing caller-frame storage by reference —
 // including the boundary `args` — is a use-after-free; the recorded body receives
 // its own boundary copy as a parameter for exactly that reason.
 template <typename Invoke>
@@ -588,66 +646,65 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
         );
     }
     if (!rt_graph_args_cacheable(args)) {
-        rt_graph_commit();
         invoke(args);
         return GraphSubmitResult{};
     }
     GraphScopeResult result = rt_graph_begin(graph_key, args);
     if (result.recording) {
         GraphAsyncRecordingState &async = rt_graph_async_recording();
+        void *handle = result.recording_handle;
         std::shared_ptr<GraphOwnedArgs> owned_args;
         try {
             owned_args = std::make_shared<GraphOwnedArgs>(args);
         } catch (...) {
             try {
-                if (!rt_graph_prepare(args)) {
-                    rt_graph_abort();
+                if (!rt_graph_prepare(handle, args)) {
+                    rt_graph_abort(handle);
                     rt_graph_commit();
                     return result;
                 }
                 invoke(args);
                 (void)rt_graph_end();
             } catch (...) {
-                rt_graph_abort();
+                rt_graph_abort(handle);
                 throw;
             }
             rt_graph_commit();
             return result;
         }
-        auto record = [owned_args, invoke]() mutable {
+        auto record = [owned_args, invoke, handle]() mutable {
             try {
-                if (!rt_graph_prepare(owned_args->args())) {
-                    rt_graph_abort();
+                if (!rt_graph_prepare(handle, owned_args->args())) {
+                    rt_graph_abort(handle);
                     return;
                 }
                 invoke(owned_args->args());
                 (void)rt_graph_end();
             } catch (...) {
-                rt_graph_abort();
+                rt_graph_abort(handle);
             }
         };
         if (!async.start(std::move(record))) {
             try {
-                if (!rt_graph_prepare(owned_args->args())) {
-                    rt_graph_abort();
+                if (!rt_graph_prepare(handle, owned_args->args())) {
+                    rt_graph_abort(handle);
                     rt_graph_commit();
                     return result;
                 }
                 invoke(owned_args->args());
                 (void)rt_graph_end();
             } catch (...) {
-                rt_graph_abort();
+                rt_graph_abort(handle);
                 throw;
             }
             rt_graph_commit();
         }
     } else if (result.execute_block) {
         // Un-cacheable at begin, or the Definition cache is full: ordinary path.
-        rt_graph_commit();
         if (!current_runtime()->ops->is_fatal(current_runtime())) invoke(args);
     }
-    // A cache hit or an in-flight hit skips the body. In-flight Graph tasks are
-    // finalized before the next non-Graph operation or orchestration completion.
+    // A cache hit or an in-flight hit skips the body. Every in-flight Graph task
+    // is finalized at orchestration completion.
     return result;
 }
 
