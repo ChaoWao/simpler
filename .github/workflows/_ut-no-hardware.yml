@@ -45,14 +45,15 @@ jobs:
           python-version: ${{ inputs.python_version }}
 
       - name: Install GoogleTest
-        if: inputs.setup_variant == 'github'
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y libgtest-dev
-          else
-            brew install googletest
-          fi
+        if: inputs.setup_variant == 'github' && runner.os == 'Linux'
+        uses: ./.github/actions/apt-install
+        with:
+          required-packages: libgtest-dev
+          install-timeout-seconds: "240"
+
+      - name: Install GoogleTest on macOS
+        if: inputs.setup_variant == 'github' && runner.os != 'Linux'
+        run: brew install googletest
 
       - name: Cache pip packages
         uses: ./.github/actions/cache-pip

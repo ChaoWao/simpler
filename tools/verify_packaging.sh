@@ -142,7 +142,7 @@ else:
     print("ninja executable: not found; CMake will select another generator")
 PY
     echo "ERROR: venv missing or has unsupported packaging dependencies. Install with:" >&2
-    echo "  pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'pytest>=6.0' 'torch>=2.3'" >&2
+    echo "  pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'ninja>=1.11' 'pytest>=6.0' 'torch>=2.3'" >&2
     exit 1
 }
 

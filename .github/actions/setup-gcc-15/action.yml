@@ -16,7 +16,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install GCC 15 and build tools
+    - name: Prepare GCC 15 and build tools
+      id: packages
       if: runner.os == 'Linux'
       shell: bash
       env:
@@ -88,14 +89,42 @@ runs:
               sudo tee /etc/apt/sources.list.d/ubuntu-toolchain-r-test.sources >/dev/null
           fi
 
-          apt_options=(
-            -o Acquire::Retries=3
-            -o Acquire::http::Timeout=20
-            -o Acquire::https::Timeout=20
-          )
-          sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"
+          if [[ "$needs_gcc_ppa" == true ]]; then
+            echo "update-mode=source-file" >> "$GITHUB_OUTPUT"
+            echo "source-file=/etc/apt/sources.list.d/ubuntu-toolchain-r-test.sources" >> "$GITHUB_OUTPUT"
+            echo "update-attempts=2" >> "$GITHUB_OUTPUT"
+            echo "install-attempts=2" >> "$GITHUB_OUTPUT"
+          else
+            echo "update-mode=none" >> "$GITHUB_OUTPUT"
+            echo "source-file=" >> "$GITHUB_OUTPUT"
+            echo "update-attempts=1" >> "$GITHUB_OUTPUT"
+            echo "install-attempts=1" >> "$GITHUB_OUTPUT"
+          fi
+          echo "required-packages=${packages[*]}" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Install GCC 15 and build tools
+      if: runner.os == 'Linux' && steps.packages.outputs.required-packages != ''
+      uses: ./.github/actions/apt-install
+      with:
+        required-packages: ${{ steps.packages.outputs.required-packages }}
+        update-mode: ${{ steps.packages.outputs.update-mode }}
+        source-file: ${{ steps.packages.outputs.source-file }}
+        update-attempts: ${{ steps.packages.outputs.update-attempts }}
+        update-timeout-seconds: "60"
+        install-timeout-seconds: "240"
+        install-attempts: ${{ steps.packages.outputs.install-attempts }}
+
+    - name: Verify GCC 15 and build tools
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        is_version_15() {
+          command -v "$1" >/dev/null 2>&1 &&
+            [[ "$("$1" -dumpversion | cut -d. -f1)" == 15 ]]
+        }
 
         command -v gcc-15
         command -v g++-15

@@ -11,7 +11,6 @@ import importlib.util
 import os
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -45,13 +44,9 @@ def _load_clang_tidy_module(monkeypatch):
 
 
 def _selection_script() -> str:
-    workflow = WORKFLOW.read_text()
-    start = "      - name: Select lint build target\n"
-    end = "\n      - name: Install build and lint tools\n"
-    assert workflow.count(start) == 1
-    block = workflow.split(start, 1)[1].split(end, 1)[0]
-    run = block.split("        run: |\n", 1)[1]
-    return textwrap.dedent(run)
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["run"]["steps"]
+    return next(step["run"] for step in steps if step.get("name") == "Select lint build target")
 
 
 def _commit(repo: Path, relative_path: str, contents: str) -> str:

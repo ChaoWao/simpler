@@ -34,13 +34,27 @@ shape. The executable job bodies live in reusable workflows:
 NPU unit-test bodies are split one workflow per architecture so each job
 renders only its own steps. Shared step scaffolding that is safe to run
 after checkout lives in composite actions under `.github/actions/`
-(`cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `network1-*` actions).
+(`apt-install`, `cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `network1-*` actions).
 `setup-gcc-15` accepts a complete, pre-provisioned GCC 15 toolchain on any
 Linux runner; automatic installation of missing Linux tools is Ubuntu-only,
 while macOS installation uses Homebrew. `_packaging.yml` deliberately retains
 its separate compiler setup: Linux packaging accepts the platform compiler and
 also installs ccache, while its macOS fallback is outside the shared action's
-strict GCC 15 contract.
+strict GCC 15 contract. Only the compiler is required there — ninja comes from
+PyPI with the venv, and both the workflow and `tools/verify_packaging.sh` run
+without ccache — so a package manager that cannot serve ccache emits a warning
+and the job continues. `apt-install` gives every apt operation a wall-clock
+bound and attempts to repair an interrupted dpkg transaction before another apt
+operation can run. It uses the runner's existing package indexes by default, avoiding a
+full mirror refresh for ordinary CI dependencies. `setup-gcc-15` is the one
+exception: after installing its pinned Toolchain PPA source, it refreshes only
+that `.sources` file, retrying a failed refresh once with a 60-second bound per
+attempt. That isolated refresh disables list cleanup, preserving the runner's
+Ubuntu indexes for the following install. A failed refresh is a warning; the
+required package install, bounded at four minutes and retried once for this
+PPA workload, decides whether the job can continue. An install from cached
+indexes that fails receives one bounded system-refresh retry. The acquire
+timeouts remain a per-connection safeguard, not a wall-clock guarantee.
 
 ```text
 PullRequest
@@ -284,7 +298,7 @@ queueing entirely:
   where the main CI passes `setup_variant=github` and GitHub-hosted runners.
   Gate outputs still come from the canonical `detect-changes` workflow, executed
   on `[self-hosted, cpu]` in this lane.
-- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel. When the pre-commit selector requests clang-tidy preparation — for eligible C/C++, `.pre-commit-config.yaml`, or an unknown path — the job creates `g++-15` as a stand-in for the Ubuntu Toolchain PPA compiler. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so that diff's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The pre-commit job shadows the distro `clang-tidy` only on that build path; Python-only and other lint-only diffs do not build sim artifacts or create either compiler shim.
+- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel. `setup-venv` installs a PyPI `ninja` into the venv on every lane, which shadows the dnf-provided `ninja-build` on `PATH` whenever the venv is active — deliberately, so CMake's generator selection is identical on this lane and on the github-hosted ones. Same tool, different provenance; the dnf package stays in the contract for builds that run outside the venv. When the pre-commit selector requests clang-tidy preparation — for eligible C/C++, `.pre-commit-config.yaml`, or an unknown path — the job creates `g++-15` as a stand-in for the Ubuntu Toolchain PPA compiler. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so that diff's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The pre-commit job shadows the distro `clang-tidy` only on that build path; Python-only and other lint-only diffs do not build sim artifacts or create either compiler shim.
 - The lane run is standalone — it attaches no checks to the PR; results are read from the run.
 
 ## Hardware Classification

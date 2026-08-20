@@ -38,26 +38,40 @@ jobs:
           persist-credentials: false
 
       - name: Set up C++ compiler
+        id: packaging-tools
         if: inputs.setup_variant == 'github'
         run: |
+          # ninja arrives from PyPI with the venv, so the only package a
+          # packaging build cannot proceed without is a host compiler. ccache
+          # merely warms the matrix's later modes and the matrix step already
+          # runs without it, so a package manager that cannot serve it is a
+          # warning, not a failure.
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            missing_packages=()
-            command -v ninja >/dev/null 2>&1 || missing_packages+=(ninja-build)
-            command -v ccache >/dev/null 2>&1 || missing_packages+=(ccache)
+            required_packages=()
             if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
-              missing_packages+=(g++)
+              required_packages+=(g++)
             fi
-            if (( ${#missing_packages[@]} )); then
-              sudo apt-get update
-              sudo apt-get install -y "${missing_packages[@]}"
-            fi
+            optional_packages=()
+            command -v ccache >/dev/null 2>&1 || optional_packages+=(ccache)
+            echo "required-packages=${required_packages[*]}" >> "$GITHUB_OUTPUT"
+            echo "optional-packages=${optional_packages[*]}" >> "$GITHUB_OUTPUT"
           else
-            command -v ninja >/dev/null 2>&1 || brew install ninja
-            command -v ccache >/dev/null 2>&1 || brew install ccache
+            if ! command -v ccache >/dev/null 2>&1; then
+              brew install ccache ||
+                echo "::warning::brew could not install ccache; continuing without it"
+            fi
             if ! command -v gcc-15 >/dev/null 2>&1 || ! command -v g++-15 >/dev/null 2>&1; then
               brew install gcc@15 || brew install gcc
             fi
           fi
+
+      - name: Install Linux C++ compiler tools
+        if: inputs.setup_variant == 'github' && runner.os == 'Linux' && (steps.packaging-tools.outputs.required-packages != '' || steps.packaging-tools.outputs.optional-packages != '')
+        uses: ./.github/actions/apt-install
+        with:
+          required-packages: ${{ steps.packaging-tools.outputs.required-packages }}
+          optional-packages: ${{ steps.packaging-tools.outputs.optional-packages }}
+          install-timeout-seconds: "240"
 
       - name: Set up Python ${{ inputs.python_version }}
         if: inputs.setup_variant == 'github'
@@ -72,7 +86,7 @@ jobs:
       - name: Install build + runtime deps in venv
         uses: ./.github/actions/setup-venv
         with:
-          packages: "scikit-build-core>=0.10.0 nanobind>=2.0.0 cmake>=3.15 pytest>=6.0"
+          packages: "scikit-build-core>=0.10.0 nanobind>=2.0.0 cmake>=3.15 ninja>=1.11 pytest>=6.0"
 
       - name: Run packaging matrix
         run: |

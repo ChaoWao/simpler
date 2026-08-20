@@ -18,6 +18,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).parents[3]
 ACTION_PATH = REPO_ROOT / ".github/actions/setup-gcc-15/action.yml"
+APT_ACTION_PATH = REPO_ROOT / ".github/actions/apt-install/action.yml"
 PPA_KEY_PATH = REPO_ROOT / ".github/actions/setup-gcc-15/ubuntu-toolchain-r-test.asc"
 SETUP_ACTION = "./.github/actions/setup-gcc-15"
 WORKFLOW_PATHS = (
@@ -56,6 +57,11 @@ def _named_step(path: Path, name: str) -> dict[str, Any]:
 def _action_script(condition: str) -> str:
     action = _load_yaml(ACTION_PATH)
     return next(step["run"] for step in action["runs"]["steps"] if step.get("if") == condition)
+
+
+def _apt_action_script() -> str:
+    action = _load_yaml(APT_ACTION_PATH)
+    return action["runs"]["steps"][0]["run"]
 
 
 def _write_command(path: Path, body: str = "exit 0") -> None:
@@ -132,6 +138,234 @@ def test_linux_branch_installs_only_missing_tools_on_ubuntu_and_pins_the_ppa_key
     assert "${{ github.action_path }}/ubuntu-toolchain-r-test.asc" in script
     assert ': "${VERSION_CODENAME:?Ubuntu /etc/os-release must define VERSION_CODENAME}"' in script
     assert "Signed-By: /etc/apt/keyrings/ubuntu-toolchain-r-test.gpg $EXPECTED_PPA_FINGERPRINT" in script
+
+
+def test_apt_install_preserves_system_indexes_for_ppa_only_refresh_and_recovers_interrupted_installs() -> None:
+    action = _load_yaml(APT_ACTION_PATH)
+    script = action["runs"]["steps"][0]["run"]
+
+    assert action["inputs"]["update-mode"]["default"] == "none"
+    assert "Dir::Etc::SourceList=/dev/null" in script
+    assert "Dir::Etc::SourceParts=$sourceparts_dir" in script
+    assert "APT::Get::List-Cleanup=0" in script
+    assert "timeout --kill-after=15s" in script
+    assert "dpkg --configure -a" in script
+    assert "Acquire::Retries=0" in script
+    assert "sudo DEBIAN_FRONTEND=noninteractive timeout" in script
+    assert "apt install failed on cached indexes; refreshing system indexes once" in script
+    assert "run_update system 1" in script
+    assert "${{ inputs." not in script
+
+
+def test_apt_install_refreshes_the_system_index_after_a_cached_install_failure(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "apt.log"
+    install_marker = tmp_path / "install-attempted"
+    _write_command(
+        bin_dir / "sudo",
+        '''case "$1" in
+  DEBIAN_FRONTEND=*) export "$1"; shift ;;
+esac
+case "$1" in
+  rm|dpkg) exit 0 ;;
+esac
+exec "$@"''',
+    )
+    _write_command(bin_dir / "timeout", 'shift\nshift\nexec "$@"')
+    _write_command(
+        bin_dir / "apt-get",
+        """echo "$*" >> "$APT_LOG"
+if [ ! -e "$APT_INSTALL_MARKER" ]; then
+  : > "$APT_INSTALL_MARKER"
+  exit 1
+fi""",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "APT_INSTALL_MARKER": str(install_marker),
+            "APT_LOG": str(log_path),
+            "INSTALL_ATTEMPTS": "1",
+            "INSTALL_TIMEOUT_SECONDS": "240",
+            "OPTIONAL_PACKAGES": "",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "REQUIRED_PACKAGES": "libgtest-dev",
+            "RUNNER_TEMP": str(tmp_path),
+            "SOURCE_FILE": "",
+            "UPDATE_ATTEMPTS": "1",
+            "UPDATE_MODE": "none",
+            "UPDATE_TIMEOUT_SECONDS": "120",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _apt_action_script()],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log_path.read_text().splitlines()
+    assert "install" in commands[0]
+    assert "update" in commands[1]
+    assert "install" in commands[2]
+
+
+def test_apt_install_retries_a_required_install_before_refreshing_indexes(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "apt.log"
+    install_marker = tmp_path / "install-attempted"
+    _write_command(
+        bin_dir / "sudo",
+        '''case "$1" in
+  DEBIAN_FRONTEND=*) export "$1"; shift ;;
+esac
+case "$1" in
+  rm|dpkg) exit 0 ;;
+esac
+exec "$@"''',
+    )
+    _write_command(bin_dir / "timeout", 'shift\nshift\nexec "$@"')
+    _write_command(
+        bin_dir / "apt-get",
+        """echo "$*" >> "$APT_LOG"
+if [ ! -e "$APT_INSTALL_MARKER" ]; then
+  : > "$APT_INSTALL_MARKER"
+  exit 1
+fi""",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "APT_INSTALL_MARKER": str(install_marker),
+            "APT_LOG": str(log_path),
+            "INSTALL_ATTEMPTS": "2",
+            "INSTALL_TIMEOUT_SECONDS": "240",
+            "OPTIONAL_PACKAGES": "",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "REQUIRED_PACKAGES": "g++-15",
+            "RUNNER_TEMP": str(tmp_path),
+            "SOURCE_FILE": "",
+            "UPDATE_ATTEMPTS": "1",
+            "UPDATE_MODE": "none",
+            "UPDATE_TIMEOUT_SECONDS": "120",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _apt_action_script()],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log_path.read_text().splitlines()
+    assert len(commands) == 2
+    assert all("install" in command for command in commands)
+
+
+def test_apt_install_rejects_invalid_input_before_running_apt(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    apt_called = tmp_path / "apt-called"
+    _write_command(bin_dir / "apt-get", f': > "{apt_called}"')
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "INSTALL_ATTEMPTS": "1",
+            "INSTALL_TIMEOUT_SECONDS": "240",
+            "OPTIONAL_PACKAGES": "",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "REQUIRED_PACKAGES": "libgtest-dev",
+            "RUNNER_TEMP": str(tmp_path),
+            "SOURCE_FILE": "",
+            "UPDATE_ATTEMPTS": "zero",
+            "UPDATE_MODE": "none",
+            "UPDATE_TIMEOUT_SECONDS": "120",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _apt_action_script()],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "must be positive integers" in result.stdout + result.stderr
+    assert not apt_called.exists()
+
+
+def test_apt_install_source_file_update_uses_only_the_requested_source(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "apt.log"
+    source_file = tmp_path / "toolchain.sources"
+    source_file.write_text("Types: deb\nURIs: https://example.invalid/apt\nSuites: noble\nComponents: main\n")
+    _write_command(
+        bin_dir / "sudo",
+        '''case "$1" in
+  DEBIAN_FRONTEND=*) export "$1"; shift ;;
+esac
+case "$1" in
+  rm|dpkg) exit 0 ;;
+esac
+exec "$@"''',
+    )
+    _write_command(bin_dir / "timeout", 'shift\nshift\nexec "$@"')
+    _write_command(bin_dir / "apt-get", 'echo "$*" >> "$APT_LOG"')
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "APT_LOG": str(log_path),
+            "INSTALL_ATTEMPTS": "1",
+            "INSTALL_TIMEOUT_SECONDS": "240",
+            "OPTIONAL_PACKAGES": "",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "REQUIRED_PACKAGES": "",
+            "RUNNER_TEMP": str(tmp_path),
+            "SOURCE_FILE": str(source_file),
+            "UPDATE_ATTEMPTS": "1",
+            "UPDATE_MODE": "source-file",
+            "UPDATE_TIMEOUT_SECONDS": "60",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _apt_action_script()],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = log_path.read_text()
+    assert "Dir::Etc::SourceList=/dev/null" in command
+    assert "Dir::Etc::SourceParts=" in command
+    assert "APT::Get::List-Cleanup=0" in command
+    assert command.rstrip().endswith("update")
+
+
+@pytest.mark.parametrize(
+    "workflow_name, step_name",
+    [
+        ("_packaging.yml", "Install Linux C++ compiler tools"),
+        ("_pre-commit.yml", "Install build and lint tools"),
+        ("_ut-no-hardware.yml", "Install GoogleTest"),
+    ],
+)
+def test_workflow_apt_sites_use_the_shared_action(workflow_name: str, step_name: str) -> None:
+    step = _named_step(REPO_ROOT / ".github/workflows" / workflow_name, step_name)
+    assert step["uses"] == "./.github/actions/apt-install"
 
 
 def test_vendored_ppa_key_has_exactly_one_expected_primary_key() -> None:
@@ -291,6 +525,6 @@ def test_self_cpu_scene_tests_preserve_the_preprovisioned_compiler_contract(tmp_
     assert (runner_temp / "bin/g++-15").resolve() == bin_dir / "g++"
 
 
-@pytest.mark.parametrize("path", (ACTION_PATH, *WORKFLOW_PATHS), ids=lambda path: path.name)
+@pytest.mark.parametrize("path", (ACTION_PATH, APT_ACTION_PATH, *WORKFLOW_PATHS), ids=lambda path: path.name)
 def test_changed_action_and_workflows_are_valid_yaml(path: Path) -> None:
     _load_yaml(path)
