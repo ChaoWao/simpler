@@ -117,11 +117,11 @@ def test_device_poison_codes_key_on_the_host_band_not_the_latched_one():
     cf = _load_root_conftest()
 
     # Host band: PTO_RUNTIME_ERR_INTERNAL, plus the CANN sticky-error codes.
-    assert cf._is_device_runtime_error_msg("run failed with code -1000")
-    assert cf._is_device_runtime_error_msg("simpler_init failed with code 507899")
+    assert cf._requires_l2_worker_retirement_msg("prepare_native_run failed with code -1000")
+    assert cf._requires_l2_worker_retirement_msg("simpler_init failed with code 507899")
 
     # Device-latched band (-1..-999): never poison, whatever the mechanism.
-    assert not cf._is_device_runtime_error_msg("run failed with code -1")  # SCOPE_DEADLOCK
-    assert not cf._is_device_runtime_error_msg("run failed with code -3")  # FLOW_CONTROL_DEADLOCK
-    assert not cf._is_device_runtime_error_msg("run failed with code -100")  # SCHEDULER_TIMEOUT
+    assert not cf._requires_l2_worker_retirement_msg("prepare_native_run failed with code -1")  # SCOPE_DEADLOCK
+    assert not cf._requires_l2_worker_retirement_msg("prepare_native_run failed with code -3")  # FLOW_CONTROL_DEADLOCK
+    assert not cf._requires_l2_worker_retirement_msg("prepare_native_run failed with code -100")  # SCHEDULER_TIMEOUT
     assert not any(-999 <= code <= -1 for code in cf._DEVICE_POISON_CODES)

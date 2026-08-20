@@ -134,7 +134,7 @@ def test_run_class_cases_keeps_device_error_visible_to_poison_classifier() -> No
 
     class FailingScene:
         def _run_and_validate(self, *_args, **_kwargs):
-            raise RuntimeError("run_prepared failed with code 507018")
+            raise RuntimeError("prepare_native_run failed with code 507018")
 
     with pytest.raises(RuntimeError) as failure:
         run_class_cases(
@@ -153,7 +153,7 @@ def test_run_class_cases_keeps_device_error_visible_to_poison_classifier() -> No
         )
 
     excinfo = SimpleNamespace(type=type(failure.value), value=failure.value)
-    assert conftest._is_device_runtime_error(excinfo)
+    assert conftest._requires_l2_worker_retirement(excinfo)
 
 
 def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None:
