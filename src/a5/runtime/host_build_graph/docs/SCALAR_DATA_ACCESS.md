@@ -50,6 +50,22 @@ Runtime-created output buffers also live in the graph heap and have no host-view
 registration. Even if their address is nonzero, host orchestration must not
 dereference or modify them.
 
+## No Initial-Value Fill on a Runtime Allocation
+
+`TensorCreateInfo` carries no `set_initial_value` here, unlike its
+`tensormap_and_ringbuffer` counterpart. The fill stores to
+`ChipTensor::buffer.addr` — a GM-heap device address — which the AICPU
+orchestrator can write and the host orchestrator this runtime uses cannot. The
+method is absent rather than failing at run time, so an orchestration that asks
+for it does not compile against this runtime instead of faulting on device.
+
+To give a runtime allocation a defined starting content — a fixed-size tile
+whose producer writes only a prefix, so its consumer reads a known value in the
+remainder — have a task write it. Doing it on device also keeps the buffer
+correct under Graph Execution, where a value written once while recording would
+reach none of the replays: each submission materializes its outputs at addresses
+it derives for itself, from a heap block whose prior contents it never reads.
+
 ## Ownership Validation
 
 Before a wait slot is used, the runtime verifies:
