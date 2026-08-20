@@ -9,7 +9,7 @@
 """Centralized path management.
 
 PROJECT_ROOT auto-resolves between two layouts:
-  - wheel install: simpler_setup/_assets/{src,build/lib} populated by CMakeLists install()
+  - wheel install: simpler_setup/_assets/{src,cmake,build/lib} populated by CMakeLists install()
   - source tree / editable: repo root with src/ and build/lib/ in original positions
 """
 

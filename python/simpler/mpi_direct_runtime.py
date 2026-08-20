@@ -81,9 +81,7 @@ def _init_mpi(MPI, expected_rank: int, expected_world_size: int):
         raise RuntimeError("MPI was initialized before simpler.mpi_direct_runtime called MPI.Init_thread")
     provided = MPI.Init_thread(required=MPI.THREAD_SERIALIZED)
     if provided < MPI.THREAD_SERIALIZED:
-        raise RuntimeError(
-            f"MPI_THREAD_SERIALIZED is required, but MPI provided thread level {provided}"
-        )
+        raise RuntimeError(f"MPI_THREAD_SERIALIZED is required, but MPI provided thread level {provided}")
     world = MPI.COMM_WORLD
     world.Set_errhandler(MPI.ERRORS_RETURN)
     if int(world.Get_rank()) != expected_rank:

@@ -33,6 +33,7 @@ from simpler.task_interface import (
     TensorArgType,
 )
 from simpler.worker import RemoteCallable
+
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.pto_isa import ensure_pto_isa_root
@@ -146,9 +147,7 @@ def controller(context) -> None:
             expected[worker_id] = (_array(0.0), lhs + rhs)
 
         members = tuple(
-            (spec.worker_id, local_index)
-            for spec in executors
-            for local_index in range(len(spec.device_ids))
+            (spec.worker_id, local_index) for spec in executors for local_index in range(len(spec.device_ids))
         )
 
         def parent_orch(orch, _args, cfg):
