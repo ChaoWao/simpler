@@ -198,7 +198,7 @@ def pytest_addoption(parser):
         "--enable-dep-gen",
         action="store_true",
         default=False,
-        help="Enable dep_gen capture (SubmitTrace ring, first round only)",
+        help="Enable dep_gen capture (disabled when --rounds > 1)",
     )
     parser.addoption(
         "--enable-pmu",
@@ -214,7 +214,8 @@ def pytest_addoption(parser):
         "--enable-scope-stats",
         action="store_true",
         default=False,
-        help="Enable per-scope peak collection and emit <output_prefix>/scope_stats.jsonl (per-scope ring-fill peaks).",
+        help="Enable per-scope peak collection and emit <output_prefix>/scope_stats/scope_stats.jsonl "
+        "(per-scope ring-fill peaks).",
     )
     parser.addoption(
         "--enable-swimlane-overhead",
@@ -460,6 +461,20 @@ def _configure_sanitizer(config):
         )
 
 
+def _validate_diagnostic_flags(config) -> None:
+    # Imported by full path: `simpler_setup.scene_test` as an attribute is the
+    # @scene_test decorator, not this module.
+    from simpler_setup.scene_test import _validate_diagnostic_flags as validate  # noqa: PLC0415
+
+    try:
+        validate(
+            chip_swimlane=config.getoption("--enable-chip-swimlane", default=0),
+            swimlane_overhead=config.getoption("--enable-swimlane-overhead", default=False),
+        )
+    except ValueError as e:
+        raise pytest.UsageError(str(e)) from e
+
+
 def _validate_level_filters(config) -> None:
     if config.getoption("--level", default=None) is not None and (
         config.getoption("--exclude-level", default=None) is not None
@@ -501,6 +516,7 @@ def pytest_configure(config):
     )
 
     _validate_level_filters(config)
+    _validate_diagnostic_flags(config)
     _configure_sanitizer(config)
 
     # Configure logging unconditionally (not only when --log-level is passed) so

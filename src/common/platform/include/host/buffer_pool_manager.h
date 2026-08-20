@@ -42,8 +42,8 @@
  *      narrow `write_range_to_device(field_ptr, sizeof(field))` calls.
  *      A bulk host→device write-back is deliberately avoided — it would
  *      race with AICPU writes to device-only fields (current_buf_ptr,
- *      total/dropped/mismatch counters, queue_tails, free_queue.head, and
- *      on a5 ChipSwimlaneAicpuPhaseHeader::magic).
+ *      current_buf_seq, total/dropped/mismatch counters, queue_tails,
+ *      free_queue.head, and the subsystem's device-written header fields).
  *   2. Pulls each popped buffer's contents from device via
  *      `copy_buffer_from_device` inside ProfilerAlgorithms::process_entry
  *      before delivering it to the collector.

@@ -29,8 +29,8 @@ end-to-end runtime numbers. Two cases dominate the profiler diet:
 
 chip swimlane profiling captures both: per-task `(start, end,
 dispatch, finish)` records on the AICore side, plus per-iteration
-phase records on the AICPU scheduler side and a one-shot
-orchestrator summary. The host writes a Chrome Trace Event JSON
+phase records on the AICPU scheduler side and per-submit orchestrator
+envelopes. The host writes a Chrome Trace Event JSON
 that loads directly in Perfetto, and the same file feeds a
 scheduler-overhead deep-dive report when a device log is
 available.
@@ -139,8 +139,8 @@ The JSON output `"chip_swimlane_level"` field is the captured perf_level:
 `1` = AICore timing only, `2` = +AICPU dispatch/finish,
 `3` = +scheduler phases, `4` = +orchestrator phases.
 
-`--rounds > 1` collects only on the **first** round so warm-up
-runs are not double-counted.
+Chip-swimlane collection is disabled when `--rounds > 1` so benchmark
+runs are not instrumented.
 
 ### 3.2 Output
 
@@ -611,73 +611,84 @@ host publishes for the run. The shared region carries a fixed
 shape on both architectures):
 
 ```text
-ChipSwimlaneDataHeader                                (host init, device R/W)
-├── queues  [MAX_AICPU_THREADS][READYQUEUE_SIZE]
-├── queue_heads / queue_tails (per-thread)
-└── num_cores
+ChipSwimlaneDataHeader                               (host init, device R/W)
+├── queues [MAX_AICPU_THREADS][PROF_READYQUEUE_SIZE]
+├── queue_heads / queue_tails  (per-thread)
+├── num_cores / chip_swimlane_level                   (host writes at init)
+├── num_sched_phase_threads / num_orch_phase_threads  (AICPU writes at phase
+├── num_phase_cores / core_to_thread[]                 init; host gates on
+│                                                      the two counts)
+└── backpressure                (DfxBackpressureHeader)
 
-ChipSwimlaneAicpuTaskPool[num_cores]                    (per-core AICPU pool state)
-├── free_queue {buffer_ptrs[SLOT_COUNT], head, tail}
-├── current_buf_ptr           (AICPU active ChipSwimlaneAicpuTaskBuffer*)
-├── aicore_ring_ptr           (legacy; kept for ABI continuity)
-├── total_record_count
-├── dropped_record_count
-└── mismatch_record_count     (legacy; no longer written)
+Every pool below is the same 192B shape — one ChipSwimlaneActiveHead (64B)
+plus one ChipSwimlaneFreeQueue (128B). Only the buffer payload type differs,
+which is what lets the drain machinery stay polymorphic:
 
-ChipSwimlaneAicoreTaskPool[num_cores]              (per-core AICore pool state)
-├── head {current_buf_ptr, current_buf_seq,     (single 64B cache line;
-│         total_record_count,                    AICPU writes, AICore dcci-
-│         dropped_record_count}                  polls per task; AICPU bumps
-│                                                current_buf_seq on rotation
-│                                                so AICore detects the change)
-└── free_queue {buffer_ptrs[SLOT_COUNT], head, tail}
+head       {current_buf_ptr, current_buf_seq,     single 64B cache line: the
+            total_record_count,                   producer's active buffer
+            dropped_record_count}                 plus its accounting
+free_queue {buffer_ptrs[PROF_SLOT_COUNT],         SPSC ring — host pushes
+            head, tail}                           recycled buffers, AICPU pops
 
-[ChipSwimlaneAicoreTaskBuffer × PLATFORM_AICORE_BUFFERS_PER_CORE per core]
-└── ChipSwimlaneAicoreTaskRecord records[PLATFORM_AICORE_BUFFER_SIZE]  (1024 records, 32B each)
+ChipSwimlaneAicpuTaskPool[num_cores]                    (AICPU writes)
+└── ChipSwimlaneAicpuTaskBuffer × PLATFORM_PROF_BUFFERS_PER_CORE
+    └── ChipSwimlaneAicpuTaskRecord records[PLATFORM_PROF_BUFFER_SIZE]
+                                                        (1000 records, 32B each)
 
-a2a3 layout (post-#942):
-[ChipSwimlaneAicpuSchedPhasePool[num_sched_phase_threads]]  (per-AICPU-thread)
-└── ChipSwimlaneAicpuSchedPhaseBuffer × PROF_BUFFERS_PER_THREAD; alias of TaskPool
+ChipSwimlaneAicoreTaskPool[num_cores]                   (AICore writes; AICPU
+└── ChipSwimlaneAicoreTaskBuffer                         rotates and bumps
+    × PLATFORM_AICORE_BUFFERS_PER_CORE                   current_buf_seq, which
+    └── ChipSwimlaneAicoreTaskRecord                     AICore dcci-polls per
+        records[PLATFORM_AICORE_BUFFER_SIZE]             task to detect)
+                                                        (1024 records, 32B each)
 
-[ChipSwimlaneAicpuOrchPhasePool[num_orch_phase_threads]]    (per-AICPU-thread)
-└── ChipSwimlaneAicpuOrchPhaseBuffer × PROF_BUFFERS_PER_THREAD; alias of TaskPool
+ChipSwimlaneAicpuSchedPhasePool[MAX_AICPU_THREADS]      (one per scheduler
+└── ChipSwimlaneAicpuSchedPhaseBuffer                    thread; buffers only
+    × PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD             for live threads)
+    └── ChipSwimlaneAicpuSchedPhaseRecord
+        records[PLATFORM_PHASE_RECORDS_PER_THREAD]      (16384 records, 64B each)
 
-a5 layout (pre-split; pending port to the a2a3 shape above):
-[ChipSwimlaneAicpuPhasePool[num_phase_threads]]   (single unified pool, gated
-                                                 by ChipSwimlaneAicpuPhaseHeader
-                                                 + CHIP_SWIMLANE_AICPU_PHASE_MAGIC)
-
-(a2a3 phase metadata — num_sched_phase_threads, num_orch_phase_threads,
- num_phase_cores, core_to_thread[] — lives inside ChipSwimlaneDataHeader,
- not a separate cache line; the legacy header + magic gate were removed
- in #941. Host gates on num_{sched,orch}_phase_threads > 0.)
+ChipSwimlaneAicpuOrchPhasePool[MAX_AICPU_THREADS]       (orchestration is
+└── ChipSwimlaneAicpuOrchPhaseBuffer                     single-threaded, so
+    × PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD              only ordinal 0 ever
+    └── ChipSwimlaneAicpuOrchPhaseRecord                 gets a producer)
+        records[PLATFORM_PHASE_RECORDS_PER_THREAD]      (16384 records, 32B each)
 ```
+
+The pool-state array is sized `PLATFORM_MAX_AICPU_THREADS` on both phase
+kinds because AICPU's offset stride is fixed at that width; only the first
+`aicpu_thread_num` states ever get buffers seeded.
 
 Task records are identical across architectures:
 
-- `ChipSwimlaneAicpuTaskRecord` — per-task AICPU-owned fields (task_id, dispatch_time,
-  finish_time, func_id, core_type, reg_task_id), 64-byte aligned.
-  `reg_task_id` is the join key against the matching AICore record.
-- `ChipSwimlaneAicoreTaskRecord` — slim AICore-only record (start, end, task_id),
-  32 bytes; AICore writes one per task into its currently-active
-  per-core buffer.
+- `ChipSwimlaneAicpuTaskRecord` — per-task AICPU-owned fields (dispatch_time,
+  finish_time, reg_task_id); 20 B logical, `aligned(32)` so two records share
+  a cache line. `reg_task_id` is the join key against the matching AICore
+  record. `core_type` comes from the static per-core table
+  `ChipSwimlaneCollector::set_core_types` publishes, and `func_id` is resolved
+  post-process by `swimlane_converter.py` from deps.json's `kernel_ids[]` —
+  neither is carried in the record.
+- `ChipSwimlaneAicoreTaskRecord` — slim AICore-only record (start_time,
+  end_time, task_token_raw, reg_task_id, receive_to_start_cycles), 32 bytes;
+  AICore writes one per task into its currently-active per-core buffer.
+  `reg_task_id` is the join key; `task_token_raw` is identity only.
 
-Phase records diverge — a2a3 split them into two type-tagged streams
-in #942, a5 still uses the legacy unified shape:
+Both architectures use split phase streams:
 
-- a2a3:
-  - `ChipSwimlaneAicpuSchedPhaseRecord` (40 B) — per-iteration scheduler
-    phase; kind ∈ {Complete, Dispatch} + loop_iter + tasks_processed +
-    pop_hit / pop_miss deltas.
-  - `ChipSwimlaneAicpuOrchPhaseRecord` (32 B) — per-submit orchestrator
-    envelope; task_id + submit_idx + start/end.
-- a5:
-  - `ChipSwimlaneAicpuPhaseRecord` (40 B) — single record type carrying
-    both sched and orch via a `phase_id` discriminator; pending port to
-    the split shape.
+- `ChipSwimlaneAicpuSchedPhaseRecord` (64 B) — one record per **emitted
+  phase**, not per scheduler iteration: a single iteration routinely emits
+  several (e.g. Complete, AsyncPoll, Dispatch, Release, plus the Resolve
+  inner phase). `ChipSwimlaneSchedPhaseKind` spans the outer phases
+  (Complete, Dispatch, Release, Dummy, EarlyDispatch, AsyncPoll, Drain,
+  GraphPrepare), the inner ones (Resolve, DrainPrepare, DrainPublish) and
+  the separate-lane markers (DummyTask, PredicatedSkip) — see §3.2 for how
+  each is rendered. Carries loop_iter + tasks_processed + pop_hit /
+  pop_miss deltas and queue-depth snapshots.
+- `ChipSwimlaneAicpuOrchPhaseRecord` (32 B) — per-submit orchestrator
+  envelope; task_id + submit_idx + start/end.
 
-`swimlane_converter` shape-detects per source and produces the same
-output JSON for both. On a2a3 the orch stream replaces the per-sub-step
+`swimlane_converter` consumes the shared shape and produces the same
+output JSON on both architectures. The orch stream replaces the per-sub-step
 records folded into ORCH_SUBMIT; there is no separate shared-memory
 aggregate. The run-window envelope is emitted to device log via
 `LOG_INFO "orch_start=… orch_end=… orch_cost=…"`.
@@ -757,12 +768,12 @@ are single-kind.
 │                          │               │                          │
 │ start(tf)                │               │ AICPU on FIN:            │
 │   ┌────────────────────┐ │ SPSC ready    │   commit AicpuTask       │
-│   │ drain/refill shard │ │ queues        │   record (kind 0); fill  │
-│   │ + replenish thread │ │<──4 kinds────<│   func_id / dispatch /   │
-│   │   poll ready queue │<┼──multiplexed──│   finish; rotate buffer  │
-│   │   refill freeQ     │─┼──free queue──>│   when full              │
+│   │ drain/refill shard │ │ queues        │   record (kind 0):       │
+│   │ + replenish thread │ │<──4 kinds────<│   dispatch / finish /    │
+│   │   poll ready queue │<┼──multiplexed──│   reg_task_id; rotate    │
+│   │   refill freeQ     │─┼──free queue──>│   buffer when full       │
 │   └────────────────────┘ │               │ AICPU scheduler thread:  │
-│   ┌────────────────────┐ │               │   per work iter: write   │
+│   ┌────────────────────┐ │               │   per emitted phase:     │
 │   │ collector shard    │ │               │   SchedPhaseRecord       │
 │   │   reads via host   │ │ shared mem    │   (kind 1). Per submit:  │
 │   │   mapping; copies  │<┼──mapping─────<│   write OrchPhaseRecord  │
@@ -782,17 +793,21 @@ are single-kind.
 ```text
 init_chip_swimlane()
   chip_swimlane_collector_.initialize(num_aicore, ..., output_prefix_)
-  kernel_args_.args.chip_swimlane_data_base = chip_swimlane_collector_.get_chip_swimlane_shm_device_ptr()
+  kernel_args_.args.chip_swimlane_data_base =
+      chip_swimlane_collector_.get_chip_swimlane_setup_device_ptr()
+  kernel_args_.args.chip_swimlane_aicore_rotation_table =
+      chip_swimlane_collector_.get_aicore_ring_addr_table_device_ptr()
 start(tf)                          ← spawn split mgmt + collector shards
 launch AICPU / AICore
 rtStreamSynchronize
 stop()                             ← join mgmt/replenish → join collectors
 read_phase_header_metadata()       ← single-shot read of the
                                      core→thread mapping
-reconcile_counters()               ← three-bucket accounting for both
-                                     PERF and PHASE pools (total /
-                                     collected / dropped); any non-zero
-                                     current_buf_ptr is a flush bug
+reconcile_counters()               ← two-bucket accounting per pool
+                                     (PERF, SCHED_PHASE, ORCH_PHASE):
+                                     collected + dropped == device_total;
+                                     any non-zero current_buf_ptr over a
+                                     non-empty buffer is a flush bug
 export_swimlane_json()             ← writes <output_prefix>/chip_swimlane_records.json
 finalize(unregister, free)
 ```
@@ -829,34 +844,37 @@ behavioral deviation from §5.2 is the **transport channel**: a5 has no
 host-shadow `malloc()` and the mgmt loop synchronizes the two via
 `profiling_copy.h` (`rtMemcpy` onboard, plain `memcpy` in sim).
 
-The AICore-side write target is a per-core, **stable**
-`ChipSwimlaneAicoreRing` (`dual_issue_slots[PLATFORM_L2_AICORE_RING_SIZE]`)
-allocated once by the host and addressed via
-`ChipSwimlaneAicpuTaskPool::aicore_ring_ptr` (AICPU side) and
-`KernelArgs::aicore_chip_swimlane_ring_addrs[block_idx]` forwarded into
-`set_aicore_chip_swimlane_ring()` by `KERNEL_ENTRY` (AICore side). The ring
-address never changes during a run, so AICore's write address is
-decoupled from the AICPU's rotating `ChipSwimlaneAicpuTaskBuffer`. Buffer rotation is
-internal to `chip_swimlane_aicpu_complete_task` when `records[count]` hits
+What is **stable** per core is the *head slot address*, not the buffer. The
+host publishes a `uint64_t[num_aicore]` rotation table through
+`KernelArgs::chip_swimlane_aicore_rotation_table`; `KERNEL_ENTRY` indexes it by
+`block_idx` and hands the slot to `set_chip_swimlane_aicore_head_slot()`. AICPU's
+`chip_swimlane_aicpu_init` fills each slot with the address of that core's
+`ChipSwimlaneAicoreTaskPool::head`. AICore therefore holds one address for the
+whole run, but what it *finds* there rotates: it dcci-polls the head per task
+and re-reads `current_buf_ptr` whenever `current_buf_seq` bumps (§5.1). AICPU
+task-buffer rotation is separately internal to
+`chip_swimlane_aicpu_complete_task` when `records[count]` hits
 `PLATFORM_PROF_BUFFER_SIZE`. The runtime `Handshake` carries no
 profiling fields.
 
 The framework's `MemoryOps` therefore carries five callbacks on
 a5 (`alloc` / `reg` / `free_` / `copy_to_device` /
 `copy_from_device`); the mgmt loop mirrors the entire shm region
-(`ChipSwimlaneDataHeader` + per-core `ChipSwimlaneAicpuTaskPool` +
-`ChipSwimlaneAicpuPhaseHeader` + per-thread `ChipSwimlaneAicpuPhasePool`)
+(`ChipSwimlaneDataHeader` + the per-core task pools + the per-thread
+sched- and orch-phase pools)
 device → host at the top of every tick, then pushes back only the
 fields host actually modified (advanced `queue_heads[q]`, refilled
 `free_queue.tail` and `buffer_ptrs[slot]`) via
 `BufferPoolManager::write_range_to_device`. The bulk
 `mirror_shm_to_device` is deliberately **not** called from the mgmt
 loop: it would race with AICPU writes to device-only fields
-(`current_buf_ptr`, `total/dropped/mismatch` counters, `queue_tails`,
-`free_queue.head`, `ChipSwimlaneAicpuPhaseHeader::magic`,
-`ChipSwimlaneAicpuPhaseHeader::core_to_thread[]`) and roll them back to
+(`head.current_buf_ptr`, `head.current_buf_seq`, `head.total/dropped`
+counters, `queue_tails`, `free_queue.head`, and the header's
+`num_{sched,orch}_phase_threads` / `num_phase_cores` / `core_to_thread[]`)
+and roll them back to
 whatever the host shadow held at the start of the tick. Per-buffer
-payloads (`ChipSwimlaneAicpuTaskBuffer` / `ChipSwimlaneAicpuPhaseBuffer`)
+payloads (`ChipSwimlaneAicpuTaskBuffer` /
+`ChipSwimlaneAicpuSchedPhaseBuffer` / `ChipSwimlaneAicpuOrchPhaseBuffer`)
 are pulled on demand inside `ProfilerAlgorithms::process_entry` after
 a popped ready-entry resolves to its host shadow. `BufferPoolManager`'s
 `release_owned_buffers` canonicalizes carved sub-buffers back to the
@@ -871,14 +889,14 @@ rollback by `release_all_owned()`.
 │   : ProfilerBase<...>    │               │                          │
 │                          │               │                          │
 │ initialize()             │  alloc + reg  │ AICore on task end:      │
-│   rtMalloc shm           │──+ shadow────>│   write timing into      │
-│   per-core ChipSwimlaneAicpuTaskBuffer  │   memset 0    │   per-core ring slot     │
-│   per-core AicoreRing    │   + push 0s   │   dual_issue_slots[      │
-│   per-thread ChipSwimlaneAicpuPhaseBuffer │               │     task_id & 1]         │
-│   register_mapping(s)    │               │                          │
-│   set_memory_context     │               │ AICPU on FIN:            │
-│                          │               │   read ring slot →       │
-│                          │               │   commit into records[]  │
+│   rtMalloc shm           │──+ shadow────>│   dcci the head slot,    │
+│   per-core AicpuTaskBuf  │   memset 0    │   write a slim record    │
+│   per-core AicoreTaskBuf │   + push 0s   │   into the active        │
+│   per-thread Sched/Orch  │               │   AicoreTaskBuffer       │
+│     PhaseBuf             │               │                          │
+│   register_mapping(s)    │               │ AICPU on FIN:            │
+│   set_memory_context     │               │   commit AicpuTask       │
+│                          │               │   record into records[]  │
 │ start(thread_factory)    │               │                          │
 │   mgmt_thread starts     │               │ AICPU per-thread flush   │
 │   poll_thread starts     │               │   on exit: enqueue       │
@@ -907,7 +925,7 @@ rollback by `release_all_owned()`.
 │ read_phase_header_meta   │               │                          │
 │ reconcile_counters       │               │                          │
 │   sanity-check leftovers │               │                          │
-│   + 3-bucket cross-check │               │                          │
+│   + 2-bucket cross-check │               │                          │
 │ export_swimlane_json()   │               │                          │
 │ finalize(free)           │               │                          │
 └──────────────────────────┘               └──────────────────────────┘
@@ -919,14 +937,14 @@ rollback by `release_all_owned()`.
 init_chip_swimlane()
   chip_swimlane_collector_.initialize(num_aicore, ..., output_prefix_)
   kernel_args_.args.chip_swimlane_data_base = chip_swimlane_collector_.get_chip_swimlane_setup_device_ptr()
-  kernel_args_.args.aicore_chip_swimlane_ring_addrs =
-      chip_swimlane_collector_.get_aicore_ring_addrs_device_ptr()
+  kernel_args_.args.chip_swimlane_aicore_rotation_table =
+      chip_swimlane_collector_.get_aicore_ring_addr_table_device_ptr()
 chip_swimlane_collector_.start(thread_factory)   ← mgmt + poll threads
 launch AICPU / AICore
 rtStreamSynchronize
 chip_swimlane_collector_.stop()                  ← join mgmt + poll, drain final batch
 chip_swimlane_collector_.read_phase_header_metadata()
-chip_swimlane_collector_.reconcile_counters()    ← sanity-check + 3-bucket cross-check
+chip_swimlane_collector_.reconcile_counters()    ← sanity-check + 2-bucket cross-check
 chip_swimlane_collector_.export_swimlane_json()
 chip_swimlane_collector_.finalize()
 ```
@@ -936,33 +954,34 @@ on a5 inherits the same CRTP base
 ([`profiling_common::ProfilerBase`](../../src/common/platform/include/host/profiler_base.h))
 as a2a3 and parameterizes
 [`BufferPoolManager`](../../src/common/platform/include/host/buffer_pool_manager.h)
-with `ChipSwimlaneModule` (`kBufferKinds = 2`). The only a5-specific
-glue is the 5-callback `MemoryOps` and the per-tick shm mirror.
+with `ChipSwimlaneModule` (`kBufferKinds = 4`). The collector source is
+shared — `src/common/platform/{include,shared}/host/` — so the only
+a5-specific glue is the 5-callback `MemoryOps` and the per-tick shm mirror.
 
 a5's per-thread AICPU flush hooks (`chip_swimlane_aicpu_flush` /
 `chip_swimlane_aicpu_flush_phase_buffers`) are the only data path on the
 records side — host never reads from `current_buf_ptr` to recover
 records. `reconcile_counters` is purely passive: it logs an error if
 any `current_buf_ptr` is non-zero with a non-empty buffer (a
-device-flush bug), then runs the three-bucket cross-check
-`collected + dropped + mismatch == device_total` per pool (PERF +
-PHASE), same shape as a2a3.
+device-flush bug), then runs the two-bucket cross-check
+`collected + dropped == device_total` per pool (PERF, SCHED_PHASE,
+ORCH_PHASE), same shape as a2a3.
 
 ### 5.4 a2a3 vs a5 at a glance
 
 | Aspect | a2a3 | a5 |
 | ------ | ---- | -- |
-| Task record | `ChipSwimlaneAicpuTaskRecord` (64 B) + `ChipSwimlaneAicoreTaskRecord` (32 B) | identical |
-| Phase record | split: `ChipSwimlaneAicpuSchedPhaseRecord` (40 B) + `ChipSwimlaneAicpuOrchPhaseRecord` (32 B) | unified `ChipSwimlaneAicpuPhaseRecord` (40 B, `phase_id`-tagged); pending port |
-| AICore WIP-slot protocol | identical | |
+| Task record | `ChipSwimlaneAicpuTaskRecord` (32 B) + `ChipSwimlaneAicoreTaskRecord` (32 B) | identical |
+| Phase record | `ChipSwimlaneAicpuSchedPhaseRecord` (64 B) + `ChipSwimlaneAicpuOrchPhaseRecord` (32 B) | identical |
+| AICore head-slot rotation protocol | identical | |
 | AICPU commit on FIN | identical | |
 | Buffer model | rotating pool (free + ready queues) per kind | identical |
-| Ready queue | per-AICPU-thread, multiplexes 4 kinds via `ReadyQueueEntry::kind` | per-AICPU-thread, 2 kinds via `is_phase` |
+| Ready queue | per-AICPU-thread, multiplexes 4 kinds via `ReadyQueueEntry::kind` | identical |
 | Host threads | split mgmt + collector shards, streams during execution | same split mgmt + collector shards (5 = `PLATFORM_MAX_AICPU_THREADS` vs a2a3's 4) |
-| Host-class shape | `ProfilerBase<ChipSwimlaneCollector, ChipSwimlaneModule>` (`kBufferKinds = 4`) | same base, `kBufferKinds = 2` |
+| Host-class shape | `ProfilerBase<ChipSwimlaneCollector, ChipSwimlaneModule>` (`kBufferKinds = 4`) | identical — one shared collector under `src/common/platform/` |
 | Host transport | `halHostRegister` shared memory | host-shadow `malloc` + per-tick `rtMemcpy`/`memcpy` |
 | `MemoryOps` callbacks | 3 (`alloc`, `reg`, `free_`) | 5 (+ `copy_to_device`, `copy_from_device`) |
-| `reconcile_counters` | passive cross-check (collected + dropped + mismatch == device_total) | identical |
+| `reconcile_counters` | passive cross-check (collected + dropped == device_total) | identical |
 | Lifecycle | `initialize` → `start` → `stop` → `read_phase_header_metadata` → `reconcile_counters` → `export_swimlane_json` → `finalize` | identical |
 
 ## 6. Overhead
@@ -978,21 +997,25 @@ When enabled, the dominant per-task overhead is:
 - The AICPU commit on FIN, which copies the WIP record into the
   ring buffer plus a few metadata fields.
 
-Phase-record overhead (only at `--enable-chip-swimlane >= 3`):
+Phase-record overhead, same on both architectures:
 
-- a2a3 — one 40 B `ChipSwimlaneAicpuSchedPhaseRecord` per work-emitting
-  scheduler iteration (Complete + Dispatch, idle iters do not emit),
-  plus one 32 B `ChipSwimlaneAicpuOrchPhaseRecord` per `submit_task()`.
-- a5 — one 40 B `ChipSwimlaneAicpuPhaseRecord` per emitted phase
-  (legacy unified shape).
+- at `--enable-chip-swimlane >= 3` — one 64 B
+  `ChipSwimlaneAicpuSchedPhaseRecord` per **emitted phase**, so a scheduler
+  iteration that does several kinds of work costs several records; idle
+  iterations emit none.
+- at `--enable-chip-swimlane >= 4` only — one 32 B
+  `ChipSwimlaneAicpuOrchPhaseRecord` per `submit_task()`. Level 3 captures
+  no orchestrator records at all (`ChipSwimlaneLevel::ORCH_PHASES` gates
+  both the pool allocation and the device-side write).
 
 Both architectures drain buffers concurrently with execution through the
 ProfilerBase mgmt/collector pipeline; both a2a3 and a5 use split mgmt plus
-collector shards for this profiler (a5 with 7 shards, a2a3 with 4). a5
+collector shards for this profiler, capped at `PLATFORM_MAX_AICPU_THREADS`
+(a5 5, a2a3 4). a5
 additionally pays per-buffer `rtMemcpy`/`memcpy` round-trips to keep the
 host shadow in sync, which overlap with device execution.
 
-`--rounds > 1` collects only on the first round so the steady-state
+`--rounds > 1` disables chip-swimlane collection so the steady-state
 benchmark is not perturbed.
 
 ## 7. Limitations
@@ -1016,19 +1039,26 @@ benchmark is not perturbed.
 
 ### 7.2 a5
 
-- Each per-core `ChipSwimlaneAicpuTaskBuffer` and per-thread `ChipSwimlaneAicpuPhaseBuffer` is
-  fixed-size. Tasks past `PLATFORM_PROF_BUFFER_SIZE` per core (and
-  phases past `PLATFORM_PHASE_RECORDS_PER_THREAD` per thread) are
-  silently dropped via AICPU early return; the host surfaces the
-  count in the finalize log line. Raise the constants in
-  [platform_config.h](../../src/a5/platform/include/common/platform_config.h)
-  for workloads that exceed them.
+- Buffers are fixed-size but **rotated**, so a long run is not bounded by
+  one buffer's capacity. A record is dropped when the producer cannot get a
+  replacement buffer — the pool's free queue is empty because the host has
+  not refilled it yet — or when the ready-queue enqueue fails; AICore
+  additionally drops on its own slot guard when its free queue is empty.
+  Hitting `PLATFORM_PROF_BUFFER_SIZE` / `PLATFORM_PHASE_RECORDS_PER_THREAD`
+  inside a buffer is a defensive path that rotation should have prevented.
+  Every drop bumps `dropped_record_count`, which the host surfaces in the
+  finalize log line. The tuning knobs are therefore **pool depth and
+  replenishment rate** — `PLATFORM_PROF_BUFFERS_PER_CORE`,
+  `PLATFORM_AICORE_BUFFERS_PER_CORE`,
+  `PLATFORM_PROF_{SCHED,ORCH}_BUFFERS_PER_THREAD`, `PLATFORM_PROF_SLOT_COUNT`
+  in [platform_config.h](../../src/a5/platform/include/common/platform_config.h)
+  — not the per-buffer record counts.
 - `a5sim` exercises the export pipeline; the simulated device
   clock is not realistic for absolute-timing analysis.
 
 ### 7.3 Common
 
-- Only the **first** round records when `--rounds > 1` is in use.
+- Chip-swimlane collection is disabled when `--rounds > 1` is in use.
 - The current implementation captures incore-level scope only —
   L3 composition and orchestrator-internal sub-tasks are visible
   through the orchestrator phase summary, not as nested swimlane
@@ -1038,7 +1068,7 @@ benchmark is not perturbed.
 
 **No `chip_swimlane_records.json` produced.** Check that
 `--enable-chip-swimlane` was passed. Verify `<output_prefix>` exists
-in the run log; if `--rounds > 1`, only the first round records.
+in the run log; `--rounds > 1` disables chip-swimlane collection.
 
 **`merged_swimlane.json` is missing.** `swimlane_converter` runs
 automatically after a SceneTest with `--enable-chip-swimlane`; if it

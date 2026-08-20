@@ -503,9 +503,10 @@ changes capture that:
    pushed back to device with `manager_.write_range_to_device(&field,
    sizeof(field))`. The bulk `mirror_shm_to_device` is deliberately
    **not** called from the mgmt loop — it would race with AICPU writes
-   to device-only fields (`current_buf_ptr`, `total/dropped/mismatch`
-   counters, `queue_tails`, `free_queue.head`,
-   `ChipSwimlaneAicpuPhaseHeader::magic`, `core_to_thread[]`), rolling them
+   to device-only fields (`current_buf_ptr`, `current_buf_seq`,
+   `total/dropped/mismatch` counters, `queue_tails`, `free_queue.head`,
+   and the subsystem's device-written header fields such as
+   `ChipSwimlaneDataHeader::core_to_thread[]`), rolling them
    back to whatever the host shadow had at the start of the tick. Per-buffer
    payloads (`ChipSwimlaneAicpuTaskBuffer` / `PmuBuffer` /
    `DumpMetaBuffer`) are still pulled on demand inside
@@ -538,7 +539,7 @@ per-core ring/reg addresses travel through `KernelArgs`:
 | `KernelArgs` field | Producer | Consumer |
 | ------------------ | -------- | -------- |
 | `enable_profiling_flag` (bitmask) | host (DeviceRunner) | AICPU `kernel.cpp` → `set_chip_swimlane_enabled` / `set_pmu_enabled` / `set_dump_args_enabled`; AICore `KERNEL_ENTRY` → `set_aicore_profiling_flag` |
-| `aicore_chip_swimlane_ring_addrs` (table) | host (`ChipSwimlaneCollector::initialize`) | AICore `KERNEL_ENTRY` indexes `table[block_idx]` → `set_aicore_chip_swimlane_ring` |
+| `chip_swimlane_aicore_rotation_table` (table) | host (`ChipSwimlaneCollector::initialize`) | AICore `KERNEL_ENTRY` indexes `table[block_idx]` → `set_chip_swimlane_aicore_head_slot` |
 | `aicore_pmu_ring_addrs` (table) | host (`PmuCollector::init`) | AICore `KERNEL_ENTRY` → `set_aicore_pmu_ring` |
 | `regs` (per-physical-core register-base table) | host (already required for AICPU MMIO) | AICore `KERNEL_ENTRY` resolves `regs[get_physical_core_id()]` → `set_aicore_pmu_reg_base`; AICore `aicore_execute` caches the value at Phase-3 |
 
@@ -549,19 +550,34 @@ runtime `aicore_execute(runtime, block_idx, core_type)` signature is
 unchanged; adding a new profiling field touches `KernelArgs` and this
 state surface, never the runtime protocol.
 
-### 8.2 Stable AICore staging ring (decouples AICore write from AICPU buffer rotation)
+### 8.2 What AICore holds across an AICPU buffer rotation
 
-ChipSwimlane and PMU on a5 both use the "AICore writes, AICPU commits" model.
-The AICore-side write target is a per-core
-[`ChipSwimlaneAicoreRing`](../../src/common/platform/include/common/chip_swimlane_profiling.h) /
+ChipSwimlane and PMU both hand AICore one per-core address that never
+changes for the whole run, so AICPU can rotate its buffers underneath
+without renegotiating. **What that address points at differs**: for PMU it
+is the staging ring AICore writes into, so AICore's write target really is
+fixed; for ChipSwimlane it is only the head slot AICore reads, and the
+buffer it then writes into rotates.
+
+**PMU (a5)** — AICore writes into a per-core
 [`PmuAicoreRing`](../../src/a5/platform/include/common/pmu_profiling.h) of
-`PLATFORM_{L2,PMU}_AICORE_RING_SIZE` (= 2, dual-issue) slots, allocated
-once by the host and addressed by
-`BufferState::aicore_ring_ptr` (AICPU-visible) and the per-core
-`aicore_*_ring_addrs[block_idx]` (AICore-visible). The address is
-never reassigned, so AICore's write target is stable across AICPU's
-rotating `ChipSwimlaneAicpuTaskBuffer` / `PmuBuffer` flips — flipping is now
-fully internal to `*_complete_record` and never crosses into Handshake.
+`PLATFORM_PMU_AICORE_RING_SIZE` (= 2, dual-issue) slots, allocated once by
+the host and addressed by `PmuBufferState::aicore_ring_ptr` (AICPU-visible)
+and `KernelArgs::aicore_pmu_ring_addrs[block_idx]` (AICore-visible). AICPU
+reads the slot on FIN and commits it into the rotating `PmuBuffer`; the
+staging ring itself is never reassigned.
+
+**ChipSwimlane (both arches)** — AICore is the producer of record and writes
+directly into the rotating `ChipSwimlaneAicoreTaskBuffer`, so there is no
+staging ring. What is fixed is the *head slot*:
+`KernelArgs::chip_swimlane_aicore_rotation_table[block_idx]` points at that
+core's `ChipSwimlaneActiveHead`, and AICore dcci-polls it per task, picking up
+a new `current_buf_ptr` whenever AICPU bumps `current_buf_seq`. See
+[chip-swimlane-profiling.md §5.1](chip-swimlane-profiling.md#51-common-interfaces)
+for the rotation protocol.
+
+Either way, flipping is fully internal to the collector's device-side commit
+path and never crosses into Handshake.
 
 Everything else — Module concept contract, alloc policy
 (drain-shard top-up + proactive replenish), `kIdleTimeoutSec` / `kSubsystemName`
