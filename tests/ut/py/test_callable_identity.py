@@ -38,6 +38,7 @@ from simpler.callable_identity import (
     validate_hashid,
 )
 from simpler.orchestrator import Orchestrator
+from simpler.remote_l3_limits import MAX_FRAME_BYTES
 from simpler.remote_l3_protocol import (
     CallableKind,
     ChipCallableBlobLocation,
@@ -2884,7 +2885,7 @@ def test_initial_mpi_direct_register_rollback_aborts_only_uncommitted_workers():
             return _FakeRemoteControlResult(worker_id)
 
     worker = Worker(level=4, num_sub_workers=0)
-    hub = worker_mod._MpiDirectTransportHub(1024)
+    hub = worker_mod._MpiDirectTransportHub(MAX_FRAME_BYTES)
     for worker_id in range(2):
         worker._add_mpi_direct_worker(
             worker_mod._MpiDirectWorkerSpec(

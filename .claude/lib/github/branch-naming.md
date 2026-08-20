@@ -16,9 +16,9 @@ Generate branch name from commit message.
 | Sim | `sim/` |
 | CI | `support/` |
 
-1. Take the commit subject description (after `Type:`), lowercase it, replace spaces and special characters with hyphens, strip trailing hyphens.
+2. Take the commit subject description (after `Type: `), lowercase it, replace spaces and special characters with hyphens, strip trailing hyphens.
 
-2. Truncate to 50 characters.
+3. Truncate to 50 characters.
 
 ## Examples
 

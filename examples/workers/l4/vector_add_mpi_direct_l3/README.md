@@ -61,8 +61,8 @@ Any failed vector validation exits non-zero.
 
 ## Running it in CI
 
-The pod job's `pod-stage` action writes the per-machine launcher on both
-machines at one shared path and exports it as `POD_MPI_PYTHON`; the
-`test_vector_add_mpi_direct_l3.py` wrapper reads it together with `POD_LOCAL_IP`
-and the standard pod fixtures, and skips when `mpirun`, `mpi4py`, or either
+The network1 job's `network1-stage` action writes the per-machine launcher on both
+machines at one shared path and exports it as `NETWORK1_MPI_PYTHON`; the
+`test_vector_add_mpi_direct_l3.py` wrapper reads it together with `NETWORK1_LOCAL_IP`
+and the standard network1 fixtures, and skips when `mpirun`, `mpi4py`, or either
 variable is absent.
