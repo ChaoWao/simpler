@@ -23,6 +23,7 @@ Analysis CLIs that consume these outputs are documented in
 | -------- | -------------- |
 | [L2 Timing](l2-timing.md) | `host_wall` / `device_wall` / Effective / Orch / Sched breakdown from `[STRACE]` |
 | [Host runtime trace markers](host-trace.md) | The `[STRACE]` marker set emitted by the host runtime |
+| [Measuring the host_build_graph bind path](hbg-bind-measurement.md) | How to run the qwen and dsv4 decode cases for bind-segment numbers and a host swimlane |
 | [Device-side phase timing](device-phases.md) | Fixed AICPU phases and the variable-phase plan |
 | [Scheduler-Overhead Model](sched-overhead-model.md) | Is the scheduler the bottleneck, or starved — the model behind `--overhead` |
 

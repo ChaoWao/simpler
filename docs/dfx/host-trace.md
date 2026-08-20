@@ -231,7 +231,9 @@ inside its `chip.run.bind`, matched on `(pid, inv)`. Both sides are the same
 still recovers the stage's own segments from the runtime's timing log lines; where
 both are present the artifact wins, so a segment is not drawn twice. See
 [host_build_graph's profiling levels](../../src/a2a3/runtime/host_build_graph/docs/profiling_levels.md)
-for what that runtime records.
+for what that runtime records, and
+[hbg-bind-measurement.md](hbg-bind-measurement.md) for the recipe that produces
+both the log and the artifact on a real decode network.
 
 **One exception, because a K-deep pipeline is not K threads.** The direct-chip
 lane drives prepare(N+1) and finalize(N) from the *same* OS thread, so a 40-run
