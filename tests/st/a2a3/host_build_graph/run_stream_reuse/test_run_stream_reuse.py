@@ -107,7 +107,6 @@ class TestRunStreamReuseHbg(SceneTestCase):
         {
             "name": "repeated_runs",
             "platforms": ["a2a3", "a2a3sim"],
-            "config": {"block_dim": 3},
             "params": {},
         },
     ]
@@ -181,7 +180,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
         args, output_names = _build_l2_ref_args(test_args, self.CALLABLE["orchestration"]["signature"], worker)
         golden_args = test_args.clone()
         self.compute_golden(golden_args, params, subtract=subtract)
-        worker.run(handle, args, config=self._build_config(self.CASES[0]["config"]))
+        worker.run(handle, args, config=self._build_config(self.CASES[0].get("config", {})))
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     # The st_worker fixture is shared by every test in this class, and so is the
@@ -205,7 +204,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
             chip_args,
             slot_id,
             generation,
-            config=self._build_config(self.CASES[0]["config"]),
+            config=self._build_config(self.CASES[0].get("config", {})),
         )
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 

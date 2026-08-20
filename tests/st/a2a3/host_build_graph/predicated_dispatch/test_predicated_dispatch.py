@@ -85,6 +85,8 @@ class TestPredicatedDispatch(SceneTestCase):
         ],
     }
 
+    # One scheduler owns every core, so both cases isolate predicate evaluation
+    # and task retirement from cross-scheduler routing.
     CASES = [
         {
             "name": "PredicateFalseSkips",

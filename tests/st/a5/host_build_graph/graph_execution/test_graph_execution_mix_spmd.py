@@ -57,7 +57,6 @@ class TestGraphExecutionMixSpmdHostBuildGraphA5(SceneTestCase):
         {
             "name": "record_then_replay_mix_spmd",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]

@@ -54,6 +54,8 @@ class TestHeapEmptyRingRebase(SceneTestCase):
         ],
     }
 
+    # One scheduler owns every core, so both scopes drain under the same
+    # scheduler topology while only the ring-1 heap capacity forces the rebase.
     CASES = [
         {
             "name": "EmptyRingRebase",

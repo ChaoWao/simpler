@@ -53,13 +53,11 @@ class TestGraphExecutionHostBuildGraphA5(SceneTestCase):
             "name": "record_then_replay_1d",
             "platforms": ["a5sim", "a5"],
             "manual": ["a5sim"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
             "params": {"shape": (128 * 128,)},
         },
         {
             "name": "record_then_replay_2d",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
             "params": {"shape": (128 * 128, 1)},
         },
     ]

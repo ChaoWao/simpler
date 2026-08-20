@@ -111,7 +111,6 @@ class TestGraphPredicatedDispatchA5(SceneTestCase):
         {
             "name": "PredicateAcrossGraphReplays",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]

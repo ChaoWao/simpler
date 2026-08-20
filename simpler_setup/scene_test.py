@@ -28,6 +28,7 @@ import logging
 import os
 import platform as host_platform
 import sys
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import IntEnum
@@ -47,6 +48,9 @@ from .scene_test_cache import (
 logger = logging.getLogger(__name__)
 
 _compile_cache: dict[tuple, object] = {}
+
+_CASE_CONFIG_KEYS = frozenset({"aicpu_thread_num", "runtime_env", "device_count", "num_sub_workers"})
+_RUNTIME_ENV_KEYS = frozenset({"ring_task_window", "ring_heap", "ring_dep_pool"})
 
 
 class _DiagnosticOptions(NamedTuple):
@@ -1356,6 +1360,41 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
 # ---------------------------------------------------------------------------
 
 
+def _validate_case_configs(cls: type) -> None:
+    """Validate the framework-owned configuration mappings on a scene-test class."""
+    for index, case in enumerate(getattr(cls, "CASES", ())):
+        if not isinstance(case, Mapping):
+            raise TypeError(f"{cls.__name__}.CASES[{index}] must be a mapping, got {type(case).__name__}")
+
+        case_name = case.get("name", f"index {index}")
+        config = case.get("config", {})
+        if not isinstance(config, Mapping):
+            raise TypeError(
+                f"{cls.__name__}.CASES[{index}] ({case_name!r}) config must be a mapping, got {type(config).__name__}"
+            )
+
+        unknown_config = sorted(set(config) - _CASE_CONFIG_KEYS)
+        if unknown_config:
+            raise ValueError(
+                f"{cls.__name__}.CASES[{index}] ({case_name!r}) config has unknown keys: "
+                f"{', '.join(unknown_config)}; allowed keys: {', '.join(sorted(_CASE_CONFIG_KEYS))}"
+            )
+
+        runtime_env = config.get("runtime_env", {})
+        if not isinstance(runtime_env, Mapping):
+            raise TypeError(
+                f"{cls.__name__}.CASES[{index}] ({case_name!r}) config.runtime_env must be a mapping, "
+                f"got {type(runtime_env).__name__}"
+            )
+
+        unknown_runtime_env = sorted(set(runtime_env) - _RUNTIME_ENV_KEYS)
+        if unknown_runtime_env:
+            raise ValueError(
+                f"{cls.__name__}.CASES[{index}] ({case_name!r}) config.runtime_env has unknown keys: "
+                f"{', '.join(unknown_runtime_env)}; allowed keys: {', '.join(sorted(_RUNTIME_ENV_KEYS))}"
+            )
+
+
 def scene_test(level: int | SceneTestLevel, runtime: str):
     """Decorator marking a SceneTestCase with level and runtime.
 
@@ -1364,6 +1403,7 @@ def scene_test(level: int | SceneTestLevel, runtime: str):
     level_decorator = scene_level(level)
 
     def decorator(cls):
+        _validate_case_configs(cls)
         level_decorator(cls)
         cls._st_runtime = runtime
         cls_dir = Path(inspect.getfile(cls)).parent

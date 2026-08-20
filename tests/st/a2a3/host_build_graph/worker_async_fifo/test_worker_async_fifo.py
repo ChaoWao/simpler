@@ -169,7 +169,7 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
         {
             "name": "whole_run_fifo",
             "platforms": ["a2a3"],
-            "config": {"device_count": 1, "num_sub_workers": 1, "aicpu_thread_num": 4},
+            "config": {"device_count": 1, "num_sub_workers": 1},
             "params": {},
         },
     ]

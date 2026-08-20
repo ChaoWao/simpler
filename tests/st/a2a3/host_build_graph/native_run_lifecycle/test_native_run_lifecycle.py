@@ -54,7 +54,6 @@ class TestNativeRunLifecycle(SceneTestCase):
         {
             "name": "phase_split_preserves_blocking_compatibility",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {"a": 2.0, "b": 3.0},
         }
     ]
@@ -132,7 +131,7 @@ class TestNativeRunLifecycle(SceneTestCase):
     ):
         del rounds, skip_golden, enable_chip_swimlane, enable_dump_args
         del enable_pmu, enable_dep_gen, enable_scope_stats, output_prefix
-        config = self._build_config(case["config"])
+        config = self._build_config(case.get("config", {}))
         chip_worker = worker._chip_worker
         assert chip_worker is not None
         supports_concurrent_prepare = bool(chip_worker._impl.supports_concurrent_native_prepare)
@@ -176,7 +175,7 @@ class TestNativeRunLifecycle(SceneTestCase):
             # while its shared memory is still mapped, so a collector retained by
             # an abandoned run makes the next prepare on this runner fail.
             with tempfile.TemporaryDirectory(prefix="simpler-abandon-diagnostics-") as abandon_dir:
-                abandon_config = self._build_config(case["config"])
+                abandon_config = self._build_config(case.get("config", {}))
                 abandon_config.enable_scope_stats = True
                 abandon_config.output_prefix = abandon_dir
                 abandon_args = self.generate_args(case["params"])
@@ -273,7 +272,7 @@ class TestNativeRunLifecycle(SceneTestCase):
                 _compare_outputs(successor_args, successor_golden, successor_outputs, self.RTOL, self.ATOL)
 
                 with tempfile.TemporaryDirectory(prefix="simpler-native-diagnostics-") as output_dir:
-                    diagnostic_config = self._build_config(case["config"])
+                    diagnostic_config = self._build_config(case.get("config", {}))
                     diagnostic_config.enable_dep_gen = True
                     diagnostic_config.output_prefix = output_dir
 

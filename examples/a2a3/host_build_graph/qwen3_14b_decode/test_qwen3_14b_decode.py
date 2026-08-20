@@ -53,7 +53,6 @@ class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
             "name": "GraphExecutionBatch16Seq3500",
             "platforms": ["a2a3"],
             "manual": True,
-            "config": {"aicpu_thread_num": 4, "block_dim": 0},
             "params": {"seed": 1234, "seq_len": 3500},
         },
     ]
