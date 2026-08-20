@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+# ruff: noqa: PLC0415
 """Unit tests for neutral comm-provider values and typed errors."""
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from simpler.comm_provider import (
     POSIX_SHM_TOKEN_MAX_BYTES,
     DeviceAllocationTarget,
     HostAllocationTarget,
+    ImportCapability,
     PosixShmImport,
     ProviderCleanupFailure,
     ProviderPartResourceState,
@@ -34,12 +36,13 @@ from simpler.comm_provider import (
     RegionAllocationError,
     RegionAllocationResult,
     RegionAllocationSpec,
+    RegionCleanupCause,
     RegionControlError,
     RegionControlErrorKind,
-    RegionCleanupCause,
     RegionEnvironmentKind,
     RegionExportDescriptor,
     RegionOperationKind,
+    RegionPartAllocation,
     RegionPartAllocationSpec,
     RegionPartExportDescriptor,
     RegionPartKind,
@@ -360,7 +363,7 @@ class FakeRegionPartAllocation:
         part: RegionPartKind,
         spec: RegionPartAllocationSpec,
         *,
-        world: "FakeShellWorld",
+        world: FakeShellWorld,
         local_base: int,
         shm_name: str,
         mapping_bytes: int | None = None,
@@ -382,7 +385,7 @@ class FakeRegionPartAllocation:
         self.release_step_failures: list[ProviderCleanupFailure] = []
         self._local_base = local_base
         self._mapping_bytes = spec.logical_bytes if mapping_bytes is None else mapping_bytes
-        self._import_capability: object = PosixShmImport(shm_name=shm_name)
+        self._import_capability: ImportCapability = PosixShmImport(shm_name=shm_name)
 
     def _raise_configured(self, spec: BaseException | type[BaseException] | None) -> None:
         if spec is None:
@@ -396,9 +399,7 @@ class FakeRegionPartAllocation:
         self.world.record(self.part, "materialize")
         if self.release_count != 0:
             self.world.materialize_called_release = True
-        self.world.constructed_at_first_materialize.setdefault(
-            self.part, tuple(self.world.constructed_parts)
-        )
+        self.world.constructed_at_first_materialize.setdefault(self.part, tuple(self.world.constructed_parts))
         self._raise_configured(self.fail_materialize)
         self.materialized = True
         self.world.side_effects.append((self.part, "materialize"))
@@ -416,7 +417,7 @@ class FakeRegionPartAllocation:
         self._raise_configured(self.fail_mapping_bytes)
         return self._mapping_bytes
 
-    def import_capability(self) -> object:
+    def import_capability(self) -> ImportCapability:
         self.calls.append("import_capability")
         self.world.record(self.part, "import_capability")
         if not self.materialized:
@@ -495,7 +496,7 @@ class FakeShellFactory:
         context: RegionAllocationContext,
         part: RegionPartKind,
         spec: RegionPartAllocationSpec,
-    ) -> FakeRegionPartAllocation:
+    ) -> RegionPartAllocation:
         del context
         self.world.record(part, "construct")
         if part in self.fail_construct:
@@ -891,6 +892,7 @@ def test_sim_posix_store_creates_two_distinct_named_objects_and_zeros_only_count
         try:
             assert payload_shm.size == 64
             assert counter_shm.size == 8
+            assert counter_shm.buf is not None
             assert bytes(counter_shm.buf[:8]) == b"\x00" * 8
             payload_view = store.local_view(result.provider_resource_id, RegionPartKind.PAYLOAD)
             counter_view = store.local_view(result.provider_resource_id, RegionPartKind.COUNTER)
@@ -909,6 +911,7 @@ def test_sim_posix_collision_does_not_open_or_unlink_the_existing_object():
     token = _generate_posix_shm_token()
     existing = SharedMemory(name=_posix_shm_create_name(token), create=True, size=8)
     try:
+        assert existing.buf is not None
         existing.buf[:8] = b"KEEPKEEP"
         shell = SimPosixShmAllocation(
             _sim_context(),
@@ -922,6 +925,7 @@ def test_sim_posix_collision_does_not_open_or_unlink_the_existing_object():
         assert shell.release_once() is None
         still_there = SharedMemory(name=_posix_shm_create_name(token))
         try:
+            assert still_there.buf is not None
             assert bytes(still_there.buf[:8]) == b"KEEPKEEP"
         finally:
             still_there.close()
@@ -1447,4 +1451,3 @@ def test_closed_dispatcher_routes_onboard_vmm_window_to_vmm_allocation():
     assert isinstance(payload, VmmAllocation)
     assert isinstance(sim, SimPosixShmAllocation)
     assert payload.registry_handle is None
-

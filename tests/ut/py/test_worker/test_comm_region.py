@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+# ruff: noqa: PLC0415
 """Unit tests for the private region materializer."""
 
 import dataclasses
@@ -450,6 +451,8 @@ class _FakeNativeWorker:
 
         req_shm = SharedMemory(name=request_shm_name)
         reply_shm = SharedMemory(name=reply_shm_name)
+        assert req_shm.buf is not None
+        assert reply_shm.buf is not None
         req_buf = req_shm.buf
         reply_buf = reply_shm.buf
         try:
@@ -509,7 +512,7 @@ def region_worker(monkeypatch):
         fail_release: bool = False,
         fail_first_import: bool = False,
         fail_second_import: bool = False,
-        allocate_error: BaseException | None = None,
+        allocate_error: Optional[BaseException] = None,
         mutate_success=None,
         device_ids=(8, 9),
     ):
@@ -556,6 +559,10 @@ def test_worker_materializes_region_instance_and_closes_single_region(region_wor
     assert instance.worker_id == 1
     assert instance._payload_mapping is leases[0]
     assert instance._counter_mapping is leases[1]
+    assert instance._payload_mapping is not None
+    assert instance._counter_mapping is not None
+    assert instance._payload_part is not None
+    assert instance._counter_part is not None
     assert instance._payload_mapping is not instance._counter_mapping
     assert instance._payload_mapping.handle != instance._counter_mapping.handle
     assert instance._payload_part.span == RegionPartSpan(offset=0, nbytes=64)
@@ -941,6 +948,8 @@ def test_successful_close_then_materialize_and_close_again(region_worker):
 def test_committed_local_base_zero_is_not_treated_as_absent(region_worker):
     worker, _calls, _leases = region_worker()
     instance = _materialize_default_region(worker)
+    assert instance._payload_part is not None
+    assert instance._counter_part is not None
     assert instance._payload_part.span.offset == 0
     assert instance._counter_part.span.offset == 0
     assert instance.state is RegionInstanceState.LIVE

@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+# ruff: noqa: PLC0415, E402
 """Unit tests for Worker (Python L3 wrapper over _Worker).
 
 Tests use SubWorker (fork/shm) as the only worker type — no NPU device required.
@@ -73,6 +74,8 @@ def _native_control_region_release(recorder, worker_id, request_shm_name, reply_
 
     req_shm = SharedMemory(name=request_shm_name)
     reply_shm = SharedMemory(name=reply_shm_name)
+    assert req_shm.buf is not None
+    assert reply_shm.buf is not None
     req_buf = req_shm.buf
     reply_buf = reply_shm.buf
     try:
@@ -89,6 +92,7 @@ def _native_control_region_release(recorder, worker_id, request_shm_name, reply_
         del reply_buf
         req_shm.close()
         reply_shm.close()
+
 
 from ._harness import chip_callable, fake_chip_l3, requires_sim_binaries
 
@@ -4165,7 +4169,7 @@ class TestRunHandle:
         resources.worker_chip_regions.append(region)
         worker._live_worker_chip_regions.append(region)
         instance = FakeInstance()
-        worker._region_instance_registry.track(instance, resources)
+        worker._region_instance_registry.track(cast(Any, instance), resources)
         handle = RunHandle(worker, 1, (), resources)
         worker._accepted_run_handles.add(handle)
 

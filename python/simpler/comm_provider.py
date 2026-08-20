@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from multiprocessing.shared_memory import SharedMemory
-from typing import Callable, Protocol, Union
+from typing import Any, Callable, Protocol, TypeVar, Union
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     BackendKind,
@@ -156,7 +156,10 @@ def _require_int32(name: str, value: object) -> int:
     return number
 
 
-def _require_enum(enum_cls: type[IntEnum] | type[Enum], value: object, name: str):
+_EnumT = TypeVar("_EnumT", bound=Enum)
+
+
+def _require_enum(enum_cls: type[_EnumT], value: object, name: str) -> _EnumT:
     try:
         return enum_cls(value)
     except ValueError as exc:
@@ -422,7 +425,7 @@ class RegionProviderError(Exception):
 class RegionControlError(RegionProviderError):
     def __init__(
         self,
-        kind: RegionControlErrorKind,
+        kind: RegionControlErrorKind | int,
         message: str = "",
         *,
         failed_part: RegionPartKind | int = RegionPartKind.INVALID,
@@ -486,10 +489,7 @@ class RegionPartAllocation(Protocol):
     def release_once(self) -> ProviderCleanupFailure | None: ...
 
 
-ShellFactory = Callable[
-    [RegionAllocationContext, RegionPartKind, RegionPartAllocationSpec],
-    RegionPartAllocation,
-]
+ShellFactory = Callable[..., Any]
 
 
 def _generate_posix_shm_token() -> str:
@@ -504,8 +504,8 @@ def _posix_shm_create_name(token: str) -> str:
 
 
 def _unlink_posix_shm_token(token: str) -> None:
-    import _posixshmem
-    from multiprocessing import resource_tracker
+    import _posixshmem  # noqa: PLC0415
+    from multiprocessing import resource_tracker  # noqa: PLC0415
 
     name = token if token.startswith("/") else f"/{token}"
     try:
@@ -522,8 +522,15 @@ def _unlink_posix_shm_token(token: str) -> None:
         pass
 
 
+def _require_shm_buf(shm: SharedMemory) -> memoryview:
+    buf = shm.buf
+    if buf is None:
+        raise RuntimeError("shared memory mapping is missing")
+    return buf
+
+
 def _shm_local_base(shm: SharedMemory) -> int:
-    exported = ctypes.c_char.from_buffer(shm.buf)
+    exported = ctypes.c_char.from_buffer(_require_shm_buf(shm))
     try:
         return ctypes.addressof(exported)
     finally:
@@ -540,7 +547,7 @@ class SimPosixShmAllocation:
         spec: RegionPartAllocationSpec,
         *,
         candidate_name: str | None = None,
-        shm_cls: type[SharedMemory] = SharedMemory,
+        shm_cls: Any = SharedMemory,
     ) -> None:
         del context
         self._part = _require_part(part)
@@ -614,7 +621,7 @@ class SimPosixShmAllocation:
         if end > self._spec.logical_bytes:
             raise ValueError("zero_bytes range exceeds logical_bytes")
         assert self._shm is not None
-        self._shm.buf[offset:end] = b"\x00" * nbytes
+        _require_shm_buf(self._shm)[offset:end] = b"\x00" * nbytes
 
     def release_once(self) -> ProviderCleanupFailure | None:
         self._release_once_count += 1
@@ -976,9 +983,7 @@ class ProviderRegionStore:
                 del self._resources[resource_id]
             else:
                 self._state = ProviderRegionStoreState.CLOSE_FAILED
-            error = self._allocation_error(
-                primary, resource_id, stage.part, stage.operation, debt=not complete
-            )
+            error = self._allocation_error(primary, resource_id, stage.part, stage.operation, debt=not complete)
             raise error from primary
 
     def describe(self, provider_resource_id: int) -> RegionExportDescriptor:
@@ -1052,9 +1057,7 @@ class ProviderRegionStore:
                     results.append(self._incomplete_result(resource))
             else:
                 results.append(self._incomplete_result(resource))
-        self._state = (
-            ProviderRegionStoreState.CLOSE_FAILED if self._resources else ProviderRegionStoreState.CLOSED
-        )
+        self._state = ProviderRegionStoreState.CLOSE_FAILED if self._resources else ProviderRegionStoreState.CLOSED
         return tuple(results)
 
     def _require_open(self) -> None:
@@ -1098,9 +1101,7 @@ class ProviderRegionStore:
             )
         return resource
 
-    def _freeze_descriptor(
-        self, resource: ProviderRegionResource, stage: _AllocateStage
-    ) -> RegionExportDescriptor:
+    def _freeze_descriptor(self, resource: ProviderRegionResource, stage: _AllocateStage) -> RegionExportDescriptor:
         exports: dict[RegionPartKind, RegionPartExportDescriptor] = {}
         for kind in REGION_PARTS:
             stage.part = kind

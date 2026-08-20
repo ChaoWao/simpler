@@ -354,9 +354,7 @@ class RegionInstanceRegistry:
             raise errors[0]
 
     def _iter_run(self, run_scope: Any) -> tuple[RegionInstance, ...]:
-        return tuple(
-            instance for key, instance in self._instances.items() if self._run_scopes[key] is run_scope
-        )
+        return tuple(instance for key, instance in self._instances.items() if self._run_scopes[key] is run_scope)
 
     def _settle(self, instance: RegionInstance) -> None:
         if id(instance) not in self._instances:
@@ -545,18 +543,7 @@ class RegionInstance:
         )
         self._state = RegionInstanceState.CLOSE_FAILED
 
-    def _close_owned(self, *, poison_on_error: bool) -> None:
-        if self._state is RegionInstanceState.CLOSED:
-            return
-        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
-            raise self._cleanup_error
-        if self._close_attempted:
-            if self._cleanup_error is not None:
-                raise self._cleanup_error
-            return
-        self._close_attempted = True
-        if self._state is RegionInstanceState.LIVE:
-            self._state = RegionInstanceState.CLOSING
+    def _close_mapping_leases(self) -> list[BaseException]:
         errors: list[BaseException] = []
         for lease in (self._payload_mapping, self._counter_mapping):
             if lease is None:
@@ -569,21 +556,42 @@ class RegionInstance:
                     _worker_host_mapped_region_close(int(lease))
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
-        if self._release_client is not None and int(self._provider_resource_id) != 0:
-            try:
-                result = self._release_client.release(int(self._provider_resource_id))
-                if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
-                    self._provider_release_committed = True
-                elif result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
-                    raise RuntimeError(
-                        f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
-                    )
-                elif result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
-                    raise RuntimeError(
-                        f"region instance: provider resource {self._provider_resource_id} is unknown"
-                    )
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
+        return errors
+
+    def _release_provider_resource(self) -> BaseException | None:
+        if self._release_client is None or int(self._provider_resource_id) == 0:
+            return None
+        try:
+            result = self._release_client.release(int(self._provider_resource_id))
+            if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
+                self._provider_release_committed = True
+                return None
+            if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+                raise RuntimeError(
+                    f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
+                )
+            if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
+                raise RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
+            return None
+        except BaseException as exc:  # noqa: BLE001
+            return exc
+
+    def _close_owned(self, *, poison_on_error: bool) -> None:
+        if self._state is RegionInstanceState.CLOSED:
+            return
+        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
+            raise self._cleanup_error
+        if self._close_attempted:
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
+            return
+        self._close_attempted = True
+        if self._state is RegionInstanceState.LIVE:
+            self._state = RegionInstanceState.CLOSING
+        errors = self._close_mapping_leases()
+        release_error = self._release_provider_resource()
+        if release_error is not None:
+            errors.append(release_error)
         if not errors:
             self._state = RegionInstanceState.CLOSED
             return
@@ -614,7 +622,7 @@ class RegionInstance:
             raise MaterializationError(f"region instance is not live: {label}")
 
 
-def project_region_allocation_spec(plan: BackendPlan, layout: RegionLayoutSpec) -> RegionAllocationSpec:
+def project_region_allocation_spec(plan: object, layout: object) -> RegionAllocationSpec:
     if not isinstance(plan, BackendPlan):
         raise TypeError("project_region_allocation_spec requires a BackendPlan")
     if not isinstance(layout, RegionLayoutSpec):
@@ -752,7 +760,8 @@ def validate_committed_region_allocation(  # noqa: PLR0912
         if int(payload_cap.shareable_handle) == int(counter_cap.shareable_handle):
             raise RuntimeError("committed VMM shareable handles must be distinct")
         if expected_device_id is not None and (
-            int(payload_cap.device_id) != int(expected_device_id) or int(counter_cap.device_id) != int(expected_device_id)
+            int(payload_cap.device_id) != int(expected_device_id)
+            or int(counter_cap.device_id) != int(expected_device_id)
         ):
             raise RuntimeError("committed VMM device_id is outside this worker's device namespace")
     elif expected_capability_type is PosixShmImport:

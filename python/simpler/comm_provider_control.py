@@ -17,7 +17,7 @@ from __future__ import annotations
 import struct
 from enum import IntEnum
 from multiprocessing.shared_memory import SharedMemory
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
 
@@ -48,9 +48,7 @@ PROVIDER_REGION_CTRL_MAGIC = 0x50524354
 PROVIDER_REGION_CTRL_ABI_MAJOR = 1
 PROVIDER_REGION_CTRL_ABI_MINOR = 0
 PROVIDER_REGION_CTRL_MAGIC_VERSION = (
-    (PROVIDER_REGION_CTRL_MAGIC << 32)
-    | (PROVIDER_REGION_CTRL_ABI_MAJOR << 16)
-    | PROVIDER_REGION_CTRL_ABI_MINOR
+    (PROVIDER_REGION_CTRL_MAGIC << 32) | (PROVIDER_REGION_CTRL_ABI_MAJOR << 16) | PROVIDER_REGION_CTRL_ABI_MINOR
 )
 
 ALLOCATE_REQUEST_BYTES = 48
@@ -170,7 +168,20 @@ def _require_magic(magic: int) -> None:
         raise RegionControlError(RegionControlErrorKind.BAD_MAGIC_VERSION, "unsupported provider control version")
 
 
-def _require_enum(enum_cls: type[IntEnum], value: int, *, allow_zero: bool = False) -> IntEnum:
+_IntEnumT = TypeVar("_IntEnumT", bound=IntEnum)
+
+
+def _require_shm_buf(shm: SharedMemory) -> memoryview:
+    buf = shm.buf
+    if buf is None:
+        raise RegionControlError(
+            RegionControlErrorKind.INTERNAL_INVARIANT,
+            "shared memory mapping is missing",
+        )
+    return buf
+
+
+def _require_enum(enum_cls: type[_IntEnumT], value: int, *, allow_zero: bool = False) -> _IntEnumT:
     try:
         typed = enum_cls(value)
     except ValueError as exc:
@@ -227,7 +238,9 @@ def decode_allocate_request(buf: memoryview | bytes | bytearray) -> RegionAlloca
     if int(request_bytes) != ALLOCATE_REQUEST_BYTES:
         raise RegionControlError(RegionControlErrorKind.BAD_MESSAGE_SIZE, "allocate request_bytes must be 48")
     if int(reserved20) != 0 or int(reserved40) != 0:
-        raise RegionControlError(RegionControlErrorKind.RESERVED_NONZERO, "allocate request reserved fields must be zero")
+        raise RegionControlError(
+            RegionControlErrorKind.RESERVED_NONZERO, "allocate request reserved fields must be zero"
+        )
     try:
         return RegionAllocationSpec(
             payload=RegionPartAllocationSpec(
@@ -420,7 +433,9 @@ def encode_allocate_success_reply(
     view = _as_memoryview(buf, ALLOCATE_REPLY_BYTES, writable=True)
     validate_independent_local_views(payload_view, counter_view)
     _zero_reply(view)
-    _pack_allocate_header(view, resource_id=result.provider_resource_id, error_kind=0, failed_part=0, failed_operation=0, debt=0)
+    _pack_allocate_header(
+        view, resource_id=result.provider_resource_id, error_kind=0, failed_part=0, failed_operation=0, debt=0
+    )
     _encode_export_part(view, ALLOCATE_PAYLOAD_EXPORT_OFFSET, result.export_descriptor.payload)
     _encode_export_part(view, ALLOCATE_COUNTER_EXPORT_OFFSET, result.export_descriptor.counter)
     _encode_local_view(view, ALLOCATE_PAYLOAD_VIEW_OFFSET, payload_view)
@@ -456,19 +471,33 @@ def encode_allocate_allocation_error_reply(buf: memoryview | bytearray, error: R
 
 def decode_allocate_reply(
     buf: memoryview | bytes | bytearray,
-) -> tuple[AllocateReplyTag, RegionAllocationResult | None, RegionPartLocalView | None, RegionPartLocalView | None, RegionControlError | RegionAllocationError | None]:
+) -> tuple[
+    AllocateReplyTag,
+    RegionAllocationResult | None,
+    RegionPartLocalView | None,
+    RegionPartLocalView | None,
+    RegionControlError | RegionAllocationError | None,
+]:
     view = _as_memoryview(buf, ALLOCATE_REPLY_BYTES, writable=False)
     tag = _require_enum(AllocateReplyTag, _acquire_tag(view), allow_zero=True)
     if tag is AllocateReplyTag.EMPTY:
-        raise RegionControlProtocolError(RegionControlErrorKind.INVALID_FIELD_VALUE, "allocate reply is missing commit tag")
-    magic, reply_bytes, _tag, resource_id, error_kind, failed_part, failed_operation, debt = _ALLOCATE_REPLY_HEADER.unpack_from(
-        view, 0
+        raise RegionControlProtocolError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE, "allocate reply is missing commit tag"
+        )
+    magic, reply_bytes, _tag, resource_id, error_kind, failed_part, failed_operation, debt = (
+        _ALLOCATE_REPLY_HEADER.unpack_from(view, 0)
     )
     _require_magic(int(magic))
     if int(reply_bytes) != ALLOCATE_REPLY_BYTES:
         raise RegionControlError(RegionControlErrorKind.BAD_MESSAGE_SIZE, "allocate reply_bytes must be 232")
     if tag is AllocateReplyTag.SUCCESS:
-        if int(resource_id) == 0 or int(error_kind) != 0 or int(failed_part) != 0 or int(failed_operation) != 0 or int(debt) != 0:
+        if (
+            int(resource_id) == 0
+            or int(error_kind) != 0
+            or int(failed_part) != 0
+            or int(failed_operation) != 0
+            or int(debt) != 0
+        ):
             raise RegionControlError(
                 RegionControlErrorKind.INVALID_FIELD_VALUE,
                 "SUCCESS requires a resource id and zero error fields",
@@ -503,7 +532,9 @@ def decode_allocate_reply(
                 "ALLOCATION_ERROR requires a provisional resource id",
             )
         if int(debt) not in (0, 1):
-            raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "cleanup debt remaining must be 0 or 1")
+            raise RegionControlError(
+                RegionControlErrorKind.INVALID_FIELD_VALUE, "cleanup debt remaining must be 0 or 1"
+            )
         kind = _require_enum(RegionControlErrorKind, int(error_kind))
         if kind not in _ALLOCATION_ERROR_KINDS:
             raise RegionControlError(
@@ -642,11 +673,57 @@ def _failure_from_entry(part: RegionPartKind, operation: int, cause: int) -> Pro
     return ProviderCleanupFailure(part=part, backend_operation=typed_op, typed_cause=typed_cause)  # type: ignore[arg-type]
 
 
+def _require_zero_release_side_fields(
+    mask: int,
+    payload_op: int,
+    payload_cause: int,
+    counter_op: int,
+    counter_cause: int,
+    message: str,
+) -> None:
+    if mask != 0 or payload_op != 0 or payload_cause != 0 or counter_op != 0 or counter_cause != 0:
+        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, message)
+
+
+def _decode_cleanup_incomplete_failures(
+    mask: int,
+    payload_op: int,
+    payload_cause: int,
+    counter_op: int,
+    counter_cause: int,
+) -> list[ProviderCleanupFailure]:
+    if mask & ~(FAILURE_MASK_PAYLOAD | FAILURE_MASK_COUNTER):
+        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "failure mask has unknown bits")
+    if mask == 0:
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE,
+            "CLEANUP_INCOMPLETE requires a nonzero failure mask",
+        )
+    failures: list[ProviderCleanupFailure] = []
+    if mask & FAILURE_MASK_PAYLOAD:
+        failures.append(_failure_from_entry(RegionPartKind.PAYLOAD, payload_op, payload_cause))
+    elif payload_op != 0 or payload_cause != 0:
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE,
+            "unselected PAYLOAD failure entry must be zero",
+        )
+    if mask & FAILURE_MASK_COUNTER:
+        failures.append(_failure_from_entry(RegionPartKind.COUNTER, counter_op, counter_cause))
+    elif counter_op != 0 or counter_cause != 0:
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE,
+            "unselected COUNTER failure entry must be zero",
+        )
+    return failures
+
+
 def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderReleaseResult | RegionControlError:
     view = _as_memoryview(buf, RELEASE_REPLY_BYTES, writable=False)
     tag = _require_enum(ReleaseReplyTag, _acquire_tag(view), allow_zero=True)
     if tag is ReleaseReplyTag.EMPTY:
-        raise RegionControlProtocolError(RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply is missing commit tag")
+        raise RegionControlProtocolError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply is missing commit tag"
+        )
     (
         magic,
         reply_bytes,
@@ -663,20 +740,25 @@ def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderRelease
     if int(reply_bytes) != RELEASE_REPLY_BYTES:
         raise RegionControlError(RegionControlErrorKind.BAD_MESSAGE_SIZE, "release reply_bytes must be 48")
     if int(resource_id) == 0:
-        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply resource id must be nonzero")
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply resource id must be nonzero"
+        )
     if tag is ReleaseReplyTag.RELEASE_ERROR:
-        if int(mask) != 0 or int(payload_op) != 0 or int(payload_cause) != 0 or int(counter_op) != 0 or int(counter_cause) != 0:
-            raise RegionControlError(
-                RegionControlErrorKind.INVALID_FIELD_VALUE,
-                "RELEASE_ERROR requires a zero failure mask and entries",
-            )
+        _require_zero_release_side_fields(
+            int(mask),
+            int(payload_op),
+            int(payload_cause),
+            int(counter_op),
+            int(counter_cause),
+            "RELEASE_ERROR requires a zero failure mask and entries",
+        )
         kind = _require_enum(RegionControlErrorKind, int(error_kind))
         if kind not in _RELEASE_ERROR_KINDS:
             raise RegionControlError(
                 RegionControlErrorKind.INVALID_ENUM_VALUE,
                 "RELEASE_ERROR kind is not allowed",
             )
-        return RegionControlError(kind)  # type: ignore[arg-type]
+        return RegionControlError(kind)
     if int(error_kind) != 0:
         raise RegionControlError(
             RegionControlErrorKind.INVALID_FIELD_VALUE,
@@ -687,35 +769,25 @@ def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderRelease
         ReleaseReplyTag.ALREADY_GONE: ProviderReleaseStatus.ALREADY_GONE,
         ReleaseReplyTag.UNKNOWN_RESOURCE: ProviderReleaseStatus.UNKNOWN_RESOURCE,
         ReleaseReplyTag.CLEANUP_INCOMPLETE: ProviderReleaseStatus.CLEANUP_INCOMPLETE,
-    }.get(tag)  # type: ignore[arg-type]
+    }.get(tag)
     if status is None:
         raise RegionControlError(RegionControlErrorKind.INVALID_ENUM_VALUE, f"unknown release reply tag {int(tag)}")
     failures: list[ProviderCleanupFailure] = []
     if status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
-        if int(mask) & ~ (FAILURE_MASK_PAYLOAD | FAILURE_MASK_COUNTER):
-            raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "failure mask has unknown bits")
-        if int(mask) == 0:
-            raise RegionControlError(
-                RegionControlErrorKind.INVALID_FIELD_VALUE,
-                "CLEANUP_INCOMPLETE requires a nonzero failure mask",
-            )
-        if int(mask) & FAILURE_MASK_PAYLOAD:
-            failures.append(_failure_from_entry(RegionPartKind.PAYLOAD, int(payload_op), int(payload_cause)))
-        elif int(payload_op) != 0 or int(payload_cause) != 0:
-            raise RegionControlError(
-                RegionControlErrorKind.INVALID_FIELD_VALUE,
-                "unselected PAYLOAD failure entry must be zero",
-            )
-        if int(mask) & FAILURE_MASK_COUNTER:
-            failures.append(_failure_from_entry(RegionPartKind.COUNTER, int(counter_op), int(counter_cause)))
-        elif int(counter_op) != 0 or int(counter_cause) != 0:
-            raise RegionControlError(
-                RegionControlErrorKind.INVALID_FIELD_VALUE,
-                "unselected COUNTER failure entry must be zero",
-            )
-    elif int(mask) != 0 or int(payload_op) != 0 or int(payload_cause) != 0 or int(counter_op) != 0 or int(counter_cause) != 0:
-        raise RegionControlError(
-            RegionControlErrorKind.INVALID_FIELD_VALUE,
+        failures = _decode_cleanup_incomplete_failures(
+            int(mask),
+            int(payload_op),
+            int(payload_cause),
+            int(counter_op),
+            int(counter_cause),
+        )
+    else:
+        _require_zero_release_side_fields(
+            int(mask),
+            int(payload_op),
+            int(payload_cause),
+            int(counter_op),
+            int(counter_cause),
             "non-incomplete release replies require zero failure mask and entries",
         )
     return ProviderReleaseResult(
@@ -783,8 +855,8 @@ class ProviderAllocateClient:
     ) -> tuple[RegionAllocationResult, RegionPartLocalView, RegionPartLocalView]:
         req_shm = SharedMemory(create=True, size=ALLOCATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=ALLOCATE_REPLY_BYTES)
-        req_buf = memoryview(req_shm.buf)
-        reply_buf = memoryview(reply_shm.buf)
+        req_buf = memoryview(_require_shm_buf(req_shm))
+        reply_buf = memoryview(_require_shm_buf(reply_shm))
         self.committed_resource_id = 0
         try:
             encode_allocate_request(req_buf, spec)
@@ -796,7 +868,9 @@ class ProviderAllocateClient:
                 return result, payload_view, counter_view
             if error is not None:
                 raise error
-            raise RegionControlProtocolError(RegionControlErrorKind.INVALID_FIELD_VALUE, "allocate reply is uncommitted")
+            raise RegionControlProtocolError(
+                RegionControlErrorKind.INVALID_FIELD_VALUE, "allocate reply is uncommitted"
+            )
         finally:
             del req_buf
             del reply_buf
@@ -835,8 +909,8 @@ class ProviderReleaseClient:
     def _issue(self, provider_resource_id: int) -> ProviderReleaseResult:
         req_shm = SharedMemory(create=True, size=RELEASE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=RELEASE_REPLY_BYTES)
-        req_buf = memoryview(req_shm.buf)
-        reply_buf = memoryview(reply_shm.buf)
+        req_buf = memoryview(_require_shm_buf(req_shm))
+        reply_buf = memoryview(_require_shm_buf(reply_shm))
         try:
             encode_release_request(req_buf, provider_resource_id)
             try:

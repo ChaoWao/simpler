@@ -159,6 +159,20 @@ from .comm_endpoints import (
     at,
     parse_endpoint_path,
 )
+from .comm_provider import (
+    DeviceAllocationTarget,
+    PosixShmImport,
+    ProviderRegionStore,
+    RegionAllocationContext,
+    RegionAllocationSpec,
+    RegionEnvironmentKind,
+    RegionPartExportDescriptor,
+    VmmShareableHandleImport,
+)
+from .comm_provider_control import (
+    handle_ctrl_region_allocate,
+    handle_ctrl_region_release,
+)
 from .comm_region import (
     MaterializationContext,
     RegionInstance,
@@ -238,21 +252,6 @@ from .task_interface import (
     TaskArgs,
     _initialize_host_log,
     _Worker,
-)
-from .comm_provider import (
-    DeviceAllocationTarget,
-    PosixShmImport,
-    ProviderRegionStore,
-    RegionAllocationContext,
-    RegionAllocationError,
-    RegionAllocationSpec,
-    RegionEnvironmentKind,
-    RegionPartExportDescriptor,
-    VmmShareableHandleImport,
-)
-from .comm_provider_control import (
-    handle_ctrl_region_allocate,
-    handle_ctrl_region_release,
 )
 from .worker_chip_orch_comm import (
     WorkerChipOrchRegion,
@@ -2683,9 +2682,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     DEVICE_MALLOC/VMM_WINDOW backings this chip may materialize.
     """
     prepared = prepared if prepared is not None else set()
-    environment = (
-        RegionEnvironmentKind.SIM if str(chip_platform).endswith("sim") else RegionEnvironmentKind.ONBOARD
-    )
+    environment = RegionEnvironmentKind.SIM if str(chip_platform).endswith("sim") else RegionEnvironmentKind.ONBOARD
     provider_region_store = ProviderRegionStore(
         RegionAllocationContext(
             environment_kind=environment,
@@ -8320,11 +8317,7 @@ class Worker:
                         pass
                     resources.requires_ordered_cleanup = required_ordered_cleanup_before
                 region._expire()
-            if (
-                instance is not None
-                and instance._state is RegionInstanceState.LIVE
-                and not instance._close_attempted
-            ):
+            if instance is not None and instance._state is RegionInstanceState.LIVE and not instance._close_attempted:
                 try:
                     self._region_instance_registry.close(instance)
                 except BaseException as close_exc:  # noqa: BLE001

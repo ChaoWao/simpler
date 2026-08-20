@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+# ruff: noqa: PLC0415
 """Unit tests for the private provider-region control wire."""
 
 from __future__ import annotations
@@ -16,23 +17,18 @@ from multiprocessing.shared_memory import SharedMemory
 import pytest
 from simpler.buffer import BackendKind
 from simpler.comm_provider import (
-    DeviceAllocationTarget,
     PosixShmImport,
     ProviderCleanupFailure,
     ProviderRegionStore,
     ProviderReleaseResult,
     ProviderReleaseStatus,
-    RegionAllocationContext,
     RegionAllocationError,
     RegionAllocationResult,
-    RegionAllocationSpec,
     RegionCleanupCause,
     RegionControlError,
     RegionControlErrorKind,
-    RegionEnvironmentKind,
     RegionExportDescriptor,
     RegionOperationKind,
-    RegionPartAllocationSpec,
     RegionPartExportDescriptor,
     RegionPartKind,
     RegionPartLocalView,
@@ -71,6 +67,7 @@ from simpler.comm_provider_control import (
     handle_ctrl_region_allocate,
     handle_ctrl_region_release,
 )
+
 from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _allocation_spec, _sim_context
 
 _OLD_MAGIC = 0x4C334C3200020000
@@ -157,7 +154,9 @@ def test_allocate_success_writes_commit_tag_last(monkeypatch):
     original = control._publish_tag
 
     def _spy(view, tag):
-        body_ready.append(bytes(view[ALLOCATE_PAYLOAD_EXPORT_OFFSET : ALLOCATE_PAYLOAD_EXPORT_OFFSET + 4]) != b"\x00\x00\x00\x00")
+        body_ready.append(
+            bytes(view[ALLOCATE_PAYLOAD_EXPORT_OFFSET : ALLOCATE_PAYLOAD_EXPORT_OFFSET + 4]) != b"\x00\x00\x00\x00"
+        )
         original(view, tag)
 
     monkeypatch.setattr(control, "_publish_tag", _spy)
@@ -296,8 +295,12 @@ class _LoopbackMailbox:
         self.allocate_calls += 1
         req = SharedMemory(name=request_shm_name)
         reply = SharedMemory(name=reply_shm_name)
+        assert req.buf is not None
+        assert reply.buf is not None
         try:
-            handle_ctrl_region_allocate(memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES], memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES], self.store)
+            handle_ctrl_region_allocate(
+                memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES], memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES], self.store
+            )
         finally:
             req.close()
             reply.close()
@@ -307,8 +310,12 @@ class _LoopbackMailbox:
         self.release_calls += 1
         req = SharedMemory(name=request_shm_name)
         reply = SharedMemory(name=reply_shm_name)
+        assert req.buf is not None
+        assert reply.buf is not None
         try:
-            handle_ctrl_region_release(memoryview(req.buf)[:RELEASE_REQUEST_BYTES], memoryview(reply.buf)[:RELEASE_REPLY_BYTES], self.store)
+            handle_ctrl_region_release(
+                memoryview(req.buf)[:RELEASE_REQUEST_BYTES], memoryview(reply.buf)[:RELEASE_REPLY_BYTES], self.store
+            )
         finally:
             req.close()
             reply.close()
@@ -445,6 +452,7 @@ def test_allocate_client_old_version_reply_is_a_decode_failure():
             self.allocate_calls += 1
             reply = SharedMemory(name=reply_shm_name)
             try:
+                assert reply.buf is not None
                 struct.pack_into("<Q", reply.buf, 0, _OLD_MAGIC)
                 struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
             finally:
@@ -502,29 +510,3 @@ def test_allocate_client_uncommitted_reply_does_not_call_store_again():
     with pytest.raises(RegionControlProtocolError, match="commit"):
         client.allocate(_allocation_spec())
     assert mailbox.calls == 2
-
-
-def test_allocate_client_old_version_reply_is_a_decode_failure():
-    class _OldVersionMailbox:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-            del worker_id, request_shm_name
-            self.calls += 1
-            reply = SharedMemory(name=reply_shm_name)
-            try:
-                struct.pack_into("<Q", reply.buf, 0, _OLD_MAGIC)
-                struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
-            finally:
-                reply.close()
-
-        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-            raise AssertionError("release must not be called")
-
-    mailbox = _OldVersionMailbox()
-    client = ProviderAllocateClient(mailbox, 1)
-    with pytest.raises(RegionControlError) as exc_info:
-        client.allocate(_allocation_spec())
-    assert exc_info.value.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
-    assert mailbox.calls == 1

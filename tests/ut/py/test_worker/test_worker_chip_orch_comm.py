@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+# ruff: noqa: PLC0415
 
 import contextlib
 import ctypes
@@ -18,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -122,7 +123,13 @@ def test_old_create_reply_codec_and_combined_mapping_remain_deleted():
         ):
             assert legacy_name not in source
     access_header = (
-        Path(__file__).resolve().parents[4] / "src" / "common" / "platform" / "include" / "host" / "worker_chip_orch_region_access.h"
+        Path(__file__).resolve().parents[4]
+        / "src"
+        / "common"
+        / "platform"
+        / "include"
+        / "host"
+        / "worker_chip_orch_region_access.h"
     )
     assert not access_header.exists()
 
@@ -180,8 +187,12 @@ class _FakeDirectCWorker:
             payload_mapping = payload_bytes if self.mapping_bytes is None else int(self.mapping_bytes)
             counter_mapping = counter_bytes if self.mapping_bytes is None else int(self.mapping_bytes)
             if sim:
-                payload_cap: PosixShmImport | VmmShareableHandleImport = PosixShmImport(f"sim-direct-{region_id}-p")
-                counter_cap: PosixShmImport | VmmShareableHandleImport = PosixShmImport(f"sim-direct-{region_id}-c")
+                payload_cap: Union[PosixShmImport, VmmShareableHandleImport] = PosixShmImport(
+                    f"sim-direct-{region_id}-p"
+                )
+                counter_cap: Union[PosixShmImport, VmmShareableHandleImport] = PosixShmImport(
+                    f"sim-direct-{region_id}-c"
+                )
             else:
                 payload_cap = VmmShareableHandleImport(self.device_id, self.shareable_handle)
                 counter_cap = VmmShareableHandleImport(self.device_id, self.shareable_handle + 1)
@@ -1760,7 +1771,8 @@ def test_public_create_worker_chip_region_uses_admitted_w2_plan_and_two_imports(
     monkeypatch.setattr(
         worker_module,
         "_worker_host_mapped_region_import_sim",
-        lambda token, mapping_bytes, owner_token: imports.append((str(token), int(mapping_bytes))) or (100 + len(imports)),
+        lambda token, mapping_bytes, owner_token: imports.append((str(token), int(mapping_bytes)))
+        or (100 + len(imports)),
     )
     try:
         orch = Orchestrator(MagicMock(), worker)
