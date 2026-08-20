@@ -158,8 +158,8 @@ struct PTO2OrchestratorState {
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
     TaskOutputTensors alloc_tensors(const CoreTaskArgs &args);
     GraphScopeResult graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash);
-    bool graph_prepare(const GraphTaskArgs &args);
-    void graph_abort();
+    bool graph_prepare(void *recording_handle, const GraphTaskArgs &args);
+    void graph_abort(void *recording_handle);
     bool graph_end();
     void graph_commit();
     void mark_done();

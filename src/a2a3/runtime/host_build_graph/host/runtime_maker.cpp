@@ -361,6 +361,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
 // The orchestration .so exports these (PTO2 submit_task form).
 typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
+typedef void (*OrchestrationPrewarmFunc)();
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
 // of these (the entry, plus the .so's own framework_bind_runtime, which sets
@@ -793,6 +794,13 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
             dlclose(handle);
             return -1;
         }
+        void *prewarm_sym = dlsym(handle, "framework_prewarm_graph_recorders");
+        if (prewarm_sym == nullptr) {
+            LOG_ERROR("host-orch: orch .so does not export framework_prewarm_graph_recorders: %s", dlerror());
+            dlclose(handle);
+            return -1;
+        }
+        reinterpret_cast<OrchestrationPrewarmFunc>(prewarm_sym)();
         // Safe to unlink now: the handle keeps the .so mapped regardless of path.
         unlink(so_path.c_str());
         auto *eps = new HostOrchEntryPoints{};
