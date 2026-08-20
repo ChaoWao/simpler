@@ -39,6 +39,7 @@
 
 #include "call_config.h"
 #include "common/host_span.h"
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "orchestrator.h"
 #include "ring.h"
@@ -1210,13 +1211,13 @@ TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
 
     worker.dispatch(WorkerDispatch{slot, 0});
     ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
-    EXPECT_TRUE(captured_host_span("node.dispatch"));
+    EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Dispatch)));
 
     const WorkerDispatch submitted = endpoint_ptr->submitted().front();
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
     worker.progress();
     ASSERT_EQ(completed.size(), 1u);
-    EXPECT_TRUE(captured_host_span("node.complete"));
+    EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete)));
 
     worker.stop();
     allocator.shutdown();
@@ -1474,8 +1475,8 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
-    EXPECT_TRUE(captured_host_span("node.frame_submit"));
-    EXPECT_TRUE(captured_host_span("node.activate"));
+    EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit)));
+    EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate)));
     allocator.shutdown();
 }
 
@@ -2042,10 +2043,13 @@ TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleInde
     );
     orchestrator.close_run_submission(run);
 
-    ASSERT_TRUE(captured_host_span("node.submit"));
+    ASSERT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit)));
     std::ostringstream expected;
     expected << "run_id=" << run << " task_slot=" << group.task_slot << " group_index=-1 group_size=2 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("node.submit"), expected.str());
+    EXPECT_EQ(
+        captured_host_span_attrs(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit)),
+        expected.str()
+    );
 }
 
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
@@ -2515,11 +2519,14 @@ TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
 
     auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
 
-    ASSERT_TRUE(captured_host_span("node.submit"));
+    ASSERT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit)));
     std::ostringstream expected;
     expected << "run_id=" << run_id << " task_slot=" << submitted.task_slot
              << " group_index=0 group_size=1 worker_id=0 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("node.submit"), expected.str());
+    EXPECT_EQ(
+        captured_host_span_attrs(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit)),
+        expected.str()
+    );
 
     mock_worker.wait_running();
     mock_worker.complete();
