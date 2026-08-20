@@ -313,15 +313,16 @@ local child memory:  (LOCAL_CHILD, worker_id, ptr)
 Known limitation: two remote tensors that reference overlapping byte ranges
 with different `offset_begin` values do not automatically depend on each other.
 For example, a producer writing `[0, 4096)` and a consumer reading
-`[1024, 2048)` map to different dependency keys. This matches the current local
-`ptr`-based TensorMap behavior, where a subview at `base + offset` is a
-different key from `base`.
+`[1024, 2048)` map to different dependency keys.
 
-The first implementation chooses this route to keep remote scheduling behavior
-compatible with local fork/shm semantics and to avoid changing TensorMap into a
-range index as part of the transport bring-up. `offset_end`/`nbytes` remains in
-`RemoteTensorDesc` for bounds checks and for a future range-overlap TensorMap
-upgrade, but it is not part of the first dependency key.
+Local keys no longer share this limitation. A local key names the backing alone
+and each TensorMap entry carries the view's geometry, so an overlapping pair is
+ordered and a disjoint pair is not. The remote path is now the only one that
+folds an offset into the key. `offset_end`/`nbytes` remains in
+`RemoteTensorDesc` for bounds checks and is what an upgrade would turn into the
+entry's footprint once `offset` leaves the key — noting that `HOST_INLINE` pins
+`buffer_id` and `generation` to zero, so `offset` is currently the only thing
+separating two inline payloads.
 
 ## HCOMM Adapter Contract
 

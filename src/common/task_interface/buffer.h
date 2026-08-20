@@ -252,16 +252,20 @@ inline constexpr uint64_t TENSOR_EXTENT_UNREPRESENTABLE = UINT64_MAX;
 // Byte extent of a (possibly strided) view: the last addressable element, plus one element.
 // Saturates at TENSOR_EXTENT_UNREPRESENTABLE rather than wrapping, so an extent a hostile
 // shape/stride cannot express is rejected instead of comparing as a small, in-bounds value.
-// Callers that have not yet validated `r` must not trust the result for anything but a bound.
-inline uint64_t tensor_extent_bytes(const Tensor &r) {
+// Callers that have not yet validated the view must not trust the result for anything but a bound.
+inline uint64_t view_extent_bytes(const uint32_t *shapes, const uint32_t *strides, uint32_t ndims, DataType dtype) {
     uint64_t last_elem = 0;
-    for (uint32_t i = 0; i < r.ndims && i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
-        if (r.shapes[i] == 0) continue;
+    for (uint32_t i = 0; i < ndims && i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
+        if (shapes[i] == 0) continue;
         last_elem = tensor_add_sat(
-            last_elem, tensor_mul_sat(static_cast<uint64_t>(r.shapes[i] - 1), static_cast<uint64_t>(r.strides[i]))
+            last_elem, tensor_mul_sat(static_cast<uint64_t>(shapes[i] - 1), static_cast<uint64_t>(strides[i]))
         );
     }
-    return tensor_mul_sat(tensor_add_sat(last_elem, 1), get_element_size(r.dtype));
+    return tensor_mul_sat(tensor_add_sat(last_elem, 1), get_element_size(dtype));
+}
+
+inline uint64_t tensor_extent_bytes(const Tensor &r) {
+    return view_extent_bytes(r.shapes, r.strides, r.ndims, r.dtype);
 }
 
 /**
@@ -407,15 +411,187 @@ inline void validate_tensor(const Tensor &r) {
     }
 }
 
-// Do two views of the SAME backing touch a common byte? Compared as bounding ranges
-// [byte_offset, byte_offset + extent): a strided view's gaps are treated as occupied, so this is
-// conservative — it never misses a real overlap, and may report one for two interleaved views.
-// The end offsets saturate, so an unvalidated extent cannot wrap a range into a false "disjoint".
+/**
+ * Half-open byte range [begin, end) within one backing — a view's bounding box.
+ *
+ * A strided view's gaps count as occupied, so this is only a bound: `x[0:4, 0:4]` and
+ * `x[0:4, 8:12]` of one 16x16 matrix are disjoint yet their bounding ranges intersect. It is the
+ * O(1) reject stage of `tensor_overlap` below, which refines an intersection per dimension.
+ *
+ * `end` saturates at UINT64_MAX, so an extent that does not fit 64 bits cannot wrap a range into
+ * a false "disjoint". A default-constructed range spans the whole backing.
+ */
+struct TensorByteRange {
+    uint64_t begin{0};
+    uint64_t end{UINT64_MAX};
+
+    bool overlaps(const TensorByteRange &o) const { return begin < o.end && o.begin < end; }
+    bool covers(const TensorByteRange &o) const { return begin <= o.begin && o.end <= end; }
+};
+
+// The bounding range a view occupies in its backing.
+inline TensorByteRange tensor_byte_range(const Tensor &r) {
+    return TensorByteRange{r.byte_offset, tensor_add_sat(r.byte_offset, tensor_extent_bytes(r))};
+}
+
+/**
+ * How one view (`probe`) stands to another (`entry`) over the same backing.
+ *
+ * `PARTIAL` is also the answer when the pair cannot be compared exactly, so a caller may only
+ * read `NONE` as proof of disjointness — never `PARTIAL` as proof of a shared byte.
+ */
+enum class TensorOverlap : uint8_t {
+    NONE,     // provably no common byte
+    PARTIAL,  // they share a byte, or the pair is not exactly comparable
+    COVERED,  // every byte of `entry` is also a byte of `probe`
+};
+
+/**
+ * The geometry of a view inside its backing — what decides whether two views touch a common byte.
+ *
+ * `ndims == 0` is the whole-backing footprint: what a caller registers when it knows a buffer is
+ * touched but not which bytes (an allocation; a remote argument whose key already carries the
+ * offset). No valid Tensor has `ndims == 0`, so a default-constructed footprint means exactly
+ * that, and overlaps everything.
+ *
+ * The backing's identity is deliberately absent: a footprint is only ever compared against
+ * another over the SAME backing, which the caller establishes — a shared dependency key, or the
+ * identity check in `tensors_overlap`.
+ */
+struct TensorFootprint {
+    uint64_t byte_offset{0};
+    uint64_t backing_nbytes{0};
+    uint32_t shapes[MAX_TENSOR_DIMS]{};
+    uint32_t strides[MAX_TENSOR_DIMS]{};  // in elements, as on Tensor
+    uint32_t ndims{0};
+    DataType dtype{};
+
+    bool is_whole_backing() const { return ndims == 0; }
+    TensorByteRange range() const {
+        if (is_whole_backing()) return TensorByteRange{};
+        const uint64_t extent = view_extent_bytes(shapes, strides, ndims, dtype);
+        return TensorByteRange{byte_offset, tensor_add_sat(byte_offset, extent)};
+    }
+};
+
+inline TensorFootprint tensor_footprint(const Tensor &r) {
+    TensorFootprint f{};
+    f.byte_offset = r.byte_offset;
+    f.backing_nbytes = r.buffer.nbytes;
+    f.ndims = r.ndims;
+    f.dtype = r.dtype;
+    for (uint32_t i = 0; i < MAX_TENSOR_DIMS; ++i) {
+        f.shapes[i] = r.shapes[i];
+        f.strides[i] = r.strides[i];
+    }
+    return f;
+}
+
+/**
+ * Do two views of the same backing touch a common byte, and does `probe` swallow `entry` whole?
+ *
+ * Three stages, mirroring the L2 `PTO2TensorMap::check_overlap` this is the host-side counterpart
+ * of (`src/{arch}/runtime/tensormap_and_ringbuffer/runtime/pto_tensormap.h`):
+ *
+ *   1. Bounding-range intersection. O(1), and the only stage a whole-backing footprint reaches.
+ *      Disjoint bounding boxes are disjoint views, so this alone can answer `NONE`.
+ *   2. Per-dimension hyper-rectangle intersection, once the bounding boxes do intersect. Eligible
+ *      only when both sides share one canonical row-major axis layout — same dtype and ndims,
+ *      identical strides, `strides` descending as exact integer multiples down to 1, and each
+ *      origin decomposing cleanly under the shape that layout implies. Disjoint on any single
+ *      axis makes the views disjoint, which is what separates two column blocks whose bounding
+ *      boxes interleave.
+ *   3. Anything stage 2 cannot model — a transposed pair, a stepped slice, mismatched dtypes —
+ *      falls out as `PARTIAL`. Exact enumeration of those is not attempted.
+ *
+ * Every rejection path in stage 2 yields `PARTIAL`, never `NONE`: an unmodelled pair is assumed
+ * to conflict. So a false edge is possible where the truth is subtler; a real one is never lost.
+ */
+inline TensorOverlap tensor_overlap(const TensorFootprint &probe, const TensorFootprint &entry) {
+    // ---- Stage 1: bounding-range intersection (O(1) reject) ----
+    const TensorByteRange probe_range = probe.range();
+    const TensorByteRange entry_range = entry.range();
+    if (!probe_range.overlaps(entry_range)) return TensorOverlap::NONE;
+    if (probe.is_whole_backing()) {
+        return entry_range.begin >= probe_range.begin && entry_range.end <= probe_range.end ? TensorOverlap::COVERED :
+                                                                                              TensorOverlap::PARTIAL;
+    }
+    if (entry.is_whole_backing()) return TensorOverlap::PARTIAL;
+
+    // ---- Stage 2 prerequisites: one shared canonical row-major axis layout ----
+    if (probe.dtype != entry.dtype || probe.ndims != entry.ndims) return TensorOverlap::PARTIAL;
+    const uint32_t ndims = probe.ndims;
+    if (ndims > static_cast<uint32_t>(MAX_TENSOR_DIMS)) return TensorOverlap::PARTIAL;
+    for (uint32_t i = 0; i < ndims; ++i) {
+        if (probe.strides[i] != entry.strides[i]) return TensorOverlap::PARTIAL;
+        if (probe.strides[i] == 0) return TensorOverlap::PARTIAL;
+    }
+    // The reference-shape derivation below reads `strides[i] == prod(shape[i+1..])`. Requiring the
+    // innermost stride to be 1 and each outer one to be an exact multiple of its inner neighbour is
+    // what makes that true; it rejects stepped slices and any view chain that reorders the axes.
+    if (probe.strides[ndims - 1] != 1) return TensorOverlap::PARTIAL;
+    for (uint32_t i = 1; i < ndims; ++i) {
+        if (probe.strides[i - 1] % probe.strides[i] != 0) return TensorOverlap::PARTIAL;
+    }
+
+    const uint64_t elem = get_element_size(probe.dtype);
+    if (elem == 0) return TensorOverlap::PARTIAL;
+    if (probe.byte_offset % elem != 0 || entry.byte_offset % elem != 0) return TensorOverlap::PARTIAL;
+
+    // Reference shape A of the backing, recovered from the stride vector: A[i] = strides[i-1] /
+    // strides[i], and A[0] from however many elements the backing holds. An allocator that rounded
+    // the backing up leaves A[0] larger than the truth, which only loosens the bounds check below —
+    // A[0] is never used as anything but an upper bound, so it can produce neither a false NONE nor
+    // a false COVERED.
+    uint32_t ref_shapes[MAX_TENSOR_DIMS] = {};
+    for (uint32_t i = 1; i < ndims; ++i) {
+        ref_shapes[i] = probe.strides[i - 1] / probe.strides[i];
+    }
+    const uint64_t numel_storage = probe.backing_nbytes / elem;
+    const uint32_t stride0 = probe.strides[0];
+    if (numel_storage % stride0 != 0) return TensorOverlap::PARTIAL;
+    const uint64_t ref_shape0 = numel_storage / stride0;
+    if (ref_shape0 > UINT32_MAX) return TensorOverlap::PARTIAL;
+    ref_shapes[0] = static_cast<uint32_t>(ref_shape0);
+
+    // Decompose each origin into per-axis coordinates. `strides[i] == prod(A[i+1..])`, so dividing
+    // the remainder by strides[i] yields axis i directly. A non-zero final remainder means the
+    // origin does not sit on a lattice point of this layout — not modellable, so PARTIAL.
+    uint64_t probe_off[MAX_TENSOR_DIMS] = {};
+    uint64_t entry_off[MAX_TENSOR_DIMS] = {};
+    uint64_t probe_remain = probe.byte_offset / elem;
+    uint64_t entry_remain = entry.byte_offset / elem;
+    for (uint32_t i = 0; i < ndims; ++i) {
+        const uint64_t s = probe.strides[i];
+        probe_off[i] = probe_remain / s;
+        entry_off[i] = entry_remain / s;
+        probe_remain %= s;
+        entry_remain %= s;
+    }
+    if (probe_remain != 0 || entry_remain != 0) return TensorOverlap::PARTIAL;
+
+    for (uint32_t i = 0; i < ndims; ++i) {
+        if (probe_off[i] + probe.shapes[i] > ref_shapes[i]) return TensorOverlap::PARTIAL;
+        if (entry_off[i] + entry.shapes[i] > ref_shapes[i]) return TensorOverlap::PARTIAL;
+    }
+
+    // ---- Stage 2 core: per-axis line-segment intersection ----
+    bool probe_contains_entry = true;
+    for (uint32_t i = 0; i < ndims; ++i) {
+        const uint64_t p_begin = probe_off[i];
+        const uint64_t p_end = p_begin + probe.shapes[i];
+        const uint64_t e_begin = entry_off[i];
+        const uint64_t e_end = e_begin + entry.shapes[i];
+        if (!(p_begin < e_end && e_begin < p_end)) return TensorOverlap::NONE;
+        if (!(p_begin <= e_begin && e_end <= p_end)) probe_contains_entry = false;
+    }
+    return probe_contains_entry ? TensorOverlap::COVERED : TensorOverlap::PARTIAL;
+}
+
+// Do two views of the SAME backing touch a common byte?
 inline bool tensors_overlap(const Tensor &a, const Tensor &b) {
     if (!(a.buffer.identity == b.buffer.identity)) return false;
-    const uint64_t a_end = tensor_add_sat(a.byte_offset, tensor_extent_bytes(a));
-    const uint64_t b_end = tensor_add_sat(b.byte_offset, tensor_extent_bytes(b));
-    return a.byte_offset < b_end && b.byte_offset < a_end;
+    return tensor_overlap(tensor_footprint(a), tensor_footprint(b)) != TensorOverlap::NONE;
 }
 
 static_assert(std::is_trivially_copyable_v<Tensor>, "Tensor must be trivially copyable for blob memcpy");

@@ -10,21 +10,29 @@
  */
 
 /**
- * TensorMap — (RunId, TensorKey) → producer task slot mapping.
+ * TensorMap — (RunId, TensorKey) → the live producers of a backing's byte ranges.
  *
- * At the hierarchical host level, every tensor is identified by a TensorKey
- * consisting of (ptr, worker_id). Host tensors (HeapRing) use
- * worker_id=-1 because their addresses are globally unique; child_memory
- * tensors use the owning NEXT_LEVEL worker id to disambiguate identical
- * device addresses across different children.
+ * A TensorKey names a whole backing: the canonical identity of a local buffer, scoped by the
+ * owning NEXT_LEVEL worker id for device memory (identical device addresses recur across
+ * children), or the exported (owner, buffer_id, generation, offset) of a remote one. Two views
+ * of one backing therefore land on one key by construction, and the key alone cannot tell a
+ * pair that conflicts from a pair that does not.
+ *
+ * `TensorFootprint` is what tells them apart. Each key holds every producer whose written view is
+ * still the last word on some byte of the backing, so `x[0]` and `x[1]` coexist under one key and
+ * neither resolves as the other's producer. This mirrors the L2 PTO2TensorMap, which hashes by
+ * base address only and walks the chain running the same overlap cascade — a bounding-range
+ * reject, then a per-dimension hyper-rectangle test that separates two column blocks whose
+ * bounding boxes interleave.
+ *
+ * Conservative in one direction only: a pair the cascade cannot model exactly counts as
+ * overlapping, and a producer a later write only partly covers stays live. So an extra edge is
+ * possible where the truth is subtler, and a real dependency is never dropped.
  *
  * Unlike the L2 PTO2TensorMap, this implementation:
  *   - Uses std::unordered_map (no ring buffer entry pool)
- *   - Does not perform overlap detection (each key maps to one producer)
- *   - Cleans up a task's entries when it is CONSUMED, skipping the keys a
+ *   - Cleans up a task's entries when it is CONSUMED, skipping the views a
  *     newer same-run producer has taken over
- *
- * Owned exclusively by the Orchestrator (main thread); no locking required.
  */
 
 #pragma once
@@ -37,21 +45,24 @@
 
 class TensorMap {
 public:
-    // Look up the producer for a tensor key.
-    // Returns INVALID_SLOT when not found.
-    TaskSlot lookup(RunId run_id, TensorKey key) const;
+    // Append every live producer under `key` whose written view overlaps `view`. Views that do
+    // not intersect are the disjoint slices of one backing, and are not dependencies.
+    // `out` is appended to, not cleared: one task accumulates producers across all its args.
+    void lookup_overlapping(RunId run_id, TensorKey key, const TensorFootprint &view, std::vector<TaskSlot> &out) const;
 
-    // Register key → producer mapping.
-    // Overwrites any existing entry (re-use of the same buffer by a new producer).
-    void insert(RunId run_id, TensorKey key, TaskSlot producer);
+    // Register `producer` as the writer of `view` under `key`. Entries this write covers whole
+    // are superseded and dropped; one that reaches outside it stays, because it is still the
+    // last writer of the bytes this write does not reach.
+    void insert(RunId run_id, TensorKey key, const TensorFootprint &view, TaskSlot producer);
 
-    // Remove the entries in 'keys' that still map to 'owner'.
-    // Called when a producer task transitions to CONSUMED. A key that a newer
-    // same-run producer has since re-registered belongs to that producer and
-    // is left intact.
+    // Remove the entries under 'keys' still owned by 'owner'.
+    // Called when a producer task transitions to CONSUMED. A view that a newer same-run
+    // producer has since superseded is already gone; one it left standing belongs to nobody
+    // else and is dropped here.
     void erase_task_outputs(RunId run_id, TaskSlot owner, const std::vector<TensorKey> &keys);
 
-    // Number of entries currently tracked.
+    // Number of (key, view) producer entries currently tracked. A key holding two disjoint
+    // live writers counts twice.
     int32_t size() const;
 
 private:
@@ -71,6 +82,11 @@ private:
         }
     };
 
+    struct Entry {
+        TensorFootprint view{};
+        TaskSlot producer{INVALID_SLOT};
+    };
+
     mutable std::mutex mu_;
-    std::unordered_map<RunTensorKey, TaskSlot, RunTensorKeyHash> map_;
+    std::unordered_map<RunTensorKey, std::vector<Entry>, RunTensorKeyHash> map_;
 };

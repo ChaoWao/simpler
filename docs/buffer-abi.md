@@ -194,9 +194,35 @@ orch.submit_next_level(chip_handle, ta, cfg, worker=0)
 ```
 
 `TaskArgs` carries `Tensor`s. Tags drive dependency inference, which keys on
-the **canonical identity** (buffer granularity, the successor of the former
-buffer-address key); byte-range overlap between same-buffer views is refined by
-the L2 OverlapMap on the materialized tensors, not by the L3 key.
+the **canonical identity** — buffer granularity, the successor of the former
+buffer-address key, so every view of one backing lands on one key and no real
+dependency hides behind a differing offset. Which of those candidates actually
+conflict is then decided by their **view geometry**, in two stages:
+
+1. **Bounding range.** `[byte_offset, byte_offset + extent)` on each side.
+   Disjoint boxes are disjoint views, answered in O(1).
+2. **Per-dimension intersection**, when the boxes do overlap. Each origin is
+   decomposed into per-axis coordinates and the axes are intersected one by
+   one; disjoint on any single axis makes the views disjoint.
+
+So two disjoint slices of one buffer carry no edge and run concurrently —
+`x[0]` and `x[1]` of a rank-major tensor by stage 1, and `x[:, 0:4]` versus
+`x[:, 8:12]` of a matrix by stage 2, whose bounding boxes interleave because
+every row of one sits between two rows of the other.
+
+This is the host-side counterpart of the L2 OverlapMap cascade, and carries the
+same limits. Stage 2 models only pairs sharing one canonical row-major layout —
+same dtype and `ndims`, identical `strides` descending as exact multiples down
+to 1, origins on that layout's lattice. A transposed pair, a stepped slice, or
+two views of different rank over one backing fall through as *overlapping*, as
+does a producer a later write only partly covers. Every fallback is in that one
+direction: an extra edge is possible where the truth is subtler, and a real
+dependency is never dropped.
+
+An extra edge is normally just lost concurrency. It is not always: where two
+tasks rendezvous with each other, a spurious edge holds back the dispatch that
+would release the other, and the run deadlocks. That is why the disjointness
+above is answered precisely rather than conservatively.
 
 ## Reading and writing data — torch only at the boundaries
 
@@ -298,7 +324,9 @@ values are final, at submit:
   so there is no order between them to express, and a device-staged copy of a
   host backing does not even alias on the device for the L2 overlap map to
   notice. Disjoint slices of one buffer stay legal — that is what `byte_offset`
-  is for.
+  is for, and this check runs the same two-stage comparison dependency
+  inference does, so a tiled write of one buffer passes rather than tripping on
+  bounding boxes that merely interleave.
 
 Group members are not compared against each other: a group is one node, and
 naming one buffer as every member's output is how it publishes a single

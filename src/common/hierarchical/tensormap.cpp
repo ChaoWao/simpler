@@ -11,27 +11,53 @@
 
 #include "tensormap.h"
 
-TaskSlot TensorMap::lookup(RunId run_id, TensorKey key) const {
+void TensorMap::lookup_overlapping(
+    RunId run_id, TensorKey key, const TensorFootprint &view, std::vector<TaskSlot> &out
+) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = map_.find(RunTensorKey{run_id, key});
-    if (it == map_.end()) return INVALID_SLOT;
-    return it->second;
+    if (it == map_.end()) return;
+    for (const Entry &entry : it->second) {
+        if (tensor_overlap(view, entry.view) != TensorOverlap::NONE) out.push_back(entry.producer);
+    }
 }
 
-void TensorMap::insert(RunId run_id, TensorKey key, TaskSlot producer) {
+void TensorMap::insert(RunId run_id, TensorKey key, const TensorFootprint &view, TaskSlot producer) {
     std::lock_guard<std::mutex> lk(mu_);
-    map_[RunTensorKey{run_id, key}] = producer;
+    std::vector<Entry> &entries = map_[RunTensorKey{run_id, key}];
+    // A write leaves an earlier producer standing only for the bytes it does not reach, so an
+    // entry it covers whole is dead and one it only reaches into is not. Dropping the latter too
+    // would lose the dependency a consumer of those outside bytes must still take.
+    size_t kept = 0;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (tensor_overlap(view, entries[i].view) == TensorOverlap::COVERED) continue;
+        entries[kept++] = entries[i];
+    }
+    entries.resize(kept);
+    entries.push_back(Entry{view, producer});
 }
 
 void TensorMap::erase_task_outputs(RunId run_id, TaskSlot owner, const std::vector<TensorKey> &keys) {
     std::lock_guard<std::mutex> lk(mu_);
     for (const auto &key : keys) {
         auto it = map_.find(RunTensorKey{run_id, key});
-        if (it != map_.end() && it->second == owner) map_.erase(it);
+        if (it == map_.end()) continue;
+        std::vector<Entry> &entries = it->second;
+        size_t kept = 0;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].producer == owner) continue;
+            entries[kept++] = entries[i];
+        }
+        entries.resize(kept);
+        if (entries.empty()) map_.erase(it);
     }
 }
 
 int32_t TensorMap::size() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return static_cast<int32_t>(map_.size());
+    size_t total = 0;
+    for (const auto &bucket : map_) {
+        total += bucket.second.size();
+    }
+    return static_cast<int32_t>(total);
 }
