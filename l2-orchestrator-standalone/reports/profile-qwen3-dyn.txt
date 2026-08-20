@@ -1,0 +1,60 @@
+==============================================================================================================
+L2 Orchestrator profile — qwen3_dynamic_tensormap.h (QWEN3_SPMD_TIER=0)
+  3096 kernel submits (3096 SPMD subtasks) + 779 framework allocs = 3875 engine tasks
+engine: a2a3 / host_build_graph, PTO2OrchestratorState (L2)
+==============================================================================================================
+
+LEVEL 1 — the four lines (driver-bracketed, uninstrumented run)
+  step                                     ns     % of block
+  ----------------------------------------------------------
+  rt_scope_begin                          950          0.01%
+  entry                              11931741         99.96%
+  rt_scope_end                            100          0.00%
+  rt_orchestration_done                  3900          0.03%
+  TOTAL                              11936691
+
+  per task: 3.08 us    throughput: 324629 tasks/s
+
+INSTRUMENT COST — quote throughput from the clean run, shape from the tables below
+  uninstrumented total       11.937 ms
+  instrumented   total       12.304 ms   (+3.1%)
+  one steady_clock read          30 ns
+
+READ p50/p99, NOT mean. A single OS scheduling stall moves a mean by multiples
+while leaving p50 and p99 untouched. The mean column reconciles total/count; it
+is not the robust statistic.
+
+LEVEL 2 — every entry->engine call (intercepted ops table)
+  step                            count   total_ms    mean_ns     p50_ns     p99_ns     max_ns       %
+  ------------------------------------------------------------------------------------------------------------
+  alloc_tensors                     779      1.480       1900       1580       6510      18260  14.46%
+  submit_task                      3096      8.760       2829       2500       8620      17280  85.54%
+
+SUBMIT LATENCY BY TENSOR-ARG COUNT — the per-tensor slope of STEP 3/4
+  tensors         count     p50_ns     p99_ns   p50/tensor
+  --------------------------------------------------------
+  3                1320       2800       8100        933.3
+  4                1440       1730       7610        432.5
+  5                 240       4310      11340        862.0
+  6                   6       1950       3450        325.0
+  12                 90       4970      10581        414.2
+
+LEVEL 3 — the engine's own step counters inside submit_task_common
+  (SIMPLER_ORCH_PROFILING=1, uninstrumented run; submit_count=3875, clock=100000000 Hz)
+  step                                                 cycles     total_ms        %
+  ----------------------------------------------------------------------------------
+  STEP 1  prepare_task (slot + heap alloc)              46006        0.460    4.63%
+  STEP 2  sync_tensormap                                 2013        0.020    0.20%
+  STEP 3  infer deps: TensorMap lookup                 250500        2.505   25.19%
+  STEP 4  register outputs: TensorMap insert            30664        0.307    3.08%
+  STEP 5  payload/descriptor GM write                  663528        6.635   66.73%
+  STEP 6  publish fanin_count                            1662        0.017    0.17%
+          end_scope (outside submit)                        1        0.000    0.00%
+  waits: alloc 0 cycles, fanin 0 cycles
+
+
+qwen3_dynamic_tensormap.h — the case's own accounting (QWEN3_SPMD_TIER=0)
+  kernel submits        3096      framework allocs      779      (engine tasks = 3875)
+  SPMD subtasks         3096      scalar args          7326
+  dep-tracked args      9162      _ro (NO_DEP) args    2874
+  sum of the case's DUR_* (virtual AICore time, NOT measured): 110168.700 us

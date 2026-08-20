@@ -1,0 +1,27 @@
+{
+  "payload": "qwen3-dyn",
+  "engine": "a2a3/host_build_graph L2 PTO2OrchestratorState",
+  "engine_tasks": 3875,
+  "spmd_subtasks": 3096,
+  "clean_total_ns": 11937341,
+  "instrumented_total_ns": 12304183,
+  "clock_read_ns": 30,
+  "orch_profiling_built": true,
+  "phases": {
+    "entry": {"count": 1, "total_ns": 11931741, "mean_ns": 11931741, "p50_ns": 11931741, "p99_ns": 11931741, "max_ns": 11931741},
+    "rt_orchestration_done": {"count": 1, "total_ns": 3900, "mean_ns": 3900, "p50_ns": 3900, "p99_ns": 3900, "max_ns": 3900},
+    "rt_scope_begin": {"count": 1, "total_ns": 950, "mean_ns": 950, "p50_ns": 950, "p99_ns": 950, "max_ns": 950},
+    "rt_scope_end": {"count": 1, "total_ns": 100, "mean_ns": 100, "p50_ns": 100, "p99_ns": 100, "max_ns": 100}
+  },
+  "ops": {
+    "alloc_tensors": {"count": 779, "total_ns": 1480396, "mean_ns": 1900, "p50_ns": 1580, "p99_ns": 6510, "max_ns": 18260},
+    "submit_task": {"count": 3096, "total_ns": 8759927, "mean_ns": 2829, "p50_ns": 2500, "p99_ns": 8620, "max_ns": 17280}
+  },
+  "submit_by_tensor_count": {
+    "3": {"count": 1320, "p50_ns": 2800, "p99_ns": 8100},
+    "4": {"count": 1440, "p50_ns": 1730, "p99_ns": 7610},
+    "5": {"count": 240, "p50_ns": 4310, "p99_ns": 11340},
+    "6": {"count": 6, "p50_ns": 1950, "p99_ns": 3450},
+    "12": {"count": 90, "p50_ns": 4970, "p99_ns": 10581}
+  }
+}

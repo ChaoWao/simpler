@@ -1,0 +1,4 @@
+# Every build tree this package makes. scripts/profile_l2.sh alone creates
+# three (build, build-prof, build-tm), and the root .gitignore's `build/` rule
+# matches only the first.
+build*/
