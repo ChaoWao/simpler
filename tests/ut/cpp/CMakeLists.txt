@@ -649,6 +649,23 @@ target_link_libraries(test_worker_chip_orch_endpoint PRIVATE
 add_test(NAME test_worker_chip_orch_endpoint COMMAND test_worker_chip_orch_endpoint)
 set_tests_properties(test_worker_chip_orch_endpoint PROPERTIES LABELS "no_hardware")
 
+add_executable(test_region_instance_view
+    common/test_region_instance_view.cpp
+    stubs/test_stubs.cpp
+)
+target_include_directories(test_region_instance_view PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
+target_link_libraries(test_region_instance_view PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_region_instance_view COMMAND test_region_instance_view)
+set_tests_properties(test_region_instance_view PROPERTIES LABELS "no_hardware")
+
 add_common_utils_test(test_runtime_timeout_config common/test_runtime_timeout_config.cpp)
 target_include_directories(test_runtime_timeout_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/a2a3/platform/include

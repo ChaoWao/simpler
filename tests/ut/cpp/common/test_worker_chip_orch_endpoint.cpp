@@ -49,6 +49,9 @@ TEST(WorkerChipOrchEndpointTest, DecodesDescriptorScalarsAndCounterRange) {
     ASSERT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::NONE) << endpoint.error().message;
     EXPECT_EQ(endpoint.descriptor().counter_base, desc.counter_base);
     EXPECT_EQ(endpoint.descriptor().counter_bytes, desc.counter_bytes);
+    EXPECT_EQ(endpoint.view().payload_span().base, desc.payload_base);
+    EXPECT_EQ(endpoint.view().counter_span().base, desc.counter_base);
+    EXPECT_FALSE(endpoint.view().failed());
 
     uint64_t counter_addr = 0;
     ASSERT_TRUE(endpoint.counter_addr(8, counter_addr)) << endpoint.error().message;

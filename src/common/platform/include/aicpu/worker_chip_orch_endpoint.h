@@ -13,10 +13,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
-#include "aicpu/cache_maintenance.h"
-#include "aicpu/device_time.h"
+#include "aicpu/region_instance_view.h"
 #include "common/worker_chip_orch_comm.h"
 
 struct WorkerChipOrchPayloadView {
@@ -77,12 +75,7 @@ class WorkerChipOrchEndpoint {
 public:
     explicit WorkerChipOrchEndpoint(const WorkerChipOrchRegionDesc &desc) :
         desc_(desc) {
-        if (worker_chip_orch_comm::validate_desc(desc_) != WorkerChipOrchCommValidationError::OK) {
-            set_error(
-                WorkerChipEndpointErrorKind::BAD_DESCRIPTOR, WorkerChipEndpointOp::INIT, desc_.region_id, 0, 0,
-                "invalid descriptor"
-            );
-        }
+        install_view_or_error();
     }
 
     WorkerChipOrchEndpoint(const uint64_t *scalars, size_t scalar_count) {
@@ -93,53 +86,46 @@ public:
                 WorkerChipEndpointErrorKind::BAD_DESCRIPTOR, WorkerChipEndpointOp::INIT, region_id, 0, 0,
                 "invalid descriptor scalars"
             );
+            return;
         }
+        install_view_or_error();
     }
 
     const WorkerChipEndpointError &error() const { return error_; }
 
     const WorkerChipOrchRegionDesc &descriptor() const { return desc_; }
 
+    const RegionInstanceView &view() const { return view_; }
+
     bool counter_addr(uint64_t offset, uint64_t &out_addr) {
         out_addr = 0;
         if (has_error()) {
             return false;
         }
-        if (worker_chip_orch_comm_add_overflows(desc_.counter_base, offset)) {
-            set_error(
-                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::COUNTER_ADDR, desc_.region_id, 0, 0,
-                "counter offset is out of bounds"
-            );
+        uint64_t reported = 0;
+        if (!worker_chip_orch_comm_add_overflows(desc_.counter_base, offset)) {
+            reported = desc_.counter_base + offset;
+        }
+        if (!view_.counter_addr(offset, out_addr)) {
+            adopt_view_error(WorkerChipEndpointOp::COUNTER_ADDR, reported, 0);
             return false;
         }
-        uint64_t addr = desc_.counter_base + offset;
-        if (!validate_counter_addr_for_op(
-                WorkerChipEndpointOp::COUNTER_ADDR, addr, 0, 0, "counter offset is out of bounds"
-            )) {
-            return false;
-        }
-        out_addr = addr;
         return true;
     }
 
-    bool validate_counter_addr(uint64_t counter_addr) const {
-        return worker_chip_orch_comm::validate_counter_addr(desc_, counter_addr) ==
-               WorkerChipOrchCommValidationError::OK;
-    }
+    bool validate_counter_addr(uint64_t counter_addr) const { return view_.counter_contains(counter_addr); }
 
     bool payload_read(uint64_t offset, uint64_t nbytes, WorkerChipOrchPayloadView &out) {
         out = WorkerChipOrchPayloadView{0, 0};
         if (has_error()) {
             return false;
         }
-        if (!validate_payload_range(WorkerChipEndpointOp::PAYLOAD_READ, offset, nbytes)) {
+        RegionPayloadView inner{};
+        if (!view_.payload_read(offset, nbytes, inner)) {
+            adopt_view_error(WorkerChipEndpointOp::PAYLOAD_READ, 0, 0);
             return false;
         }
-        uint64_t gm_addr = desc_.payload_base + offset;
-        cache_invalidate_range(
-            reinterpret_cast<const void *>(static_cast<uintptr_t>(gm_addr)), static_cast<size_t>(nbytes)
-        );
-        out = WorkerChipOrchPayloadView{gm_addr, nbytes};
+        out = WorkerChipOrchPayloadView{inner.local_addr, inner.nbytes};
         return true;
     }
 
@@ -147,19 +133,10 @@ public:
         if (has_error()) {
             return false;
         }
-        if (src == nullptr) {
-            set_error(
-                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::PAYLOAD_WRITE, desc_.region_id, 0, 0,
-                "null payload source"
-            );
+        if (!view_.payload_write(offset, src, nbytes)) {
+            adopt_view_error(WorkerChipEndpointOp::PAYLOAD_WRITE, 0, 0);
             return false;
         }
-        if (!validate_payload_range(WorkerChipEndpointOp::PAYLOAD_WRITE, offset, nbytes)) {
-            return false;
-        }
-        void *dst = reinterpret_cast<void *>(static_cast<uintptr_t>(desc_.payload_base + offset));
-        memcpy(dst, src, static_cast<size_t>(nbytes));
-        cache_flush_range(dst, static_cast<size_t>(nbytes));
         return true;
     }
 
@@ -167,29 +144,18 @@ public:
         if (has_error()) {
             return false;
         }
-        if (!validate_counter_addr_for_op(
-                WorkerChipEndpointOp::SIGNAL_NOTIFY, counter_addr, value, 0, "invalid counter address"
-            )) {
-            return false;
-        }
-        if (!worker_chip_orch_comm::valid_notify_op(op)) {
+        uint64_t offset = 0;
+        if (!absolute_to_counter_offset(counter_addr, offset)) {
             set_error(
-                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_NOTIFY, desc_.region_id,
-                counter_addr, value, "invalid notify operation"
+                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::SIGNAL_NOTIFY, desc_.region_id,
+                counter_addr, value, "invalid counter address"
             );
             return false;
         }
-
-        volatile int32_t *counter = counter_ptr(counter_addr);
-        if (op == WorkerChipOrchNotifyOp::Set) {
-            *counter = value;
-        } else {
-            cache_invalidate_range(
-                reinterpret_cast<const void *>(static_cast<uintptr_t>(counter_addr)), sizeof(*counter)
-            );
-            *counter = static_cast<int32_t>(*counter + value);
+        if (!view_.notify(offset, value, static_cast<RegionNotifyOp>(static_cast<uint32_t>(op)))) {
+            adopt_view_error(WorkerChipEndpointOp::SIGNAL_NOTIFY, counter_addr, value);
+            return false;
         }
-        cache_flush_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(counter_addr)), sizeof(*counter));
         return true;
     }
 
@@ -200,21 +166,20 @@ public:
         if (has_error()) {
             return false;
         }
-        if (!validate_counter_addr_for_op(
-                WorkerChipEndpointOp::SIGNAL_TEST, counter_addr, cmp_value, 0, "invalid counter address"
-            )) {
-            return false;
-        }
-        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
+        uint64_t offset = 0;
+        if (!absolute_to_counter_offset(counter_addr, offset)) {
             set_error(
-                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_TEST, desc_.region_id,
-                counter_addr, cmp_value, "invalid wait comparison"
+                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::SIGNAL_TEST, desc_.region_id,
+                counter_addr, cmp_value, "invalid counter address"
             );
             return false;
         }
-        int32_t observed = load_counter(counter_addr);
-        out =
-            WorkerChipOrchSignalTestResult{worker_chip_orch_comm::compare_counter(observed, cmp_value, cmp), observed};
+        RegionSignalTestResult inner{};
+        if (!view_.test(offset, cmp_value, static_cast<RegionWaitCmp>(static_cast<uint32_t>(cmp)), inner)) {
+            adopt_view_error(WorkerChipEndpointOp::SIGNAL_TEST, counter_addr, cmp_value);
+            return false;
+        }
+        out = WorkerChipOrchSignalTestResult{inner.matched, inner.observed};
         return true;
     }
 
@@ -225,76 +190,70 @@ public:
         if (has_error()) {
             return false;
         }
-        if (!validate_counter_addr_for_op(
-                WorkerChipEndpointOp::SIGNAL_WAIT, counter_addr, cmp_value, 0, "invalid counter address"
-            )) {
-            return false;
-        }
-        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
+        uint64_t offset = 0;
+        if (!absolute_to_counter_offset(counter_addr, offset)) {
             set_error(
-                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_WAIT, desc_.region_id,
-                counter_addr, cmp_value, "invalid wait comparison"
+                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::SIGNAL_WAIT, desc_.region_id,
+                counter_addr, cmp_value, "invalid counter address"
             );
             return false;
         }
-
-        uint64_t start = device_time_now_ticks();
-        uint64_t frequency_hz = device_time_frequency_hz();
-        while (true) {
-            int32_t current = load_counter(counter_addr);
-            observed = current;
-            if (worker_chip_orch_comm::compare_counter(current, cmp_value, cmp)) {
-                return true;
-            }
-            uint64_t now = device_time_now_ticks();
-            if (timeout == 0 || sys_cnt_elapsed_ns(start, now, frequency_hz) >= timeout) {
-                set_error(
-                    WorkerChipEndpointErrorKind::SIGNAL_TIMEOUT, WorkerChipEndpointOp::SIGNAL_WAIT, desc_.region_id,
-                    counter_addr, cmp_value, current, "wait timed out"
-                );
-                return false;
-            }
+        if (!view_.wait(offset, cmp_value, static_cast<RegionWaitCmp>(static_cast<uint32_t>(cmp)), timeout, observed)) {
+            adopt_view_error(WorkerChipEndpointOp::SIGNAL_WAIT, counter_addr, cmp_value);
+            return false;
         }
+        return true;
     }
 
 private:
     bool has_error() const { return error_.kind != WorkerChipEndpointErrorKind::NONE; }
 
-    bool validate_payload_range(WorkerChipEndpointOp op, uint64_t offset, uint64_t nbytes) {
-        WorkerChipOrchCommValidationError error =
-            worker_chip_orch_comm::validate_payload_bounds(offset, nbytes, desc_.payload_bytes);
-        if (error == WorkerChipOrchCommValidationError::OK) {
-            return true;
+    void install_view_or_error() {
+        if (worker_chip_orch_comm::validate_desc(desc_) != WorkerChipOrchCommValidationError::OK ||
+            !view_.assign(
+                RegionPartLocalSpan{desc_.payload_base, desc_.payload_bytes},
+                RegionPartLocalSpan{desc_.counter_base, desc_.counter_bytes}
+            )) {
+            set_error(
+                WorkerChipEndpointErrorKind::BAD_DESCRIPTOR, WorkerChipEndpointOp::INIT, desc_.region_id, 0, 0,
+                "invalid descriptor"
+            );
         }
-        set_error(
-            WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, 0, 0, "payload range is out of bounds"
-        );
-        return false;
     }
 
-    bool validate_counter_addr_for_op(
-        WorkerChipEndpointOp op, uint64_t counter_addr, int32_t counter_operand, int32_t observed_counter,
-        const char *message
-    ) {
-        if (worker_chip_orch_comm::validate_counter_addr(desc_, counter_addr) ==
-            WorkerChipOrchCommValidationError::OK) {
-            return true;
+    bool absolute_to_counter_offset(uint64_t counter_addr, uint64_t &offset) const {
+        offset = 0;
+        if (counter_addr < desc_.counter_base) {
+            return false;
         }
-        set_error(
-            WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, counter_addr, counter_operand,
-            observed_counter, message
-        );
-        return false;
+        offset = counter_addr - desc_.counter_base;
+        return true;
     }
 
-    static volatile int32_t *counter_ptr(uint64_t counter_addr) {
-        return reinterpret_cast<volatile int32_t *>(static_cast<uintptr_t>(counter_addr));
-    }
-
-    static int32_t load_counter(uint64_t counter_addr) {
-        volatile int32_t *counter = counter_ptr(counter_addr);
-        cache_invalidate_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(counter_addr)), sizeof(*counter));
-        return *counter;
+    void adopt_view_error(WorkerChipEndpointOp op, uint64_t counter_addr, int32_t counter_operand) {
+        const RegionViewError &ve = view_.error();
+        WorkerChipEndpointErrorKind kind = WorkerChipEndpointErrorKind::OUT_OF_BOUNDS;
+        switch (ve.kind) {
+        case RegionViewErrorKind::INVALID_VIEW:
+            kind = WorkerChipEndpointErrorKind::BAD_DESCRIPTOR;
+            break;
+        case RegionViewErrorKind::OUT_OF_BOUNDS:
+            kind = WorkerChipEndpointErrorKind::OUT_OF_BOUNDS;
+            break;
+        case RegionViewErrorKind::INVALID_ENUM:
+            kind = WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL;
+            break;
+        case RegionViewErrorKind::TIMEOUT:
+            kind = WorkerChipEndpointErrorKind::SIGNAL_TIMEOUT;
+            break;
+        case RegionViewErrorKind::ISSUED_FAILURE:
+            kind = WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL;
+            break;
+        case RegionViewErrorKind::NONE:
+            kind = WorkerChipEndpointErrorKind::OUT_OF_BOUNDS;
+            break;
+        }
+        set_error(kind, op, desc_.region_id, counter_addr, counter_operand, ve.observed, ve.message);
     }
 
     void set_error(
@@ -317,4 +276,5 @@ private:
 
     WorkerChipOrchRegionDesc desc_{};
     WorkerChipEndpointError error_{WorkerChipEndpointErrorKind::NONE, WorkerChipEndpointOp::INIT, 0, 0, 0, 0, ""};
+    RegionInstanceView view_{};
 };
