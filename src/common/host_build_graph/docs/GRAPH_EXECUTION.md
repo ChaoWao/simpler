@@ -380,10 +380,12 @@ bytes it starts from are whatever that heap region last held.
 ## Scheduler flow
 
 Host orchestration builds the complete task image before device execution. At
-the end of orchestration, the Host uploads every exact-size Graph POD image,
-relocates the task and payload pointers in the shared-memory image, copies the
-complete shared-memory/runtime-arena image to the device, and then launches the
-resident Scheduler.
+the end of orchestration, the Host stages each Graph POD image into the runtime
+arena's device region alongside the compacted shared-memory image, copies that
+one bind image to the device, and then launches the resident Scheduler. Nothing
+is patched on the way: a slot state names its payload and descriptor by a delta
+from its own address, so the bytes the Host wrote are the bytes the device
+schedules.
 
 All AICPU threads classify disjoint slices of the completed task window behind
 one startup barrier. A Graph task enters preparation and external-fanin

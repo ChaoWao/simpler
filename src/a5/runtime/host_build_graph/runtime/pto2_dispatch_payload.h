@@ -67,9 +67,11 @@ static_assert(
 // PTO2TaskPayload layout drift fails the build rather than corrupting args[].
 constexpr uint32_t PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET = 0;
 constexpr uint32_t PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
-// Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate; tensors follow it.
-constexpr uint32_t PTO2_TASKPAYLOAD_TENSORS_OFFSET = 640;
-constexpr uint32_t PTO2_TASKPAYLOAD_SCALARS_OFFSET = 4736;
+// Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate. Scalars follow it,
+// then tensors — the tensor array is last because it is the only region whose used
+// extent varies per task, so a task's read set is a contiguous prefix.
+constexpr uint32_t PTO2_TASKPAYLOAD_SCALARS_OFFSET = 640;
+constexpr uint32_t PTO2_TASKPAYLOAD_TENSORS_OFFSET = 768;
 constexpr uint32_t PTO2_TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
 
 /**

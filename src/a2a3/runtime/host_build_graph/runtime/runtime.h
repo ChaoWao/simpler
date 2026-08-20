@@ -174,6 +174,13 @@ public:
     // the boot thread reads this instead of counting SM ring heads.
     int32_t host_total_tasks;
 
+    // Distance between consecutive payloads in the shipped shared-memory image.
+    // Smaller than sizeof(PTO2TaskPayload) whenever the bind's widest task uses
+    // fewer tensors than the array holds, which is the usual case. Set by the host
+    // before the image is copied; the AICPU needs it at attach to place every
+    // segment that follows the payload array.
+    uint64_t sm_payload_stride;
+
 private:
     // Kernel binary tracking for cleanup
 

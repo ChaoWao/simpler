@@ -109,8 +109,12 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     definition.off_tensor_sources = append_section(image, tensor_sources);
     definition.off_scalars = append_section(image, scalars);
     definition.off_scalar_sources = append_section(image, scalar_sources);
+    // Widest node here declares one tensor, so the storage strides well below the
+    // type; the fixture exercises the compacted stride rather than the identity case.
+    const size_t node_stride = graph_node_stride(1);
     size_t execution_storage_bytes = 0;
-    graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), &execution_storage_bytes);
+    graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), node_stride, &execution_storage_bytes);
+    definition.node_stride = static_cast<uint32_t>(node_stride);
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     definition.total_bytes = static_cast<uint32_t>(image.size());
     std::memcpy(image.data(), &definition, sizeof(definition));
@@ -279,18 +283,44 @@ TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     size_t nodes_offset = 0;
     size_t storage_bytes = 0;
 
-    ASSERT_TRUE(graph_execution_storage_layout(NODE_COUNT, &nodes_offset, &storage_bytes));
+    // Identity stride first: the layout must still describe a full-width execution.
+    ASSERT_TRUE(graph_execution_storage_layout(NODE_COUNT, sizeof(GraphNodeStorage), &nodes_offset, &storage_bytes));
     EXPECT_EQ(nodes_offset % alignof(GraphNodeStorage), 0U);
     EXPECT_GE(nodes_offset, sizeof(GraphExecution));
     EXPECT_EQ(storage_bytes, nodes_offset + NODE_COUNT * sizeof(GraphNodeStorage));
+
+    // A compacted stride shortens only the array; the header offset is stride-free.
+    // The last entry keeps room for a whole GraphNodeStorage, because that is what
+    // materialization placement-news into it.
+    const size_t narrow = graph_node_stride(1);
+    size_t narrow_offset = 0;
+    size_t narrow_bytes = 0;
+    ASSERT_TRUE(graph_execution_storage_layout(NODE_COUNT, narrow, &narrow_offset, &narrow_bytes));
+    EXPECT_EQ(narrow_offset, nodes_offset);
+    EXPECT_EQ(narrow_bytes, nodes_offset + (NODE_COUNT - 1) * narrow + sizeof(GraphNodeStorage));
+    EXPECT_GE(narrow_bytes - (narrow_offset + (NODE_COUNT - 1) * narrow), sizeof(GraphNodeStorage));
 }
 
 TEST(GraphExecutionStorage, RejectsInvalidNodeCount) {
     size_t storage_bytes = 0;
 
-    EXPECT_FALSE(graph_execution_storage_bytes(0, &storage_bytes));
-    EXPECT_FALSE(graph_execution_storage_bytes(-1, &storage_bytes));
-    EXPECT_FALSE(graph_execution_storage_bytes(static_cast<int32_t>(GRAPH_MAX_NODES) + 1, &storage_bytes));
+    const size_t full = sizeof(GraphNodeStorage);
+    EXPECT_FALSE(graph_execution_storage_bytes(0, full, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(-1, full, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(static_cast<int32_t>(GRAPH_MAX_NODES) + 1, full, &storage_bytes));
+    // A stride the layout cannot honour is rejected the same way a bad node count is:
+    // past the type there is nothing to read, and below the payload head an entry
+    // cannot hold its own fixed fields.
+    EXPECT_FALSE(graph_execution_storage_bytes(1, full + alignof(GraphNodeStorage), &storage_bytes));
+    EXPECT_FALSE(
+        graph_execution_storage_bytes(1, graph_node_stride_floor() - alignof(GraphNodeStorage), &storage_bytes)
+    );
+    EXPECT_FALSE(graph_execution_storage_bytes(1, full - 1, &storage_bytes));
+    // The compacted stride the widest node implies is honoured, and is smaller.
+    EXPECT_TRUE(graph_execution_storage_bytes(4, graph_node_stride(1), &storage_bytes));
+    size_t full_bytes = 0;
+    EXPECT_TRUE(graph_execution_storage_bytes(4, full, &full_bytes));
+    EXPECT_LT(storage_bytes, full_bytes);
 }
 
 // A resubmission gets the same heap block back, so the bytes it starts from are
@@ -317,7 +347,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task = &outer_task;
+    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = &submission;
 
     GraphExecution *execution = graph_execution_localize(outer_slot);
@@ -326,15 +356,15 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     // overlap the node outputs occupying the leading required_heap bytes.
     EXPECT_EQ(static_cast<void *>(execution), heap.execution());
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
-    GraphNodeStorage &node = execution->node_storage[0];
+    GraphNodeStorage &node = execution->node_at(0);
     ASSERT_EQ(node.payload.scalar_count, 1);
     ASSERT_EQ(node.payload.tensor_count, 1);
     EXPECT_EQ(node.payload.scalars[0], 17U);
-    EXPECT_EQ(execution->node_storage[1].payload.scalars[0], 18U);
+    EXPECT_EQ(execution->node_at(1).payload.scalars[0], 18U);
     EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
     EXPECT_EQ(node.payload.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::FLOAT32));
-    EXPECT_EQ(execution->node_storage[1].payload.dump_metadata.dump_arg_mask, uint64_t{1} << 1);
-    EXPECT_EQ(execution->node_storage[1].payload.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::INT32));
+    EXPECT_EQ(execution->node_at(1).payload.dump_metadata.dump_arg_mask, uint64_t{1} << 1);
+    EXPECT_EQ(execution->node_at(1).payload.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::INT32));
 
     graph_execution_mark_completed(*execution);
     execution->retired_nodes.store(2, std::memory_order_release);
@@ -350,7 +380,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     node.task.kernel_id[0] = 314;
     node.slot.active_mask = ActiveMask(3);
     node.payload.scalars[0] = 2718;
-    execution->node_storage[1].payload.scalars[0] = 31415;
+    execution->node_at(1).payload.scalars[0] = 31415;
     node.payload.tensors[0].version = 1618;
     node.slot.completed_subtasks.store(1, std::memory_order_relaxed);
     node.payload.dispatch_fanin.store(1, std::memory_order_relaxed);
@@ -365,12 +395,12 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(node.task.kernel_id[0], 42);
     EXPECT_EQ(node.slot.active_mask.raw(), 1);
     EXPECT_EQ(node.payload.scalars[0], 99U);
-    EXPECT_EQ(execution->node_storage[1].payload.scalars[0], 18U);
+    EXPECT_EQ(execution->node_at(1).payload.scalars[0], 18U);
     EXPECT_EQ(node.payload.tensors[0].version, 0);
     EXPECT_EQ(node.task.task_id, PTO2TaskId::make(1, (8U << 10U)));
     EXPECT_EQ(node.task.packed_buffer_base, heap.base());
     EXPECT_EQ(node.payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(second_boundary.data()));
-    EXPECT_EQ(execution->node_storage[1].payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
+    EXPECT_EQ(execution->node_at(1).payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
     EXPECT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
@@ -396,7 +426,7 @@ TEST(GraphDefinitionObject, RejectsDefinitionBeyondRetainedBytes) {
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task = &outer_task;
+    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = &submission;
 
     EXPECT_EQ(graph_execution_localize(outer_slot), nullptr);
@@ -555,7 +585,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task = &outer_task;
+    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = &submission;
 
     GraphExecution *execution = graph_execution_localize(outer_slot);
@@ -567,7 +597,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     // not the 0xAA fill: state machine, counters and atomics all start from
     // values only the device side wrote.
     for (int32_t i = 0; i < execution->node_count; ++i) {
-        const GraphNodeStorage &node = execution->node_storage[i];
+        const GraphNodeStorage &node = execution->node_at(i);
         ASSERT_EQ(node.slot.task_state.load(std::memory_order_relaxed), PTO2_TASK_PENDING);
         ASSERT_EQ(node.slot.task_kind, TaskKind::GRAPH_NODE);
         ASSERT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);

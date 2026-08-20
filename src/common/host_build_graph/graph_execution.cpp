@@ -22,15 +22,18 @@ namespace {
 // The storage is the tail of the outer GRAPH task's heap allocation, so its
 // bytes are whatever that region last held; every field an execution needs is
 // written here or by the materialize pass, never inherited from those bytes.
-GraphExecution *acquire_host_execution_storage(uintptr_t storage_addr, size_t storage_bytes, int32_t node_count) {
+GraphExecution *
+acquire_host_execution_storage(uintptr_t storage_addr, size_t storage_bytes, int32_t node_count, size_t node_stride) {
     size_t nodes_offset = 0;
     size_t required_bytes = 0;
     if (storage_addr == 0 || storage_addr % alignof(GraphNodeStorage) != 0 ||
-        !graph_execution_storage_layout(node_count, &nodes_offset, &required_bytes) || required_bytes > storage_bytes) {
+        !graph_execution_storage_layout(node_count, node_stride, &nodes_offset, &required_bytes) ||
+        required_bytes > storage_bytes) {
         return nullptr;
     }
     auto *execution = new (reinterpret_cast<void *>(storage_addr)) GraphExecution{};
     execution->node_count = node_count;
+    execution->node_stride = node_stride;
     execution->remaining_nodes.store(node_count, std::memory_order_relaxed);
     execution->node_storage =
         reinterpret_cast<GraphNodeStorage *>(reinterpret_cast<uint8_t *>(execution) + nodes_offset);
@@ -238,7 +241,7 @@ bool graph_rebind_tensor(
             (!own_output && producer_index == node_index)) {
             return false;
         }
-        PTO2TaskDescriptor &producer = execution.node_storage[producer_index].task;
+        PTO2TaskDescriptor &producer = execution.node_at(producer_index).task;
         const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
         const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
         if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
@@ -364,7 +367,7 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
 
     GraphExecution *execution = acquire_host_execution_storage(
         outer_base + definition->required_heap, definition->execution_storage_bytes,
-        static_cast<int32_t>(definition->task_count)
+        static_cast<int32_t>(definition->task_count), definition->node_stride
     );
     if (execution == nullptr) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
@@ -470,7 +473,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
     const int32_t last = std::min(execution.node_count, first + max_nodes);
     const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
     for (int32_t i = first; i < last; ++i) {
-        GraphNodeStorage *storage = &execution.node_storage[i];
+        GraphNodeStorage *storage = &execution.node_at(i);
         if (i >= execution.constructed_nodes) {
             storage = new (storage) GraphNodeStorage;
             execution.constructed_nodes++;

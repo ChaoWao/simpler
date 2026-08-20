@@ -786,11 +786,22 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.tensor_arg_count = static_cast<uint32_t>(tensors.size());
     definition.scalar_arg_count = static_cast<uint32_t>(scalars.size());
     definition.predicate_count = static_cast<uint32_t>(predicates.size());
+    // The widest node sets the stride every entry of this Definition's execution
+    // storage gets; nodes[] carries each node's declared tensor count.
+    int32_t widest_node_tensor_count = 0;
+    for (const GraphNodeDefinition &node : nodes) {
+        if (node.tensor_count > widest_node_tensor_count) widest_node_tensor_count = node.tensor_count;
+    }
+    const size_t node_stride = graph_node_stride(widest_node_tensor_count);
     size_t execution_storage_bytes = 0;
-    if (!graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), &execution_storage_bytes) ||
+    if (node_stride > UINT32_MAX ||
+        !graph_execution_storage_bytes(
+            static_cast<int32_t>(definition.task_count), node_stride, &execution_storage_bytes
+        ) ||
         execution_storage_bytes > UINT32_MAX) {
         return false;
     }
+    definition.node_stride = static_cast<uint32_t>(node_stride);
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     // Every section's byte count is known now, so the image grows once instead of
     // resizing eleven times. Each append aligns its start, hence the per-section
@@ -1384,9 +1395,9 @@ static TaskOutputTensors submit_task_common(
     // push_ready_routed; otherwise the returned index selects the producer passed
     // to register_wake. Wake retargeting in register_wake may reclassify a task
     // when the selected producer is already complete.
-    // The initial scan happens before the scheduler dispatch loop starts. Because
-    // fanin is a flat array of position-independent integers, none of this needs
-    // host->device pointer relocation.
+    // The initial scan happens before the scheduler dispatch loop starts. Fanin is
+    // a flat array of position-independent integers, so it crosses to the device
+    // unchanged.
     payload.fanin_count = fanin_builder.count;
     (void)sched;
 
@@ -1594,6 +1605,14 @@ bool graph_submit_outer(
     PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
     PTO2TaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
 
+    // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
+    // completion flag are established here, at the claim, because nothing else
+    // writes them. A stale wake_list_head of WAKE_LIST_SENTINEL would close the
+    // list against every consumer, and a stale completion flag would report the
+    // Graph done before it ran.
+    slot.reset_for_reuse();
+    ring.completion_flags[allocation.slot].store(0, std::memory_order_relaxed);
+
     slot.bind_buffers(&payload, &task);
     slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
     slot.last_consumer_local_id = static_cast<int32_t>(task_id.local());
@@ -1602,7 +1621,6 @@ bool graph_submit_outer(
     slot.total_required_subtasks = 0;
     slot.logical_block_num = 1;
     slot.task_kind = TaskKind::GRAPH;
-    slot.graph_context = nullptr;
     scope_tasks_push(orch, &slot);
 
     task.task_id = task_id;

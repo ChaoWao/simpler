@@ -22,14 +22,14 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include <atomic>
+#include <cstddef>
 
 #include "profiling_config.h"
 #include "pto_constants.h"
@@ -332,10 +332,18 @@ struct PTO2TaskPayload {
     // dispatch.
     alignas(64) DispatchPredicate predicate;
     ArgsDumpTaskMetadata dump_metadata;
-    // === Cache lines 10-73 (4096B) — tensors (alignas(64) forces alignment) ===
+    // === Cache lines 10-11 (128B) — scalars ===
+    // alignas is load-bearing: the AICore reads this at a compile-time offset, and
+    // uint64_t alone would let it start right after dump_metadata instead of on the
+    // next cache line. tensors got its 640 for free from ChipTensor's own alignment.
+    alignas(64) uint64_t scalars[MAX_SCALAR_ARGS];
+    // === Cache lines 12-75 (4096B) — tensors (alignas(64) forces alignment) ===
+    //
+    // Last on purpose. This is the only region whose used extent varies per task —
+    // one to seventeen entries of thirty-two on a measured decode — so putting it at
+    // the end makes everything a task reads a contiguous prefix, which is what lets
+    // the shipped image carry less than the whole array.
     ChipTensor tensors[MAX_TENSOR_ARGS];
-    // === Cache lines 74-75 (128B) — scalars ===
-    uint64_t scalars[MAX_SCALAR_ARGS];
 
     // Layout verification (size checks that don't need offsetof).
     static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
@@ -432,23 +440,93 @@ struct PTO2TaskPayload {
 static_assert(offsetof(PTO2TaskPayload, fanin_local_ids) == 12, "inline fanin id array must follow fanin_count");
 static_assert(
     offsetof(PTO2TaskPayload, predicate) == 576,
-    "dispatch predicate occupies cache line 9 at fixed byte 576 (before tensors, never moves)"
+    "dispatch predicate occupies cache line 9 at fixed byte 576 (before the arg arrays, never moves)"
 );
 static_assert(
     offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 640,
-    "dump metadata must fit in the AICPU-only cache line before tensors"
+    "dump metadata must fit in the AICPU-only cache line before the arg arrays"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)"
+    offsetof(PTO2TaskPayload, scalars) == 640, "scalars must start at byte 640 (cache line 10, after predicate)"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor),
-    "scalars must immediately follow tensors"
+    offsetof(PTO2TaskPayload, tensors) == 640 + MAX_SCALAR_ARGS * sizeof(uint64_t),
+    "tensors must immediately follow scalars, and must be the last region: the shipped "
+    "image carries only as much of the array as a task uses, so nothing may sit past it"
 );
 static_assert(
-    sizeof(PTO2TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
-    "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + tensors + scalars"
+    sizeof(PTO2TaskPayload) == 640 + MAX_SCALAR_ARGS * sizeof(uint64_t) + MAX_TENSOR_ARGS * sizeof(ChipTensor),
+    "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + scalars + tensors"
 );
+
+/**
+ * A pointer to a sibling in the same contiguous block, stored as a byte delta
+ * from the field's own address.
+ *
+ * The block is `memcpy`'d to the device as one image, so a delta between two
+ * addresses inside it is invariant under the move while a raw pointer is not.
+ * Both users below satisfy that precondition: a ring task's payload and
+ * descriptor live in the same shared-memory image as its slot state, and a Graph
+ * node's live in the same GraphNodeStorage.
+ *
+ * A zero delta means unbound — a field can never coincide with its own target.
+ * Zeroed memory therefore reads as null, which is what the slot's pristine state
+ * is.
+ *
+ * int32_t bounds the distance at 2 GiB. Both blocks are far below it — a
+ * GraphNodeStorage is a fixed struct, and the shared-memory image's end is
+ * rejected above the bound in attach_populated — and set() leaves the field
+ * unbound rather than storing a truncated delta, so an out-of-range target
+ * reads back as null instead of as unrelated memory.
+ */
+namespace simpler::hbg {
+
+template <typename T>
+class SelfRelativePtr {
+public:
+    SelfRelativePtr() = default;
+
+    // The stored value means something only relative to where it is stored, so
+    // copying it from another field would silently retarget it. Every write goes
+    // through set(), which takes the destination's own address into account. A
+    // whole-block memcpy is unaffected: it moves the field and its target
+    // together, which is the case this representation exists for.
+    SelfRelativePtr(const SelfRelativePtr &) = delete;
+    SelfRelativePtr &operator=(const SelfRelativePtr &) = delete;
+
+    T *get() const {
+        if (delta_ == 0) return nullptr;
+        return reinterpret_cast<T *>(reinterpret_cast<uintptr_t>(this) + static_cast<intptr_t>(delta_));
+    }
+
+    void set(T *target) {
+        if (target == nullptr) {
+            delta_ = 0;
+            return;
+        }
+        const intptr_t delta = reinterpret_cast<intptr_t>(target) - reinterpret_cast<intptr_t>(this);
+        // Narrowing a delta this large would name unrelated memory that a consumer
+        // would then dereference. Unbound is the one value every consumer already
+        // tests for.
+        if (delta < INT32_MIN || delta > INT32_MAX) {
+            delta_ = 0;
+            return;
+        }
+        delta_ = static_cast<int32_t>(delta);
+    }
+
+    T *operator->() const { return get(); }
+    T &operator*() const { return *get(); }
+    explicit operator bool() const { return delta_ != 0; }
+
+    friend bool operator==(const SelfRelativePtr &lhs, std::nullptr_t) { return lhs.delta_ == 0; }
+    friend bool operator!=(const SelfRelativePtr &lhs, std::nullptr_t) { return lhs.delta_ != 0; }
+
+private:
+    int32_t delta_{0};
+};
+
+}  // namespace simpler::hbg
 
 /**
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
@@ -478,8 +556,10 @@ struct alignas(64) PTO2TaskSlotState {
     std::atomic<PTO2TaskState> task_state;
 
     // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
-    PTO2TaskPayload *payload;
-    PTO2TaskDescriptor *task;
+    // Self-relative, so the SM image needs no pointer fix-up on its way to the
+    // device: both targets sit in the same block as this field.
+    simpler::hbg::SelfRelativePtr<PTO2TaskPayload> payload;
+    simpler::hbg::SelfRelativePtr<PTO2TaskDescriptor> task;
 
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
     // A pending consumer whose fanin scan finds an unmet producer registers on
@@ -538,8 +618,8 @@ struct alignas(64) PTO2TaskSlotState {
     }
 
     void bind_buffers(PTO2TaskPayload *p, PTO2TaskDescriptor *t) {
-        payload = p;
-        task = t;
+        payload.set(p);
+        task.set(t);
     }
 
     // Host-visible completion mirror. The device readiness truth
@@ -582,5 +662,3 @@ static_assert(sizeof(PTO2TaskSlotState) == 64);
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.
 inline PTO2TaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(0x1));
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
