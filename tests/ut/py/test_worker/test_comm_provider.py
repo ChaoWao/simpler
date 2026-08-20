@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from simpler.comm_provider import (
     ProviderCleanupFailure,
     ProviderPartResourceState,
     ProviderRegionResourceState,
+    ProviderRegionStore,
     ProviderRegionStoreState,
     ProviderReleaseResult,
     ProviderReleaseStatus,
@@ -42,6 +44,7 @@ from simpler.comm_provider import (
     RegionPartExportDescriptor,
     RegionPartKind,
     RegionPartLocalView,
+    SimPosixShmAllocation,
     VmmShareableHandleImport,
     validate_independent_local_views,
 )
@@ -346,3 +349,670 @@ def test_control_error_rejects_none_kind_and_unknown_values():
         RegionControlError(RegionControlErrorKind.NONE)
     with pytest.raises(ValueError):
         RegionControlError(99)
+
+
+class FakeRegionPartAllocation:
+    """Deterministic RegionPartAllocation shell for store tests."""
+
+    def __init__(
+        self,
+        part: RegionPartKind,
+        spec: RegionPartAllocationSpec,
+        *,
+        world: "FakeShellWorld",
+        local_base: int,
+        shm_name: str,
+        mapping_bytes: int | None = None,
+    ) -> None:
+        self.part = part
+        self.spec = spec
+        self.world = world
+        self.calls: list[str] = []
+        self.local_ledger: list[object] = []
+        self.materialized = False
+        self.release_count = 0
+        self.zero_calls: list[tuple[int, int]] = []
+        self.fail_materialize: BaseException | type[BaseException] | None = None
+        self.fail_zero: BaseException | type[BaseException] | None = None
+        self.fail_mapping_bytes: BaseException | type[BaseException] | None = None
+        self.fail_import_capability: BaseException | type[BaseException] | None = None
+        self.fail_local_base: BaseException | type[BaseException] | None = None
+        self.raise_on_release: BaseException | type[BaseException] | None = None
+        self.release_step_failures: list[ProviderCleanupFailure] = []
+        self._local_base = local_base
+        self._mapping_bytes = spec.logical_bytes if mapping_bytes is None else mapping_bytes
+        self._import_capability: object = PosixShmImport(shm_name=shm_name)
+
+    def _raise_configured(self, spec: BaseException | type[BaseException] | None) -> None:
+        if spec is None:
+            return
+        if isinstance(spec, BaseException):
+            raise spec
+        raise spec()
+
+    def materialize(self) -> None:
+        self.calls.append("materialize")
+        self.world.record(self.part, "materialize")
+        if self.release_count != 0:
+            self.world.materialize_called_release = True
+        self.world.constructed_at_first_materialize.setdefault(
+            self.part, tuple(self.world.constructed_parts)
+        )
+        self._raise_configured(self.fail_materialize)
+        self.materialized = True
+        self.world.side_effects.append((self.part, "materialize"))
+
+    def mapping_bytes(self) -> int:
+        self.calls.append("mapping_bytes")
+        self.world.record(self.part, "mapping_bytes")
+        if not self.materialized:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "mapping_bytes requires a materialized shell",
+                failed_part=self.part,
+                failed_operation=RegionOperationKind.DESCRIBE,
+            )
+        self._raise_configured(self.fail_mapping_bytes)
+        return self._mapping_bytes
+
+    def import_capability(self) -> object:
+        self.calls.append("import_capability")
+        self.world.record(self.part, "import_capability")
+        if not self.materialized:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "import_capability requires a materialized shell",
+                failed_part=self.part,
+                failed_operation=RegionOperationKind.DESCRIBE,
+            )
+        self._raise_configured(self.fail_import_capability)
+        return self._import_capability
+
+    def local_base(self) -> int:
+        self.calls.append("local_base")
+        self.world.record(self.part, "local_base")
+        if not self.materialized:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "local_base requires a materialized shell",
+                failed_part=self.part,
+                failed_operation=RegionOperationKind.LOCAL_VIEW,
+            )
+        self._raise_configured(self.fail_local_base)
+        return self._local_base
+
+    def zero_bytes(self, offset: int, nbytes: int) -> None:
+        self.calls.append("zero_bytes")
+        self.world.record(self.part, "zero_bytes")
+        self.zero_calls.append((offset, nbytes))
+        if not self.materialized:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "zero_bytes requires a materialized shell",
+                failed_part=self.part,
+                failed_operation=RegionOperationKind.ZERO_BYTES,
+            )
+        self._raise_configured(self.fail_zero)
+
+    def release_once(self) -> ProviderCleanupFailure | None:
+        self.calls.append("release_once")
+        self.world.record(self.part, "release_once")
+        self.release_count += 1
+        if self.release_count > 1:
+            self.world.duplicate_releases.append(self.part)
+        self._raise_configured(self.raise_on_release)
+        for failure in self.release_step_failures:
+            self.local_ledger.append(failure)
+        if self.release_step_failures:
+            return self.release_step_failures[0]
+        return None
+
+
+class FakeShellWorld:
+    def __init__(self) -> None:
+        self.calls: list[tuple[RegionPartKind, str]] = []
+        self.constructed_parts: list[RegionPartKind] = []
+        self.side_effects: list[tuple[RegionPartKind, str]] = []
+        self.constructed_at_first_materialize: dict[RegionPartKind, tuple[RegionPartKind, ...]] = {}
+        self.duplicate_releases: list[RegionPartKind] = []
+        self.materialize_called_release = False
+
+    def record(self, part: RegionPartKind, name: str) -> None:
+        self.calls.append((part, name))
+
+
+class FakeShellFactory:
+    def __init__(self) -> None:
+        self.world = FakeShellWorld()
+        self.payloads: list[FakeRegionPartAllocation] = []
+        self.counters: list[FakeRegionPartAllocation] = []
+        self.fail_construct: dict[RegionPartKind, BaseException | type[BaseException]] = {}
+        self._seq = 0
+
+    def __call__(
+        self,
+        context: RegionAllocationContext,
+        part: RegionPartKind,
+        spec: RegionPartAllocationSpec,
+    ) -> FakeRegionPartAllocation:
+        del context
+        self.world.record(part, "construct")
+        if part in self.fail_construct:
+            spec_or_exc = self.fail_construct[part]
+            if isinstance(spec_or_exc, BaseException):
+                raise spec_or_exc
+            raise spec_or_exc()
+        self._seq += 1
+        local_base = 0x1000 if part is RegionPartKind.PAYLOAD else 0x2000
+        shell = FakeRegionPartAllocation(
+            part,
+            spec,
+            world=self.world,
+            local_base=local_base,
+            shm_name=f"/{part.name[0].lower()}{self._seq}",
+        )
+        self.world.constructed_parts.append(part)
+        if part is RegionPartKind.PAYLOAD:
+            self.payloads.append(shell)
+        else:
+            self.counters.append(shell)
+        return shell
+
+
+def _sim_context() -> RegionAllocationContext:
+    return RegionAllocationContext(
+        environment_kind=RegionEnvironmentKind.SIM,
+        target=DeviceAllocationTarget(device_id=0),
+    )
+
+
+def _allocation_spec() -> RegionAllocationSpec:
+    return RegionAllocationSpec(payload=_payload_spec(), counter=_counter_spec())
+
+
+def _open_store(factory: FakeShellFactory | None = None) -> tuple[ProviderRegionStore, FakeShellFactory]:
+    factory = FakeShellFactory() if factory is None else factory
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    return store, factory
+
+
+def _backend_failure(part: RegionPartKind) -> ProviderCleanupFailure:
+    return ProviderCleanupFailure(
+        part=part,
+        backend_operation=RegionOperationKind.RELEASE,
+        typed_cause=RegionCleanupCause.BACKEND_ERROR,
+    )
+
+
+def test_empty_sweep_closes_an_open_store_and_is_idempotent():
+    store, _factory = _open_store()
+    assert store.state is ProviderRegionStoreState.OPEN
+    assert store.sweep() == ()
+    assert store.state is ProviderRegionStoreState.CLOSED
+    assert store.sweep() == ()
+    assert store.state is ProviderRegionStoreState.CLOSED
+    with pytest.raises(RegionControlError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert not hasattr(store, "retry_cleanup")
+
+
+def test_allocate_and_export_installs_both_shells_before_materialize():
+    store, factory = _open_store()
+    result = store.allocate_and_export(_allocation_spec())
+    assert result.provider_resource_id == 1
+    assert factory.world.constructed_at_first_materialize[RegionPartKind.PAYLOAD] == (
+        RegionPartKind.PAYLOAD,
+        RegionPartKind.COUNTER,
+    )
+    assert factory.world.calls[:4] == [
+        (RegionPartKind.PAYLOAD, "construct"),
+        (RegionPartKind.COUNTER, "construct"),
+        (RegionPartKind.PAYLOAD, "materialize"),
+        (RegionPartKind.COUNTER, "materialize"),
+    ]
+    assert factory.payloads[0].zero_calls == []
+    assert factory.counters[0].zero_calls == [(0, 8)]
+    assert factory.world.materialize_called_release is False
+    payload = store.local_view(1, RegionPartKind.PAYLOAD)
+    counter = store.local_view(1, RegionPartKind.COUNTER)
+    validate_independent_local_views(payload, counter)
+    descriptor = store.describe(1)
+    assert isinstance(descriptor.payload.import_capability, PosixShmImport)
+    assert isinstance(descriptor.counter.import_capability, PosixShmImport)
+    assert descriptor.payload.import_capability.shm_name != descriptor.counter.import_capability.shm_name
+
+
+def test_ids_are_monotonic_nonzero_and_never_reused_after_burned_create_failure():
+    store, factory = _open_store()
+    first = store.allocate_and_export(_allocation_spec())
+    assert first.provider_resource_id == 1
+    factory.fail_construct[RegionPartKind.COUNTER] = RuntimeError("construct")
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.provisional_resource_id == 2
+    assert error.cleanup_debt_remaining is False
+    assert error.control_kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    assert error.failed_part is RegionPartKind.COUNTER
+    assert factory.payloads[-1].release_count == 1
+    assert factory.payloads[-1].materialized is False
+    assert store.state is ProviderRegionStoreState.OPEN
+    factory.fail_construct.clear()
+    third = store.allocate_and_export(_allocation_spec())
+    assert third.provider_resource_id == 3
+    released = store.release(1)
+    assert released.status is ProviderReleaseStatus.RELEASED
+    gone = store.release(1)
+    assert gone.status is ProviderReleaseStatus.ALREADY_GONE
+    unknown = store.release(99)
+    assert unknown.status is ProviderReleaseStatus.UNKNOWN_RESOURCE
+    with pytest.raises(RegionControlError) as id_exc:
+        store.release(0)
+    assert id_exc.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+
+def test_release_attempts_both_parts_and_enters_close_failed_on_first_cleanup_debt():
+    store, factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    factory.payloads[0].release_step_failures = [_backend_failure(RegionPartKind.PAYLOAD)]
+    result = store.release(1)
+    assert result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert result.failures[0].part is RegionPartKind.PAYLOAD
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert store.state is ProviderRegionStoreState.CLOSE_FAILED
+    with pytest.raises(RegionControlError) as exc_info:
+        store.describe(1)
+    assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
+    with pytest.raises(RegionControlError):
+        store.local_view(1, RegionPartKind.PAYLOAD)
+    with pytest.raises(RegionControlError):
+        store.release(1)
+    with pytest.raises(RegionControlError):
+        store.allocate_and_export(_allocation_spec())
+
+
+def test_sweep_first_cleans_untouched_resources_and_does_not_reissue_failed_cleanup():
+    store, factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    store.allocate_and_export(_allocation_spec())
+    factory.payloads[0].release_step_failures = [_backend_failure(RegionPartKind.PAYLOAD)]
+    first = store.release(1)
+    assert first.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert factory.payloads[1].release_count == 0
+    results = store.sweep()
+    assert [item.provider_resource_id for item in results] == [1, 2]
+    assert results[0].status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert results[1].status is ProviderReleaseStatus.RELEASED
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert factory.payloads[1].release_count == 1
+    assert factory.counters[1].release_count == 1
+    assert store.state is ProviderRegionStoreState.CLOSE_FAILED
+    again = store.sweep()
+    assert [item.provider_resource_id for item in again] == [1]
+    assert again[0].status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert factory.payloads[0].release_count == 1
+    assert factory.world.duplicate_releases == []
+
+
+def test_counter_materialize_failure_cleans_both_installed_shells_and_stays_open():
+    factory = FakeShellFactory()
+
+    def _factory(context, kind, spec):
+        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+        if kind is RegionPartKind.COUNTER:
+            shell.fail_materialize = RuntimeError("counter materialize")
+        return shell
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+    assert error.failed_part is RegionPartKind.COUNTER
+    assert error.failed_operation is RegionOperationKind.MATERIALIZE
+    assert error.cleanup_debt_remaining is False
+    assert factory.payloads[0].materialized is True
+    assert factory.counters[0].materialized is False
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert store.state is ProviderRegionStoreState.OPEN
+
+
+@pytest.mark.parametrize(
+    ("attr", "exc", "part", "operation"),
+    [
+        ("fail_zero", RuntimeError("zero"), RegionPartKind.COUNTER, RegionOperationKind.ZERO_BYTES),
+        ("fail_mapping_bytes", RuntimeError("map"), RegionPartKind.PAYLOAD, RegionOperationKind.DESCRIBE),
+        ("fail_import_capability", RuntimeError("import"), RegionPartKind.PAYLOAD, RegionOperationKind.DESCRIBE),
+        ("fail_local_base", RuntimeError("base"), RegionPartKind.PAYLOAD, RegionOperationKind.LOCAL_VIEW),
+        ("fail_materialize", KeyboardInterrupt(), RegionPartKind.PAYLOAD, RegionOperationKind.MATERIALIZE),
+    ],
+)
+def test_create_path_failures_are_classified_and_cleanup_runs_once(attr, exc, part, operation):
+    factory = FakeShellFactory()
+
+    def _factory(context, kind, spec):
+        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+        if kind is part:
+            setattr(shell, attr, exc)
+        return shell
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.failed_part is part
+    assert error.failed_operation is operation
+    assert error.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+    assert error.cleanup_debt_remaining is False
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert store.state is ProviderRegionStoreState.OPEN
+
+
+def test_create_cleanup_failure_retains_record_and_close_failed():
+    factory = FakeShellFactory()
+
+    def _factory(context, kind, spec):
+        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+        if kind is RegionPartKind.COUNTER:
+            shell.fail_materialize = RuntimeError("counter materialize")
+        if kind is RegionPartKind.PAYLOAD:
+            shell.release_step_failures = [_backend_failure(RegionPartKind.PAYLOAD)]
+        return shell
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.cleanup_debt_remaining is True
+    assert error.failed_part is RegionPartKind.COUNTER
+    assert store.state is ProviderRegionStoreState.CLOSE_FAILED
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    snapshot = store.sweep()
+    assert snapshot[0].status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert factory.payloads[0].release_count == 1
+
+
+def test_fake_release_keeps_later_failures_local_and_summarizes_the_first():
+    store, factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    first = _backend_failure(RegionPartKind.PAYLOAD)
+    later = ProviderCleanupFailure(
+        part=RegionPartKind.PAYLOAD,
+        backend_operation=RegionOperationKind.RELEASE,
+        typed_cause=RegionCleanupCause.INTERRUPTED,
+    )
+    factory.payloads[0].release_step_failures = [first, later]
+    result = store.release(1)
+    assert result.failures == (first,)
+    assert factory.payloads[0].local_ledger == [first, later]
+
+
+def test_overlapping_local_views_are_an_internal_invariant_and_are_cleaned():
+    factory = FakeShellFactory()
+
+    def _factory(context, kind, spec):
+        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+        shell._local_base = 0
+        return shell
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.control_kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    assert error.failed_operation is RegionOperationKind.LOCAL_VIEW
+    assert error.cleanup_debt_remaining is False
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+
+
+def test_closed_dispatcher_is_an_internal_invariant_and_burns_the_id():
+    store = ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=RegionEnvironmentKind.SIM,
+            target=HostAllocationTarget(),
+        )
+    )
+    with pytest.raises(RegionAllocationError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    error = exc_info.value
+    assert error.provisional_resource_id == 1
+    assert error.control_kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    assert error.cleanup_debt_remaining is False
+    assert store.state is ProviderRegionStoreState.OPEN
+    with pytest.raises(RegionAllocationError) as second:
+        store.allocate_and_export(_allocation_spec())
+    assert second.value.provisional_resource_id == 2
+
+
+def test_id_exhaustion_fails_before_a_side_effect_and_does_not_wrap():
+    store, factory = _open_store()
+    store._next_provider_resource_id = _UINT64_MAX
+    result = store.allocate_and_export(_allocation_spec())
+    assert result.provider_resource_id == _UINT64_MAX
+    with pytest.raises(RegionControlError) as exc_info:
+        store.allocate_and_export(_allocation_spec())
+    assert exc_info.value.kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    assert factory.world.constructed_parts == [RegionPartKind.PAYLOAD, RegionPartKind.COUNTER]
+    gone = store.release(1)
+    assert gone.status is ProviderReleaseStatus.ALREADY_GONE
+
+
+def test_release_interrupt_on_payload_still_attempts_counter():
+    store, factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    factory.payloads[0].raise_on_release = KeyboardInterrupt()
+    result = store.release(1)
+    assert result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE
+    assert result.failures[0].typed_cause is RegionCleanupCause.INTERRUPTED
+    assert factory.counters[0].release_count == 1
+    assert store.state is ProviderRegionStoreState.CLOSE_FAILED
+
+
+def test_describe_and_local_view_reject_gone_and_unknown_ids():
+    store, _factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    store.release(1)
+    with pytest.raises(RegionControlError) as gone:
+        store.describe(1)
+    assert gone.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+    with pytest.raises(RegionControlError) as unknown:
+        store.local_view(8, RegionPartKind.PAYLOAD)
+    assert unknown.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+    with pytest.raises(RegionControlError) as zero:
+        store.describe(0)
+    assert zero.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+
+def test_unmaterialized_fake_facts_fail_and_materialize_does_not_release():
+    factory = FakeShellFactory()
+    spec = _allocation_spec()
+    payload = factory(_sim_context(), RegionPartKind.PAYLOAD, spec.payload)
+    with pytest.raises(RegionControlError) as exc_info:
+        payload.mapping_bytes()
+    assert exc_info.value.kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    payload.materialize()
+    assert payload.release_count == 0
+    assert payload.mapping_bytes() == spec.payload.logical_bytes
+
+
+def test_successful_sweep_releases_active_resources_in_id_order():
+    store, factory = _open_store()
+    store.allocate_and_export(_allocation_spec())
+    store.allocate_and_export(_allocation_spec())
+    results = store.sweep()
+    assert [item.status for item in results] == [
+        ProviderReleaseStatus.RELEASED,
+        ProviderReleaseStatus.RELEASED,
+    ]
+    assert [item.provider_resource_id for item in results] == [1, 2]
+    assert store.state is ProviderRegionStoreState.CLOSED
+    assert factory.payloads[0].release_count == 1
+    assert factory.payloads[1].release_count == 1
+    with pytest.raises(RegionControlError):
+        store.describe(1)
+
+
+def test_sim_posix_store_creates_two_distinct_named_objects_and_zeros_only_counter():
+    store = ProviderRegionStore(_sim_context())
+    result = store.allocate_and_export(_allocation_spec())
+    try:
+        payload_name = result.export_descriptor.payload.import_capability.shm_name
+        counter_name = result.export_descriptor.counter.import_capability.shm_name
+        assert payload_name != counter_name
+        payload_shm = SharedMemory(name=payload_name)
+        counter_shm = SharedMemory(name=counter_name)
+        try:
+            assert payload_shm.size == 64
+            assert counter_shm.size == 8
+            assert bytes(counter_shm.buf[:8]) == b"\x00" * 8
+            payload_view = store.local_view(result.provider_resource_id, RegionPartKind.PAYLOAD)
+            counter_view = store.local_view(result.provider_resource_id, RegionPartKind.COUNTER)
+            validate_independent_local_views(payload_view, counter_view)
+        finally:
+            payload_shm.close()
+            counter_shm.close()
+    finally:
+        released = store.release(result.provider_resource_id)
+        assert released.status is ProviderReleaseStatus.RELEASED
+
+
+def test_sim_posix_collision_does_not_open_or_unlink_the_existing_object():
+    from simpler.comm_provider import _generate_posix_shm_token, _posix_shm_create_name
+
+    token = _generate_posix_shm_token()
+    existing = SharedMemory(name=_posix_shm_create_name(token), create=True, size=8)
+    try:
+        existing.buf[:8] = b"KEEPKEEP"
+        shell = SimPosixShmAllocation(
+            _sim_context(),
+            RegionPartKind.PAYLOAD,
+            _payload_spec(8),
+            candidate_name=token,
+        )
+        with pytest.raises(RegionControlError) as exc_info:
+            shell.materialize()
+        assert exc_info.value.kind is RegionControlErrorKind.BACKEND_FAILURE
+        assert shell.release_once() is None
+        still_there = SharedMemory(name=_posix_shm_create_name(token))
+        try:
+            assert bytes(still_there.buf[:8]) == b"KEEPKEEP"
+        finally:
+            still_there.close()
+    finally:
+        existing.close()
+        existing.unlink()
+
+
+def test_sim_posix_overlong_token_is_rejected_before_creation():
+    with pytest.raises(ValueError):
+        SimPosixShmAllocation(
+            _sim_context(),
+            RegionPartKind.PAYLOAD,
+            _payload_spec(),
+            candidate_name="n" * (POSIX_SHM_TOKEN_MAX_BYTES + 1),
+        )
+
+
+def test_sim_posix_interrupted_create_unlinks_owned_name_once():
+    from simpler.comm_provider import _generate_posix_shm_token, _posix_shm_create_name
+
+    token = _generate_posix_shm_token()
+    created: dict[str, SharedMemory] = {}
+
+    class _CreateThenInterrupt:
+        def __init__(self, name, *, create, size, **kwargs):
+            created["shm"] = SharedMemory(name=name, create=create, size=size)
+            raise KeyboardInterrupt()
+
+    shell = SimPosixShmAllocation(
+        _sim_context(),
+        RegionPartKind.COUNTER,
+        _counter_spec(),
+        candidate_name=token,
+        shm_cls=_CreateThenInterrupt,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        shell.materialize()
+    failure = shell.release_once()
+    assert failure is None
+    assert shell.release_once() is None
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=_posix_shm_create_name(token))
+    if "shm" in created:
+        created["shm"].close()
+
+
+def test_sim_posix_close_failure_still_unlinks_and_keeps_later_detail():
+    from simpler.comm_provider import _posix_shm_create_name
+
+    shell = SimPosixShmAllocation(_sim_context(), RegionPartKind.PAYLOAD, _payload_spec(8))
+    shell.materialize()
+    token = shell.candidate_name
+
+    def _boom_close():
+        raise OSError("close failed")
+
+    assert shell._shm is not None
+    shell._shm.close = _boom_close  # type: ignore[method-assign]
+    failure = shell.release_once()
+    assert failure is not None
+    assert failure.typed_cause is RegionCleanupCause.BACKEND_ERROR
+    assert [step for step, _exc in shell.local_cleanup_details] == ["close"]
+    assert shell.release_once() is failure
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=_posix_shm_create_name(token))
+
+
+def test_sim_posix_unlink_failure_is_summarized_after_successful_close():
+    shell = SimPosixShmAllocation(_sim_context(), RegionPartKind.COUNTER, _counter_spec())
+    shell.materialize()
+
+    def _boom_unlink():
+        raise OSError("unlink failed")
+
+    assert shell._shm is not None
+    shell._shm.unlink = _boom_unlink  # type: ignore[method-assign]
+    failure = shell.release_once()
+    assert failure is not None
+    assert [step for step, _exc in shell.local_cleanup_details] == ["unlink"]
+    shell._name_ownership_known = False
+    try:
+        if shell._shm is not None:
+            SharedMemory.unlink(shell._shm)
+    except FileNotFoundError:
+        pass
+
+
+def test_sim_posix_first_cleanup_failure_is_close_when_both_steps_fail():
+    from simpler.comm_provider import _posix_shm_create_name
+
+    shell = SimPosixShmAllocation(_sim_context(), RegionPartKind.PAYLOAD, _payload_spec(8))
+    shell.materialize()
+    token = shell.candidate_name
+    assert shell._shm is not None
+    real_unlink = shell._shm.unlink
+
+    def _boom_close():
+        raise OSError("close failed")
+
+    def _boom_unlink():
+        raise OSError("unlink failed")
+
+    shell._shm.close = _boom_close  # type: ignore[method-assign]
+    shell._shm.unlink = _boom_unlink  # type: ignore[method-assign]
+    failure = shell.release_once()
+    assert failure is not None
+    assert [step for step, _exc in shell.local_cleanup_details] == ["close", "unlink"]
+    try:
+        real_unlink()
+    except FileNotFoundError:
+        pass
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=_posix_shm_create_name(token))

@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Neutral provider-region values, typed codes, and structured results.
+"""Neutral provider-region values, typed codes, store, and structured results.
 
 This module is the provider-agent value surface for CPU-NPU comm regions. It
 does not import worker-chip compatibility types, Worker, mailbox transport, or
@@ -15,9 +15,13 @@ W5a transaction identity.
 
 from __future__ import annotations
 
+import ctypes
+import errno
+import uuid
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import Union
+from multiprocessing.shared_memory import SharedMemory
+from typing import Callable, Protocol, Union
 
 from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
 
@@ -458,3 +462,641 @@ class RegionAllocationError(RegionProviderError):
         self.cleanup_debt_remaining = _require_bool("cleanup_debt_remaining", cleanup_debt_remaining)
         self.message = str(message)
         super().__init__(self.message or kind.name)
+
+
+class RegionPartAllocation(Protocol):
+    """Owning backend shell for one PAYLOAD or COUNTER allocation."""
+
+    def materialize(self) -> None: ...
+
+    def mapping_bytes(self) -> int: ...
+
+    def import_capability(self) -> ImportCapability: ...
+
+    def local_base(self) -> int: ...
+
+    def zero_bytes(self, offset: int, nbytes: int) -> None: ...
+
+    def release_once(self) -> ProviderCleanupFailure | None: ...
+
+
+ShellFactory = Callable[
+    [RegionAllocationContext, RegionPartKind, RegionPartAllocationSpec],
+    RegionPartAllocation,
+]
+
+
+def _generate_posix_shm_token() -> str:
+    token = "smp_" + uuid.uuid4().hex[:24]
+    if getattr(SharedMemory, "_prepend_leading_slash", True):
+        token = "/" + token
+    return _require_posix_shm_token(token)
+
+
+def _posix_shm_create_name(token: str) -> str:
+    return token[1:] if token.startswith("/") else token
+
+
+def _unlink_posix_shm_token(token: str) -> None:
+    import _posixshmem
+    from multiprocessing import resource_tracker
+
+    name = token if token.startswith("/") else f"/{token}"
+    try:
+        _posixshmem.shm_unlink(name)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return
+        raise
+    try:
+        resource_tracker.unregister(name, "shared_memory")
+    except Exception:
+        pass
+
+
+def _shm_local_base(shm: SharedMemory) -> int:
+    exported = ctypes.c_char.from_buffer(shm.buf)
+    try:
+        return ctypes.addressof(exported)
+    finally:
+        del exported
+
+
+class SimPosixShmAllocation:
+    """One POSIX shm object for a single PAYLOAD or COUNTER part."""
+
+    def __init__(
+        self,
+        context: RegionAllocationContext,
+        part: RegionPartKind,
+        spec: RegionPartAllocationSpec,
+        *,
+        candidate_name: str | None = None,
+        shm_cls: type[SharedMemory] = SharedMemory,
+    ) -> None:
+        del context
+        self._part = _require_part(part)
+        if not isinstance(spec, RegionPartAllocationSpec):
+            raise TypeError("spec must be RegionPartAllocationSpec")
+        self._spec = spec
+        self._shm_cls = shm_cls
+        self.candidate_name = _require_posix_shm_token(candidate_name or _generate_posix_shm_token())
+        self._name_ownership_known = False
+        self._shm_object_installed = False
+        self._mapping_available = False
+        self._shm: SharedMemory | None = None
+        self._local_base: int | None = None
+        self._close_attempted = False
+        self._close_complete = False
+        self._unlink_attempted = False
+        self._unlink_complete = False
+        self._release_once_count = 0
+        self._first_cleanup_failure: ProviderCleanupFailure | None = None
+        self.local_cleanup_details: list[tuple[str, BaseException]] = []
+
+    def materialize(self) -> None:
+        try:
+            shm = self._shm_cls(
+                name=_posix_shm_create_name(self.candidate_name),
+                create=True,
+                size=self._spec.logical_bytes,
+            )
+        except FileExistsError as exc:
+            raise RegionControlError(
+                RegionControlErrorKind.BACKEND_FAILURE,
+                "POSIX shm name collision",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.MATERIALIZE,
+            ) from exc
+        except BaseException:
+            self._name_ownership_known = True
+            raise
+        self._shm = shm
+        self._name_ownership_known = True
+        self._shm_object_installed = True
+        self._local_base = _shm_local_base(shm)
+        self._mapping_available = True
+
+    def mapping_bytes(self) -> int:
+        self._require_mapping("mapping_bytes")
+        return self._spec.logical_bytes
+
+    def import_capability(self) -> PosixShmImport:
+        self._require_mapping("import_capability")
+        return PosixShmImport(shm_name=self.candidate_name)
+
+    def local_base(self) -> int:
+        self._require_mapping("local_base")
+        if self._local_base is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "POSIX shm mapping has no local base",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.LOCAL_VIEW,
+            )
+        return self._local_base
+
+    def zero_bytes(self, offset: int, nbytes: int) -> None:
+        self._require_mapping("zero_bytes")
+        if type(offset) is not int or type(nbytes) is not int:
+            raise TypeError("zero_bytes offset and nbytes must be int")
+        if offset < 0 or nbytes < 0:
+            raise ValueError("zero_bytes offset and nbytes must be non-negative")
+        end = offset + nbytes
+        if end > self._spec.logical_bytes:
+            raise ValueError("zero_bytes range exceeds logical_bytes")
+        assert self._shm is not None
+        self._shm.buf[offset:end] = b"\x00" * nbytes
+
+    def release_once(self) -> ProviderCleanupFailure | None:
+        self._release_once_count += 1
+        if self._release_once_count > 1:
+            return self._first_cleanup_failure
+        if self._shm_object_installed and not self._close_attempted:
+            self._close_attempted = True
+            try:
+                if self._shm is not None:
+                    self._shm.close()
+                self._close_complete = True
+            except BaseException as exc:
+                self._record_cleanup_failure("close", exc)
+        if self._name_ownership_known and not self._unlink_attempted:
+            self._unlink_attempted = True
+            try:
+                self._unlink_owned_name()
+                self._unlink_complete = True
+            except BaseException as exc:
+                self._record_cleanup_failure("unlink", exc)
+        return self._first_cleanup_failure
+
+    def _unlink_owned_name(self) -> None:
+        if self._shm is not None:
+            try:
+                self._shm.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return
+                raise
+        _unlink_posix_shm_token(self.candidate_name)
+
+    def _record_cleanup_failure(self, step: str, exc: BaseException) -> None:
+        cause = RegionCleanupCause.INTERRUPTED if _interrupt_like(exc) else RegionCleanupCause.BACKEND_ERROR
+        failure = ProviderCleanupFailure(
+            part=self._part,
+            backend_operation=RegionOperationKind.RELEASE,
+            typed_cause=cause,
+        )
+        self.local_cleanup_details.append((step, exc))
+        if self._first_cleanup_failure is None:
+            self._first_cleanup_failure = failure
+
+    def _require_mapping(self, operation: str) -> None:
+        if not self._mapping_available or self._shm is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                f"{operation} requires a materialized POSIX shm mapping",
+                failed_part=self._part,
+                failed_operation=RegionOperationKind.DESCRIBE
+                if operation in {"mapping_bytes", "import_capability"}
+                else RegionOperationKind.LOCAL_VIEW
+                if operation == "local_base"
+                else RegionOperationKind.ZERO_BYTES,
+            )
+
+
+def _closed_part_dispatcher(
+    context: RegionAllocationContext,
+    part: RegionPartKind,
+    spec: RegionPartAllocationSpec,
+) -> RegionPartAllocation:
+    if (
+        spec.planned_backing_kind is BackendKind.VMM_WINDOW
+        and context.environment_kind is RegionEnvironmentKind.SIM
+        and isinstance(context.target, DeviceAllocationTarget)
+    ):
+        return SimPosixShmAllocation(context, part, spec)
+    raise RegionControlError(
+        RegionControlErrorKind.INTERNAL_INVARIANT,
+        "admitted allocation combination has no provider backend",
+        failed_part=part,
+        failed_operation=RegionOperationKind.NONE,
+    )
+
+
+def _initialize_counter_storage(allocation: RegionPartAllocation, logical_bytes: int) -> None:
+    allocation.zero_bytes(0, logical_bytes)
+
+
+def _store_lifecycle_error(state: ProviderRegionStoreState) -> RegionControlError:
+    return RegionControlError(
+        RegionControlErrorKind.STORE_LIFECYCLE,
+        f"store is {state.name}",
+    )
+
+
+def _invalid_resource_id_error(message: str) -> RegionControlError:
+    return RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, message)
+
+
+def _interrupt_like(exc: BaseException) -> bool:
+    return isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit))
+
+
+def _cleanup_failure_from_exception(part: RegionPartKind, exc: BaseException) -> ProviderCleanupFailure:
+    cause = RegionCleanupCause.INTERRUPTED if _interrupt_like(exc) else RegionCleanupCause.BACKEND_ERROR
+    return ProviderCleanupFailure(
+        part=part,
+        backend_operation=RegionOperationKind.RELEASE,
+        typed_cause=cause,
+    )
+
+
+def _coerce_part_cleanup_failure(kind: RegionPartKind, returned: object) -> ProviderCleanupFailure:
+    if isinstance(returned, ProviderCleanupFailure):
+        if returned.part is kind:
+            return returned
+        return ProviderCleanupFailure(
+            part=kind,
+            backend_operation=returned.backend_operation,
+            typed_cause=returned.typed_cause,
+        )
+    return ProviderCleanupFailure(
+        part=kind,
+        backend_operation=RegionOperationKind.RELEASE,
+        typed_cause=RegionCleanupCause.BACKEND_ERROR,
+    )
+
+
+class _AllocateStage:
+    def __init__(self) -> None:
+        self.part = RegionPartKind.INVALID
+        self.operation = RegionOperationKind.NONE
+
+
+class _ProviderPartRecord:
+    def __init__(
+        self,
+        kind: RegionPartKind,
+        spec: RegionPartAllocationSpec,
+        allocation: RegionPartAllocation,
+    ) -> None:
+        self.kind = kind
+        self.spec = spec
+        self.allocation = allocation
+        self.state = ProviderPartResourceState.SHELL
+        self.cleanup_failure: ProviderCleanupFailure | None = None
+
+
+class ProviderRegionResource:
+    """Store-private logical record for one provider resource ID."""
+
+    def __init__(self, provider_resource_id: int, spec: RegionAllocationSpec) -> None:
+        self.provider_resource_id = provider_resource_id
+        self.spec = spec
+        self.state = ProviderRegionResourceState.CREATING
+        self.parts: dict[RegionPartKind, _ProviderPartRecord] = {}
+        self.export_descriptor: RegionExportDescriptor | None = None
+        self.local_views: dict[RegionPartKind, RegionPartLocalView] = {}
+
+
+class ProviderRegionStore:
+    """Provider-agent physical ownership authority for one store incarnation."""
+
+    def __init__(
+        self,
+        context: RegionAllocationContext,
+        *,
+        _shell_factory: ShellFactory | None = None,
+    ) -> None:
+        if not isinstance(context, RegionAllocationContext):
+            raise TypeError("context must be RegionAllocationContext")
+        self._context = context
+        self._state = ProviderRegionStoreState.OPEN
+        self._next_provider_resource_id = 1
+        self._resources: dict[int, ProviderRegionResource] = {}
+        self._shell_factory = _closed_part_dispatcher if _shell_factory is None else _shell_factory
+
+    @property
+    def context(self) -> RegionAllocationContext:
+        return self._context
+
+    @property
+    def state(self) -> ProviderRegionStoreState:
+        return self._state
+
+    def allocate_and_export(self, spec: RegionAllocationSpec) -> RegionAllocationResult:
+        self._require_open()
+        if not isinstance(spec, RegionAllocationSpec):
+            raise TypeError("spec must be RegionAllocationSpec")
+        resource_id = self._burn_id()
+        resource = ProviderRegionResource(resource_id, spec)
+        self._resources[resource_id] = resource
+        stage = _AllocateStage()
+        try:
+            for kind in REGION_PARTS:
+                stage.part = kind
+                stage.operation = RegionOperationKind.NONE
+                allocation = self._shell_factory(self._context, kind, spec.part(kind))
+                resource.parts[kind] = _ProviderPartRecord(kind, spec.part(kind), allocation)
+            for kind in REGION_PARTS:
+                stage.part = kind
+                stage.operation = RegionOperationKind.MATERIALIZE
+                part = resource.parts[kind]
+                part.state = ProviderPartResourceState.MATERIALIZING
+                part.allocation.materialize()
+            stage.part = RegionPartKind.COUNTER
+            stage.operation = RegionOperationKind.ZERO_BYTES
+            _initialize_counter_storage(resource.parts[RegionPartKind.COUNTER].allocation, spec.counter.logical_bytes)
+            descriptor = self._freeze_descriptor(resource, stage)
+            local_views = self._freeze_local_views(resource, stage)
+            for part in resource.parts.values():
+                part.state = ProviderPartResourceState.READY
+            resource.export_descriptor = descriptor
+            resource.local_views = local_views
+            resource.state = ProviderRegionResourceState.ACTIVE
+            return RegionAllocationResult(resource_id, descriptor)
+        except BaseException as primary:
+            if isinstance(primary, RegionControlError):
+                if primary.failed_part is not RegionPartKind.INVALID:
+                    stage.part = primary.failed_part
+                if primary.failed_operation is not RegionOperationKind.NONE:
+                    stage.operation = primary.failed_operation
+            resource.state = ProviderRegionResourceState.CLEANUP_PENDING
+            complete = self._release_installed_parts(resource)
+            if complete:
+                del self._resources[resource_id]
+            else:
+                self._state = ProviderRegionStoreState.CLOSE_FAILED
+            error = self._allocation_error(
+                primary, resource_id, stage.part, stage.operation, debt=not complete
+            )
+            raise error from primary
+
+    def describe(self, provider_resource_id: int) -> RegionExportDescriptor:
+        self._require_open()
+        resource = self._require_active_resource(provider_resource_id)
+        if resource.export_descriptor is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "ACTIVE resource is missing a frozen export descriptor",
+            )
+        return resource.export_descriptor
+
+    def local_view(self, provider_resource_id: int, part: RegionPartKind | int) -> RegionPartLocalView:
+        self._require_open()
+        kind = _require_part(part)
+        resource = self._require_active_resource(provider_resource_id)
+        view = resource.local_views.get(kind)
+        if view is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "ACTIVE resource is missing a frozen local view",
+                failed_part=kind,
+                failed_operation=RegionOperationKind.LOCAL_VIEW,
+            )
+        return view
+
+    def release(self, provider_resource_id: int) -> ProviderReleaseResult:
+        self._require_open()
+        resource_id = self._require_resource_id(provider_resource_id)
+        classified = self._classify_absent_id(resource_id)
+        if classified is not None:
+            return ProviderReleaseResult(provider_resource_id=resource_id, status=classified)
+        resource = self._resources[resource_id]
+        resource.state = ProviderRegionResourceState.CLEANUP_PENDING
+        resource.export_descriptor = None
+        resource.local_views = {}
+        complete = self._release_installed_parts(resource)
+        if complete:
+            del self._resources[resource_id]
+            return ProviderReleaseResult(
+                provider_resource_id=resource_id,
+                status=ProviderReleaseStatus.RELEASED,
+            )
+        self._state = ProviderRegionStoreState.CLOSE_FAILED
+        return self._incomplete_result(resource)
+
+    def sweep(self) -> tuple[ProviderReleaseResult, ...]:
+        if self._state is ProviderRegionStoreState.CLOSED:
+            return ()
+        self._state = ProviderRegionStoreState.CLOSING
+        results: list[ProviderReleaseResult] = []
+        for resource_id in sorted(self._resources):
+            resource = self._resources[resource_id]
+            if resource.state in (
+                ProviderRegionResourceState.ACTIVE,
+                ProviderRegionResourceState.CREATING,
+            ):
+                resource.state = ProviderRegionResourceState.CLEANUP_PENDING
+                resource.export_descriptor = None
+                resource.local_views = {}
+                complete = self._release_installed_parts(resource)
+                if complete:
+                    del self._resources[resource_id]
+                    results.append(
+                        ProviderReleaseResult(
+                            provider_resource_id=resource_id,
+                            status=ProviderReleaseStatus.RELEASED,
+                        )
+                    )
+                else:
+                    results.append(self._incomplete_result(resource))
+            else:
+                results.append(self._incomplete_result(resource))
+        self._state = (
+            ProviderRegionStoreState.CLOSE_FAILED if self._resources else ProviderRegionStoreState.CLOSED
+        )
+        return tuple(results)
+
+    def _require_open(self) -> None:
+        if self._state is not ProviderRegionStoreState.OPEN:
+            raise _store_lifecycle_error(self._state)
+
+    def _burn_id(self) -> int:
+        resource_id = self._next_provider_resource_id
+        if resource_id > _UINT64_MAX:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "provider_resource_id space exhausted",
+            )
+        self._next_provider_resource_id = resource_id + 1
+        return resource_id
+
+    def _require_resource_id(self, provider_resource_id: object) -> int:
+        resource_id = _require_uint64("provider_resource_id", provider_resource_id)
+        if resource_id == 0:
+            raise _invalid_resource_id_error("provider_resource_id must be nonzero")
+        return resource_id
+
+    def _classify_absent_id(self, resource_id: int) -> ProviderReleaseStatus | None:
+        if resource_id in self._resources:
+            return None
+        if resource_id < self._next_provider_resource_id:
+            return ProviderReleaseStatus.ALREADY_GONE
+        return ProviderReleaseStatus.UNKNOWN_RESOURCE
+
+    def _require_active_resource(self, provider_resource_id: object) -> ProviderRegionResource:
+        resource_id = self._require_resource_id(provider_resource_id)
+        resource = self._resources.get(resource_id)
+        if resource is None:
+            if resource_id < self._next_provider_resource_id:
+                raise _invalid_resource_id_error("provider_resource_id is already gone")
+            raise _invalid_resource_id_error("provider_resource_id is unknown")
+        if resource.state is not ProviderRegionResourceState.ACTIVE:
+            raise RegionControlError(
+                RegionControlErrorKind.STORE_LIFECYCLE,
+                f"resource is {resource.state.name}",
+            )
+        return resource
+
+    def _freeze_descriptor(
+        self, resource: ProviderRegionResource, stage: _AllocateStage
+    ) -> RegionExportDescriptor:
+        exports: dict[RegionPartKind, RegionPartExportDescriptor] = {}
+        for kind in REGION_PARTS:
+            stage.part = kind
+            stage.operation = RegionOperationKind.DESCRIBE
+            part = resource.parts[kind]
+            spec = part.spec
+            try:
+                mapping_bytes = part.allocation.mapping_bytes()
+                import_capability = part.allocation.import_capability()
+            except RegionControlError:
+                raise
+            except Exception as exc:
+                raise RegionControlError(
+                    RegionControlErrorKind.BACKEND_FAILURE,
+                    str(exc) or "export descriptor facts failed",
+                    failed_part=kind,
+                    failed_operation=RegionOperationKind.DESCRIBE,
+                ) from exc
+            try:
+                exports[kind] = RegionPartExportDescriptor(
+                    planned_backing_kind=spec.planned_backing_kind,
+                    logical_bytes=spec.logical_bytes,
+                    mapping_bytes=mapping_bytes,
+                    import_capability=import_capability,
+                )
+            except Exception as exc:
+                raise RegionControlError(
+                    RegionControlErrorKind.INTERNAL_INVARIANT,
+                    str(exc) or "export descriptor construction failed",
+                    failed_part=kind,
+                    failed_operation=RegionOperationKind.DESCRIBE,
+                ) from exc
+        return RegionExportDescriptor(
+            payload=exports[RegionPartKind.PAYLOAD],
+            counter=exports[RegionPartKind.COUNTER],
+        )
+
+    def _freeze_local_views(
+        self, resource: ProviderRegionResource, stage: _AllocateStage
+    ) -> dict[RegionPartKind, RegionPartLocalView]:
+        views: dict[RegionPartKind, RegionPartLocalView] = {}
+        for kind in REGION_PARTS:
+            stage.part = kind
+            stage.operation = RegionOperationKind.LOCAL_VIEW
+            part = resource.parts[kind]
+            try:
+                local_base = part.allocation.local_base()
+            except RegionControlError:
+                raise
+            except Exception as exc:
+                raise RegionControlError(
+                    RegionControlErrorKind.BACKEND_FAILURE,
+                    str(exc) or "local view facts failed",
+                    failed_part=kind,
+                    failed_operation=RegionOperationKind.LOCAL_VIEW,
+                ) from exc
+            try:
+                views[kind] = RegionPartLocalView(
+                    part=kind,
+                    local_base=local_base,
+                    logical_bytes=part.spec.logical_bytes,
+                )
+            except Exception as exc:
+                raise RegionControlError(
+                    RegionControlErrorKind.INTERNAL_INVARIANT,
+                    str(exc) or "local view construction failed",
+                    failed_part=kind,
+                    failed_operation=RegionOperationKind.LOCAL_VIEW,
+                ) from exc
+        try:
+            validate_independent_local_views(views[RegionPartKind.PAYLOAD], views[RegionPartKind.COUNTER])
+        except ValueError as exc:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                str(exc),
+                failed_part=RegionPartKind.INVALID,
+                failed_operation=RegionOperationKind.LOCAL_VIEW,
+            ) from exc
+        return views
+
+    def _release_installed_parts(self, resource: ProviderRegionResource) -> bool:
+        for kind in REGION_PARTS:
+            part = resource.parts.get(kind)
+            if part is None or part.state is ProviderPartResourceState.RELEASED:
+                continue
+            part.state = ProviderPartResourceState.CLEANUP_PENDING
+            try:
+                returned = part.allocation.release_once()
+            except BaseException as exc:
+                part.cleanup_failure = _cleanup_failure_from_exception(kind, exc)
+                continue
+            if returned is None:
+                part.state = ProviderPartResourceState.RELEASED
+                part.cleanup_failure = None
+            else:
+                part.cleanup_failure = _coerce_part_cleanup_failure(kind, returned)
+        return all(part.state is ProviderPartResourceState.RELEASED for part in resource.parts.values())
+
+    def _incomplete_result(self, resource: ProviderRegionResource) -> ProviderReleaseResult:
+        failures: list[ProviderCleanupFailure] = []
+        for kind in REGION_PARTS:
+            part = resource.parts.get(kind)
+            if part is None or part.state is ProviderPartResourceState.RELEASED:
+                continue
+            if part.cleanup_failure is None:
+                part.cleanup_failure = ProviderCleanupFailure(
+                    part=kind,
+                    backend_operation=RegionOperationKind.RELEASE,
+                    typed_cause=RegionCleanupCause.BACKEND_STATE_MISMATCH,
+                )
+            failures.append(part.cleanup_failure)
+        return ProviderReleaseResult(
+            provider_resource_id=resource.provider_resource_id,
+            status=ProviderReleaseStatus.CLEANUP_INCOMPLETE,
+            failures=tuple(failures),
+        )
+
+    def _allocation_error(
+        self,
+        primary: BaseException,
+        resource_id: int,
+        part: RegionPartKind,
+        operation: RegionOperationKind,
+        *,
+        debt: bool,
+    ) -> RegionAllocationError:
+        kind = RegionControlErrorKind.INTERNAL_INVARIANT
+        if isinstance(primary, RegionControlError):
+            if primary.kind in _ALLOCATION_ERROR_KINDS:
+                kind = primary.kind
+        elif operation in _BACKEND_FAILURE_OPERATIONS:
+            kind = RegionControlErrorKind.BACKEND_FAILURE
+        if kind is RegionControlErrorKind.BACKEND_FAILURE and operation not in _BACKEND_FAILURE_OPERATIONS:
+            kind = RegionControlErrorKind.INTERNAL_INVARIANT
+            operation = RegionOperationKind.NONE
+        return RegionAllocationError(
+            provisional_resource_id=resource_id,
+            control_kind=kind,
+            failed_part=part,
+            failed_operation=operation,
+            cleanup_debt_remaining=debt,
+            message=str(primary),
+        )
