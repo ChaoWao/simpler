@@ -62,7 +62,7 @@ _TMR = _load_tmr_case()
 
 def _host_build_graph_callable():
     """Same CALLABLE as the TMR case, with kernel sources re-pointed at the TMR dir
-    and the orchestration swapped for the predicated-dispatch variant.
+    and the orchestration swapped for the Graph-form variant.
 
     ``decode_fwd_hostbuild.cpp`` is the tensormap_and_ringbuffer orchestration
     with one runtime-specific rewrite and the runtime untouched. HBG runs the
@@ -100,9 +100,9 @@ class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
             "config": {
                 "device_count": N_RANKS,
                 "num_sub_workers": 0,
-                # Ring task window matches the TMR case (the predicated rewrite
+                # Ring task window matches the TMR case (HBG_RECV_ROWS_PER_EXPERT
                 # materializes the same per-expert tile count the dynamic loops
-                # produced in-regime). The heap grows 2x: the static grid
+                # produced in-regime). The heap grows 2x: a constant trip count
                 # allocates tile scratch for all 32 experts per MoE layer, while
                 # the dynamic loops allocated only for experts that received rows.
                 "runtime_env": {
