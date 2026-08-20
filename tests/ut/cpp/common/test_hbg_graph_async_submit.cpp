@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #include "pto_orchestration_api.h"
@@ -40,6 +41,9 @@ struct FakeRuntime {
     bool record_entered{false};
     bool later_submit_entered{false};
     bool overlapped{false};
+    bool record_every_begin{false};
+    bool gate_four_prepares{false};
+    int four_prepare_overlaps{0};
     int prepare_overlaps{0};
     int begin_calls{0};
     int prepare_calls{0};
@@ -54,6 +58,7 @@ struct FakeRuntime {
     // What graph_prepare actually received, so the deep copy GraphOwnedArgs makes
     // can be compared against the boundary the caller passed.
     bool prepare_saw_args{false};
+    const void *prepare_handle{nullptr};
     int32_t recorded_tensor_count{-1};
     int32_t recorded_scalar_count{-1};
     uint64_t recorded_tensor_addr{0};
@@ -78,7 +83,9 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs
     fake.begin_calls++;
     GraphScopeResult result;
     result.execute_block = false;
-    result.recording = fake.begin_calls == 1;
+    result.recording = fake.record_every_begin || fake.begin_calls == 1;
+    // The handle the recording thread must hand back to graph_prepare.
+    if (result.recording) result.recording_handle = &fake;
     if (!result.recording) {
         fake.later_submit_entered = true;
         fake.cv.notify_all();
@@ -86,10 +93,11 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs
     return result;
 }
 
-bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
+bool fake_graph_prepare(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args) {
     FakeRuntime &fake = *as_fake(rt);
     std::unique_lock<std::mutex> lock(fake.mutex);
     fake.prepare_calls++;
+    fake.prepare_handle = recording_handle;
     fake.prepare_thread = std::this_thread::get_id();
     fake.prepare_saw_args = true;
     fake.recorded_tensor_count = args.tensor_count();
@@ -106,6 +114,14 @@ bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
     if (args.scalar_count() > 0) {
         fake.recorded_scalar = args.scalar(0);
     }
+    if (fake.gate_four_prepares) {
+        fake.cv.notify_all();
+        const bool all_prepared = fake.cv.wait_for(lock, kHandshakeTimeout, [&] {
+            return fake.prepare_calls == 4;
+        });
+        if (all_prepared) fake.four_prepare_overlaps++;
+        return true;
+    }
     // The hash-keyed outer shell is enough for the caller to continue. Hold
     // prepare until the later same-hash submission proves that start() did not
     // retain the old worker-ready handshake.
@@ -116,10 +132,11 @@ bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
     return true;
 }
 
-void fake_graph_abort(PTO2Runtime *) {}
+void fake_graph_abort(PTO2Runtime *, void *) {}
 
 bool fake_graph_end(PTO2Runtime *rt) {
     FakeRuntime &fake = *as_fake(rt);
+    std::lock_guard<std::mutex> lock(fake.mutex);
     fake.end_calls++;
     fake.submit_thread = std::this_thread::get_id();
     return true;
@@ -144,6 +161,78 @@ const PTO2RuntimeOps kFakeOps = {
 
 }  // namespace
 
+TEST(HbgGraphAsyncSubmit, PrewarmedRecorderPoolGrowsForFiveConcurrentGraphs) {
+    constexpr int kGraphCount = 5;
+    GraphAsyncRecordingState pool;
+    ASSERT_TRUE(pool.prewarm());
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    int entered = 0;
+    bool release = false;
+    std::set<std::thread::id> worker_ids;
+    GraphTaskArgs empty_args;
+
+    for (int i = 0; i < kGraphCount; ++i) {
+        ASSERT_TRUE(pool.start(empty_args, [&](GraphTaskArgs &) {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            worker_ids.insert(std::this_thread::get_id());
+            entered++;
+            gate_cv.notify_all();
+            gate_cv.wait(lock, [&]() {
+                return release;
+            });
+        }));
+    }
+
+    bool all_entered = false;
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        all_entered = gate_cv.wait_for(lock, kHandshakeTimeout, [&]() {
+            return entered == kGraphCount;
+        });
+        release = true;
+    }
+    gate_cv.notify_all();
+    pool.wait();
+
+    EXPECT_TRUE(all_entered) << "every Graph recording must start before any one of them finishes";
+    EXPECT_EQ(worker_ids.size(), static_cast<size_t>(kGraphCount))
+        << "a fifth Graph must grow the four-worker prewarmed pool instead of queueing";
+}
+
+TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit) {
+    FakeRuntime fake{};
+    fake.ops = &kFakeOps;
+    fake.record_every_begin = true;
+    fake.gate_four_prepares = true;
+    framework_bind_runtime(reinterpret_cast<PTO2Runtime *>(&fake));
+
+    uint32_t storage[4]{};
+    uint32_t shape[] = {4};
+    ChipTensor boundary = make_tensor_external(storage, shape, 1);
+    GraphTaskArgs args;
+    args.add_input(boundary);
+
+    int body_calls = 0;
+    for (uint64_t graph_key = 0x1800; graph_key < 0x1804; ++graph_key) {
+        PTO2ScopeGuard scope;
+        const GraphSubmitResult result = rt_submit_graph_impl(graph_key, args, [&](const GraphTaskArgs &) {
+            std::lock_guard<std::mutex> lock(fake.mutex);
+            body_calls++;
+        });
+        EXPECT_TRUE(result.recording);
+    }
+    rt_graph_commit();
+    framework_bind_runtime(nullptr);
+
+    EXPECT_EQ(fake.begin_calls, 4);
+    EXPECT_EQ(fake.prepare_calls, 4);
+    EXPECT_EQ(fake.four_prepare_overlaps, 4) << "all four recorders must enter before commit waits for any Definition";
+    EXPECT_EQ(fake.end_calls, 4);
+    EXPECT_EQ(fake.commit_calls, 1) << "only the explicit final commit may wait for the recorder pool";
+    EXPECT_EQ(body_calls, 4);
+}
+
 TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     FakeRuntime fake{};
     fake.ops = &kFakeOps;
@@ -161,8 +250,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     {
         PTO2ScopeGuard scope;
         first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
-            // Graph bodies use the ordinary task wrappers, which commit any
-            // preceding outer Graph before submitting. This must not make the
+            // An explicit commit reached from a Graph body must not make the
             // recorder wait for its own in-flight job.
             rt_graph_commit();
             std::unique_lock<std::mutex> lock(fake.mutex);
@@ -185,7 +273,6 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     }
     rt_graph_commit();
 
-    const std::thread::id first_record_thread = fake.record_thread;
     {
         std::lock_guard<std::mutex> lock(fake.mutex);
         fake.begin_calls = 0;
@@ -223,13 +310,13 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     EXPECT_EQ(body_calls, 2);
     EXPECT_EQ(fake.prepare_calls, 2);
     EXPECT_EQ(fake.prepare_overlaps, 2) << "main-thread Graph submission must not wait for worker graph_prepare";
+    EXPECT_EQ(fake.prepare_handle, &fake) << "the recording thread must bind through the handle graph_begin returned";
     EXPECT_EQ(fake.end_calls, 2);
     EXPECT_EQ(fake.commit_calls, 4);
     EXPECT_EQ(fake.scope_begin_calls, 4);
     EXPECT_EQ(fake.scope_end_calls, 4);
     EXPECT_TRUE(fake.overlapped);
     EXPECT_NE(fake.record_thread, caller);
-    EXPECT_EQ(fake.record_thread, first_record_thread) << "steady-state recording must reuse the worker thread";
     EXPECT_EQ(fake.prepare_thread, fake.record_thread);
     EXPECT_EQ(fake.submit_thread, fake.record_thread);
 }

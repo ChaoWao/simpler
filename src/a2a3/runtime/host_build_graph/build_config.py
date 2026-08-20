@@ -21,6 +21,8 @@
 # The "orchestration" directory contains source files compiled into both
 # runtime targets AND the orchestration .so (e.g., tensor methods needed
 # by the ChipTensor constructor's validation logic).
+# "host_orchestration_support" is linked only into that host-loaded .so; its
+# recorder prewarm entry must not instantiate host threads in runtime targets.
 
 BUILD_CONFIG = {
     "aicore": {"include_dirs": ["runtime", "common", ".."], "source_dirs": ["aicore", "orchestration"]},
@@ -32,5 +34,8 @@ BUILD_CONFIG = {
         "include_dirs": ["runtime", "common", ".."],
         "source_dirs": ["host", "runtime/orchestrator_core", "runtime/shared", "orchestration"],
     },
-    "orchestration": {"include_dirs": ["runtime", "orchestration", "common", ".."], "source_dirs": ["orchestration"]},
+    "orchestration": {
+        "include_dirs": ["runtime", "orchestration", "common", ".."],
+        "source_dirs": ["orchestration", "host_orchestration_support"],
+    },
 }

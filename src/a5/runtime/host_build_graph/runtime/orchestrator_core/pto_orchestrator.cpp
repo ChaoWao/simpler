@@ -389,23 +389,46 @@ struct GraphPendingUpload {
     bool deferred_heap{false};
 };
 
-enum class GraphRecordingStatus : uint8_t { IDLE = 0, RECORDING = 1, READY = 2, FAILED = 3 };
+enum class GraphRecordingStatus : uint8_t { RECORDING = 0, READY = 1, FAILED = 2 };
 
-struct GraphHostState {
-    std::unordered_map<uint64_t, std::vector<std::byte>> definitions;
+// One Definition being recorded. Entries are keyed by Graph key and held by
+// unique_ptr, so a rehash of the owning map never moves one: the recording
+// thread is handed this address at graph_begin and dereferences it without
+// taking recording_mutex.
+struct GraphInflightRecording {
+    uint64_t full_key{0};
     std::unique_ptr<GraphRecording> recording;
-    std::vector<GraphPendingUpload> pending_uploads;
-    std::mutex recording_mutex;
-    std::condition_variable recording_cv;
-    // Atomic because graph_prepare reads it on the recording worker without
+    // Atomic because graph_prepare reads it on the recording thread without
     // taking recording_mutex, by design: acquiring the mutex there lets a
-    // main-thread burst of same-hash submissions starve the worker before it can
+    // main-thread burst of same-key submissions starve the thread before it can
     // bind its private recording state. Every other access holds the mutex.
-    std::atomic<GraphRecordingStatus> recording_status{GraphRecordingStatus::IDLE};
-    uint64_t recording_key{0};
+    std::atomic<GraphRecordingStatus> recording_status{GraphRecordingStatus::RECORDING};
 
     GraphRecordingStatus status() const { return recording_status.load(std::memory_order_acquire); }
     void set_status(GraphRecordingStatus next) { recording_status.store(next, std::memory_order_release); }
+};
+
+struct GraphHostState {
+    std::unordered_map<uint64_t, std::vector<std::byte>> definitions;
+    // Recordings in flight, at most one per Graph key. Several record at once,
+    // each on its own thread; graph_commit drains and finalizes all of them.
+    std::unordered_map<uint64_t, std::unique_ptr<GraphInflightRecording>> inflight;
+    std::vector<GraphPendingUpload> pending_uploads;
+    std::mutex recording_mutex;
+    std::condition_variable recording_cv;
+    // Mirrors inflight.size() so orchestration completion answers the common
+    // "nothing is recording" case without taking recording_mutex.
+    std::atomic<size_t> inflight_count{0};
+
+    // Definitions this run can still admit: published plus in flight, against
+    // the per-worker cache limit.
+    size_t claimed_definitions() const { return definitions.size() + inflight.size(); }
+    bool any_recording() const {
+        for (const auto &entry : inflight) {
+            if (entry.second->status() == GraphRecordingStatus::RECORDING) return true;
+        }
+        return false;
+    }
 };
 
 namespace {
@@ -414,6 +437,9 @@ GraphHostState *graph_state_from(PTO2OrchestratorState *orch) {
     return orch == nullptr ? nullptr : static_cast<GraphHostState *>(orch->graph_host_state);
 }
 
+// The in-flight entry this thread is recording into, bound by graph_prepare and
+// cleared by graph_end / graph_abort.
+thread_local GraphInflightRecording *g_active_graph_entry = nullptr;
 thread_local GraphRecording *g_active_graph_recording = nullptr;
 // The recording a thread holds belongs to one GraphHostState. Recording into it
 // from a different orchestrator would silently mix two graphs, so the owner is
@@ -1655,21 +1681,25 @@ bool graph_submit_pending_definition(
     return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
 }
 
-bool graph_finalize_pending_submissions(
-    PTO2OrchestratorState *orch, GraphHostState *state, const GraphDefinition &definition
-) {
-    if (definition.execution_storage_bytes == 0 ||
-        definition.required_heap > UINT64_MAX - definition.execution_storage_bytes) {
-        return false;
-    }
-    const uint64_t owned_heap = definition.required_heap + definition.execution_storage_bytes;
-    if (owned_heap > static_cast<uint64_t>(INT32_MAX)) return false;
+bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
     for (GraphPendingUpload &pending : state->pending_uploads) {
-        if (!pending.deferred_heap || pending.image.size() < sizeof(GraphSubmission)) continue;
+        if (!pending.deferred_heap) continue;
+        if (pending.image.size() < sizeof(GraphSubmission)) return false;
         auto *submission = reinterpret_cast<GraphSubmission *>(pending.image.data());
-        if (submission->graph_key != definition.full_key || pending.outer_slot == nullptr ||
-            pending.outer_slot->task == nullptr || pending.outer_slot->task_kind != TaskKind::GRAPH ||
+        auto definition_it = state->definitions.find(submission->graph_key);
+        const GraphDefinition *definition =
+            definition_it == state->definitions.end() ? nullptr : graph_definition(definition_it->second);
+        if (definition == nullptr || definition->execution_storage_bytes == 0 ||
+            definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
+            pending.outer_slot == nullptr || pending.outer_slot->task == nullptr ||
+            pending.outer_slot->task_kind != TaskKind::GRAPH ||
             !graph_submission_wire_size_valid(*submission, pending.image.size())) {
+            if (failed_key != nullptr) *failed_key = submission->graph_key;
+            return false;
+        }
+        const uint64_t owned_heap = definition->required_heap + definition->execution_storage_bytes;
+        if (owned_heap > static_cast<uint64_t>(INT32_MAX)) {
+            if (failed_key != nullptr) *failed_key = submission->graph_key;
             return false;
         }
         void *packed_base = nullptr;
@@ -1677,11 +1707,12 @@ bool graph_finalize_pending_submissions(
         if (!orch->ring.task_allocator.reserve_deferred_heap(
                 static_cast<int32_t>(owned_heap), &packed_base, &packed_end
             )) {
+            if (failed_key != nullptr) *failed_key = submission->graph_key;
             return false;
         }
         pending.outer_slot->task->packed_buffer_base = packed_base;
         pending.outer_slot->task->packed_buffer_end = packed_end;
-        submission->definition_hash = definition.content_hash;
+        submission->definition_hash = definition->content_hash;
         pending.deferred_heap = false;
     }
     return true;
@@ -1914,37 +1945,10 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 
     const uint64_t full_key = graph_full_key(callable_hash, graph_key);
     std::unique_lock<std::mutex> lock(state->recording_mutex);
-    if (state->status() != GraphRecordingStatus::IDLE) {
-        if (state->recording_key != full_key || state->status() == GraphRecordingStatus::FAILED) {
-            return result;
-        }
-        bool boundary_matches = false;
-        if (state->recording != nullptr) {
-            boundary_matches = graph_recording_boundary_matches(*state->recording, args);
-        } else {
-            auto definition_it = state->definitions.find(full_key);
-            boundary_matches = definition_it != state->definitions.end() &&
-                               graph_definition(definition_it->second) != nullptr &&
-                               graph_boundary_matches(*graph_definition(definition_it->second), args);
-        }
-        if (!boundary_matches) return result;
 
-        PTO2TaskId submitted = PTO2TaskId::invalid();
-        ORCH_PHASE_START();
-        if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
-            result.execute_block = false;
-            result.task_id = submitted;
-            ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
-#if SIMPLER_DFX
-            g_orch_submit_idx++;
-#if SIMPLER_ORCH_PROFILING
-            g_orch_submit_count++;
-#endif
-#endif
-        }
-        return result;
-    }
-
+    // A published Definition is immutable, so the cache lookup comes first and
+    // answers regardless of what else is recording. Gating it on an idle recorder
+    // would make an already-built Definition wait for an unrelated one.
     auto definition_it = state->definitions.find(full_key);
     if (definition_it != state->definitions.end()) {
         PTO2TaskId submitted = PTO2TaskId::invalid();
@@ -1962,13 +1966,41 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
         }
         return result;
     }
-    if (state->definitions.size() >= GRAPH_MAX_DEFINITIONS) {
+
+    // This key is already recording: publish another zero-heap shell against it.
+    // A recording that ended has its Definition in the cache, so reaching here
+    // with no recording object means the pass failed and this key is spent.
+    auto inflight_it = state->inflight.find(full_key);
+    if (inflight_it != state->inflight.end()) {
+        GraphInflightRecording &entry = *inflight_it->second;
+        if (entry.status() != GraphRecordingStatus::RECORDING || entry.recording == nullptr ||
+            !graph_recording_boundary_matches(*entry.recording, args)) {
+            return result;
+        }
+        PTO2TaskId submitted = PTO2TaskId::invalid();
+        ORCH_PHASE_START();
+        if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
+            result.execute_block = false;
+            result.task_id = submitted;
+            ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
+#if SIMPLER_DFX
+            g_orch_submit_idx++;
+#if SIMPLER_ORCH_PROFILING
+            g_orch_submit_count++;
+#endif
+#endif
+        }
+        return result;
+    }
+
+    if (state->claimed_definitions() >= GRAPH_MAX_DEFINITIONS) {
         debug_assert(
-            state->definitions.size() < GRAPH_MAX_DEFINITIONS &&
+            state->claimed_definitions() < GRAPH_MAX_DEFINITIONS &&
             "Graph Definition cache exceeds the supported per-worker limit"
         );
         LOG_WARN(
-            "[GraphExecution] Definition cache is full (%zu entries); using ordinary path", state->definitions.size()
+            "[GraphExecution] Definition cache is full (%zu published, %zu in flight); using ordinary path",
+            state->definitions.size(), state->inflight.size()
         );
         return result;
     }
@@ -1983,15 +2015,19 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
         recording->boundary_tensors.push_back(args.tensor(i).ref());
         recording->boundary_types.push_back(args.tag(i));
     }
-    state->recording = std::move(recording);
-    state->recording_key = full_key;
-    state->set_status(GraphRecordingStatus::RECORDING);
+    auto entry = std::make_unique<GraphInflightRecording>();
+    entry->full_key = full_key;
+    entry->recording = std::move(recording);
+    GraphInflightRecording *entry_ptr = entry.get();
+    state->inflight.emplace(full_key, std::move(entry));
+    state->inflight_count.store(state->inflight.size(), std::memory_order_release);
 
     PTO2TaskId submitted = PTO2TaskId::invalid();
     ORCH_PHASE_START();
     if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
         result.execute_block = false;
         result.recording = true;
+        result.recording_handle = entry_ptr;
         result.task_id = submitted;
         ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
 #if SIMPLER_DFX
@@ -2001,42 +2037,46 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 #endif
 #endif
     } else {
-        state->recording.reset();
-        state->recording_key = 0;
-        state->set_status(GraphRecordingStatus::IDLE);
+        state->inflight.erase(full_key);
+        state->inflight_count.store(state->inflight.size(), std::memory_order_release);
     }
     return result;
 }
 
-bool PTO2OrchestratorState::graph_prepare(const GraphTaskArgs &args) {
+bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
     GraphHostState *state = graph_state_from(this);
-    if (state == nullptr || g_active_graph_recording != nullptr) return false;
-    // graph_begin publishes this unique recording before the private job is
-    // enqueued; the recording worker's queue acquire observes those writes.
-    // Until this worker calls graph_end/graph_abort, later graph_begin calls
-    // only read the boundary vectors under recording_mutex, and only this worker
-    // writes the fields it binds below. Taking that mutex here lets the main
-    // thread's same-hash submit burst starve prepare and collapse the intended
-    // overlap, so the status read goes through the atomic instead.
-    if (state->status() != GraphRecordingStatus::RECORDING || state->recording == nullptr ||
-        !graph_recording_boundary_matches(*state->recording, args)) {
+    if (state == nullptr || recording_handle == nullptr || g_active_graph_recording != nullptr) return false;
+    auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
+    // graph_begin published this entry before the private job was enqueued, and
+    // the entry's address is stable for as long as the recording lives, so the
+    // recording thread reaches its own state without searching for it. Until this
+    // thread calls graph_end/graph_abort, later graph_begin calls only read the
+    // boundary vectors under recording_mutex, and only this thread writes the
+    // fields it binds below. Taking that mutex here lets the main thread's
+    // same-key submit burst starve prepare and collapse the intended overlap, so
+    // the status read goes through the atomic instead.
+    if (entry->status() != GraphRecordingStatus::RECORDING || entry->recording == nullptr ||
+        !graph_recording_boundary_matches(*entry->recording, args)) {
         return false;
     }
     args.anchor_scalar_sources();
-    state->recording->boundary_args = &args;
-    g_active_graph_recording = state->recording.get();
+    entry->recording->boundary_args = &args;
+    g_active_graph_entry = entry;
+    g_active_graph_recording = entry->recording.get();
     g_active_graph_owner = state;
     return true;
 }
 
-void PTO2OrchestratorState::graph_abort() {
+void PTO2OrchestratorState::graph_abort(void *recording_handle) {
     GraphHostState *state = graph_state_from(this);
-    if (state == nullptr) return;
+    auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
+    if (state == nullptr || entry == nullptr) return;
     {
         std::lock_guard<std::mutex> lock(state->recording_mutex);
-        state->recording.reset();
-        state->set_status(GraphRecordingStatus::FAILED);
+        entry->recording.reset();
+        entry->set_status(GraphRecordingStatus::FAILED);
     }
+    g_active_graph_entry = nullptr;
     g_active_graph_recording = nullptr;
     g_active_graph_owner = nullptr;
     state->recording_cv.notify_all();
@@ -2047,7 +2087,8 @@ void PTO2OrchestratorState::graph_abort() {
 bool PTO2OrchestratorState::graph_end() {
     GraphHostState *state = graph_state_from(this);
     GraphRecording *recording = active_graph_recording(this);
-    if (state == nullptr || recording == nullptr) return false;
+    GraphInflightRecording *entry = g_active_graph_entry;
+    if (state == nullptr || recording == nullptr || entry == nullptr) return false;
 
     std::vector<std::byte> definition;
     ORCH_PHASE_START();
@@ -2059,7 +2100,7 @@ bool PTO2OrchestratorState::graph_end() {
     if (header == nullptr) {
         debug_assert(false && "The recorded Graph contains a construct that Graph Execution does not support");
         LOG_WARN("%s", "[GraphExecution] asynchronous recording produced an unsupported Graph");
-        graph_abort();
+        graph_abort(entry);
         return false;
     }
     LOG_DEBUG(
@@ -2069,51 +2110,56 @@ bool PTO2OrchestratorState::graph_end() {
     bool ready = false;
     {
         std::lock_guard<std::mutex> lock(state->recording_mutex);
-        if (state->status() != GraphRecordingStatus::RECORDING || state->recording_key != header->full_key) {
-            state->set_status(GraphRecordingStatus::FAILED);
+        if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
+            entry->set_status(GraphRecordingStatus::FAILED);
         } else {
             state->definitions.emplace(header->full_key, std::move(definition));
-            state->set_status(GraphRecordingStatus::READY);
+            entry->set_status(GraphRecordingStatus::READY);
         }
-        ready = state->status() == GraphRecordingStatus::READY;
-        state->recording.reset();
+        ready = entry->status() == GraphRecordingStatus::READY;
+        entry->recording.reset();
     }
+    g_active_graph_entry = nullptr;
     g_active_graph_recording = nullptr;
     g_active_graph_owner = nullptr;
     state->recording_cv.notify_all();
     return ready;
 }
 
+// Join every recording in flight and back-patch all deferred shells in submit
+// order. Orchestration completion is the only normal-path barrier.
 void PTO2OrchestratorState::graph_commit() {
     if (active_graph_recording(this) != nullptr) return;
     GraphHostState *state = graph_state_from(this);
-    if (state == nullptr) return;
+    if (state == nullptr || state->inflight_count.load(std::memory_order_acquire) == 0) return;
 
-    uint64_t full_key = 0;
-    const GraphDefinition *definition = nullptr;
-    bool failed = false;
+    std::unordered_map<uint64_t, std::unique_ptr<GraphInflightRecording>> drained;
     {
         std::unique_lock<std::mutex> lock(state->recording_mutex);
-        if (state->status() == GraphRecordingStatus::IDLE) return;
+        if (state->inflight.empty()) return;
         state->recording_cv.wait(lock, [&]() {
-            return state->status() != GraphRecordingStatus::RECORDING;
+            return !state->any_recording();
         });
-        full_key = state->recording_key;
-        failed = state->status() != GraphRecordingStatus::READY;
-        auto definition_it = state->definitions.find(full_key);
-        if (!failed && definition_it != state->definitions.end()) definition = graph_definition(definition_it->second);
+        drained.swap(state->inflight);
+        state->inflight_count.store(0, std::memory_order_release);
     }
 
-    if (definition == nullptr || !graph_finalize_pending_submissions(this, state, *definition)) failed = true;
-    {
-        std::lock_guard<std::mutex> lock(state->recording_mutex);
-        state->set_status(GraphRecordingStatus::IDLE);
-        state->recording_key = 0;
+    uint64_t failed_key = 0;
+    bool failed = false;
+    for (const auto &[key, entry] : drained) {
+        auto definition_it = state->definitions.find(key);
+        if (entry->status() == GraphRecordingStatus::READY && definition_it != state->definitions.end() &&
+            graph_definition(definition_it->second) != nullptr) {
+            continue;
+        }
+        if (!failed) failed_key = key;
+        failed = true;
     }
+    if (!failed && !graph_finalize_pending_submissions(this, state, &failed_key)) failed = true;
     if (failed) {
         report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "failed to finalize asynchronous Graph key=%#llx",
-            static_cast<unsigned long long>(full_key)
+            static_cast<unsigned long long>(failed_key)
         );
     }
 }
