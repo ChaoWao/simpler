@@ -922,10 +922,15 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
     }
 }
 
-int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
+int simpler_provision_dma_workspace(
+    DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
+) {
     // Simulation provides no async-DMA workspaces; a non-empty request fails
-    // fast so an SDMA-enabled Worker cannot come up on sim.
+    // fast so an SDMA-enabled Worker cannot come up on sim. With no workspace
+    // there is likewise nothing for the warmup ELF to warm.
     (void)ctx;
+    (void)sdma_warmup_binary;
+    (void)sdma_warmup_size;
     return required_mask == 0 ? 0 : -1;
 }
 

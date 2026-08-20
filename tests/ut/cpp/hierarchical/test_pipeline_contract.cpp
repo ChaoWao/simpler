@@ -25,9 +25,12 @@ namespace {
 // silently changes what an existing call means. Pinning the whole signature makes
 // any reordering a build failure here instead of a runtime mystery; a genuinely
 // intended change updates this alias and says so.
+// Appended (never inserted) since the last revision: `sdma_warmup_path`, the
+// vector-only ELF used to warm the SDMA control path during init-time workspace
+// provisioning.
 using ExpectedChipWorkerInit = void (ChipWorker::*)(
     const std::string &, const std::string &, const std::string &, const std::string &, int, const CallConfig *,
-    uint32_t, const std::string &
+    uint32_t, const std::string &, const std::string &
 );
 static_assert(
     std::is_same_v<decltype(&ChipWorker::init), ExpectedChipWorkerInit>,

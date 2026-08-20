@@ -1082,10 +1082,14 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
     }
 }
 
-int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
+int simpler_provision_dma_workspace(
+    DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
+) {
     if (ctx == NULL) return -1;
     try {
-        return static_cast<DeviceRunnerBase *>(ctx)->provision_dma_workspace(required_mask);
+        return static_cast<DeviceRunnerBase *>(ctx)->provision_dma_workspace(
+            required_mask, sdma_warmup_binary, static_cast<size_t>(sdma_warmup_size)
+        );
     } catch (...) {
         return -1;
     }

@@ -121,6 +121,12 @@ class RuntimeBinaries:
     them to the device alongside the inner SO). Sim platforms have no
     dispatcher; the field is ``None`` there. ``_lookup_binaries`` resolves
     and validates the path against the build output directory.
+
+    ``sdma_warmup_path`` points at ``sdma_warmup_kernel.o``, the vector-only ELF
+    that warms the SDMA control path once at worker init. Unlike the dispatcher
+    it is optional: only arches whose aicore CMakeLists builds it have one, and
+    a missing warmup ELF costs latency on the first TPREFETCH_ASYNC rather than
+    breaking the worker, so the field is left ``None`` instead of raising.
     """
 
     host_path: Path
@@ -128,6 +134,7 @@ class RuntimeBinaries:
     aicore_path: Path
     sim_context_path: Optional[Path] = None
     dispatcher_path: Optional[Path] = None
+    sdma_warmup_path: Optional[Path] = None
 
 
 class RuntimeBuilder:
@@ -300,6 +307,7 @@ class RuntimeBuilder:
             aicore_path=paths["aicore"],
             sim_context_path=sim_context_path,
             dispatcher_path=dispatcher_path,
+            sdma_warmup_path=self._resolve_sdma_warmup_path(),
         )
 
     def get_binaries(
@@ -343,6 +351,9 @@ class RuntimeBuilder:
         # arch reuse the same SO instead of carrying a copy each (~50 KB × N).
         # None on sim — sim variants have no dispatcher.
         dispatcher_staging_dir = self._LIB_DIR / arch / "dispatcher" if variant != "sim" else None
+        # Same reasoning for the vector-only SDMA warmup ELF: no runtime-specific
+        # code, so one copy per arch. None on sim — sim has no device SDMA.
+        sdma_warmup_staging_dir = self._LIB_DIR / arch / "sdma_warmup" if variant != "sim" else None
 
         if not build:
             return self._lookup_binaries(name, output_dir)
@@ -362,20 +373,21 @@ class RuntimeBuilder:
         def _compile_target(target: str) -> Path:
             include_dirs, source_dirs = self._resolve_target_dirs(config_dir, build_config, target)
             defines = dict(effective_profiling_config or {})
+            # Pin-resolved checkout path for CMake include dirs (#1403). Needed by
+            # host (SDMA workspace manager) and by aicore (the SDMA warmup kernel's
+            # vector-only target). Prefer the path already resolved on the
+            # RuntimeCompiler; fall back to ensure_pto_isa_root when embedding but
+            # the compiler field is unset (e.g. mocked UT / partial construction).
+            if target in ("host", "aicore") and self._requires_pto_isa_metadata_validation():
+                pto_root = getattr(compiler, "pto_isa_root", None)
+                if not isinstance(pto_root, str) or not pto_root:
+                    from .pto_isa import ensure_pto_isa_root  # noqa: PLC0415
+
+                    pto_root = ensure_pto_isa_root(verbose=True)
+                defines["PTO_ISA_ROOT"] = pto_root
             if target == "host":
                 if build_pto_isa_commit:
                     defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit
-                # Pin-resolved checkout path for host CMake include dirs (#1403).
-                # Prefer the path already resolved on the RuntimeCompiler; fall
-                # back to ensure_pto_isa_root when embedding but the compiler
-                # field is unset (e.g. mocked UT / partial construction).
-                if self._requires_pto_isa_metadata_validation():
-                    pto_root = getattr(compiler, "pto_isa_root", None)
-                    if not isinstance(pto_root, str) or not pto_root:
-                        from .pto_isa import ensure_pto_isa_root  # noqa: PLC0415
-
-                        pto_root = ensure_pto_isa_root(verbose=True)
-                    defines["PTO_ISA_ROOT"] = pto_root
                 for opt_in_define in ("SIMPLER_ENABLE_PTO_URMA_WORKSPACE",):
                     if os.environ.get(opt_in_define, "").upper() in {"1", "ON", "TRUE", "YES"}:
                         defines[opt_in_define] = "ON"
@@ -398,6 +410,7 @@ class RuntimeBuilder:
                     build_dir=str(cache_dir),
                     output_dir=output_dir,
                     dispatcher_dest=dispatcher_staging_dir if target == "aicpu" else None,
+                    sdma_warmup_dest=sdma_warmup_staging_dir if target == "aicore" else None,
                     cmake_defines=cmake_defines,
                 )
 
@@ -438,7 +451,23 @@ class RuntimeBuilder:
             aicore_path=aicore_path,
             sim_context_path=sim_context_path,
             dispatcher_path=dispatcher_path,
+            sdma_warmup_path=self._resolve_sdma_warmup_path(),
         )
+
+    def _resolve_sdma_warmup_path(self) -> Optional[Path]:
+        """Return path to sdma_warmup_kernel.o, or None when this build has none.
+
+        Staged per arch under ``build/lib/<arch>/sdma_warmup/`` by
+        runtime_compiler when the arch's aicore CMakeLists builds the vector-only
+        warmup ELF. Returns ``None`` for sim and whenever the file is absent:
+        without it the first TPREFETCH_ASYNC pays the cold SDMA control path
+        (~4.4 ms) but nothing breaks, so this is deliberately not validated the
+        way ``_resolve_dispatcher_path`` is.
+        """
+        if self._variant == "sim":
+            return None
+        path = self._LIB_DIR / self._arch / "sdma_warmup" / "sdma_warmup_kernel.o"
+        return path if path.is_file() else None
 
     def _resolve_dispatcher_path(self) -> Optional[Path]:
         """Return path to libsimpler_aicpu_dispatcher.so for onboard variants.

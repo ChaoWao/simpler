@@ -84,6 +84,14 @@ static_assert(offsetof(CommGlobalDomainDescriptor, handle) == 32, "CommGlobalDom
 uint32_t dma_workspace_supported_mask(void);
 
 /**
+ * Number of SDMA channels the provisioned workspace describes, i.e. how many
+ * channels the control-path warmup must walk. Exposed through the comm seam
+ * because it comes from a PTO constant (kSdmaMaxChannel) and src/common must
+ * not include PTO headers.
+ */
+uint32_t dma_workspace_channel_count(void);
+
+/**
  * Provision the async-DMA workspaces named in required_mask for the current
  * device (aclrtGetDevice) and write their device addresses into addr_out[kind]
  * (0 where unused), for kind in [0, count). Bit `1u << kind` requests that

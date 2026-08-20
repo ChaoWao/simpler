@@ -761,6 +761,11 @@ static void ensure_sdma_workspace(CommHandle h) {
 // it with a null workspace.
 extern "C" uint32_t dma_workspace_supported_mask(void) { return 0; }
 
+// 0 channels: a5 provisions no device-wide SDMA workspace (see above), so there
+// is nothing for the control-path warmup to walk. Defined anyway because the
+// shared onboard DeviceRunnerBase references the symbol.
+extern "C" uint32_t dma_workspace_channel_count(void) { return 0; }
+
 extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_out, int count, void **handle_out) {
     if (!addr_out || !handle_out || count < 0) return -1;
     *handle_out = nullptr;

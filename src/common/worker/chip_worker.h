@@ -74,10 +74,15 @@ public:
     /// platform/runtime that does not support a requested engine. The mask stays
     /// a raw integer here so this platform-agnostic worker needs no platform
     /// headers; the binding derives it from the DmaWorkspaceKind enum.
+    /// `sdma_warmup_path`, when non-empty, is the vector-only ELF that walks the
+    /// SDMA control path once per channel during that provisioning, moving the
+    /// cold-start cost off the first TPREFETCH_ASYNC. Optional: an empty path (or
+    /// an arch that builds no such ELF) only costs that first-call latency.
     void init(
         const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
         const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config = nullptr,
-        uint32_t dma_workspace_mask = 0, const std::string &sim_context_path = ""
+        uint32_t dma_workspace_mask = 0, const std::string &sim_context_path = "",
+        const std::string &sdma_warmup_path = ""
     );
 
     /// Tear down everything: device resources and runtime library.
@@ -262,7 +267,7 @@ private:
     using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
-    using SimplerProvisionDmaWorkspaceFn = int (*)(void *, uint32_t);
+    using SimplerProvisionDmaWorkspaceFn = int (*)(void *, uint32_t, const void *, uint64_t);
     using FinalizeDeviceFn = int (*)(void *);
     using EnsureAclReadyFn = int (*)(void *, int);
     using CreateCommStreamFn = void *(*)(void *);

@@ -121,3 +121,38 @@ add_custom_target(aicore_kernel ALL
     BYPRODUCTS ${AICORE_KERNEL_OBJ}
     COMMENT "Linking AICore kernel binary"
 )
+
+# One-shot SDMA control-path warmup: a separate VECTOR-ONLY ELF, not part of
+# aicore_kernel.o above. It is its own binary because the executor ELF is a
+# resident loop launched per run, while this must run once at worker init, and
+# because it needs the PTO headers -- kept on this one compile command so the
+# executor's include set is unaffected. Skipped (not fatal) without PTO_ISA_ROOT:
+# the warmup is a pure latency optimization and the host launcher degrades to a
+# warning when the binary is absent.
+set(SDMA_WARMUP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/sdma_warmup_kernel.cpp")
+if(DEFINED PTO_ISA_ROOT AND EXISTS ${SDMA_WARMUP_SRC})
+    set(SDMA_WARMUP_OBJ_AIV "${CMAKE_CURRENT_BINARY_DIR}/sdma_warmup_kernel_aiv.o")
+    set(SDMA_WARMUP_OBJ "${CMAKE_CURRENT_BINARY_DIR}/sdma_warmup_kernel.o")
+
+    add_custom_command(
+        OUTPUT ${SDMA_WARMUP_OBJ_AIV}
+        COMMAND ${BISHENG_CC} ${AICORE_FLAGS} ${CMAKE_CUSTOM_INCLUDE_DIR_FLAGS}
+                -I${PTO_ISA_ROOT}/include -I${PTO_ISA_ROOT}/include/pto
+                --cce-aicore-arch=dav-c220-vec
+                -o ${SDMA_WARMUP_OBJ_AIV} ${SDMA_WARMUP_SRC}
+        DEPENDS ${SDMA_WARMUP_SRC}
+        COMMENT "Compiling sdma_warmup_kernel for AIV"
+    )
+
+    add_custom_target(sdma_warmup_kernel ALL
+        DEPENDS ${SDMA_WARMUP_OBJ_AIV}
+
+        COMMAND ${BISHENG_LD} -m aicorelinux -Ttext=0 -static -n
+        -o ${SDMA_WARMUP_OBJ} ${SDMA_WARMUP_OBJ_AIV}
+
+        BYPRODUCTS ${SDMA_WARMUP_OBJ}
+        COMMENT "Linking SDMA warmup kernel binary (vector-only)"
+    )
+else()
+    message(STATUS "SDMA warmup kernel: skipped (PTO_ISA_ROOT undefined or source missing)")
+endif()

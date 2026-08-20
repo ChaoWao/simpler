@@ -465,8 +465,16 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
  * for a Worker created with SDMA enabled. Bits unsupported by this
  * platform/runtime are rejected, so a Worker opting into SDMA on sim / a5 / hbg
  * fails fast. Returns 0 on success, negative on unsupported/failed provisioning.
+ *
+ * `sdma_warmup_binary` / `sdma_warmup_size` carry the vector-only ELF that walks
+ * the SDMA control path once per channel against the workspace just provisioned,
+ * so the first TPREFETCH_ASYNC does not pay that cold start. Optional: a
+ * null/empty buffer skips the warmup, and a warmup that fails does not fail
+ * provisioning — it only costs first-call latency.
  */
-int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask);
+int simpler_provision_dma_workspace(
+    DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
+);
 
 #ifdef __cplusplus
 }

@@ -1294,9 +1294,11 @@ class ChipWorker:
             device_id: NPU device ID to attach the calling thread to.
             bins: A `simpler_setup.runtime_builder.RuntimeBinaries` (or any
                 object exposing host_path / aicpu_path / aicore_path /
-                sim_context_path / dispatcher_path).
+                sim_context_path / dispatcher_path / sdma_warmup_path).
                 ``dispatcher_path`` is required for onboard platforms and
-                ignored on sim (set to None).
+                ignored on sim (set to None). ``sdma_warmup_path`` is optional
+                everywhere: without it the first TPREFETCH_ASYNC pays the cold
+                SDMA control path instead of init absorbing it.
             log_level: Threshold (10=DEBUG, 20=INFO, 25=TIMING, 30=WARN,
                 40=ERROR, 60=NUL). Defaults to a snapshot of the simpler
                 logger via `_log.get_current_config()`.
@@ -1322,6 +1324,7 @@ class ChipWorker:
             # dispatcher_path is empty on sim; onboard consumes the real path.
             dispatcher_path = getattr(bins, "dispatcher_path", None)
             sim_context_path = getattr(bins, "sim_context_path", None)
+            sdma_warmup_path = getattr(bins, "sdma_warmup_path", None)
             self._impl.init(
                 str(bins.host_path),
                 str(bins.aicpu_path),
@@ -1331,6 +1334,7 @@ class ChipWorker:
                 prewarm_config,
                 bool(enable_sdma),
                 "" if sim_context_path is None else str(sim_context_path),
+                "" if sdma_warmup_path is None else str(sdma_warmup_path),
             )
             for slot_id, callable_obj in list(self._callable_registry.items()):
                 self._impl.register_callable(int(slot_id), callable_obj)

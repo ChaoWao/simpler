@@ -165,7 +165,7 @@ ChipWorker::~ChipWorker() { finalize(); }
 void ChipWorker::init(
     const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
     const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, uint32_t dma_workspace_mask,
-    const std::string &sim_context_path
+    const std::string &sim_context_path, const std::string &sdma_warmup_path
 ) {
     if (finalized_) {
         throw std::runtime_error("ChipWorker already finalized; cannot reinitialize");
@@ -437,7 +437,26 @@ void ChipWorker::init(
     // them. On failure, roll the whole Worker back through finalize() so no
     // half-provisioned state leaks, then surface the error.
     if (dma_workspace_mask != 0) {
-        int prov_rc = simpler_provision_dma_workspace_fn_(device_ctx_, dma_workspace_mask);
+        // The warmup ELF rides provisioning because it needs the workspace it
+        // warms. Absent on arches that build no such ELF and on tests driving
+        // _ChipWorker.init directly; the platform then skips the warmup and the
+        // first TPREFETCH_ASYNC pays the cold control path instead.
+        std::vector<uint8_t> warmup_bytes;
+        if (!sdma_warmup_path.empty()) {
+            // initialized_ is already published above, so an escape from here must
+            // roll the Worker back exactly like the provisioning failure below;
+            // otherwise init() reports failure with the device context and host
+            // library still live.
+            try {
+                warmup_bytes = read_binary_file(sdma_warmup_path);
+            } catch (...) {
+                finalize();
+                throw;
+            }
+        }
+        const uint8_t *warmup_ptr = warmup_bytes.empty() ? nullptr : warmup_bytes.data();
+        int prov_rc =
+            simpler_provision_dma_workspace_fn_(device_ctx_, dma_workspace_mask, warmup_ptr, warmup_bytes.size());
         if (prov_rc != 0) {
             finalize();
             throw std::runtime_error(

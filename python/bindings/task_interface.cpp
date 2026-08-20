@@ -2151,19 +2151,21 @@ NB_MODULE(_task_interface, m) {
             "init",
             [](ChipWorker &self, const std::string &host_lib_path, const std::string &aicpu_path,
                const std::string &aicore_path, const std::string &dispatcher_path, int device_id,
-               std::optional<CallConfig> prewarm_config, bool enable_sdma, const std::string &sim_context_path) {
+               std::optional<CallConfig> prewarm_config, bool enable_sdma, const std::string &sim_context_path,
+               const std::string &sdma_warmup_path) {
                 // Translate the Python bool into a DmaWorkspaceKind bitmask so the
                 // platform-agnostic ChipWorker stays free of the enum. Empty mask
                 // when disabled leaves the Worker with no async-DMA provisioning.
                 uint32_t dma_workspace_mask = enable_sdma ? (uint32_t{1} << DMA_WORKSPACE_SDMA) : 0;
                 self.init(
                     host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id,
-                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, dma_workspace_mask, sim_context_path
+                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, dma_workspace_mask, sim_context_path,
+                    sdma_warmup_path
                 );
             },
             nb::arg("host_lib_path"), nb::arg("aicpu_path"), nb::arg("aicore_path"), nb::arg("dispatcher_path"),
             nb::arg("device_id"), nb::arg("prewarm_config") = nb::none(), nb::arg("enable_sdma") = false,
-            nb::arg("sim_context_path") = "",
+            nb::arg("sim_context_path") = "", nb::arg("sdma_warmup_path") = "",
             // Release the GIL for the (potentially long) native device attach so
             // another Python thread can run during it — e.g. a concurrent close()
             // observing INITIALIZING and failing fast (a GIL held for the whole

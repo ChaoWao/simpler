@@ -277,6 +277,7 @@ class RuntimeCompiler:
         build_dir: Optional[str] = None,
         output_dir: Optional[Union[str, Path]] = None,
         dispatcher_dest: Optional[Union[str, Path]] = None,
+        sdma_warmup_dest: Optional[Union[str, Path]] = None,
         cmake_defines: Optional[dict[str, str]] = None,
     ) -> Union[bytes, Path]:
         """
@@ -295,6 +296,11 @@ class RuntimeCompiler:
                         When None, the dispatcher SO is not exported. Used by
                         runtime_builder to share one dispatcher SO across all
                         runtimes for a given arch.
+            sdma_warmup_dest: Directory to stage sdma_warmup_kernel.o into. Only
+                        consumed when target_platform == 'aicore' (the aicore
+                        CMakeLists builds the vector-only warmup ELF as a side
+                        product). When None, or when the arch does not build the
+                        warmup ELF at all, nothing is exported.
             cmake_defines: Additional CMake cache definitions for this target.
 
         Returns:
@@ -356,6 +362,19 @@ class RuntimeCompiler:
                         subprocess.run([strip_bin, "-s", str(staged)], check=True)  # noqa: S603
 
                     place_binary(dispatcher_so, dest_dispatcher, post_process=_strip)
+            # Stage the vector-only SDMA warmup ELF the same way: it has no
+            # runtime-specific code either, so one copy per arch serves every
+            # runtime and the path is surfaced through
+            # RuntimeBinaries.sdma_warmup_path. Absent whenever the arch's aicore
+            # CMakeLists does not build it (or PTO_ISA_ROOT was unset), which the
+            # host launcher degrades on rather than failing.
+            if target_platform == "aicore" and sdma_warmup_dest is not None:
+                warmup_name = "sdma_warmup_kernel.o"
+                warmup_obj = Path(actual_build_dir) / warmup_name
+                if warmup_obj.is_file():
+                    dest_dir = Path(sdma_warmup_dest)
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    place_binary(warmup_obj, dest_dir / warmup_name)
             if output_dir is not None:
                 od = Path(output_dir)
                 od.mkdir(parents=True, exist_ok=True)

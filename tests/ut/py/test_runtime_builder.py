@@ -262,6 +262,82 @@ class TestRuntimeBuilderGetBinaries:
         assert result.aicpu_path.name == "libaicpu.so"
         assert result.aicore_path.name == "libaicore.so"
 
+    def _isolated_builder(self, MockCompiler, tmp_path, monkeypatch, platform):
+        """A builder whose staging tree is tmp_path rather than the real build/lib.
+
+        ``_LIB_DIR`` is a class attribute bound to the real PROJECT_ROOT at import,
+        so the ``_patch_runtime_root`` fixture does not redirect it. The SDMA
+        warmup tests both read and write that tree, so they must shadow it per
+        instance or they would inspect (and overwrite) the developer's actual
+        staged ELF.
+        """
+        from simpler_setup import pto_isa  # noqa: PLC0415
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "a" * 40)
+        monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
+        monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
+
+        builder = RuntimeBuilder(platform=platform)
+        builder._LIB_DIR = tmp_path / "lib"
+        return builder, mock_instance
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_sdma_warmup_path_is_none_when_nothing_staged(self, MockCompiler, tmp_path, monkeypatch):
+        """A missing warmup ELF degrades to None instead of a nonexistent path.
+
+        Unlike the dispatcher, an absent warmup ELF is not fatal: it only costs
+        first-TPREFETCH_ASYNC latency, so it must not raise FileNotFoundError.
+        """
+        self._make_runtime(tmp_path, "a2a3")
+        builder, _ = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3")
+
+        assert builder.get_binaries("test_rt", build=True).sdma_warmup_path is None
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_resolves_staged_sdma_warmup_elf(self, MockCompiler, tmp_path, monkeypatch):
+        """A staged sdma_warmup_kernel.o is surfaced through RuntimeBinaries."""
+        self._make_runtime(tmp_path, "a2a3")
+        builder, _ = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3")
+
+        staged = builder._LIB_DIR / "a2a3" / "sdma_warmup" / "sdma_warmup_kernel.o"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"\x7fELF")
+
+        assert builder.get_binaries("test_rt", build=True).sdma_warmup_path == staged
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_sim_never_claims_a_sdma_warmup_elf(self, MockCompiler, tmp_path, monkeypatch):
+        """Sim has no device SDMA, so it ignores a staged ELF and stages nothing."""
+        self._make_runtime(tmp_path, "a2a3")
+        builder, mock_instance = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3sim")
+
+        staged = builder._LIB_DIR / "a2a3" / "sdma_warmup" / "sdma_warmup_kernel.o"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"\x7fELF")
+
+        result = builder.get_binaries("test_rt", build=True)
+
+        assert result.sdma_warmup_path is None
+        aicore_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "aicore")
+        assert aicore_call.kwargs["sdma_warmup_dest"] is None
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_passes_sdma_warmup_dest_only_to_aicore(self, MockCompiler, tmp_path, monkeypatch):
+        """The warmup ELF is a side product of the aicore build, so only that
+        target is told where to stage it."""
+        self._make_runtime(tmp_path, "a2a3")
+        builder, mock_instance = self._isolated_builder(MockCompiler, tmp_path, monkeypatch, "a2a3")
+
+        builder.get_binaries("test_rt", build=True)
+
+        dests = {call.args[0]: call.kwargs["sdma_warmup_dest"] for call in mock_instance.compile.call_args_list}
+        assert dests["aicpu"] is None
+        assert dests["host"] is None
+        assert dests["aicore"] == builder._LIB_DIR / "a2a3" / "sdma_warmup"
+
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_calls_compiler_three_times(self, MockCompiler, tmp_path, default_test_platform, test_arch):
         """get_binaries(build=True) invokes compiler.compile() exactly 3 times."""
@@ -401,12 +477,16 @@ class TestRuntimeBuilderGetBinaries:
         builder.get_binaries("test_rt", build=True)
 
         host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
-        non_host_calls = [call for call in mock_instance.compile.call_args_list if call.args[0] != "host"]
+        aicore_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "aicore")
+        aicpu_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "aicpu")
         assert host_call.kwargs["cmake_defines"] == {
             "PTO_ISA_ROOT": "/tmp/pto-isa",
             "SIMPLER_PTO_ISA_BUILD_COMMIT": pin,
         }
-        assert all(call.kwargs["cmake_defines"] is None for call in non_host_calls)
+        # aicore needs the checkout path too, for the SDMA warmup kernel's
+        # vector-only target, but not the commit stamp (that keys the host ccache).
+        assert aicore_call.kwargs["cmake_defines"] == {"PTO_ISA_ROOT": "/tmp/pto-isa"}
+        assert aicpu_call.kwargs["cmake_defines"] is None
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_a5_default_build_writes_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
