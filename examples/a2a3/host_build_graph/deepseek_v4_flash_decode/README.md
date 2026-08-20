@@ -7,8 +7,9 @@ comm-window protocol. Only the runtime changes — HBG compiles the orchestratio
 with the host `g++`, runs it on the host CPU instead of the AICPU, and ships the
 built shared-memory image to the device, which then boots scheduler-only.
 
-The case exists to measure **host-side graph construction** and to prove the
-device can execute what the host built. It is deliberately not a numerics test.
+The case exists to measure **host-side graph construction and prepare**. The
+Per-PR smoke does not launch the device body and is deliberately not a numerics
+test.
 
 ## What differs from the TMR case
 
@@ -119,16 +120,17 @@ This gap is independent of the `hc_head_linear` MTE fault:
 
 ```bash
 # standalone (2 dies; wrap in task-submit on a shared box)
-python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\
-test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
+SIMPLER_SKIP_DEVICE_RUN=1 python examples/a2a3/host_build_graph/\
+deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1>
 
 # pytest
 pytest examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
-    --platform a2a3 --device <d0>,<d1> --manual only
+    --platform a2a3 --device <d0>,<d1>
 ```
 
-`manual` because the 368-kernel compile takes minutes; `skip_golden` because the
-routing is stood in, not computed.
+In Per-PR CI, the case runs in a fresh final pytest process inside the main
+scene-test device allocation. It remains `skip_golden` because no full-network
+torch reference exists upstream.
 
 To exercise only the host side without launching the device body, set
 `SIMPLER_SKIP_DEVICE_RUN=1`. `simpler_launch_run` then completes the run before

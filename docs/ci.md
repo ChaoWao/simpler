@@ -78,7 +78,7 @@ PullRequest
 | `st-sim-a2a3` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
 | `st-sim-a5` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
-| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
+| `st-onboard-a2a3` | a2a3 self-hosted | The main allocation runs `-m "not sdma and not deepseek_host_smoke"`, then `-m deepseek_host_smoke` in a fresh final pytest process; a separate `-m sdma` step and adaptive-parallel DFX feature smokes follow |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
 | `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --exclude-level 4 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
 | `st-network1-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st --level 4 --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
@@ -189,9 +189,10 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 `ChipWorker` per `(runtime, device)`:
 
 ```bash
-# Recommended CI invocation — a2a3 deselects SDMA and network1 tests, as the job does,
-# and runs SDMA as a second pass afterwards
-pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7 -x
+# Recommended CI invocation — a2a3 runs DeepSeek last in the main allocation,
+# then runs SDMA in a separate step
+pytest examples tests/st -m "not sdma and not deepseek_host_smoke" --platform a2a3 --exclude-level 4 --device 4-7 -x
+pytest examples tests/st -m deepseek_host_smoke --platform a2a3 --exclude-level 4 --device 4-7 -x
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
 # A5 runners run the non-network1 corpus, including SDMA tests
@@ -274,7 +275,7 @@ not need `--max-parallel` manually.
 
   The arch flags subtract `NON_CODE` before deciding, so a non-code-only change already makes both `false`. An arch-gated job therefore needs no separate non-code check. See [`.claude/rules/ci-change-detection.md`](../.claude/rules/ci-change-detection.md) for the invariants these gates must keep.
 
-- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma"` and `--exclude-level 4`, and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection for SDMA remains by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Network1 tests are selected by `--level 4` in `st-network1-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
+- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them (and the final-phase DeepSeek smokes) with `-m "not sdma and not deepseek_host_smoke"` and `--exclude-level 4`, and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection for SDMA remains by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Network1 tests are selected by `--level 4` in `st-network1-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
 
 ### CPU emergency lane (`ci-self-cpu.yml`) and the `/run-cpu` button
 
@@ -342,6 +343,12 @@ inside a large callable share that budget instead of multiplying it. Without an
 override the automatic budget reserves two logical CPUs and caps at eight. The
 sim jobs run on ephemeral GitHub-hosted runners with no restored cache, so they
 compile cold every time and get no warm-up step.
+
+The a2a3 main allocation runs the two DeepSeek host-preparation smokes last in
+a fresh pytest process. They still initialize devices and prepare both ranks,
+so they remain inside `task-submit`; placing them last avoids handing their
+devices straight back to ordinary scene-test workers, without acquiring a
+second allocation. SDMA and DFX retain their separate steps and allocations.
 
 The DFX smokes reuse the runner's device allocation after the main scene-test
 sweep. The `run-onboard-dfx-smokes` CI action distributes `dep_gen`, chip

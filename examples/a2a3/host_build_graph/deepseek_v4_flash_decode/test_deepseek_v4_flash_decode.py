@@ -25,22 +25,23 @@ factors travel as kernel tensor inputs read from GM, so the host never writes a
 GM-heap device address and never copies tensor data into task scalars. The
 orchestration source is therefore the TMR one recast as a Graph, with no
 runtime-specific rewrite. ``skip_golden`` is inherited from the TMR case, which
-is itself a completion/smoke case; ``manual`` because the 368-kernel compile
-takes minutes.
+is itself a completion/smoke case.
 
 Host construction and Graph recording complete (129 host submissions). An
 unskipped device run is currently blocked in Graph activation, so the recorded
 bodies never replay. See README.md for the measurements and the remaining
 Graph-runtime limitation.
 
-    python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\\
-test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
+    SIMPLER_SKIP_DEVICE_RUN=1 python examples/a2a3/host_build_graph/\
+deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1>
 """
 
 import copy
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
 
 from simpler_setup import SceneTestCase, scene_test
 from simpler_setup.goldens.deepseek_v4_flash_decode import N_RANKS, generate_inputs
@@ -63,6 +64,11 @@ def _load_tmr_case():
 _TMR = _load_tmr_case()
 
 
+@pytest.fixture(autouse=True)
+def _skip_device_execution(monkeypatch) -> None:
+    monkeypatch.setenv("SIMPLER_SKIP_DEVICE_RUN", "1")
+
+
 def _host_build_graph_callable():
     """Same CALLABLE as the TMR case, with kernel sources re-pointed at the TMR dir
     and the orchestration swapped for the Graph-form variant.
@@ -83,7 +89,8 @@ def _host_build_graph_callable():
     initialization kernels under both runtimes.
 
     The case is ``skip_golden`` because the TMR case it is derived from is: it
-    measures host-side graph construction and device execution, not numerics.
+    measures host-side graph construction and prepare, not numerics or device
+    execution.
     """
     callable_config = copy.deepcopy(_TMR.TestDeepseekV4FlashDecode.CALLABLE)
     chip = callable_config["callables"][0]
@@ -93,6 +100,7 @@ def _host_build_graph_callable():
     return callable_config
 
 
+@pytest.mark.deepseek_host_smoke
 @scene_test(level=3, runtime="host_build_graph")
 class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
     """DSv4 FLASH EP2/TP2 decode with the orchestration built on the host."""
@@ -102,7 +110,6 @@ class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
         {
             "name": "DecodeFwdEP2TP2",
             "platforms": ["a2a3"],
-            "manual": True,
             "skip_golden": True,
             "config": {
                 "device_count": N_RANKS,

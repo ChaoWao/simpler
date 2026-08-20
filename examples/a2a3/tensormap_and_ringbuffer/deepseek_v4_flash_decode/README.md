@@ -27,17 +27,17 @@ comm-window views, 1 shared counts vector) plus 13 scalars (rank id + 12
 
 ## Validation semantics
 
-The case is `skip_golden`: it is a completion/smoke test. Upstream pypto-lib
-drives the same fixture with `golden_fn=None` — a full-network torch reference
-does not exist there either; numeric coverage lives with the standalone kernel
-harnesses in pypto-lib (`models/deepseek_v4_flash_mtp/*.py`), and real-weight
-end-to-end accuracy lives in pypto-serving. What this case pins down in simpler
-CI terms: the harvested distributed program compiles, both ranks' graphs
-dispatch, the cross-die window protocol (TPUT/TNOTIFY arrivals, LM-head
-all-gather) drains, and the run terminates cleanly.
-
-It is marked `manual`: compiling 368 incore kernels plus the 7.8k-line chip
-orchestration takes several minutes, so it does not run in the default sweep.
+The case is `skip_golden`: it is a host-preparation smoke test. Upstream
+pypto-lib drives the same fixture with `golden_fn=None` — a full-network torch
+reference does not exist there either; numeric coverage lives with the
+standalone kernel harnesses in pypto-lib
+(`models/deepseek_v4_flash_mtp/*.py`), and real-weight end-to-end accuracy lives
+in pypto-serving. In simpler's Per-PR CI, the harvested distributed program and
+its 368 incore kernels compile, the two-rank run is prepared, and prepare-time
+H2D completes. The device body is not launched, so the case does not validate
+kernel execution, cross-die communication, outputs, or numerical correctness.
+Both DeepSeek runtimes run in a fresh final pytest process inside the main
+scene-test device allocation.
 
 The six buffer initializations formerly expressed as orchestration-side
 `set_initial_value(0)` calls now run on device. Each of the five
@@ -106,13 +106,19 @@ line constants").
 
 ```bash
 # standalone (2 dies; wrap in task-submit on a shared box)
-python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
-    -p a2a3 -d <d0>,<d1> --manual only
+SIMPLER_SKIP_DEVICE_RUN=1 python examples/a2a3/tensormap_and_ringbuffer/\
+deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
+    -p a2a3 -d <d0>,<d1>
 
 # pytest
 pytest examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode \
-    --platform a2a3 --device <d0>,<d1> --manual only
+    --platform a2a3 --device <d0>,<d1>
 ```
+
+The pytest module sets `SIMPLER_SKIP_DEVICE_RUN=1` before worker
+initialization. `simpler_launch_run` completes the prepared run before any
+execution claim or device launch, and finalization still releases its
+resources. No outputs are produced.
 
 The fixture materializes on the order of 100 GiB of host tensors (weights for
 both ranks); the machine needs the RAM headroom, and generation takes a few

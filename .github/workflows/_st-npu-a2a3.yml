@@ -87,11 +87,34 @@ jobs:
       - name: Run pytest scene tests (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh
+          SCENE_TEST_DRIVER="$RUNNER_TEMP/run-a2a3-scene-tests.sh"
+          trap 'rm -f "$SCENE_TEST_DRIVER"' EXIT
+          cat > "$SCENE_TEST_DRIVER" <<'SCENE_TEST_DRIVER'
+          set -euo pipefail
+          device_list=$1
+          manual_mode=$2
+
+          .venv/bin/python -m pytest examples tests/st \
+            -m "not sdma and not deepseek_host_smoke" \
+            --platform a2a3 --exclude-level 4 --device "$device_list" -v \
+            --require-pto-isa --pto-session-timeout 1200 --manual "$manual_mode"
+
+          if [[ "$manual_mode" != "only" ]]; then
+            echo "::group::DeepSeek host-preparation smokes"
+            deepseek_rc=0
+            .venv/bin/python -m pytest examples tests/st \
+              -m deepseek_host_smoke \
+              --platform a2a3 --exclude-level 4 --device "$device_list" -v \
+              --require-pto-isa --pto-session-timeout 1200 --manual "$manual_mode" || deepseek_rc=$?
+            echo "::endgroup::"
+            exit "$deepseek_rc"
+          fi
+          SCENE_TEST_DRIVER
           if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200 --manual "$MANUAL_MODE"
+            bash "$SCENE_TEST_DRIVER" "$DEVICE_RANGE" "$MANUAL_MODE"
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run ".venv/bin/python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
+              --run "bash '$SCENE_TEST_DRIVER' \$TASK_DEVICE '$MANUAL_MODE'"
           fi
 
       - name: SDMA pytest (a2a3)

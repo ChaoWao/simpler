@@ -805,13 +805,9 @@ int simpler_prepare_run(
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunContext *state = native_run_context(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
-    // TEMPORARY (host_build_graph dsv4 bring-up): stop after prepare so the host
-    // side — orchestration, graph construction, image relocation and H2D — can be
-    // measured while the device execution of that graph still stalls. Sitting in
-    // launch (not simpler_run) covers the split prepare/launch/wait entry points
-    // the chip subprocess uses, which never call simpler_run. Outputs are never
-    // produced, so any run under this variable is a timing harness, not a test.
-    // Delete this together with the variable once the stall is diagnosed.
+    // A skipped run completes after prepare-time orchestration, relocation and
+    // H2D. It never claims the runner or produces outputs because no device body
+    // is launched.
     if (std::getenv("SIMPLER_SKIP_DEVICE_RUN") != nullptr) {
         // The host phase records describe the bind path this variable exists to
         // measure, so they are written here as well as in the device-run

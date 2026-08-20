@@ -21,23 +21,24 @@ Regime (fixed at harvest time): batch 4 x 2 token rows per rank (T=8),
 start_pos 8192, paged KV in 128-token blocks, W8A8 INT8 experts, 64 routed
 experts global / 32 per rank at EP2, top-6 + 1 shared.
 
-This is a completion/smoke case (``skip_golden``): upstream pypto-lib runs the
-same fixture with ``golden_fn=None`` (component-level golden checks live with
-the standalone kernels there); a full-network torch reference does not exist
-in either repo. The case validates that the harvested distributed program —
-368 incore kernels plus a 7.8k-line chip orchestration per rank — compiles,
-dispatches across both dies, drives the comm-window protocol to completion,
-and terminates cleanly.
+This is a host-preparation smoke case (``skip_golden``): upstream pypto-lib
+runs the same fixture with ``golden_fn=None`` (component-level golden checks
+live with the standalone kernels there); a full-network torch reference does
+not exist in either repo. The harvested distributed program — 368 incore
+kernels plus a 7.8k-line chip orchestration per rank — is compiled and prepared
+for both dies, but the device body is not launched and no outputs are produced.
 
-The case is marked ``manual`` (compiling 368 kernels takes several minutes);
-run it explicitly:
+In Per-PR CI, the case runs in a fresh final pytest process inside the main
+scene-test device allocation. The standalone command sets the same host-only
+execution boundary as pytest:
 
-    python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/\
-test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
+    SIMPLER_SKIP_DEVICE_RUN=1 python examples/a2a3/tensormap_and_ringbuffer/\
+deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1>
 
 See README.md for provenance pins and the regeneration recipe.
 """
 
+import pytest
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
@@ -46,6 +47,11 @@ from simpler_setup.goldens.deepseek_v4_flash_decode import N_RANKS, generate_inp
 from simpler_setup.scene_test import _rehosted_ref
 
 _DIRS = {"i": D.IN, "o": D.OUT, "x": D.INOUT}
+
+
+@pytest.fixture(autouse=True)
+def _skip_device_execution(monkeypatch) -> None:
+    monkeypatch.setenv("SIMPLER_SKIP_DEVICE_RUN", "1")
 
 
 def _sig(encoded):
@@ -580,6 +586,7 @@ def _decode_fwd_orch_fn(orch, callables, task_args, config):
             orch.submit_next_level(callables.decode_fwd, args, config, worker=rank)
 
 
+@pytest.mark.deepseek_host_smoke
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
 class TestDeepseekV4FlashDecode(SceneTestCase):
     CALLABLE = {
@@ -609,7 +616,6 @@ class TestDeepseekV4FlashDecode(SceneTestCase):
         {
             "name": "DecodeFwdEP2TP2",
             "platforms": ["a2a3"],
-            "manual": True,
             "skip_golden": True,
             "config": {
                 "device_count": N_RANKS,

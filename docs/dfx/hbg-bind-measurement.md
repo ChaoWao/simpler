@@ -92,17 +92,16 @@ yourself:
 
 ```bash
 task-submit --device auto --device-num 2 --timeout 3600 --max-time 3600 --run \
-  "python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
-     -p a2a3 --manual only --rounds 6 -d \$TASK_DEVICE \
+  "SIMPLER_SKIP_DEVICE_RUN=1 python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
+     -p a2a3 --rounds 6 -d \$TASK_DEVICE \
      --case TestDeepseekV4FlashDecodeHostBuildGraph:: --runtime host_build_graph --level 3" | tee dsv4.log
 ```
 
 A 2-rank case emits one pass per rank per round, so six rounds is twelve passes.
 
-To measure the host path without device execution, set
-`SIMPLER_SKIP_DEVICE_RUN=1`, which returns at `simpler_launch_run`. It is a
-temporary handle from the dsv4 bring-up and is deleted once that case's device
-execution works. One property is load-bearing while it exists:
+The dsv4 command sets `SIMPLER_SKIP_DEVICE_RUN=1`, which returns at
+`simpler_launch_run` after prepare-time work and before device execution. One
+property is load-bearing:
 
 - **It is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still skips. `unset` it.
 

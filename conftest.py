@@ -492,6 +492,11 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "deepseek_host_smoke: a2a3 DeepSeek host-preparation smoke run in the final pytest phase of the "
+        "main scene-test device allocation",
+    )
+    config.addinivalue_line(
+        "markers",
         "network1_remote_device_count(n): number of remote NPU devices needed on the peer machine",
     )
     config.addinivalue_line(
