@@ -80,7 +80,8 @@ must launch as one cohort:
 3. Submit publishes only the finished graph data; it does not push ready tasks.
 4. After H2D, device boot scans every submitted task exactly once.
 5. A task with every fanin complete is routed to its ready queue; otherwise it
-   registers on its first unmet producer's wake list.
+   registers on its latest-submitted unmet producer's wake list, minimising
+   transfers between wake lists and their CAS contention.
 6. Producer completion reclassifies wake-list consumers until they become ready.
 
 Completion flags are monotonic, so a task never needs periodic fanin polling.

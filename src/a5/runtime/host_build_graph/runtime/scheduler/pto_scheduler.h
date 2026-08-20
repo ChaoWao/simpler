@@ -575,14 +575,19 @@ struct PTO2SchedulerState {
     // set its completion_flags byte. Single-ring: all producers are ring 0, so
     // there is no per-edge ring indirection.
 
-    // First-unmet classification. Returns -1 (all fanins met -> route to ready)
-    // or the index of the first unmet fanin (register on that producer's wake
-    // list). The decision is terminal: tasks are never re-polled; a producer's
+    // Unmet-fanin classification. Returns -1 (all fanins met -> route to ready)
+    // or the index of an unmet fanin (register on that producer's wake list).
+    // Scan direction is load-bearing: the builder fills fanin_local_ids in
+    // submission order, so the last unmet entry is the latest-submitted
+    // producer -- the one likeliest to complete last. Targeting it minimises
+    // wake-list transfers (a consumer re-registered onto a second producer once
+    // its first one completes) and the CAS traffic those transfers put on the
+    // lists. The decision is terminal: tasks are never re-polled; a producer's
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     int classify_fanin_state(const PTO2TaskSlotState *s) const {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
-        for (int32_t i = 0; i < p.fanin_count; i++) {
+        for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
             if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return i;
         }
         return -1;
