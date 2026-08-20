@@ -728,6 +728,15 @@ public:
     const simpler::dfx::HostPhaseRecordStore &host_phase_records() const { return host_phase_records_; }
     /** Hand this pass's records to the swimlane reader, just before its export. */
     void publish_host_phase_records_to_swimlane();
+    /**
+     * Write this pass's per-event host phase records to `output_prefix_`.
+     *
+     * Host-only: every phase recorded is produced on the host during bind and the
+     * store is finished before launch, so a caller that never reaches the device
+     * can still produce the artifact. The store writes a pass at most once, so
+     * every path that can end a run may call this unconditionally.
+     */
+    void write_host_phase_records_artifact();
     void finish_clock_correlation_session(bool capture_device_complete, bool abandon_device_resources) noexcept;
     void set_dump_args_enabled(int level) {
         dump_args_level_ = static_cast<DumpArgsLevel>(level);

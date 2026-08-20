@@ -813,6 +813,10 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     // produced, so any run under this variable is a timing harness, not a test.
     // Delete this together with the variable once the stall is diagnosed.
     if (std::getenv("SIMPLER_SKIP_DEVICE_RUN") != nullptr) {
+        // The host phase records describe the bind path this variable exists to
+        // measure, so they are written here as well as in the device-run
+        // teardown. Skipping the device must not skip the artifact.
+        state->runner->write_host_phase_records_artifact();
         state->completion_rc = 0;
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return 0;

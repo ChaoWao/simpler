@@ -23,6 +23,7 @@ HostPhaseRecordPool *HostPhaseRecordStore::arm(bool collect_records) {
     pool_ = HostPhaseRecordPool{};
     armed_ = false;
     finished_ = false;
+    records_written_ = false;
     submitted_tasks_ = 0;
     // A pass's identity must not survive into the next one: write_records_jsonl
     // asks only whether the store is armed, so a pass written before finish()
@@ -71,10 +72,11 @@ void HostPhaseRecordStore::finish(uint64_t submitted_tasks, uint64_t invocation_
     }
 }
 
-int HostPhaseRecordStore::write_records_jsonl(const std::string &path) const {
-    if (!armed_) return 0;
+int HostPhaseRecordStore::write_records_jsonl(const std::string &path) {
+    if (!armed_ || records_written_) return 0;
     const std::vector<HostPhaseRecord> all = records();
     if (all.empty() && dropped_records() == 0) return 0;
+    records_written_ = true;
 
     // Appended one object per pass: a --rounds run emits a pass per round, and
     // each object carries the identity needed to join it to that round's spans.
