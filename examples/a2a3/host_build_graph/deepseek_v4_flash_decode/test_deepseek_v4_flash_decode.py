@@ -25,10 +25,10 @@ never writes a GM-heap device address. The graph therefore keeps the size and
 shape of the real one but not the fixture's routing — hence ``skip_golden``.
 ``manual`` because the 368-kernel compile takes minutes.
 
-Host construction and Graph recording complete (1131 tasks on host); device
-execution of the non-graph remainder currently stalls 12 tasks from the end.
-See README.md for the measurement, what has been ruled out, and what is still
-open.
+Host construction and Graph recording complete (1131 tasks on host). An
+unskipped Graph-form device run is currently blocked earlier, during Graph
+activation; the non-Graph baseline completes its device body. See README.md for
+the measurements and remaining Graph-runtime limitation.
 
     python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\\
 test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only

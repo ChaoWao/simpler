@@ -128,13 +128,18 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
     int64_t v20 = (int64_t)((uint64_t)(v19 / v11) * (uint64_t)v11);
     // pto: %13, %14
     int64_t v21 = (int64_t)((uint64_t)(v19 % v11) * (uint64_t)v10);
+    // The output is padded to 16 rows, but x_flat contains only t_dim rows.
+    // Keep the cube tile capacity at 16 while restricting all x loads and
+    // matmuls to the rows that are actually present in this block.
+    int64_t remaining_rows = v4 - v20;
+    int64_t valid_rows = remaining_rows < v16 ? v16 : (remaining_rows < v11 ? remaining_rows : v11);
     // pto: %acc_inline13214__tile
     Tile<
         TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
         CompactMode::Null>
         v22 = Tile<
             TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
-            CompactMode::Null>(v11, v11);
+            CompactMode::Null>(valid_rows, v11);
     // pto: %acc_inline13214__tile
     uint64_t v23 = (uint64_t)v16;
     TASSIGN(v22, v23);
@@ -156,7 +161,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
             CompactMode::Null>
             v28 = Tile<
                 TileType::Mat, float, 16, 256, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null,
-                CompactMode::Null>(v11, v8);
+                CompactMode::Null>(valid_rows, v8);
         // pto: %x_lin_inline13225__tile
         uint64_t v29 = (uint64_t)v16;
         TASSIGN(v28, v29);
@@ -165,14 +170,14 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
         // pto: %21
         int64_t v31 = v26 < v16 ? v16 : v26;
         // pto: %x_flat_inline13229__ssa_v0_pview
-        pto::Shape<1, 1, 1, 16, 256> v32 = pto::Shape<1, 1, 1, 16, 256>();
+        pto::Shape<1, 1, 1, -1, 256> v32 = pto::Shape<1, 1, 1, -1, 256>(1, 1, 1, valid_rows, v8);
         // pto: %x_flat_inline13229__ssa_v0_pview
         pto::Stride<262144, 262144, 262144, 16384, 1> v33 = pto::Stride<262144, 262144, 262144, 16384, 1>();
         // pto: %x_flat_inline13229__ssa_v0_pview
         GlobalTensor<
-            float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>
+            float, pto::Shape<1, 1, 1, -1, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>
             v34 = GlobalTensor<
-                float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>(
+                float, pto::Shape<1, 1, 1, -1, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>(
                 v1 + ((v16 + v30 * v15) + v31), v32, v33
             );
         wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
@@ -205,21 +210,21 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
             CompactMode::Null>
             v40 = Tile<
                 TileType::Mat, float, 16, 256, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null,
-                CompactMode::Null>(v11, v8);
+                CompactMode::Null>(valid_rows, v8);
         // pto: %0
         uint64_t v41 = (uint64_t)v14;
         TASSIGN(v40, v41);
         // pto: %24
         int64_t v42 = v27 < v16 ? v16 : v27;
         // pto: %25
-        pto::Shape<1, 1, 1, 16, 256> v43 = pto::Shape<1, 1, 1, 16, 256>();
+        pto::Shape<1, 1, 1, -1, 256> v43 = pto::Shape<1, 1, 1, -1, 256>(1, 1, 1, valid_rows, v8);
         // pto: %25
         pto::Stride<262144, 262144, 262144, 16384, 1> v44 = pto::Stride<262144, 262144, 262144, 16384, 1>();
         // pto: %25
         GlobalTensor<
-            float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>
+            float, pto::Shape<1, 1, 1, -1, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>
             v45 = GlobalTensor<
-                float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>(
+                float, pto::Shape<1, 1, 1, -1, 256>, pto::Stride<262144, 262144, 262144, 16384, 1>, pto::Layout::ND>(
                 v1 + ((v16 + v30 * v15) + v42), v43, v44
             );
         wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1);
@@ -268,7 +273,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
                 CompactMode::Null>
                 v53 = Tile<
                     TileType::Left, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null,
-                    CompactMode::Null>(v11, v8);
+                    CompactMode::Null>(valid_rows, v8);
             // pto: %x_lin_inline13225__tile_Left
             uint64_t v54 = (uint64_t)v15;
             TASSIGN(v53, v54);
@@ -291,7 +296,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
                 CompactMode::Null>
                 v57 = Tile<
                     TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
-                    CompactMode::Null>(v11, v12);
+                    CompactMode::Null>(valid_rows, v12);
             // pto: %2
             uint64_t v58 = (uint64_t)v16;
             TASSIGN(v57, v58);
@@ -315,7 +320,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
                 CompactMode::Null>
                 v61 = Tile<
                     TileType::Left, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null,
-                    CompactMode::Null>(v11, v8);
+                    CompactMode::Null>(valid_rows, v8);
             // pto: %4
             uint64_t v62 = (uint64_t)v15;
             TASSIGN(v61, v62);
@@ -338,7 +343,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
                 CompactMode::Null>
                 v65 = Tile<
                     TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
-                    CompactMode::Null>(v11, v11);
+                    CompactMode::Null>(valid_rows, v11);
             // pto: %6
             uint64_t v66 = (uint64_t)v16;
             TASSIGN(v65, v66);
@@ -364,7 +369,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
             CompactMode::Null>
             v69 = Tile<
                 TileType::Left, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null,
-                CompactMode::Null>(v11, v8);
+                CompactMode::Null>(valid_rows, v8);
         // pto: %8
         uint64_t v70 = (uint64_t)v16;
         TASSIGN(v69, v70);
@@ -392,7 +397,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
             CompactMode::Null>
             v73 = Tile<
                 TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
-                CompactMode::Null>(v11, v11);
+                CompactMode::Null>(valid_rows, v11);
         // pto: %10
         uint64_t v74 = (uint64_t)v16;
         TASSIGN(v73, v74);
@@ -403,12 +408,12 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
     }
     set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
     // pto: %mixes_raw_inline13234__ssa_v0_pview
-    pto::Shape<1, 1, 1, 16, 16> v75 = pto::Shape<1, 1, 1, 16, 16>();
+    pto::Shape<1, 1, 1, -1, 16> v75 = pto::Shape<1, 1, 1, -1, 16>(1, 1, 1, valid_rows, v11);
     // pto: %mixes_raw_inline13234__ssa_v0_pview
     pto::Stride<256, 256, 256, 16, 1> v76 = pto::Stride<256, 256, 256, 16, 1>();
     // pto: %29, %mixes_raw_inline13234__ssa_v0_pview
-    GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND> v77 =
-        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>(
+    GlobalTensor<float, pto::Shape<1, 1, 1, -1, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND> v77 =
+        GlobalTensor<float, pto::Shape<1, 1, 1, -1, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>(
             v3 + (v16 + (v20 < v16 ? v16 : v20) * v11), v75, v76
         );
     wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
@@ -416,7 +421,7 @@ hc_head_linear(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, int64_t v4,
         Tile<
             TileType::Acc, float, 16, 16, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 1024, PadValue::Null,
             CompactMode::Null>,
-        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>,
+        GlobalTensor<float, pto::Shape<1, 1, 1, -1, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>,
         AtomicType::AtomicAdd>(v77, v22);
     wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1);

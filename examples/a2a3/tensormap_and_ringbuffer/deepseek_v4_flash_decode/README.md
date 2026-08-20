@@ -100,9 +100,9 @@ reproducible transforms — the license header, the repo's `clang-format`, and
 the whole-word renames `L2TaskArgs -> ChipTaskArgs`, `L0TaskArgs -> CoreTaskArgs`,
 `Tensor -> ChipTensor` (pypto's codegen still emits the pre-rename identifiers
 of its pinned runtime `3165cc89`; simpler renamed them on main per the role-based
-naming rule, with no compat alias). The one intentional post-harvest edit is the
-device-side initialization described above; regeneration must reapply it.
-`test_deepseek_v4_flash_decode.py`'s
+naming rule, with no compat alias). The intentional post-harvest edits are the
+`hc_head_linear` row-tail bound and the device-side initialization described
+above; regeneration must reapply both. `test_deepseek_v4_flash_decode.py`'s
 `_KERNELS` / `_ORCH_SIG` tables are transcribed from the harvest's
 `kernel_config.py`, and `_ARG_STEPS` / the comm-domain layout from its
 generated `host_orch.py` (per-rank stacked slices become the `_r0`/`_r1` host
