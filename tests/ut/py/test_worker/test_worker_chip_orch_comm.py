@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import contextlib
 import ctypes
 import gc
 import importlib
@@ -109,6 +110,9 @@ class _FakeDirectCWorker:
         self.mapping_bytes = mapping_bytes
         self.corrupt_access_profile = bool(corrupt_access_profile)
         self.allocate_specs: list[Any] = []
+
+    def close(self) -> None:
+        return None
 
     def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
         self.create_calls.append((int(worker_id), str(request_shm_name), str(reply_shm_name)))
@@ -284,11 +288,11 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
         region.counter(64).notify(3, NotifyOp.Set)
 
         assert len(fake_c_worker.create_calls) == 1
-        assert region.descriptor_scalars() == [0x4C334C3200020000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
+        assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
         assert 99 not in region.descriptor_scalars()
-        assert region._payload_mapping.handle == 99
-        assert region._counter_mapping.handle == 99
-        assert region._payload_mapping.handle != region.descriptor.payload_base
+        assert region._instance._payload_mapping.handle == 99
+        assert region._instance._counter_mapping.handle == 99
+        assert region._instance._payload_mapping.handle != region.descriptor.payload_base
         assert calls[0] == ("import", "sim-direct-1-p", 64, worker._owner_id)
         assert calls[1] == ("import", "sim-direct-1-c", 128, worker._owner_id)
         assert calls[2][0:3] == ("write", 99, 0)
@@ -324,9 +328,12 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_worker_host
         region.counter(64).notify(9, NotifyOp.Set)
 
         assert len(fake_c_worker.create_calls) == 1
-        assert region.descriptor_scalars() == [0x4C334C3200020000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
+        assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
         assert 123 not in region.descriptor_scalars()
-        assert region._payload_mapping.access_profile == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
+        assert (
+            region._instance._payload_mapping.access_profile
+            == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
+        )
         assert calls[0] == ("import_onboard", 2, 0xABCDEF, 64, worker._owner_id)
         assert calls[1] == ("import_onboard", 2, 0xABCDEF + 1, 128, worker._owner_id)
         assert calls[2] == ("notify", 123, 64, 9, int(NotifyOp.Set))
@@ -385,7 +392,7 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
     worker, shm, fake_c_worker = _make_started_sim_worker()
     fake_c_worker.access_profile = int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)
     try:
-        with pytest.raises(RuntimeError, match="access_profile must be sim_posix_shm"):
+        with pytest.raises(RuntimeError, match="committed import capability does not match"):
             worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.release_calls == [(0, 1)]
@@ -403,7 +410,7 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
         ({"region_id": 0}, "SUCCESS requires a resource id"),
         (
             {"access_profile": int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)},
-            "access_profile must be sim_posix_shm",
+            "committed import capability does not match",
         ),
     ],
 )
@@ -441,8 +448,8 @@ def test_onboard_direct_mapping_bytes_cover_each_independent_part(monkeypatch):
             (2, 0xABCDEF, 191, worker._owner_id),
             (2, 0xABCDEF + 1, 191, worker._owner_id),
         ]
-        assert region._payload_mapping.total_bytes == 191
-        assert region._counter_mapping.total_bytes == 191
+        assert region._instance._payload_mapping.total_bytes == 191
+        assert region._instance._counter_mapping.total_bytes == 191
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -466,9 +473,9 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
             (2, 0xABCDEF, 65536, worker._owner_id),
             (2, 0xABCDEF + 1, 65536, worker._owner_id),
         ]
-        assert region._payload_mapping is not None
-        assert region._payload_mapping.total_bytes == 65536
-        assert region._counter_mapping.total_bytes == 65536
+        assert region._instance._payload_mapping is not None
+        assert region._instance._payload_mapping.total_bytes == 65536
+        assert region._instance._counter_mapping.total_bytes == 65536
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -613,7 +620,8 @@ def test_interrupted_cleanup_ack_happens_after_region_rollback(monkeypatch):
 
         assert caught.value is ack_interrupt
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._ordered_cleanup_error is worker._worker_host_mapped_cleanup_error
+        assert worker._ordered_cleanup_error is not None
+        assert worker._worker_host_mapped_cleanup_error is not None
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -850,56 +858,14 @@ def test_late_cleanup_error_after_successful_close_replays_stably(monkeypatch):
 
 
 def test_close_replay_does_not_double_release_worker_chip_region_after_mapping_close_failure(monkeypatch):
-    class _FakeCloseWorker(_FakeDirectCWorker):
-        def __init__(self) -> None:
-            super().__init__()
-            self.close_calls = 0
-
-        def close(self) -> None:
-            self.close_calls += 1
-
-    worker = Worker(level=3, device_ids=[0], platform="a2a3sim", runtime="tensormap_and_ringbuffer")
-    fake_c_worker = _FakeCloseWorker()
-    worker._lifecycle = worker_module._Lifecycle.READY
-    worker._worker = fake_c_worker
+    worker, shm, fake_c_worker = _make_started_sim_worker()
     worker._init_owner_thread = threading.current_thread()
-    mapping = worker_chip_orch_comm.WorkerHostRegionMapping(
-        worker_id=0,
-        region_id=1,
-        access_profile=worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-        total_bytes=64,
-        payload_offset=0,
-        payload_bytes=64,
-        counter_offset=0,
-        counter_bytes=64,
-        handle=77,
+    handles = iter((77, 78))
+    monkeypatch.setattr(
+        worker_module,
+        "_worker_host_mapped_region_import_sim",
+        lambda _token, _size, _owner_token: next(handles),
     )
-    counter_mapping = worker_chip_orch_comm.WorkerHostRegionMapping(
-        worker_id=0,
-        region_id=1,
-        access_profile=worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-        total_bytes=128,
-        payload_offset=0,
-        payload_bytes=128,
-        counter_offset=0,
-        counter_bytes=128,
-        handle=78,
-    )
-    region = worker_chip_orch_comm.WorkerChipOrchRegion(
-        worker,
-        0,
-        worker_chip_orch_comm.WorkerChipOrchRegionDesc(
-            magic_version=0x4C334C3200020000,
-            region_id=1,
-            payload_base=0xDEAD_0000,
-            payload_bytes=64,
-            counter_base=0xDEAD_1000,
-            counter_bytes=128,
-        ),
-        mapping,
-        counter_mapping,
-    )
-    worker._live_worker_chip_regions.append(region)
     close_calls: list[int] = []
     fail_next_mapping_close = True
 
@@ -912,18 +878,24 @@ def test_close_replay_does_not_double_release_worker_chip_region_after_mapping_c
 
     monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_region_close", close_mapping)
 
-    with pytest.raises(RuntimeError, match="mapping close failed"):
+    try:
+        region = worker._create_worker_chip_region(0, 64, 128)
+        with pytest.raises(RuntimeError, match="mapping close failed"):
+            worker.close()
+
+        assert close_calls == [77, 78]
+        assert fake_c_worker.release_calls == [(0, 1)]
+        assert worker._live_worker_chip_regions == []
+        assert region.expired
+
         worker.close()
 
-    assert close_calls == [77, 78]
-    assert fake_c_worker.release_calls == [(0, 1)]
-    assert worker._live_worker_chip_regions == [region]
-
-    worker.close()
-
-    assert close_calls == [77, 78]
-    assert fake_c_worker.release_calls == [(0, 1)]
-    assert worker._live_worker_chip_regions == []
+        assert close_calls == [77, 78]
+        assert fake_c_worker.release_calls == [(0, 1)]
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            shm.close()
+            shm.unlink()
 
 
 def test_concurrent_close_publishes_joiner_cleanup_error_to_every_caller(monkeypatch):
@@ -1676,6 +1648,56 @@ def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(mo
         assert events == [("close", 77), ("close", 77), ("release", 1)]
         with pytest.raises(RuntimeError, match="expired"):
             region.descriptor_scalars()
+        assert region._instance._close_attempted
+    finally:
+        worker._close_worker_chip_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_compat_free_is_logical_and_keeps_region_instance_live(monkeypatch):
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    try:
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
+        )
+        region = worker._create_worker_chip_region(0, 64, 128)
+        instance = region._instance
+        region.free()
+        region.free()
+
+        with pytest.raises(RuntimeError, match="has been released"):
+            region.descriptor_scalars()
+        assert instance._state is comm_region.RegionInstanceState.LIVE
+        assert fake_c_worker.release_calls == []
+        assert worker._region_instance_registry._instances[id(instance)] is instance
+    finally:
+        worker._close_worker_chip_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_compat_descriptor_uses_independent_local_views_and_bumped_magic(monkeypatch):
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    fake_c_worker.payload_base = 0x1000
+    fake_c_worker.counter_base = 0x9000
+    try:
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
+        )
+        region = worker._create_worker_chip_region(0, 64, 128)
+        scalars = region.descriptor_scalars()
+
+        assert len(scalars) == 6
+        assert scalars[0] == worker_chip_orch_comm._REGION_MAGIC_VERSION
+        assert scalars[0] != 0x4C334C3200020000
+        assert scalars[1] == 1
+        assert scalars[2] == 0x1000
+        assert scalars[3] == 64
+        assert scalars[4] == 0x9000
+        assert scalars[5] == 128
+        assert region._instance is not None
+        assert region._instance._payload_part is not region._instance._counter_part
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()

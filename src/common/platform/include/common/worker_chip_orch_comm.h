@@ -16,7 +16,7 @@
 #include <string.h>
 
 static constexpr uint32_t WORKER_CHIP_ORCH_COMM_MAGIC = 0x4C334C32u;  // "WorkerChip"
-static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MAJOR = 2;
+static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MAJOR = 3;
 static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MINOR = 0;
 static constexpr size_t WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT = 6;
 static constexpr uint64_t WORKER_CHIP_ORCH_COMM_COUNTER_BYTES = sizeof(int32_t);

@@ -388,6 +388,8 @@ class RegionInstance:
         self._counter_mapping: Any | None = None
         self._payload_part: PayloadPart | None = None
         self._counter_part: CounterPart | None = None
+        self._payload_local_view: RegionPartLocalView | None = None
+        self._counter_local_view: RegionPartLocalView | None = None
         self._provider_resource_id = 0
         self._release_client: ProviderReleaseClient | None = None
         self._allocate_client: ProviderAllocateClient | None = None
@@ -507,6 +509,8 @@ class RegionInstance:
                 RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
                 _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, counter_lease),
             )
+            self._payload_local_view = payload_view
+            self._counter_local_view = counter_view
         except BaseException as exc:
             self._abort_materialization(exc)
             raise

@@ -193,6 +193,11 @@ TEST(WorkerChipOrchEndpointTest, SignalWaitTimeoutCarriesStructuredMetadata) {
     EXPECT_EQ(endpoint.error().counter_operand, 1);
     EXPECT_EQ(endpoint.error().observed_counter, 0);
     EXPECT_EQ(observed, 0);
+    EXPECT_FALSE(endpoint.view().failed());
+
+    WorkerChipOrchPayloadView view{};
+    EXPECT_FALSE(endpoint.payload_read(0, sizeof(uint32_t), view));
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::SIGNAL_TIMEOUT);
 }
 
 TEST(WorkerChipOrchEndpointTest, SignalWaitDoesNotTreatGreaterObservedValueAsProtocolError) {

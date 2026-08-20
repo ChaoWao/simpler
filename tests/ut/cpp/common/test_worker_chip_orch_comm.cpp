@@ -71,6 +71,14 @@ TEST(WorkerChipOrchCommTest, DescriptorRejectsBadMajorVersion) {
     EXPECT_EQ(error, WorkerChipOrchCommValidationError::BAD_MAGIC_VERSION);
 }
 
+TEST(WorkerChipOrchCommTest, DescriptorRejectsAbiMajor2) {
+    WorkerChipOrchRegionDesc desc = valid_desc();
+    desc.magic_version = worker_chip_orch_comm_pack_magic_version(WORKER_CHIP_ORCH_COMM_MAGIC, 2, 0);
+
+    WorkerChipOrchCommValidationError error = worker_chip_orch_comm_validate_desc(desc);
+    EXPECT_EQ(error, WorkerChipOrchCommValidationError::BAD_MAGIC_VERSION);
+}
+
 TEST(WorkerChipOrchCommTest, DescriptorKeepsRegionIdZeroAsInvalidSentinel) {
     WorkerChipOrchRegionDesc desc = valid_desc();
     desc.region_id = 0;

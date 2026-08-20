@@ -53,11 +53,22 @@ from simpler.worker_chip_orch_comm import (
     WaitCmp,
     WorkerChipOrchRegion,
     WorkerChipOrchRegionDesc,
-    WorkerChipRegionAccessProfile,
-    WorkerHostRegionMapping,
 )
 
 _DESC_BID = itertools.count(1)
+
+
+class _CompatInstance:
+    def __init__(self, payload_handle: int, counter_handle: int, payload_bytes: int, counter_bytes: int) -> None:
+        self.worker_id = 0
+        self._payload_part = comm_region.PayloadPart(
+            comm_region.RegionPartSpan(offset=0, nbytes=int(payload_bytes)),
+            comm_region.HostVmmCopyAccess(payload_handle),
+        )
+        self._counter_part = comm_region.CounterPart(
+            comm_region.RegionPartSpan(offset=0, nbytes=int(counter_bytes)),
+            comm_region.HostVmmCopyAccess(counter_handle),
+        )
 
 
 def _fake_alloc_handle(orch, nbytes):
@@ -589,7 +600,7 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
     orch = _FakeCOrch()
     layout = make_worker_chip_queue_layout(4, 128, 128)
     desc = WorkerChipOrchRegionDesc(
-        magic_version=0x4C334C3200020000,
+        magic_version=0x4C334C3200030000,
         region_id=1,
         payload_base=0x1000_0000,
         payload_bytes=layout.payload_bytes,
@@ -598,30 +609,8 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
     )
     region = WorkerChipOrchRegion(
         object(),
-        0,
+        _CompatInstance(44, 45, desc.payload_bytes, desc.counter_bytes),
         desc,
-        WorkerHostRegionMapping(
-            worker_id=0,
-            region_id=1,
-            access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-            total_bytes=desc.payload_bytes,
-            payload_offset=0,
-            payload_bytes=desc.payload_bytes,
-            counter_offset=0,
-            counter_bytes=desc.payload_bytes,
-            handle=44,
-        ),
-        WorkerHostRegionMapping(
-            worker_id=0,
-            region_id=1,
-            access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-            total_bytes=desc.counter_bytes,
-            payload_offset=0,
-            payload_bytes=desc.counter_bytes,
-            counter_offset=0,
-            counter_bytes=desc.counter_bytes,
-            handle=45,
-        ),
     )
     queue = WorkerChipQueue(
         orch,

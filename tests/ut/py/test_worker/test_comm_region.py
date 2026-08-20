@@ -1315,7 +1315,7 @@ def test_compatibility_create_uses_projection_result_not_a_fabricated_spec(monke
         captured["spec"] = spec
         raise RuntimeError("stop after capturing the projected spec")
 
-    monkeypatch.setattr("simpler.worker.project_region_allocation_spec", fake_project)
+    monkeypatch.setattr("simpler.comm_region.project_region_allocation_spec", fake_project)
     monkeypatch.setattr("simpler.comm_provider_control.ProviderAllocateClient.allocate", fake_allocate)
 
     with pytest.raises(RuntimeError, match="stop after capturing the projected spec"):

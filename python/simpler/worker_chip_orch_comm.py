@@ -24,12 +24,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _worker_host_mapped_region_close,
 )
 
+from .comm_provider import RegionPartLocalView, validate_independent_local_views
 from .comm_region import (
-    CounterPart,
-    HostVmmCopyAccess,
     NotifyOp,
-    PayloadPart,
-    RegionPartSpan,
     SignalTestResult,
     WaitCmp,
 )
@@ -51,7 +48,12 @@ _REGION_CREATE_REPLY_BYTES = _REGION_CREATE_REPLY.size
 _REGION_LAYOUT_ALIGNMENT = 64
 _UINT64_MAX = (1 << 64) - 1
 _MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
-_REGION_MAGIC_VERSION = 0x4C334C3200020000
+WORKER_CHIP_ORCH_COMM_MAGIC = 0x4C334C32
+WORKER_CHIP_ORCH_COMM_ABI_MAJOR = 3
+WORKER_CHIP_ORCH_COMM_ABI_MINOR = 0
+_REGION_MAGIC_VERSION = (
+    (WORKER_CHIP_ORCH_COMM_MAGIC << 32) | (WORKER_CHIP_ORCH_COMM_ABI_MAJOR << 16) | WORKER_CHIP_ORCH_COMM_ABI_MINOR
+)
 
 
 def _align_up(value: int, align: int) -> int:
@@ -91,6 +93,20 @@ class WorkerChipOrchRegionDesc:
             int(self.counter_base),
             int(self.counter_bytes),
         ]
+
+
+def worker_chip_orch_region_desc_from_local_views(
+    provider_resource_id: int, payload_view: RegionPartLocalView, counter_view: RegionPartLocalView
+) -> WorkerChipOrchRegionDesc:
+    payload_view, counter_view = validate_independent_local_views(payload_view, counter_view)
+    return WorkerChipOrchRegionDesc(
+        magic_version=_REGION_MAGIC_VERSION,
+        region_id=int(provider_resource_id),
+        payload_base=int(payload_view.local_base),
+        payload_bytes=int(payload_view.logical_bytes),
+        counter_base=int(counter_view.local_base),
+        counter_bytes=int(counter_view.logical_bytes),
+    )
 
 
 @dataclass(frozen=True)
@@ -232,31 +248,12 @@ class WorkerChipOrchCounter:
 
 
 class WorkerChipOrchRegion:
-    def __init__(
-        self,
-        owner: Any,
-        worker_id: int,
-        desc: WorkerChipOrchRegionDesc,
-        payload_mapping: WorkerHostRegionMapping,
-        counter_mapping: WorkerHostRegionMapping,
-        release_client: Any | None = None,
-    ) -> None:
+    def __init__(self, owner: Any, instance: Any, desc: WorkerChipOrchRegionDesc) -> None:
         self._owner = owner
-        self._worker_id = int(worker_id)
+        self._instance = instance
+        self._worker_id = int(instance.worker_id)
         self._descriptor = desc
-        self._payload_mapping = payload_mapping
-        self._counter_mapping = counter_mapping
-        self._release_client = release_client
-        self._payload_part = PayloadPart(
-            RegionPartSpan(offset=0, nbytes=int(desc.payload_bytes)),
-            HostVmmCopyAccess(payload_mapping.handle),
-        )
-        self._counter_part = CounterPart(
-            RegionPartSpan(offset=0, nbytes=int(desc.counter_bytes)),
-            HostVmmCopyAccess(counter_mapping.handle),
-        )
         self._released = False
-        self._chip_release_committed = False
         self._poisoned = False
         self._expired = False
 
@@ -282,7 +279,7 @@ class WorkerChipOrchRegion:
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         try:
-            self._payload_part.write(offset, host_buffer, nbytes)
+            self._payload_part().write(offset, host_buffer, nbytes)
         except Exception:
             self._poison()
             raise
@@ -290,7 +287,7 @@ class WorkerChipOrchRegion:
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         try:
-            self._payload_part.read(offset, host_buffer, nbytes)
+            self._payload_part().read(offset, host_buffer, nbytes)
         except Exception:
             self._poison()
             raise
@@ -298,7 +295,7 @@ class WorkerChipOrchRegion:
     def counter(self, offset: int) -> WorkerChipOrchCounter:
         self._ensure_live()
         offset = int(offset)
-        self._counter_part.counter(offset)
+        self._counter_part().counter(offset)
         return WorkerChipOrchCounter(self, offset)
 
     def free(self) -> None:
@@ -320,27 +317,28 @@ class WorkerChipOrchRegion:
         if self._poisoned:
             raise RuntimeError(f"L3-L2 region {self.region_id} is poisoned")
 
-    def _close_worker_host_mapping(self) -> None:
-        errors: list[BaseException] = []
-        for mapping in (self._payload_mapping, self._counter_mapping):
-            try:
-                mapping.close()
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            self._poison()
-            raise errors[0]
+    def _payload_part(self) -> Any:
+        part = self._instance._payload_part
+        if part is None:
+            raise RuntimeError(f"L3-L2 region {self.region_id} has no payload part")
+        return part
+
+    def _counter_part(self) -> Any:
+        part = self._instance._counter_part
+        if part is None:
+            raise RuntimeError(f"L3-L2 region {self.region_id} has no counter part")
+        return part
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
         try:
-            self._counter_part.notify(offset, int(value), NotifyOp(op))
+            self._counter_part().notify(offset, int(value), NotifyOp(op))
         except Exception:
             self._poison()
             raise
 
     def _direct_counter_test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
         try:
-            return self._counter_part.test(offset, int(cmp_value), WaitCmp(cmp))
+            return self._counter_part().test(offset, int(cmp_value), WaitCmp(cmp))
         except Exception:
             self._poison()
             raise
@@ -348,7 +346,7 @@ class WorkerChipOrchRegion:
     def _direct_counter_wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout_ns: int) -> int:
         timeout = float(timeout_ns) / 1_000_000_000
         try:
-            return self._counter_part.wait(offset, int(cmp_value), WaitCmp(cmp), timeout)
+            return self._counter_part().wait(offset, int(cmp_value), WaitCmp(cmp), timeout)
         except TimeoutError:
             raise
         except Exception:
