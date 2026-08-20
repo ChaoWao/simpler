@@ -101,8 +101,8 @@ typedef struct PTO2RuntimeOps {
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
-    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const CoreTaskArgs &args);
-    bool (*graph_prepare)(PTO2Runtime *rt, const CoreTaskArgs &args);
+    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args);
+    bool (*graph_prepare)(PTO2Runtime *rt, const GraphTaskArgs &args);
     void (*graph_abort)(PTO2Runtime *rt);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
@@ -128,18 +128,10 @@ struct PTO2Runtime {
 
 class GraphOwnedArgs {
 public:
-    // A CoreTaskArgs cannot report more args than its own capacity, so the loops
-    // below need no runtime bound — but only while these arrays are at least as
-    // large as that capacity. GRAPH_MAX_TENSOR_ARGS and MAX_TENSOR_ARGS are
-    // independent constants that merely happen to agree, so shrinking the Graph
-    // one would silently turn the tensor loop into an overflow that a release
-    // build cannot catch.
-    static_assert(
-        GRAPH_MAX_TENSOR_ARGS >= static_cast<uint32_t>(MAX_TENSOR_ARGS),
-        "GraphOwnedArgs must hold every tensor a CoreTaskArgs can carry"
-    );
-
-    explicit GraphOwnedArgs(const CoreTaskArgs &source) {
+    // The arrays below are sized to the Graph boundary's own capacity, so a
+    // source GraphTaskArgs cannot report more args than they hold and the copy
+    // loops need no runtime bound.
+    explicit GraphOwnedArgs(const GraphTaskArgs &source) {
         for (int32_t i = 0; i < source.tensor_count(); ++i) {
             tensors_[static_cast<size_t>(i)].copy(source.tensor(i).ref());
             switch (source.tag(i)) {
@@ -172,12 +164,12 @@ public:
         args_.set_predicate(source.predicate());
     }
 
-    CoreTaskArgs &args() { return args_; }
+    GraphTaskArgs &args() { return args_; }
 
 private:
     std::array<ChipTensor, GRAPH_MAX_TENSOR_ARGS> tensors_{};
-    std::array<uint64_t, MAX_SCALAR_ARGS> scalars_{};
-    CoreTaskArgs args_;
+    std::array<uint64_t, GRAPH_MAX_SCALAR_ARGS> scalars_{};
+    GraphTaskArgs args_;
 };
 
 class GraphAsyncRecordingState {
@@ -387,7 +379,7 @@ static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
     return rt->ops->submit_dummy_task(rt, args);
 }
 
-static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const CoreTaskArgs &args) {
+static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTaskArgs &args) {
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt) || rt->ops->graph_begin == nullptr) {
         return GraphScopeResult{};
@@ -395,7 +387,7 @@ static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const CoreTask
     return rt->ops->graph_begin(rt, graph_key, args);
 }
 
-static inline bool rt_graph_prepare(const CoreTaskArgs &args) {
+static inline bool rt_graph_prepare(const GraphTaskArgs &args) {
     PTO2Runtime *rt = current_runtime();
     return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, args);
 }
@@ -562,8 +554,8 @@ private:
 // Define or submit a Graph Execution. On a cache miss the function executes
 // normally and its sub-DAG is recorded. On a hit the function is skipped and
 // one Graph task is submitted; Scheduler expands the cached topology with the
-// current invocation's CoreTaskArgs.
-using GraphFunction = void (*)(const CoreTaskArgs &);
+// current invocation's GraphTaskArgs.
+using GraphFunction = void (*)(const GraphTaskArgs &);
 
 template <typename Function>
 static inline uint64_t rt_graph_function_id(Function function) {
@@ -581,8 +573,8 @@ static inline uint64_t rt_graph_function_id(Function function) {
 // including the boundary `args` — is a use-after-free; the recorded body receives
 // its own boundary copy as a parameter for exactly that reason.
 template <typename Invoke>
-static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const CoreTaskArgs &args, Invoke invoke) {
-    debug_assert(!args.has_error && "Graph boundary CoreTaskArgs construction failed");
+static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const GraphTaskArgs &args, Invoke invoke) {
+    debug_assert(!args.has_error && "Graph boundary GraphTaskArgs construction failed");
     debug_assert(
         args.tensor_count() <= static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS) && "Graph boundary exceeds the tensor limit"
     );
@@ -659,30 +651,30 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const C
     return result;
 }
 
-static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const CoreTaskArgs &args) {
+static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const GraphTaskArgs &args) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
-    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [function](const CoreTaskArgs &record_args) {
+    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [function](const GraphTaskArgs &record_args) {
         function(record_args);
     });
 }
 
-static inline GraphSubmitResult rt_submit_graph(GraphFunction function, const CoreTaskArgs &args) {
+static inline GraphSubmitResult rt_submit_graph(GraphFunction function, const GraphTaskArgs &args) {
     return rt_submit_graph(rt_graph_function_id(function), function, args);
 }
 
 template <typename... Config>
-using GraphFunctionWithConfig = void (*)(const CoreTaskArgs &, Config...);
+using GraphFunctionWithConfig = void (*)(const GraphTaskArgs &, Config...);
 
 template <typename... Config>
 static inline GraphSubmitResult rt_submit_graph(
-    uint64_t graph_id, GraphFunctionWithConfig<Config...> function, const CoreTaskArgs &args, Config... config
+    uint64_t graph_id, GraphFunctionWithConfig<Config...> function, const GraphTaskArgs &args, Config... config
 ) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
     auto configs = std::make_tuple(config...);
     return rt_submit_graph_impl(
-        rt_graph_make_key(graph_id, config...), args, [function, configs](const CoreTaskArgs &record_args) {
+        rt_graph_make_key(graph_id, config...), args, [function, configs](const GraphTaskArgs &record_args) {
             std::apply(
                 [&](auto... values) {
                     function(record_args, values...);
@@ -695,7 +687,7 @@ static inline GraphSubmitResult rt_submit_graph(
 
 template <typename... Config>
 static inline GraphSubmitResult
-rt_submit_graph(GraphFunctionWithConfig<Config...> function, const CoreTaskArgs &args, Config... config) {
+rt_submit_graph(GraphFunctionWithConfig<Config...> function, const GraphTaskArgs &args, Config... config) {
     return rt_submit_graph(rt_graph_function_id(function), function, args, config...);
 }
 

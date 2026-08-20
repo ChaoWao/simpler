@@ -96,8 +96,8 @@ struct PTO2RuntimeOps {
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
-    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const CoreTaskArgs &args);
-    bool (*graph_prepare)(PTO2Runtime *rt, const CoreTaskArgs &args);
+    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args);
+    bool (*graph_prepare)(PTO2Runtime *rt, const GraphTaskArgs &args);
     void (*graph_abort)(PTO2Runtime *rt);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);

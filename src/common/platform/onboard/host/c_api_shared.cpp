@@ -805,6 +805,18 @@ int simpler_prepare_run(
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunContext *state = native_run_context(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
+    // TEMPORARY (host_build_graph dsv4 bring-up): stop after prepare so the host
+    // side — orchestration, graph construction, image relocation and H2D — can be
+    // measured while the device execution of that graph still stalls. Sitting in
+    // launch (not simpler_run) covers the split prepare/launch/wait entry points
+    // the chip subprocess uses, which never call simpler_run. Outputs are never
+    // produced, so any run under this variable is a timing harness, not a test.
+    // Delete this together with the variable once the stall is diagnosed.
+    if (std::getenv("SIMPLER_SKIP_DEVICE_RUN") != nullptr) {
+        state->completion_rc = 0;
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        return 0;
+    }
     if (!state->runner->can_accept_run() || !state->runner_reserved) return -1;
     if (state->prepared_execution == nullptr ||
         !state->runner->try_acquire_native_run(state, state->identity(), &state->launch_permit)) {

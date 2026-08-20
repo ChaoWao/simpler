@@ -28,7 +28,7 @@ namespace {
 //
 // A cache miss records two AIC tasks and one AIV task. Cache hits submit one
 // outer Graph task and let Scheduler materialize this saved topology.
-void decoder_layer(const CoreTaskArgs &args) {
+void decoder_layer(const GraphTaskArgs &args) {
     const ChipTensor &input = args.tensor(0).ref();
     const ChipTensor &weight_1 = args.tensor(1).ref();
     const ChipTensor &weight_2 = args.tensor(2).ref();
@@ -53,7 +53,7 @@ void decoder_layer(const CoreTaskArgs &args) {
     rt_submit_aiv_task(FUNC_ADD, add_args);
 }
 
-void submit_layer(const CoreTaskArgs &args) { rt_submit_graph(&decoder_layer, args); }
+void submit_layer(const GraphTaskArgs &args) { rt_submit_graph(&decoder_layer, args); }
 
 }  // namespace
 
@@ -68,7 +68,7 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
     for (int32_t output_index = 3; output_index < 6; ++output_index) {
-        CoreTaskArgs layer_args;
+        GraphTaskArgs layer_args;
         layer_args.add_input(args.tensor(0).ref(), args.tensor(1).ref(), args.tensor(2).ref());
         layer_args.add_output(args.tensor(output_index).ref());
         submit_layer(layer_args);

@@ -19,8 +19,6 @@
 #include "pto_task_id.h"
 #include "pto_types.h"
 
-inline constexpr uint32_t GRAPH_MAX_TENSOR_ARGS = 32;
-
 struct GraphScopeResult {
     bool execute_block{true};
     bool recording{false};
@@ -64,7 +62,7 @@ constexpr uint64_t graph_const_hash_impl(const char *s, uint64_t h) {
 
 constexpr uint64_t GRAPH_KEY(const char *s) { return graph_const_hash_impl(s, 1469598103934665603ULL); }
 
-inline bool rt_graph_args_cacheable(const CoreTaskArgs &args) {
+inline bool rt_graph_args_cacheable(const GraphTaskArgs &args) {
     if (args.has_error || args.tensor_count() <= 0 ||
         args.tensor_count() > static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS)) {
         return false;

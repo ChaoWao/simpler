@@ -80,7 +80,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphSubmissionsReserveHeapOnlyAtCommi
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
     orch.begin_scope();
@@ -154,7 +154,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
     orch.begin_scope();
@@ -173,7 +173,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     std::thread worker([&]() {
         // Worker-owned boundary copy, alive until graph_end: graph_prepare
         // anchors scalar sources into it and stores its address.
-        CoreTaskArgs worker_args;
+        GraphTaskArgs worker_args;
         worker_args.add_input(boundary);
         prepare_ok = orch.graph_prepare(worker_args);
         {
@@ -267,7 +267,7 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
     orch.begin_scope();
@@ -289,14 +289,14 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     EXPECT_TRUE(orch.fatal) << "A shell whose Definition never arrived cannot be completed";
 }
 
-// A Graph body that allocates at runtime cannot be replayed from a Definition.
-// The recording is poisoned as it happens and graph_end refuses to publish, so
-// the caller reaches the same terminal path as an explicit abort.
-TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyPoisonsTheRecording) {
+// A Graph body may allocate. The allocation records as a kernel-less node, the
+// same shape submit_dummy_task records, so the recording stays publishable and
+// the commit latches no fatal.
+TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernellessNode) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
     orch.begin_scope();
@@ -307,21 +307,13 @@ TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyPoisonsTheRecord
     CoreTaskArgs alloc_args;
     TensorCreateInfo allocated(shape, 1, DataType::UINT32);
     alloc_args.add_output(allocated);
-    orch.alloc_tensors(alloc_args);
+    const TaskOutputTensors outputs = orch.alloc_tensors(alloc_args);
+    EXPECT_TRUE(outputs.task_id().is_valid());
 
-    // graph_end asserts on an unsupported recording, so a debug build throws
-    // where a release build returns false. rt_submit_graph_impl aborts on either,
-    // which is what the terminal path below depends on.
-    bool published = false;
-    try {
-        published = orch.graph_end();
-    } catch (const AssertionError &) {
-        orch.graph_abort();
-    }
-    EXPECT_FALSE(published);
+    EXPECT_TRUE(orch.graph_end());
 
     orch.graph_commit();
-    EXPECT_TRUE(orch.fatal);
+    EXPECT_FALSE(orch.fatal);
 }
 
 TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) {
@@ -330,7 +322,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1715, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
@@ -372,7 +364,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
-    CoreTaskArgs boundary_args;
+    GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1716, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
