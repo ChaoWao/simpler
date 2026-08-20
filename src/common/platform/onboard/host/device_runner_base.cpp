@@ -1814,6 +1814,20 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
     }
 }
 
+void DeviceRunnerBase::write_host_phase_records_artifact() {
+    // Per-event view of the prepare path. Every phase it records is produced on
+    // the host during bind, and the store is finished before launch, so this
+    // touches no device state and is callable from any point after bind --
+    // including a path that never launches. Keyed on output_prefix_ because it is
+    // non-empty exactly when this run produces diagnostic artifacts, and on the
+    // store having finished a pass, which is what a host-orchestrating runtime
+    // leaves behind. The store writes a pass at most once, so every path that can
+    // end a run calls this unconditionally.
+    if (!output_prefix_.empty() && host_phase_records_.finished()) {
+        (void)host_phase_records_.write_records_jsonl(make_host_phase_records_path(output_prefix_));
+    }
+}
+
 void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_execution_complete) {
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
@@ -1828,15 +1842,7 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_executio
         chip_swimlane_collector_.export_swimlane_json();
     }
 
-    // Per-event view of the prepare path. Written here rather than in the reap
-    // tail because a device error reaches this teardown but not that tail, and a
-    // failed run is when the prepare timing is worth having. Keyed on
-    // output_prefix_ because it is non-empty exactly when this run produces
-    // diagnostic artifacts, and on the store having finished a pass, which is what
-    // a host-orchestrating runtime leaves behind.
-    if (!output_prefix_.empty() && host_phase_records_.finished()) {
-        (void)host_phase_records_.write_records_jsonl(make_host_phase_records_path(output_prefix_));
-    }
+    write_host_phase_records_artifact();
 
     if (enable_dump_args_) {
         dump_collector_.stop();

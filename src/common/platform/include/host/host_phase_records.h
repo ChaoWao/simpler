@@ -79,9 +79,13 @@ public:
     /**
      * Append this pass's records to `path` as one JSON Lines object.
      *
+     * At most one line per pass: a second call before the next `arm()` is a no-op,
+     * so paths that both end a run -- a device-run teardown and a run that stops
+     * before launch -- can each write unconditionally without duplicating a pass.
+     *
      * @return 0 on success, -1 when the path cannot be written
      */
-    int write_records_jsonl(const std::string &path) const;
+    int write_records_jsonl(const std::string &path);
 
     /** Records in rotation order. Empty unless a pass was armed with collection. */
     std::vector<HostPhaseRecord> records() const;
@@ -108,6 +112,7 @@ private:
     std::vector<HostPhaseRecordBuffer> buffers_{};
     bool armed_{false};
     bool finished_{false};
+    bool records_written_{false};
     uint64_t submitted_tasks_{0};
     uint64_t invocation_id_{0};
 };

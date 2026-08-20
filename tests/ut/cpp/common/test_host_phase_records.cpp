@@ -11,11 +11,24 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <fstream>
+#include <string>
+
 #include "host/host_phase_records.h"
 
 using simpler::dfx::HostPhaseRecordStore;
 
 namespace {
+
+size_t count_lines(const std::string &path) {
+    std::ifstream in(path);
+    size_t n = 0;
+    for (std::string line; std::getline(in, line);) {
+        if (!line.empty()) n++;
+    }
+    return n;
+}
 
 void record_n(
     HostPhaseRecordPool *pool, HostPhaseKind kind, uint32_t n, uint64_t first_start = 0, uint32_t thread_id = 0
@@ -166,6 +179,33 @@ TEST(HostPhaseRecords, EveryKindHasItsOwnName) {
         }
     }
     EXPECT_STREQ(host_phase_kind_name(HostPhaseKind::Count), "unknown");
+}
+
+TEST(HostPhaseRecords, APassIsWrittenAtMostOnceAndTheNextPassAppends) {
+    // Both the device-run teardown and a run that stops before launch write the
+    // artifact unconditionally, so the store -- not its callers -- is what keeps a
+    // pass from appearing twice.
+    const std::string path = std::string(testing::TempDir()) + "/host_phase_records_write_once.jsonl";
+    std::remove(path.c_str());
+
+    HostPhaseRecordStore store;
+    HostPhaseRecordPool *pool = store.arm(true);
+    ASSERT_NE(pool, nullptr);
+    record_n(pool, HostPhaseKind::OrchRecordNode, 4);
+    store.finish(4, /*invocation_id=*/11);
+
+    EXPECT_EQ(store.write_records_jsonl(path), 0);
+    EXPECT_EQ(store.write_records_jsonl(path), 0);
+    EXPECT_EQ(count_lines(path), 1u) << "a second write of the same pass must append nothing";
+
+    pool = store.arm(true);
+    ASSERT_NE(pool, nullptr);
+    record_n(pool, HostPhaseKind::OrchGraphSubmit, 2);
+    store.finish(2, /*invocation_id=*/12);
+    EXPECT_EQ(store.write_records_jsonl(path), 0);
+    EXPECT_EQ(count_lines(path), 2u) << "a --rounds run must still get one line per pass";
+
+    std::remove(path.c_str());
 }
 
 }  // namespace

@@ -102,11 +102,14 @@ A 2-rank case emits one pass per rank per round, so six rounds is twelve passes.
 To measure the host path without device execution, set
 `SIMPLER_SKIP_DEVICE_RUN=1`, which returns at `simpler_launch_run`. It is a
 temporary handle from the dsv4 bring-up and is deleted once that case's device
-execution works; two of its properties are load-bearing while it exists:
+execution works. One property is load-bearing while it exists:
 
 - **It is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still skips. `unset` it.
-- **A skipped run writes no `host_phase_records.jsonl`** (see Recipe B), because
-  the artifact is written by the teardown on the device-run path.
+
+A skipped run still writes `host_phase_records.jsonl`, so Recipe B works without
+touching the device. Every phase in that artifact is produced on the host during
+bind, so the skip path writes it exactly as the device-run teardown does; what
+still gates it is `--rounds`, not the device (see Recipe B).
 
 ### Reading the segments out
 
@@ -168,22 +171,23 @@ The summed `bind phase=` lines cannot be placed on a timeline inside
 rotating record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
 one record per orchestrator operation, each with its own interval.
 
-Three conditions must all hold, and each one silently produces an empty result:
+Two conditions must both hold, and each one silently produces an empty result:
 
 1. **A diagnostic flag must be on**, because that is what makes
    `CallConfig.output_prefix` non-empty. `--enable-scope-stats` is the cheapest
    for an L3 case; `--enable-chip-swimlane` raises `NotImplementedError` for
    `level=3` (per-chip-process filename collision).
 2. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag.
-3. **The device run must not be skipped.** The artifact is written by
-   `teardown_shared_collectors_after_run()`, which sits on the device-run path.
-   A run that *fails* on device still writes it — that is deliberate, and it is
-   how a case whose device execution does not complete still yields its prepare
-   timing.
+
+The device run may be skipped or may fail; neither costs you the artifact. Every
+phase recorded is host work done during bind, so both `SIMPLER_SKIP_DEVICE_RUN`
+and the device-run teardown write it. That is what lets a case whose device
+execution does not complete still yield its prepare timing — and it is why a
+swimlane for a case that hangs on device is cheaper to take with the variable set
+than to take by waiting out the stall.
 
 ```bash
 export SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_LOG_LEVEL=TIMING TORCH_DEVICE_BACKEND_AUTOLOAD=0
-unset SIMPLER_SKIP_DEVICE_RUN
 
 task-submit --device auto --device-num 1 --timeout 2400 --max-time 2400 --run \
   "python examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py \
@@ -230,7 +234,6 @@ signal than any duration on a shared box.
 | dsv4 run through the module runner's L3 phase | log has zero `bind phase=` lines, test passes | run the L3 child command directly (Recipe A) |
 | `SIMPLER_SKIP_DEVICE_RUN=0` | run still skips the device, "PASSED" means nothing ran | `unset` the variable |
 | `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts | one round for artifacts, many rounds for numbers |
-| Skipped device run in Recipe B | output directory exists but is empty | let the device run; a failing run writes the artifact too |
 | Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the five segments; `arena_h2d` is not adjacent |
 | Single pass, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
 | `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the conditions and require the sign to agree per pass |
