@@ -536,21 +536,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ float *>(post_ffn_inline9241__ssa_v0_tensor->buffer.addr) +
         post_ffn_inline9241__ssa_v0_tensor->start_offset;
 
-    // Unpack scalar: scale0_inline14143__ssa_v0
-    union {
-        uint64_t u64;
-        float val;
-    } scale0_inline14143__ssa_v0_conv;
-    scale0_inline14143__ssa_v0_conv.u64 = args[5];
-    float scale0_inline14143__ssa_v0 = scale0_inline14143__ssa_v0_conv.val;
-
-    // Unpack scalar: scale1_inline14163__ssa_v0
-    union {
-        uint64_t u64;
-        float val;
-    } scale1_inline14163__ssa_v0_conv;
-    scale1_inline14163__ssa_v0_conv.u64 = args[6];
-    float scale1_inline14163__ssa_v0 = scale1_inline14163__ssa_v0_conv.val;
+    // Unpack tensor: hc_scale (scale0/scale1 read from GM instead of host-staged scalars)
+    __gm__ ChipTensor *hc_scale_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
+    __gm__ float *hc_scale =
+        reinterpret_cast<__gm__ float *>(hc_scale_tensor->buffer.addr) + hc_scale_tensor->start_offset;
+    float scale0_inline14143__ssa_v0 = hc_scale[0];
+    float scale1_inline14163__ssa_v0 = hc_scale[1];
 
     // Extract dynamic dim: t_linear_inline14154__ssa_v0
     int64_t t_linear_inline14154__ssa_v0 = static_cast<int64_t>(inv_rms_inline14104__ssa_v1_tensor->shapes[0]);

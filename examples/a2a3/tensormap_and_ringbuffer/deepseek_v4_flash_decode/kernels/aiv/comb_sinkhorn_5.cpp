@@ -2000,13 +2000,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ float *>(comb_t_inline11617__ssa_v0_tensor->buffer.addr) +
         comb_t_inline11617__ssa_v0_tensor->start_offset;
 
-    // Unpack scalar: scale2_inline14884__ssa_v0
-    union {
-        uint64_t u64;
-        float val;
-    } scale2_inline14884__ssa_v0_conv;
-    scale2_inline14884__ssa_v0_conv.u64 = args[4];
-    float scale2_inline14884__ssa_v0 = scale2_inline14884__ssa_v0_conv.val;
+    // Unpack tensor: hc_scale (scale2 read from GM instead of a host-staged scalar)
+    __gm__ ChipTensor *hc_scale_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ float *hc_scale =
+        reinterpret_cast<__gm__ float *>(hc_scale_tensor->buffer.addr) + hc_scale_tensor->start_offset;
+    float scale2_inline14884__ssa_v0 = hc_scale[2];
 
     // Extract dynamic dim: t_linear_inline14909__ssa_v0
     int64_t t_linear_inline14909__ssa_v0 = static_cast<int64_t>(inv_rms_inline14859__ssa_v1_tensor->shapes[0]);

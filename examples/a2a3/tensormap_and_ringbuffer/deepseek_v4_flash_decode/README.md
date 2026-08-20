@@ -47,6 +47,15 @@ up-to-16-row chunk of the dynamic `mixes_raw` split-K destination per logical
 block; an explicit task dependency orders all `hc_head_linear` `AtomicAdd`
 stores after it.
 
+The 30 orchestration-side `get_tensor_data` reads of `hc_attn_scale_*` /
+`hc_ffn_scale_*` are likewise gone. They moved data, not control flow: the
+values went straight into task scalars for the `split_pre_post*` /
+`comb_sinkhorn*` kernels. Each of those kernels now takes the scale view as an
+extra tensor input and reads scale0/scale1 (`split_pre_post*`) or scale2
+(`comb_sinkhorn*`) from GM itself. The remaining reads — `recv_count_out` and
+`ext_num_tokens_per_owner` — feed loop trip counts and launch block numbers,
+i.e. orchestration control flow, and stay on the orchestrator.
+
 ## Status: blocked on the #1644 pto-isa pin bump
 
 The case PASSES on every runtime from the wire-ABI cutover (#1729, the earliest
@@ -101,8 +110,9 @@ the whole-word renames `L2TaskArgs -> ChipTaskArgs`, `L0TaskArgs -> CoreTaskArgs
 `Tensor -> ChipTensor` (pypto's codegen still emits the pre-rename identifiers
 of its pinned runtime `3165cc89`; simpler renamed them on main per the role-based
 naming rule, with no compat alias). The intentional post-harvest edits are the
-`hc_head_linear` row-tail bound and the device-side initialization described
-above; regeneration must reapply both. `test_deepseek_v4_flash_decode.py`'s
+`hc_head_linear` row-tail bound, the device-side initialization, and the
+kernel-side scale loads described above; regeneration must reapply all three.
+`test_deepseek_v4_flash_decode.py`'s
 `_KERNELS` / `_ORCH_SIG` tables are transcribed from the harvest's
 `kernel_config.py`, and `_ARG_STEPS` / the comm-domain layout from its
 generated `host_orch.py` (per-rank stacked slices become the `_r0`/`_r1` host
