@@ -84,7 +84,8 @@ jobs:
 
           echo "needs_build=$needs_build" >> "$GITHUB_OUTPUT"
 
-      - name: Install build and lint tools
+      - name: Find missing build and lint tools
+        id: apt-packages
         if: inputs.setup_variant == 'github' && steps.lint-build.outputs.needs_build == 'true'
         run: |
           missing_packages=()
@@ -94,10 +95,14 @@ jobs:
           if ! command -v clang-tidy >/dev/null 2>&1; then
             missing_packages+=(clang-tidy)
           fi
-          if (( ${#missing_packages[@]} )); then
-            sudo apt-get update
-            sudo apt-get install -y "${missing_packages[@]}"
-          fi
+          echo "required-packages=${missing_packages[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build and lint tools
+        if: inputs.setup_variant == 'github' && runner.os == 'Linux' && steps.lint-build.outputs.needs_build == 'true' && steps.apt-packages.outputs.required-packages != ''
+        uses: ./.github/actions/apt-install
+        with:
+          required-packages: ${{ steps.apt-packages.outputs.required-packages }}
+          install-timeout-seconds: "240"
 
       - name: Verify provisioned toolchain
         if: inputs.setup_variant == 'self-cpu' && steps.lint-build.outputs.needs_build == 'true'

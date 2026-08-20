@@ -1,0 +1,191 @@
+name: Install APT packages
+description: Install required and optional packages with bounded, recoverable APT operations on Ubuntu runners.
+
+inputs:
+  required-packages:
+    description: Space-separated package names that must be installed.
+    required: false
+    default: ""
+  optional-packages:
+    description: Space-separated package names whose installation may fail without failing the caller.
+    required: false
+    default: ""
+  update-mode:
+    description: "none, system, or source-file. source-file refreshes only the supplied deb822 source."
+    required: false
+    default: none
+  source-file:
+    description: Deb822 .sources file to refresh when update-mode is source-file.
+    required: false
+    default: ""
+  update-attempts:
+    description: Number of bounded update attempts before installation proceeds from the existing indexes.
+    required: false
+    default: "1"
+  update-timeout-seconds:
+    description: Wall-clock bound for each apt-get update attempt.
+    required: false
+    default: "120"
+  install-timeout-seconds:
+    description: Wall-clock bound for each apt-get install invocation.
+    required: false
+    default: "240"
+  install-attempts:
+    description: Number of bounded install attempts before required packages fail.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install APT packages
+      shell: bash
+      env:
+        REQUIRED_PACKAGES: ${{ inputs.required-packages }}
+        OPTIONAL_PACKAGES: ${{ inputs.optional-packages }}
+        UPDATE_MODE: ${{ inputs.update-mode }}
+        SOURCE_FILE: ${{ inputs.source-file }}
+        UPDATE_ATTEMPTS: ${{ inputs.update-attempts }}
+        UPDATE_TIMEOUT_SECONDS: ${{ inputs.update-timeout-seconds }}
+        INSTALL_ATTEMPTS: ${{ inputs.install-attempts }}
+        INSTALL_TIMEOUT_SECONDS: ${{ inputs.install-timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v apt-get >/dev/null 2>&1; then
+          echo "::error::apt-install requires an apt-based runner"
+          exit 1
+        fi
+
+        apt_options=(
+          -o Acquire::Retries=0
+          -o Acquire::http::Timeout=20
+          -o Acquire::https::Timeout=20
+        )
+        update_options=()
+        sourceparts_dir=""
+
+        cleanup_sourceparts() {
+          if [[ -n "$sourceparts_dir" ]]; then
+            rm -rf "$sourceparts_dir"
+          fi
+        }
+        trap cleanup_sourceparts EXIT
+
+        is_positive_integer() {
+          [[ "$1" =~ ^[1-9][0-9]*$ ]]
+        }
+
+        for value in "$UPDATE_ATTEMPTS" "$UPDATE_TIMEOUT_SECONDS" "$INSTALL_ATTEMPTS" "$INSTALL_TIMEOUT_SECONDS"; do
+          if ! is_positive_integer "$value"; then
+            echo "::error::APT attempt counts and timeouts must be positive integers"
+            exit 1
+          fi
+        done
+        case "$UPDATE_MODE" in
+          none|system)
+            ;;
+          source-file)
+            if [[ -z "$SOURCE_FILE" || ! -f "$SOURCE_FILE" || "${SOURCE_FILE##*.}" != sources ]]; then
+              echo "::error::source-file update mode requires a readable .sources file"
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::error::unknown update mode: $UPDATE_MODE"
+            exit 1
+            ;;
+        esac
+
+        configure_update() {
+          local mode="$1"
+          update_options=()
+          case "$mode" in
+            none|system)
+              ;;
+            source-file)
+              if [[ -z "$sourceparts_dir" ]]; then
+                sourceparts_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/apt-install-sources.XXXXXX")"
+                install -m 0644 "$SOURCE_FILE" "$sourceparts_dir/${SOURCE_FILE##*/}"
+              fi
+              update_options=(
+                -o Dir::Etc::SourceList=/dev/null
+                -o "Dir::Etc::SourceParts=$sourceparts_dir"
+                -o APT::Get::List-Cleanup=0
+              )
+              ;;
+          esac
+        }
+
+        recover_apt() {
+          sudo rm -rf /var/lib/apt/lists/partial
+          sudo DEBIAN_FRONTEND=noninteractive timeout --kill-after=15s 60s dpkg --configure -a || true
+        }
+
+        run_update() {
+          local mode="$1"
+          local attempts="$2"
+          local attempt
+          local -a update_command
+          update_command=(apt-get "${apt_options[@]}")
+          configure_update "$mode"
+          if [[ "$mode" == none ]]; then
+            return 0
+          fi
+          if [[ "$mode" == source-file ]]; then
+            update_command+=("${update_options[@]}")
+          fi
+          for ((attempt = 1; attempt <= attempts; ++attempt)); do
+            if sudo DEBIAN_FRONTEND=noninteractive timeout --kill-after=15s "${UPDATE_TIMEOUT_SECONDS}s" \
+              "${update_command[@]}" update; then
+              return 0
+            fi
+            recover_apt
+            echo "::warning::apt-get $mode update attempt ${attempt}/${attempts} failed; using existing package indexes"
+          done
+          return 1
+        }
+
+        install_packages_once() {
+          if (( $# == 0 )); then
+            return 0
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive timeout --kill-after=15s "${INSTALL_TIMEOUT_SECONDS}s" \
+            apt-get "${apt_options[@]}" install -y "$@"
+        }
+
+        install_required_packages() {
+          local attempt
+          for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; ++attempt)); do
+            if install_packages_once "$@"; then
+              return 0
+            fi
+            recover_apt
+            echo "::warning::apt required-package install attempt ${attempt}/${INSTALL_ATTEMPTS} failed"
+          done
+          if [[ "$UPDATE_MODE" == none ]]; then
+            echo "::warning::apt install failed on cached indexes; refreshing system indexes once"
+            run_update system 1 || true
+            if install_packages_once "$@"; then
+              return 0
+            fi
+            recover_apt
+          fi
+          echo "::error::apt could not install $*"
+          return 1
+        }
+
+        install_optional_packages() {
+          if install_packages_once "$@"; then
+            return 0
+          fi
+          recover_apt
+          echo "::warning::apt could not install $*"
+          return 1
+        }
+
+        read -r -a required_packages <<<"$REQUIRED_PACKAGES"
+        read -r -a optional_packages <<<"$OPTIONAL_PACKAGES"
+        run_update "$UPDATE_MODE" "$UPDATE_ATTEMPTS" || true
+        install_required_packages "${required_packages[@]}"
+        install_optional_packages "${optional_packages[@]}" || true
