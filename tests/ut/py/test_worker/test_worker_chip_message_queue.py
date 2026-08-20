@@ -19,6 +19,22 @@ import pytest
 from simpler import comm_region, worker_chip_orch_comm
 from simpler import worker as worker_module
 from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
+from simpler.comm_provider import (
+    PosixShmImport,
+    ProviderReleaseResult,
+    ProviderReleaseStatus,
+    RegionAllocationResult,
+    RegionExportDescriptor,
+    RegionPartExportDescriptor,
+    RegionPartKind,
+    RegionPartLocalView,
+)
+from simpler.comm_provider_control import (
+    decode_allocate_request,
+    decode_release_request,
+    encode_allocate_success_reply,
+    encode_release_result_reply,
+)
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, get_element_size
 from simpler.worker import _IDLE, _OFF_STATE, Worker, _buffer_field_addr, _mailbox_store_i32
@@ -72,7 +88,7 @@ class _FakeCWorker:
     def __init__(self):
         self.next_region_id = 1
 
-    def control_worker_chip_region_create(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
         req_shm = SharedMemory(name=request_shm_name)
         reply_shm = SharedMemory(name=reply_shm_name)
         req_buf = req_shm.buf
@@ -80,28 +96,33 @@ class _FakeCWorker:
         assert req_buf is not None
         assert reply_buf is not None
         try:
-            req = worker_chip_orch_comm._REGION_CREATE_REQUEST.unpack_from(req_buf, 0)
-            payload_bytes = int(req[2])
-            counter_bytes = int(req[3])
-            counter_offset = ((payload_bytes + 63) // 64) * 64
+            spec = decode_allocate_request(req_buf)
+            payload_bytes = int(spec.payload.logical_bytes)
+            counter_bytes = int(spec.counter.logical_bytes)
             region_id = self.next_region_id
             self.next_region_id += 1
-            backing_name = f"queue-direct-{region_id}".encode()
-            worker_chip_orch_comm._REGION_CREATE_REPLY.pack_into(
+            result = RegionAllocationResult(
+                provider_resource_id=region_id,
+                export_descriptor=RegionExportDescriptor(
+                    payload=RegionPartExportDescriptor(
+                        BackendKind.VMM_WINDOW,
+                        payload_bytes,
+                        payload_bytes,
+                        PosixShmImport(f"queue-direct-{region_id}-p"),
+                    ),
+                    counter=RegionPartExportDescriptor(
+                        BackendKind.VMM_WINDOW,
+                        counter_bytes,
+                        counter_bytes,
+                        PosixShmImport(f"queue-direct-{region_id}-c"),
+                    ),
+                ),
+            )
+            encode_allocate_success_reply(
                 reply_buf,
-                0,
-                0x4C334C3200020000,
-                region_id,
-                0x1000_0000,
-                payload_bytes,
-                0x1000_0000 + counter_offset,
-                counter_bytes,
-                int(WorkerChipRegionAccessProfile.SIM_POSIX_SHM),
-                0,
-                0,
-                backing_name + b"\x00" * (worker_chip_orch_comm._CTRL_SHM_TOKEN_BYTES - len(backing_name)),
-                counter_offset + counter_bytes,
-                0,
+                result,
+                RegionPartLocalView(RegionPartKind.PAYLOAD, 0x1000_0000, payload_bytes),
+                RegionPartLocalView(RegionPartKind.COUNTER, 0x1000_1000, counter_bytes),
             )
         finally:
             del req_buf
@@ -109,8 +130,24 @@ class _FakeCWorker:
             req_shm.close()
             reply_shm.close()
 
-    def control_worker_chip_region_release(self, worker_id: int, region_id: int) -> None:
-        pass
+    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        req_shm = SharedMemory(name=request_shm_name)
+        reply_shm = SharedMemory(name=reply_shm_name)
+        req_buf = req_shm.buf
+        reply_buf = reply_shm.buf
+        assert req_buf is not None
+        assert reply_buf is not None
+        try:
+            resource_id = decode_release_request(req_buf)
+            encode_release_result_reply(
+                reply_buf,
+                ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+            )
+        finally:
+            del req_buf
+            del reply_buf
+            req_shm.close()
+            reply_shm.close()
 
 
 class _FakeCOrch:
@@ -142,16 +179,19 @@ class _FakeClient:
         self.fail_next_cmd: Optional[str] = None
         self.original_helpers: list[tuple[object, str, object]] = []
 
-    def import_region(self, _token: str, mapping_bytes: int, _owner_token: str) -> int:
+    def import_region(self, token: str, mapping_bytes: int, _owner_token: str) -> int:
+        if str(token).endswith("-c"):
+            self.counter_mapping_offset = 0
+            self.counter_base = 0x1000_1000
+            return 2
         self.payload = bytearray(int(mapping_bytes))
         self.counters = {}
-        self.counter_mapping_offset = int(mapping_bytes) - WORKER_CHIP_QUEUE_COUNTER_BYTES
-        self.counter_base = self.payload_base + self.counter_mapping_offset
+        self.counter_mapping_offset = 0
         self.requests.append(
             (
                 _FakeRequest(
                     cmd="alloc_region",
-                    payload_bytes=self.counter_mapping_offset,
+                    payload_bytes=int(mapping_bytes),
                     counter_bytes=WORKER_CHIP_QUEUE_COUNTER_BYTES,
                 ),
                 0.0,
@@ -564,12 +604,23 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
             worker_id=0,
             region_id=1,
             access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-            total_bytes=desc.counter_base - desc.payload_base + desc.counter_bytes,
+            total_bytes=desc.payload_bytes,
             payload_offset=0,
             payload_bytes=desc.payload_bytes,
-            counter_offset=desc.counter_base - desc.payload_base,
-            counter_bytes=desc.counter_bytes,
+            counter_offset=0,
+            counter_bytes=desc.payload_bytes,
             handle=44,
+        ),
+        WorkerHostRegionMapping(
+            worker_id=0,
+            region_id=1,
+            access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
+            total_bytes=desc.counter_bytes,
+            payload_offset=0,
+            payload_bytes=desc.counter_bytes,
+            counter_offset=0,
+            counter_bytes=desc.counter_bytes,
+            handle=45,
         ),
     )
     queue = WorkerChipQueue(
@@ -602,7 +653,7 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
 
     assert (layout.input_arena_offset, b"ordinary") in payload_writes
     assert len(orch._buffers) == alloc_count
-    assert counters[region._worker_host_mapping.counter_offset + layout.input_desc_tail_offset] == 1
+    assert counters[layout.input_desc_tail_offset] == 1
 
 
 def test_direct_mapped_ordinary_host_bytearray_does_not_allocate_queue_buffer():

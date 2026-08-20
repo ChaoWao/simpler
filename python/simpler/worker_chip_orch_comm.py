@@ -137,8 +137,8 @@ class WorkerHostRegionMapping:
     def close(self) -> None:
         if self.closed:
             return
-        _worker_host_mapped_region_close(int(self.handle))
         self.closed = True
+        _worker_host_mapped_region_close(int(self.handle))
 
 
 def decode_region_create_reply(buf: memoryview) -> WorkerChipRegionCreateReply:
@@ -237,24 +237,23 @@ class WorkerChipOrchRegion:
         owner: Any,
         worker_id: int,
         desc: WorkerChipOrchRegionDesc,
-        worker_host_mapping: WorkerHostRegionMapping,
+        payload_mapping: WorkerHostRegionMapping,
+        counter_mapping: WorkerHostRegionMapping,
+        release_client: Any | None = None,
     ) -> None:
         self._owner = owner
         self._worker_id = int(worker_id)
         self._descriptor = desc
-        self._worker_host_mapping = worker_host_mapping
-        access = HostVmmCopyAccess.from_mapping(worker_host_mapping)
+        self._payload_mapping = payload_mapping
+        self._counter_mapping = counter_mapping
+        self._release_client = release_client
         self._payload_part = PayloadPart(
-            RegionPartSpan(
-                offset=int(worker_host_mapping.payload_offset), nbytes=int(worker_host_mapping.payload_bytes)
-            ),
-            access,
+            RegionPartSpan(offset=0, nbytes=int(desc.payload_bytes)),
+            HostVmmCopyAccess(payload_mapping.handle),
         )
         self._counter_part = CounterPart(
-            RegionPartSpan(
-                offset=int(worker_host_mapping.counter_offset), nbytes=int(worker_host_mapping.counter_bytes)
-            ),
-            access,
+            RegionPartSpan(offset=0, nbytes=int(desc.counter_bytes)),
+            HostVmmCopyAccess(counter_mapping.handle),
         )
         self._released = False
         self._chip_release_committed = False
@@ -322,11 +321,15 @@ class WorkerChipOrchRegion:
             raise RuntimeError(f"L3-L2 region {self.region_id} is poisoned")
 
     def _close_worker_host_mapping(self) -> None:
-        try:
-            self._worker_host_mapping.close()
-        except Exception:
+        errors: list[BaseException] = []
+        for mapping in (self._payload_mapping, self._counter_mapping):
+            try:
+                mapping.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
             self._poison()
-            raise
+            raise errors[0]
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
         try:

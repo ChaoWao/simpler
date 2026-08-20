@@ -66,6 +66,30 @@ from simpler.worker import (
     _pack_py_callable_payload,
 )
 
+
+def _native_control_region_release(recorder, worker_id, request_shm_name, reply_shm_name, *, fail=None):
+    from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus
+    from simpler.comm_provider_control import decode_release_request, encode_release_result_reply
+
+    req_shm = SharedMemory(name=request_shm_name)
+    reply_shm = SharedMemory(name=reply_shm_name)
+    req_buf = req_shm.buf
+    reply_buf = reply_shm.buf
+    try:
+        resource_id = decode_release_request(req_buf)
+        recorder.append((worker_id, resource_id))
+        encode_release_result_reply(
+            reply_buf,
+            ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+        )
+        if fail is not None:
+            raise fail
+    finally:
+        del req_buf
+        del reply_buf
+        req_shm.close()
+        reply_shm.close()
+
 from ._harness import chip_callable, fake_chip_l3, requires_sim_binaries
 
 # ---------------------------------------------------------------------------
@@ -4013,8 +4037,8 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_worker_chip_region_release(self, worker_id, region_id):
-                self.released_regions.append((worker_id, region_id))
+            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
+                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
 
         class NativeOrchestrator:
             def __init__(self):
@@ -4116,8 +4140,8 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_worker_chip_region_release(self, worker_id, region_id):
-                self.released_regions.append((worker_id, region_id))
+            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
+                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
                 raise release_error
 
         class NativeOrchestrator:
@@ -4186,8 +4210,8 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_worker_chip_region_release(self, worker_id, region_id):
-                self.released_regions.append((worker_id, region_id))
+            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
+                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
 
         first, second = Region(11), Region(22)
         resources = worker_mod._RunResources()
@@ -6869,13 +6893,13 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         child releases its own region before reporting one.
         """
         worker = self._worker()
-        worker._config = {"platform": "a2a3sim"}
+        worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [0]}
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _interrupted(*_args):
             raise KeyboardInterrupt
 
-        worker._worker = cast(Any, SimpleNamespace(control_worker_chip_region_create=_interrupted))
+        worker._worker = cast(Any, SimpleNamespace(control_region_allocate=_interrupted))
         with pytest.raises(KeyboardInterrupt):
             worker._create_worker_chip_region(0, 4096, 64)
         assert worker._ordered_cleanup_error is not None
@@ -6884,13 +6908,13 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
 
     def test_an_ordinary_region_create_failure_does_not_refuse_further_work(self):
         worker = self._worker()
-        worker._config = {"platform": "a2a3sim"}
+        worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [0]}
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _failed(*_args):
             raise RuntimeError("chip refused the region")
 
-        worker._worker = cast(Any, SimpleNamespace(control_worker_chip_region_create=_failed))
+        worker._worker = cast(Any, SimpleNamespace(control_region_allocate=_failed))
         with pytest.raises(RuntimeError, match="chip refused the region"):
             worker._create_worker_chip_region(0, 4096, 64)
         assert worker._ordered_cleanup_error is None, "an ordinary failure must not shut the worker"

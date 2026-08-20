@@ -193,11 +193,11 @@ void WorkerEndpoint::control_alloc_domain(const char *, const char *) {
 }
 void WorkerEndpoint::control_release_domain(const char *) { throw_unsupported_control("control_release_domain"); }
 void WorkerEndpoint::control_comm_init(const char *) { throw_unsupported_control("control_comm_init"); }
-void WorkerEndpoint::control_worker_chip_region_create(const char *, const char *) {
-    throw_unsupported_control("control_worker_chip_region_create");
+void WorkerEndpoint::control_region_allocate(const char *, const char *) {
+    throw_unsupported_control("control_region_allocate");
 }
-void WorkerEndpoint::control_worker_chip_region_release(uint64_t) {
-    throw_unsupported_control("control_worker_chip_region_release");
+void WorkerEndpoint::control_region_release(const char *, const char *) {
+    throw_unsupported_control("control_region_release");
 }
 
 void WorkerEndpoint::submit_progress(Ring *, const WorkerDispatch &) {
@@ -1421,21 +1421,26 @@ void LocalMailboxEndpoint::control_comm_init(const char *request_shm_name) {
     run_control_command("control_comm_init");
 }
 
-void LocalMailboxEndpoint::control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) {
+void LocalMailboxEndpoint::control_region_allocate(const char *request_shm_name, const char *reply_shm_name) {
     if (!request_shm_name || !*request_shm_name || !reply_shm_name || !*reply_shm_name) {
-        throw std::runtime_error("control_worker_chip_region_create: request and reply shm names must be non-empty");
+        throw std::runtime_error("control_region_allocate: request and reply shm names must be non-empty");
     }
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    uint64_t sub_cmd = CTRL_WORKER_CHIP_REGION_CREATE;
+    uint64_t sub_cmd = CTRL_REGION_ALLOCATE;
     std::memcpy(mbox() + MAILBOX_OFF_CALLABLE, &sub_cmd, sizeof(uint64_t));
     write_shm_name_pair(mbox(), request_shm_name, reply_shm_name);
-    run_control_command("control_worker_chip_region_create");
+    run_control_command("control_region_allocate");
 }
 
-void LocalMailboxEndpoint::control_worker_chip_region_release(uint64_t region_id) {
+void LocalMailboxEndpoint::control_region_release(const char *request_shm_name, const char *reply_shm_name) {
+    if (!request_shm_name || !*request_shm_name || !reply_shm_name || !*reply_shm_name) {
+        throw std::runtime_error("control_region_release: request and reply shm names must be non-empty");
+    }
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    write_control_args(mbox(), CTRL_WORKER_CHIP_REGION_RELEASE, region_id);
-    run_control_command("control_worker_chip_region_release");
+    uint64_t sub_cmd = CTRL_REGION_RELEASE;
+    std::memcpy(mbox() + MAILBOX_OFF_CALLABLE, &sub_cmd, sizeof(uint64_t));
+    write_shm_name_pair(mbox(), request_shm_name, reply_shm_name);
+    run_control_command("control_region_release");
 }
 
 uint64_t WorkerThread::control_malloc(size_t size) {
@@ -1578,14 +1583,14 @@ void WorkerThread::control_comm_init(const char *request_shm_name) {
     endpoint_->control_comm_init(request_shm_name);
 }
 
-void WorkerThread::control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) {
-    if (!endpoint_) throw std::runtime_error("control_worker_chip_region_create: null endpoint");
-    endpoint_->control_worker_chip_region_create(request_shm_name, reply_shm_name);
+void WorkerThread::control_region_allocate(const char *request_shm_name, const char *reply_shm_name) {
+    if (!endpoint_) throw std::runtime_error("control_region_allocate: null endpoint");
+    endpoint_->control_region_allocate(request_shm_name, reply_shm_name);
 }
 
-void WorkerThread::control_worker_chip_region_release(uint64_t region_id) {
-    if (!endpoint_) throw std::runtime_error("control_worker_chip_region_release: null endpoint");
-    endpoint_->control_worker_chip_region_release(region_id);
+void WorkerThread::control_region_release(const char *request_shm_name, const char *reply_shm_name) {
+    if (!endpoint_) throw std::runtime_error("control_region_release: null endpoint");
+    endpoint_->control_region_release(request_shm_name, reply_shm_name);
 }
 
 bool WorkerManager::any_busy() const {
@@ -1730,22 +1735,20 @@ void WorkerManager::control_comm_init(int worker_id, const char *request_shm_nam
     wt->control_comm_init(request_shm_name);
 }
 
-void WorkerManager::control_worker_chip_region_create(
-    int worker_id, const char *request_shm_name, const char *reply_shm_name
-) {
+void WorkerManager::control_region_allocate(int worker_id, const char *request_shm_name, const char *reply_shm_name) {
     auto *wt = get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (wt == nullptr) {
-        throw std::runtime_error("control_worker_chip_region_create: invalid worker_id " + std::to_string(worker_id));
+        throw std::runtime_error("control_region_allocate: invalid worker_id " + std::to_string(worker_id));
     }
-    wt->control_worker_chip_region_create(request_shm_name, reply_shm_name);
+    wt->control_region_allocate(request_shm_name, reply_shm_name);
 }
 
-void WorkerManager::control_worker_chip_region_release(int worker_id, uint64_t region_id) {
+void WorkerManager::control_region_release(int worker_id, const char *request_shm_name, const char *reply_shm_name) {
     auto *wt = get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (wt == nullptr) {
-        throw std::runtime_error("control_worker_chip_region_release: invalid worker_id " + std::to_string(worker_id));
+        throw std::runtime_error("control_region_release: invalid worker_id " + std::to_string(worker_id));
     }
-    wt->control_worker_chip_region_release(region_id);
+    wt->control_region_release(request_shm_name, reply_shm_name);
 }
 
 ControlResult WorkerManager::control_digest_only(
