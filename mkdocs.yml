@@ -145,6 +145,7 @@ nav:
       - Log System: logging.md
       - L2 Timing: dfx/l2-timing.md
       - Host trace: dfx/host-trace.md
+      - Measuring the hbg bind path: dfx/hbg-bind-measurement.md
       - Device phases: dfx/device-phases.md
       - Scheduler-overhead model: dfx/sched-overhead-model.md
       - Chip Swimlane: dfx/chip-swimlane-profiling.md
