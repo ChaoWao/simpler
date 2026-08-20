@@ -242,21 +242,25 @@ for the operating system to schedule the thread or for `graph_prepare` to bind
 the private recording state. The keyed in-flight entry and zero-heap outer shell
 already exist before the job is enqueued, so later same-identity submissions can
 safely proceed immediately. Threads remain parked on a condition variable for
-the lifetime of the loaded orchestration SO and are reused by later runs. Four
+the lifetime of the loaded orchestration SO and are reused by later runs. Eight
 workers are created when the callable's orchestration SO is loaded, before any
 `host_orch` run; unloading the SO stops and joins them before their code is
 unmapped.
 
 **Distinct identities record concurrently.** The recorder owns a fixed 16-slot
-job queue and 16 reusable boundary snapshots. The four prewarmed workers cover
-the common four-Definition case without creating threads or allocating boundary
-storage between shell submissions. A fifth or later concurrent miss grows one
-worker per additional job, up to the 16-Definition limit, so the prewarm does not
-turn into a four-recording concurrency cap. Recording touches no shared allocator
-state and each recording classifies Tensor sources only against its own nodes and
-its own boundary, so two recordings sharing the `GRAPH_RECORD_VIRTUAL_BASE`
-range cannot see each other's addresses. What serializes is only the per-identity
-rule: at most one recording per Graph key, which the keyed in-flight map enforces.
+job queue and 16 reusable boundary snapshots. The eight prewarmed workers cover
+a workload that cuts a forward pass into up to eight Definitions without creating
+threads or allocating boundary storage between shell submissions. A ninth or later
+concurrent miss grows one worker per additional job, up to the 16-Definition
+limit, so the prewarm does not turn into an eight-recording concurrency cap.
+Growth happens inside the submission that needs it, so it lands on the submitting
+thread: a workload whose Definition count exceeds the prewarmed count pays a
+`pthread_create` (measured 32-74 us each) in the middle of its submission burst.
+Recording touches no shared allocator state and each recording classifies Tensor
+sources only against its own nodes and its own boundary, so two recordings
+sharing the `GRAPH_RECORD_VIRTUAL_BASE` range cannot see each other's addresses.
+What serializes is only the per-identity rule: at most one recording per Graph
+key, which the keyed in-flight map enforces.
 
 `graph_begin` answers a **cache hit before consulting anything in flight**. A
 published Definition is immutable, so replaying it depends on no recording; the

@@ -1,7 +1,7 @@
 # hbg: decomposing a whole-layer Graph body into per-block Definitions, and reusing them across layers
 
-**Date**: 2026-08-19
-**Verdict**: dropped — a regression on `main` as of #1897, for a reason in the runtime rather than in the decomposition
+**Date**: 2026-08-19, revised 2026-08-20
+**Verdict**: adopted at seven Definitions, once #1929 removed the single recording slot the first measurement failed against — the win is smaller than the orchestration window alone suggests, because seven Definitions are seven images to upload
 
 ## Question
 
@@ -82,14 +82,14 @@ Three things a name comparison cannot see, all of which the checks above caught:
   parameter instead. So layers 0 and 1 cannot share one Definition even though
   their operation sequences are identical.
 
-### Why it regresses
+### Why it regressed between #1897 and #1929
 
-`graph_begin` holds **one recording slot for the whole orchestration**. A Graph
-whose `full_key` differs from the in-flight recording's gets the default
-`GraphScopeResult` back — `execute_block=true, recording=false` — and
-`rt_submit_graph_impl` runs its body on the ordinary path, with no warning and
-no retry, even though the `rt_graph_commit()` on that same branch then waits for
-the recorder to go idle. So k distinct Definitions submitted back to back get
+Over that range `graph_begin` held **one recording slot for the whole
+orchestration**. A Graph whose `full_key` differed from the in-flight recording's
+got the default `GraphScopeResult` back — `execute_block=true, recording=false` —
+and `rt_submit_graph_impl` ran its body on the ordinary path, with no warning and
+no retry, even though the `rt_graph_commit()` on that same branch then waited for
+the recorder to go idle. So k distinct Definitions submitted back to back got
 roughly every other one recorded.
 
 That is exactly what block decomposition produces: where the pair form submits
@@ -136,14 +136,49 @@ three occurrences.
 
 ## Why not (now)
 
-On current `main` the decomposition makes the host submit **more** tasks than
-the form it replaces, because the single recording slot demotes the extra
-Definitions. Nothing about the decomposition itself is wrong — the structural
-map above holds, the device task count is preserved exactly, and every
-submission that *did* record hit its Definition with no boundary mismatch in any
-run — but shipping it today would be a measured regression.
+Nothing about the decomposition itself was wrong even when it measured as a
+regression — the structural map above holds, the device task count is preserved
+exactly, and every submission that *did* record hit its Definition with no
+boundary mismatch in any run. What was wrong was the single recording slot, which
+was replaced in #1929 by a keyed in-flight map plus a prewarmed recorder pool, so
+distinct keys submitted back to back all record.
 
-The stage it was aimed at is also not where this case's host time lives.
+## What the decomposition is worth on top of #1929
+
+Seven Definitions cover all 43 layers — the four loop blocks, the peeled
+`swa_attn` shared by layers 0 and 1, and one per peeled MoE scope, which the
+folded epoch keeps distinct. Host submissions drop 1131 → **129**; the loop's
+`csa_attn`/`hca_moe` replays cover layer 42 as before. Measured on a2a3,
+`--rounds 5` with the device run skipped, first pass per rank dropped, per-phase
+minimum over the 8 warm passes:
+
+| phase | main | seven Definitions | delta |
+| ----- | ---- | ----------------- | ----- |
+| `host_orch` | 2.314 ms | 1.291 ms | -44% |
+| `graph_upload` | 0.451 ms | 1.384 ms | +207% |
+| `sm_h2d` | 0.741 ms | 0.109 ms | -85% |
+| control-plane total | 3.594 ms | 2.998 ms | -17% |
+
+The shape of that is the result, not the `host_orch` line. Recording work leaves
+the submitting thread, so `host_orch` drops; but seven Definitions are seven
+images to ship, so `graph_upload` triples and takes back most of the win.
+`sm_h2d` falls because 129 task descriptors are shipped instead of 1131. Netted
+within a pass, the control plane improves 17% at best, and **at the median it
+does not improve**: 3.883 ms against main's 3.715 ms. The single-recorder form is
+nearly deterministic (`host_orch` spread 2.314-2.469, 6%); this form spans
+1.291-3.010 (133%), because its wall now depends on seven recording threads
+getting CPU on a shared box. So the trade is a predictable cost for a lower floor
+and a higher ceiling, and on a loaded machine the ceiling is what a caller sees.
+
+Two costs on the recorder side were large enough to matter at this Definition
+count, both fixed alongside the decomposition rather than tuned around:
+`graph_prepare` re-derived the boundary match it was already handed (32-46 µs per
+recording, before the recording's first node), and growing the recorder pool past
+four prewarmed workers put `pthread_create` on the submitting thread mid-burst
+(170 µs and 98 µs gaps between Graph submissions, one of them three thread
+creations at once).
+
+The stage this was aimed at is still not where the case's host time lives.
 `record_node` + `build_definition` + `graph_upload` are rebuilt from scratch on
 every run because the Definition cache lives in the per-run `GraphHostState`:
 roughly half the host prepare path re-deriving artifacts identical to the
@@ -153,30 +188,28 @@ previous run's. And the `bind` stage as a whole is dominated by neither, at
 the interesting number only because the weight staging is a fixture artifact a
 serving loop would pay once.
 
-## When to reconsider
+## What is still open
 
-- **After the recording slot stops demoting distinct keys** — either by waiting
-  for idle and retrying instead of returning `execute_block`, or by allowing
-  more than one recording in flight. That single change flips this entry's
-  verdict: the pre-#1897 measurement is what the decomposition is worth once
-  every submission records.
-- **After cross-run Definition retention lands.** Then coverage is what matters:
-  on rounds 2..N a covered layer costs one ~2.3 µs replay and an uncovered one
-  ~250 µs of submits, so covering layers 0 and 1 becomes worth the kernel
-  substitution their folded MoE epoch requires.
-- **If a network's layers repeat more than this one's.** The arithmetic here is
-  driven by DeepSeek-V4 having 2 SWA + 21 CSA + 20 HCA layers and three MoE
-  routing variants; a uniform stack would have one attention and one MoE block
-  covering every layer from a single recording.
+- **`graph_upload` is now the dominant control-plane phase for this case**, at
+  1.384 ms for seven images against 0.451 ms for one. Uploading a Definition once
+  as a shared device object is the lever, not a lower Definition count.
+- **After cross-run Definition retention lands** coverage is what matters: on
+  rounds 2..N a covered layer costs one ~2.3 µs replay and an uncovered one
+  ~250 µs of submits, so the seven Definitions stop being re-recorded per run and
+  the floor becomes the median.
+- **A network whose layers repeat more than this one's does better.** The
+  arithmetic here is driven by DeepSeek-V4 having 2 SWA + 21 CSA + 20 HCA layers
+  and three MoE routing variants; a uniform stack would have one attention and one
+  MoE block covering every layer from a single recording.
 
 ## References
 
 - PR #1900 (the case and its Graph form), #1860 (its predecessor), #1897 (the
-  overlap-recording change this entry's verdict turns on).
+  overlap-recording change the first verdict turned on), #1929 (the keyed
+  in-flight map and prewarmed recorder pool that removed the single slot).
 - [2026-08 — hbg: uploading Graph Definitions once as shared device objects](2026-08-hbg-graph-definition-single-upload.md)
   — the same `graph_upload` stage, and the source of the ~17 µs per
   alloc-and-copy pair figure the submission count multiplies.
-- `KNOWN_ISSUES.md`: the single-slot demotion, the per-run Definition cache
-  discard, and the boundary-tag defect this work surfaced (ten boundary tensors
-  the body writes are tagged `add_input`, so the outer GRAPH task never
-  registers as their producer).
+- `KNOWN_ISSUES.md`: the per-run Definition cache discard, and the boundary-tag
+  defect this work surfaced (ten boundary tensors the body writes are tagged
+  `add_input`, so the outer GRAPH task never registers as their producer).

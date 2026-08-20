@@ -14,12 +14,24 @@ device can execute what the host built. It is deliberately not a numerics test.
 
 `kernels/orchestration/decode_fwd_graph.cpp` — the file the test points at — is
 the TMR orchestration recast as a Graph, with **no runtime-specific rewrite left**:
-the 20-iteration decoder layer loop (40 of the 43 layers) becomes one
-`rt_submit_graph` per iteration, so the
-layer's task set becomes the Graph body (a free function reading its per-layer
-views, scales and indices through `GraphTaskArgs`, positionally), and the host
-records a 744-node Definition once instead of submitting the loop's ~15600
-tasks individually. The runtime is untouched.
+the whole forward pass is cut into Graph blocks, so a layer's task set becomes a
+Graph body (a free function reading its per-layer views, scales and indices
+through `GraphTaskArgs`, positionally) and the host records it once per identity
+instead of submitting the pass's ~15600 tasks individually. The runtime is
+untouched.
+
+Seven Definitions cover all 43 layers:
+
+- `csa_attn_block` (50 nodes) / `csa_moe_block` (32) and `hca_attn_block` (35) /
+  `hca_moe_block` (31) — the decoder loop's two alternating layer shapes, layers
+  2..41, plus layer 42 replaying `csa_attn_block` and `hca_moe_block`.
+- `swa_attn_block` (28) — the two peeled sliding-window attentions of layers 0
+  and 1. Their nodes are pairwise alpha-equivalent, so layer 1 replays what layer
+  0 recorded.
+- `hash_moe_l0_block` (31) / `hash_moe_l1_block` (31) — the peeled MoE scopes.
+  These cannot share a Definition: `dispatch_wait` folds the MoE epoch in as a
+  constant (32 at layer 0, 64 at layer 1) where the loop's variants take it as a
+  scalar.
 
 The read that used to force a rewrite was `recv_count_out[expert][0]`, driving
 the ten MoE per-expert tile loops. HBG builds the whole graph before the device
@@ -59,12 +71,12 @@ size and shape of the real one.
 completion/smoke case: no full-network torch reference exists upstream either,
 and component-level goldens live with the standalone kernels in pypto-lib.
 
-## Status: the host records the Definition; device replay is blocked in activation
+## Status: the host records the Definitions; device replay is blocked in activation
 
-With the Graph form the host records the 744-node Definition and boots with
-**1131 tasks on host**, an order of magnitude below submitting every task
-individually — this is measured, on both ranks. The device-side replay of a
-Definition that large is **not yet exercised**: an unskipped run fails in Graph
+With the Graph form the host records the seven Definitions and boots with **129
+submissions from the submitting thread**, two orders of magnitude below
+submitting every task individually — this is measured, on both ranks. The
+device-side replay is **not yet exercised**: an unskipped run fails in Graph
 activation (`sched_error_code=5 INVALID_ARGS` from the scheduler's graph
 queues), so the recorded bodies never replay.
 
@@ -144,6 +156,6 @@ Kernels, fixture and orchestration come from the TMR case; see its
 network shape, regeneration steps and cost. One orchestration file is specific
 to this case: `kernels/orchestration/decode_fwd_graph.cpp`, the TMR
 orchestration carrying the rewrite in the table above and recast as a Graph —
-the 20-iteration decoder layer loop becomes one `rt_submit_graph` per iteration
-with the layer's task set as the Graph body and its per-layer views, scales and
-indices crossing the boundary positionally.
+the forward pass is cut into the seven Definitions listed above, each layer's
+task set forming a Graph body whose per-layer views, scales and indices cross
+the boundary positionally.
