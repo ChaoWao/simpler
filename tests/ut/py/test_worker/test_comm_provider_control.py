@@ -390,3 +390,141 @@ def test_release_client_terminalizes_transport_failure_without_retry():
     with pytest.raises(RegionControlProtocolError):
         client.release(4)
     assert mailbox.calls == 1
+
+
+def test_allocate_client_transport_failure_does_not_call_store_or_release():
+    class _BoomMailbox:
+        def __init__(self) -> None:
+            self.allocate_calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            self.allocate_calls += 1
+            raise RuntimeError("mailbox down")
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("allocate transport failure must not issue release")
+
+    mailbox = _BoomMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RuntimeError, match="mailbox down"):
+        client.allocate(_allocation_spec())
+    assert mailbox.allocate_calls == 1
+    assert client.committed_resource_id == 0
+
+
+def test_allocate_client_missing_commit_is_a_decode_failure():
+    class _SilentMailbox:
+        def __init__(self) -> None:
+            self.allocate_calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            self.allocate_calls += 1
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("uncommitted allocate must not issue release")
+
+    mailbox = _SilentMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RegionControlProtocolError, match="commit"):
+        client.allocate(_allocation_spec())
+    assert mailbox.allocate_calls == 1
+    assert client.committed_resource_id == 0
+
+
+def test_allocate_client_old_version_reply_is_a_decode_failure():
+    class _OldVersionMailbox:
+        def __init__(self) -> None:
+            self.allocate_calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name
+            self.allocate_calls += 1
+            reply = SharedMemory(name=reply_shm_name)
+            try:
+                struct.pack_into("<Q", reply.buf, 0, _OLD_MAGIC)
+                struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
+            finally:
+                reply.close()
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("old-version allocate must not issue release")
+
+    mailbox = _OldVersionMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RegionControlError) as exc_info:
+        client.allocate(_allocation_spec())
+    assert exc_info.value.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
+    assert mailbox.allocate_calls == 1
+    assert client.committed_resource_id == 0
+
+
+def test_allocate_client_transport_failure_does_not_call_store():
+    class _BoomMailbox:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            self.calls += 1
+            raise RuntimeError("mailbox down")
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            raise AssertionError("release must not be called")
+
+    mailbox = _BoomMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RuntimeError, match="mailbox down"):
+        client.allocate(_allocation_spec())
+    assert mailbox.calls == 1
+
+
+def test_allocate_client_uncommitted_reply_does_not_call_store_again():
+    class _EmptyReplyMailbox:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            self.calls += 1
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            raise AssertionError("release must not be called")
+
+    mailbox = _EmptyReplyMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RegionControlProtocolError, match="commit"):
+        client.allocate(_allocation_spec())
+    with pytest.raises(RegionControlProtocolError, match="commit"):
+        client.allocate(_allocation_spec())
+    assert mailbox.calls == 2
+
+
+def test_allocate_client_old_version_reply_is_a_decode_failure():
+    class _OldVersionMailbox:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name
+            self.calls += 1
+            reply = SharedMemory(name=reply_shm_name)
+            try:
+                struct.pack_into("<Q", reply.buf, 0, _OLD_MAGIC)
+                struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
+            finally:
+                reply.close()
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            raise AssertionError("release must not be called")
+
+    mailbox = _OldVersionMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RegionControlError) as exc_info:
+        client.allocate(_allocation_spec())
+    assert exc_info.value.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
+    assert mailbox.calls == 1

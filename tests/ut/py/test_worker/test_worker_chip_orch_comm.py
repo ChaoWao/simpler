@@ -19,8 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 from typing import Any, Optional, cast
+from unittest.mock import MagicMock
 
 import pytest
+from simpler import comm_endpoints as ce
 from simpler import comm_region, worker_chip_orch_comm
 from simpler import worker as worker_module
 from simpler.buffer import BackendKind, mint_owner_instance_id, wrap_fork_inherited
@@ -49,6 +51,7 @@ from simpler.comm_provider_control import (
     encode_allocate_success_reply,
     encode_release_result_reply,
 )
+from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType
 from simpler.worker import (
     _IDLE,
@@ -102,6 +105,26 @@ def test_combined_host_worker_chip_region_helpers_are_removed():
         "_close_worker_host_mapping",
     ):
         assert legacy_name not in source
+
+
+def test_old_create_reply_codec_and_combined_mapping_remain_deleted():
+    worker_source = _WORKER_PY.read_text(encoding="utf-8")
+    region_source = Path(comm_region.__file__).read_text(encoding="utf-8")
+    binding_source = _TASK_INTERFACE_CPP.read_text(encoding="utf-8")
+    for source in (worker_source, region_source, binding_source):
+        for legacy_name in (
+            "validate_region_create_reply",
+            "decode_region_create_reply",
+            "WorkerHostRegionMapping",
+            "worker_chip_orch_region_access.h",
+            "ChipChildOnboardRegionExport",
+            "region_vmm_legacy_create",
+        ):
+            assert legacy_name not in source
+    access_header = (
+        Path(__file__).resolve().parents[4] / "src" / "common" / "platform" / "include" / "host" / "worker_chip_orch_region_access.h"
+    )
+    assert not access_header.exists()
 
 
 class _FakeDirectCWorker:
@@ -425,6 +448,7 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
     ("reply_updates", "match"),
     [
         ({"reply_magic": 0xBAD}, "unsupported provider control version"),
+        ({"reply_magic": 0x4C334C3200020000}, "unsupported provider control version"),
         ({"region_id": 0}, "SUCCESS requires a resource id"),
         (
             {"access_profile": _ACCESS_ONBOARD_VMM},
@@ -1721,6 +1745,57 @@ def test_compat_descriptor_uses_independent_local_views_and_bumped_magic(monkeyp
         shm.unlink()
 
 
+def test_public_create_worker_chip_region_uses_admitted_w2_plan_and_two_imports(monkeypatch):
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    imports: list[tuple[str, int]] = []
+    captured: dict[str, Any] = {}
+    original_ctx = worker._admitted_worker_chip_region_context
+
+    def spy_ctx(worker_id, payload_bytes, counter_bytes):
+        ctx = original_ctx(worker_id, payload_bytes, counter_bytes)
+        captured["ctx"] = ctx
+        return ctx
+
+    monkeypatch.setattr(worker, "_admitted_worker_chip_region_context", spy_ctx)
+    monkeypatch.setattr(
+        worker_module,
+        "_worker_host_mapped_region_import_sim",
+        lambda token, mapping_bytes, owner_token: imports.append((str(token), int(mapping_bytes))) or (100 + len(imports)),
+    )
+    try:
+        orch = Orchestrator(MagicMock(), worker)
+        region = orch.create_worker_chip_region(worker_id=0, payload_bytes=64, counter_bytes=128)
+        ctx = captured["ctx"]
+        plan = ctx.plan
+        assert isinstance(plan, ce.BackendPlan)
+        assert isinstance(plan.topology_plan, ce.SingleOwnerPlan)
+        registry = worker._get_endpoint_registry()
+        provider = registry.record_for(plan.topology_plan.provider_endpoint)
+        consumer = next(registry.record_for(member) for member in plan.ordered_members if member != provider.identity)
+        assert provider.path == "L3/L2[0]"
+        assert provider.deployment is ce.DEVICE_AICPU
+        assert consumer.path == "L3"
+        assert consumer.deployment is ce.HOST_CPU
+        assert set(plan.ordered_members) == {provider.identity, consumer.identity}
+        assert [item[0] for item in imports] == ["sim-direct-1-p", "sim-direct-1-c"]
+        assert [item[1] for item in imports] == [64, 128]
+        assert region._instance._payload_part is not region._instance._counter_part
+        scalars = region.descriptor_scalars()
+        assert len(scalars) == 6
+        assert scalars[0] == worker_chip_orch_comm._REGION_MAGIC_VERSION
+        assert scalars[0] != 0x4C334C3200020000
+        region.free()
+        assert fake_c_worker.release_calls == []
+        assert region._instance._state is comm_region.RegionInstanceState.LIVE
+        worker._cleanup_worker_chip_regions()
+        assert fake_c_worker.release_calls == [(0, 1)]
+        assert worker._region_instance_registry._instances == {}
+    finally:
+        worker._close_worker_chip_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
 @pytest.mark.parametrize("platform", ["a2a3sim", "a5sim"])
 def test_sim_worker_region_payload_roundtrip(platform):
     try:
@@ -1784,3 +1859,77 @@ def test_sim_worker_counter_wait_timeout_does_not_poison_region_and_free_is_idem
         worker.run(orch)
     finally:
         worker.close()
+
+
+@pytest.mark.parametrize("platform", ["a2a3sim", "a5sim"])
+def test_sim_public_api_two_shm_objects_and_two_consecutive_lifecycles(platform, monkeypatch):
+    try:
+        RuntimeBuilder(platform=platform).get_binaries("tensormap_and_ringbuffer")
+    except FileNotFoundError as e:
+        pytest.skip(f"{platform} runtime binaries unavailable: {e}")
+
+    imports: list[tuple[str, int]] = []
+    original_import = worker_module._worker_host_mapped_region_import_sim
+
+    def spy_import(token, mapping_bytes, owner_token):
+        imports.append((str(token), int(mapping_bytes)))
+        return original_import(token, mapping_bytes, owner_token)
+
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", spy_import)
+
+    worker = Worker(
+        level=3,
+        device_ids=[0],
+        platform=platform,
+        runtime="tensormap_and_ringbuffer",
+        num_sub_workers=0,
+    )
+    worker.init()
+    leftover_names: list[str] = []
+    try:
+
+        def orch(orch_handle, _args, _cfg):
+            host = orch_handle.alloc([16], DataType.UINT8)
+            buf_t = ctypes.c_uint8 * 16
+            buf = buf_t.from_address(int(host.base))
+            for i in range(16):
+                buf[i] = (i + 7) & 0xFF
+            region = orch_handle.create_worker_chip_region(worker_id=0, payload_bytes=16, counter_bytes=128)
+            region.payload_write(0, host)
+            for i in range(16):
+                buf[i] = 0
+            region.payload_read(0, host)
+            assert bytes(buf) == bytes((i + 7) & 0xFF for i in range(16))
+            region.counter(0).notify(3, NotifyOp.Set)
+            assert region.counter(0).test(3, WaitCmp.EQ).matched
+            region.free()
+
+        worker.run(orch)
+        first_pair = imports[:2]
+        leftover_names.extend(name for name, _size in first_pair)
+        assert len(first_pair) == 2
+        assert first_pair[0][0] != first_pair[1][0]
+        assert {first_pair[0][1], first_pair[1][1]} == {16, 128}
+        assert worker._region_instance_registry._instances == {}
+        assert worker._live_worker_chip_regions == []
+        for name in leftover_names:
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)
+
+        worker.run(orch)
+        second_pair = imports[2:]
+        leftover_names.extend(name for name, _size in second_pair)
+        assert len(second_pair) == 2
+        assert second_pair[0][0] != second_pair[1][0]
+        assert {name for name, _size in first_pair}.isdisjoint({name for name, _size in second_pair})
+        assert worker._region_instance_registry._instances == {}
+        assert worker._live_worker_chip_regions == []
+        for name in leftover_names:
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)
+    finally:
+        worker.close()
+        assert worker._region_instance_registry._instances == {}
+        for name in leftover_names:
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)

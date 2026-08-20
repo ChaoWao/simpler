@@ -613,6 +613,22 @@ def test_ids_are_monotonic_nonzero_and_never_reused_after_burned_create_failure(
     assert id_exc.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
 
 
+def test_allocate_after_successful_release_uses_a_new_id_and_cleans_once():
+    store, factory = _open_store()
+    first = store.allocate_and_export(_allocation_spec())
+    assert store.release(first.provider_resource_id).status is ProviderReleaseStatus.RELEASED
+    assert store.state is ProviderRegionStoreState.OPEN
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    second = store.allocate_and_export(_allocation_spec())
+    assert second.provider_resource_id == 2
+    assert store.release(second.provider_resource_id).status is ProviderReleaseStatus.RELEASED
+    assert factory.payloads[1].release_count == 1
+    assert factory.counters[1].release_count == 1
+    assert factory.world.duplicate_releases == []
+    assert store.state is ProviderRegionStoreState.OPEN
+
+
 def test_release_attempts_both_parts_and_enters_close_failed_on_first_cleanup_debt():
     store, factory = _open_store()
     store.allocate_and_export(_allocation_spec())
@@ -687,8 +703,11 @@ def test_counter_materialize_failure_cleans_both_installed_shells_and_stays_open
     [
         ("fail_zero", RuntimeError("zero"), RegionPartKind.COUNTER, RegionOperationKind.ZERO_BYTES),
         ("fail_mapping_bytes", RuntimeError("map"), RegionPartKind.PAYLOAD, RegionOperationKind.DESCRIBE),
+        ("fail_mapping_bytes", RuntimeError("map"), RegionPartKind.COUNTER, RegionOperationKind.DESCRIBE),
         ("fail_import_capability", RuntimeError("import"), RegionPartKind.PAYLOAD, RegionOperationKind.DESCRIBE),
+        ("fail_import_capability", RuntimeError("import"), RegionPartKind.COUNTER, RegionOperationKind.DESCRIBE),
         ("fail_local_base", RuntimeError("base"), RegionPartKind.PAYLOAD, RegionOperationKind.LOCAL_VIEW),
+        ("fail_local_base", RuntimeError("base"), RegionPartKind.COUNTER, RegionOperationKind.LOCAL_VIEW),
         ("fail_materialize", KeyboardInterrupt(), RegionPartKind.PAYLOAD, RegionOperationKind.MATERIALIZE),
     ],
 )
@@ -1244,6 +1263,96 @@ def test_region_vmm_two_handles_are_independent(fake_vmm):
     finally:
         _region_vmm_release(first.registry_handle)
         _region_vmm_release(second.registry_handle)
+
+
+def test_region_vmm_two_handles_use_independent_mapping_sizes(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_release,
+    )
+
+    first = _region_vmm_allocate_export(_region_vmm_begin(1), 64)
+    second = _region_vmm_allocate_export(_region_vmm_begin(2), 128)
+    try:
+        assert first.registry_handle != second.registry_handle
+        assert first.shareable_handle != second.shareable_handle
+        assert first.mapping_bytes == 64
+        assert second.mapping_bytes == 128
+    finally:
+        _region_vmm_release(first.registry_handle)
+        _region_vmm_release(second.registry_handle)
+
+
+def test_region_vmm_later_independent_errors_stay_local(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("va_release", "after")
+    with pytest.raises(RuntimeError, match="after va_release"):
+        _region_vmm_release(handle)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    assert inspect.present is True
+    assert inspect.unmap_complete is True
+    assert inspect.va_release_complete is True
+    assert inspect.physical_free_complete is True
+    assert inspect.physical_allocated is False
+    assert inspect.first_cleanup_failure
+    assert inspect.local_cleanup_details == [inspect.first_cleanup_failure]
+    assert "after va_release" in inspect.first_cleanup_failure
+    assert issued.count("unmap") == 1
+    assert issued.count("va_release") == 1
+    assert issued.count("physical_free") == 1
+    _region_vmm_test_reset_hooks()
+    with pytest.raises(RuntimeError, match="after va_release"):
+        _region_vmm_release(handle)
+    assert _region_vmm_test_issued_ops() == []
+
+
+def test_region_vmm_physical_free_failure_retains_record_without_reissue(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(0)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("physical_free", "before")
+    with pytest.raises(RuntimeError, match="before physical_free"):
+        _region_vmm_release(handle)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    assert inspect.present is True
+    assert inspect.unmap_complete is True
+    assert inspect.va_reserved is False
+    assert inspect.physical_allocated is True
+    assert inspect.physical_free_attempted is True
+    assert inspect.physical_free_complete is False
+    assert "physical_free" not in issued
+    assert issued.count("unmap") == 1
+    assert issued.count("va_release") == 1
+    _region_vmm_test_reset_hooks()
+    with pytest.raises(RuntimeError, match="before physical_free"):
+        _region_vmm_release(handle)
+    assert _region_vmm_test_issued_ops() == []
+    assert _region_vmm_inspect(handle).physical_allocated is True
 
 
 def test_vmm_allocation_stores_handle_before_allocate_and_zeros_only_logical_bytes(fake_vmm):

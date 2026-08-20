@@ -884,6 +884,60 @@ def test_invalid_success_reply_releases_once_and_never_imports(region_worker):
     assert leases == []
 
 
+def test_invalid_success_compensation_debt_releases_once_and_survives_until_sweep(region_worker):
+    from simpler.comm_provider import RegionPartKind, RegionPartLocalView
+
+    def overlap(result, payload_view, _counter_view):
+        return result, payload_view, RegionPartLocalView(RegionPartKind.COUNTER, 0, 128)
+
+    worker, calls, leases = region_worker(fail_release=True, mutate_success=overlap)
+    with pytest.raises(RuntimeError, match="must not overlap"):
+        _materialize_default_region(worker)
+
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    instance = tracked[0]
+    assert instance._state is RegionInstanceState.CLOSE_FAILED
+    assert instance._release_client is not None
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        worker._require_no_ordered_cleanup_failure("test")
+    assert calls == [
+        ("allocate", 64, 128),
+        ("release", 1, 42),
+    ]
+    assert leases == []
+    worker._region_instance_registry.cleanup_run(None)
+    assert _tracked(worker) == (instance,)
+    assert calls.count(("release", 1, 42)) == 1
+    worker._region_instance_registry.sweep()
+    assert _tracked(worker) == ()
+    assert calls.count(("release", 1, 42)) == 1
+
+
+def test_successful_close_then_materialize_and_close_again(region_worker):
+    worker, calls, _leases = region_worker()
+    first = _materialize_default_region(worker)
+    with worker._control_reservation("test_region_instance"):
+        first.close()
+    assert first.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
+
+    second = _materialize_default_region(worker)
+    assert second.state is RegionInstanceState.LIVE
+    assert second is not first
+    with worker._control_reservation("test_region_instance"):
+        second.close()
+    assert second.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
+    assert calls.count(("allocate", 64, 128)) == 2
+    assert sum(1 for item in calls if item[0] == "import") == 4
+    assert sum(1 for item in calls if item[0] == "mapping_close") == 4
+    assert [item for item in calls if item[0] == "release"] == [
+        ("release", 1, 42),
+        ("release", 1, 42),
+    ]
+
+
 def test_committed_local_base_zero_is_not_treated_as_absent(region_worker):
     worker, _calls, _leases = region_worker()
     instance = _materialize_default_region(worker)

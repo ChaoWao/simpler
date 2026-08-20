@@ -225,4 +225,21 @@ TEST(WorkerChipOrchEndpointTest, RejectsBadDescriptorScalars) {
     EXPECT_STRNE(endpoint.error().message, "");
 }
 
+TEST(WorkerChipOrchEndpointTest, RejectsAbiMajor2AndOldContiguousMagic) {
+    RegionStorage storage{};
+    WorkerChipOrchRegionDesc desc = make_desc(&storage);
+    desc.magic_version = worker_chip_orch_comm_pack_magic_version(WORKER_CHIP_ORCH_COMM_MAGIC, 2, 0);
+    std::array<uint64_t, WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT> scalars{
+        desc.magic_version, desc.region_id,    desc.payload_base,
+        desc.payload_bytes, desc.counter_base, desc.counter_bytes,
+    };
+
+    WorkerChipOrchEndpoint endpoint(scalars.data(), scalars.size());
+
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::BAD_DESCRIPTOR);
+    EXPECT_EQ(endpoint.error().op, WorkerChipEndpointOp::INIT);
+    EXPECT_TRUE(endpoint.view().failed());
+    EXPECT_STRNE(endpoint.error().message, "");
+}
+
 }  // namespace
