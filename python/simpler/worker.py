@@ -166,7 +166,6 @@ from .comm_region import (
     MaterializationContext,
     RegionInstance,
     RegionInstanceRegistry,
-    RegionInstanceState,
     materialize_region_instance,
     project_region_allocation_spec,
     validate_single_owner_region_shape,
@@ -8656,9 +8655,8 @@ class Worker:
             raise errors[0]
 
     def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
-        # A region stays tracked until both ownership debts commit. This makes a
-        # failed close replayable by the cleanup journal instead of publishing a
-        # false success after dropping the only reference to the region.
+        # Compatibility WorkerChipOrchRegion lists are deletion-tracked mirrors.
+        # RegionInstance lifetime is owned by the registry.
         tracked = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
         regions = list(tracked)
         errors: list[BaseException] = []
@@ -8669,16 +8667,13 @@ class Worker:
                 errors.append(exc)
         registry = getattr(self, "_region_instance_registry", None)
         if registry is not None:
-            instances = (
-                tuple(registry._instances.values()) if resources is None else registry._iter_run(resources)
-            )
-            for instance in instances:
-                if instance._state in (RegionInstanceState.CLOSED, RegionInstanceState.CLOSE_FAILED):
-                    continue
-                try:
-                    instance._close_owned(poison_on_error=True)
-                except BaseException as exc:  # noqa: BLE001
-                    errors.append(exc)
+            try:
+                if resources is None:
+                    registry.sweep()
+                else:
+                    registry.cleanup_run(resources)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
         if errors:
             raise errors[0]
 
@@ -11385,10 +11380,7 @@ class Worker:
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
             or any(group.process is not None or group.ready_dir is not None for group in self._mpi_l3_groups)
             or bool(self._live_worker_chip_regions)
-            or any(
-                instance._state is None or instance._state is RegionInstanceState.LIVE
-                for instance in self._region_instance_registry._instances.values()
-            )
+            or bool(self._region_instance_registry._instances)
             or bool(self._live_domains)
             or bool(self._live_global_domains or self._failed_global_domain_releases)
             or bool(self._global_node_domains)
@@ -11414,13 +11406,9 @@ class Worker:
             parts.append(f"{n_mpi} mpirun group(s)")
         if self._live_worker_chip_regions:
             parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
-        live_instances = sum(
-            1
-            for instance in self._region_instance_registry._instances.values()
-            if instance._state is None or instance._state is RegionInstanceState.LIVE
-        )
-        if live_instances:
-            parts.append(f"{live_instances} region instance(s)")
+        n_instances = len(self._region_instance_registry._instances)
+        if n_instances:
+            parts.append(f"{n_instances} region instance(s)")
         if self._live_domains:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
         if self._live_global_domains or self._failed_global_domain_releases:

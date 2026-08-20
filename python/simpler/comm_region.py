@@ -315,10 +315,58 @@ class RegionInstanceRegistry:
         self._instances[key] = instance
         self._run_scopes[key] = run_scope
 
+    def close(self, instance: RegionInstance) -> None:
+        try:
+            instance._close_owned(poison_on_error=True)
+        finally:
+            self._settle(instance)
+
+    def cleanup_run(self, run_scope: Any) -> None:
+        errors: list[BaseException] = []
+        for instance in self._iter_run(run_scope):
+            if instance._close_attempted or instance._state in (
+                RegionInstanceState.CLOSED,
+                RegionInstanceState.CLOSE_FAILED,
+            ):
+                self._settle(instance)
+                continue
+            try:
+                self.close(instance)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def sweep(self) -> None:
+        errors: list[BaseException] = []
+        for instance in tuple(self._instances.values()):
+            if not instance._close_attempted and instance._state not in (
+                RegionInstanceState.CLOSED,
+                RegionInstanceState.CLOSE_FAILED,
+            ):
+                try:
+                    instance._close_owned(poison_on_error=True)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+            self._retire(id(instance))
+        if errors:
+            raise errors[0]
+
     def _iter_run(self, run_scope: Any) -> tuple[RegionInstance, ...]:
         return tuple(
             instance for key, instance in self._instances.items() if self._run_scopes[key] is run_scope
         )
+
+    def _settle(self, instance: RegionInstance) -> None:
+        if id(instance) not in self._instances:
+            return
+        if instance._retains_cleanup_only_reachability():
+            return
+        self._retire(id(instance))
+
+    def _retire(self, key: int) -> None:
+        self._instances.pop(key, None)
+        self._run_scopes.pop(key, None)
 
 
 class RegionInstance:
@@ -346,6 +394,8 @@ class RegionInstance:
         self._state: RegionInstanceState | None = None
         self._cleanup_error: BaseException | None = None
         self._close_attempted = False
+        self._ever_live = False
+        self._provider_release_committed = False
 
     @property
     def state(self) -> RegionInstanceState:
@@ -385,9 +435,10 @@ class RegionInstance:
             raise self._cleanup_error
         if self._state is None and self._provider_resource_id == 0 and self._payload_mapping is None:
             self._state = RegionInstanceState.CLOSED
+            self._worker._region_instance_registry._settle(self)
             return
         self._worker._require_region_control_context("region_instance.close")
-        self._close_owned(poison_on_error=True)
+        self._worker._region_instance_registry.close(self)
 
     def _materialize(self, spec: RegionAllocationSpec) -> None:
         plan = self.plan
@@ -459,6 +510,7 @@ class RegionInstance:
         except BaseException as exc:
             self._abort_materialization(exc)
             raise
+        self._ever_live = True
         self._state = RegionInstanceState.LIVE
 
     def _abort_materialization(self, cause: BaseException) -> None:
@@ -511,11 +563,13 @@ class RegionInstance:
         if self._release_client is not None and int(self._provider_resource_id) != 0:
             try:
                 result = self._release_client.release(int(self._provider_resource_id))
-                if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+                if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
+                    self._provider_release_committed = True
+                elif result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
                     raise RuntimeError(
                         f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
                     )
-                if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
+                elif result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
                     raise RuntimeError(
                         f"region instance: provider resource {self._provider_resource_id} is unknown"
                     )
@@ -537,6 +591,13 @@ class RegionInstance:
     def _fail_terminal(self, error: BaseException) -> None:
         self._cleanup_error = error
         self._state = RegionInstanceState.CLOSE_FAILED
+
+    def _retains_cleanup_only_reachability(self) -> bool:
+        if self._state is RegionInstanceState.CLOSED:
+            return False
+        if self._state is RegionInstanceState.CLOSE_FAILED:
+            return not (self._ever_live and self._provider_release_committed)
+        return True
 
     def _ensure_live(self) -> None:
         if self._state is not RegionInstanceState.LIVE:
@@ -642,6 +703,7 @@ def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
     except BaseException as exc:
         if instance._state is None:
             instance._abort_materialization(exc)
+        ctx.worker._region_instance_registry._settle(instance)
         raise
 
 

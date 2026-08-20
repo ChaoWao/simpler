@@ -26,6 +26,7 @@ from simpler.comm_region import (
     RefusalReason,
     RegionCounter,
     RegionInstance,
+    RegionInstanceRegistry,
     RegionInstanceState,
     RegionPartSpan,
     SignalTestResult,
@@ -93,6 +94,10 @@ def _materialize_default_region(worker: Worker):
         ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
         ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
     )
+
+
+def _tracked(worker: Worker) -> tuple[RegionInstance, ...]:
+    return tuple(worker._region_instance_registry._instances.values())
 
 
 def _manual_two_member_context(
@@ -614,6 +619,7 @@ def test_worker_materializes_region_instance_and_closes_single_region(region_wor
         instance.close()
     assert instance.state is RegionInstanceState.CLOSED
     assert worker._live_worker_chip_regions == []
+    assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -689,6 +695,7 @@ def test_live_region_instance_close_reuses_one_shot_cleanup(region_worker):
         instance.close()
 
     assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -700,6 +707,7 @@ def test_live_region_instance_close_reuses_one_shot_cleanup(region_worker):
     with worker._control_reservation("test_region_instance"):
         instance.close()
     assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     with pytest.raises(MaterializationError, match="not live"):
         instance.payload_write(0, "src")
 
@@ -713,6 +721,7 @@ def test_region_instance_close_failure_marks_failed_and_poisons_worker(region_wo
             instance.close()
 
     assert instance.state is RegionInstanceState.CLOSE_FAILED
+    assert _tracked(worker) == ()
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         worker._require_no_ordered_cleanup_failure("test")
     with pytest.raises(RuntimeError, match="not live"):
@@ -740,6 +749,7 @@ def test_region_instance_close_failure_replays_cached_error(region_worker):
             instance.close()
 
     assert instance.state is RegionInstanceState.CLOSE_FAILED
+    assert _tracked(worker) == ()
     assert second_excinfo.value is first_excinfo.value
     assert calls == [
         ("allocate", 64, 128),
@@ -776,7 +786,9 @@ def test_callback_region_close_before_submit_retired_from_run_cleanup(region_wor
         worker._building_run_resources = None
 
     assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     worker._cleanup_worker_chip_regions(resources)
+    assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -805,8 +817,10 @@ def test_callback_region_run_cleanup_then_later_close_is_idempotent(region_worke
     worker._cleanup_worker_chip_regions(resources)
 
     assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     instance.close()
     assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -853,9 +867,7 @@ def test_materialize_tracks_before_allocate_and_create_failure_is_not_live(regio
 
     assert worker._live_worker_chip_regions == []
     assert calls == [("allocate", 64, 128)]
-    tracked = tuple(worker._region_instance_registry._instances.values())
-    assert len(tracked) == 1
-    assert tracked[0].state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     worker._require_no_ordered_cleanup_failure("test")
 
 
@@ -882,7 +894,8 @@ def test_first_import_failure_releases_once_and_poisons(region_worker):
     with pytest.raises(RuntimeError, match="first import failed"):
         _materialize_default_region(worker)
 
-    tracked = tuple(worker._region_instance_registry._instances.values())
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
     assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         worker._require_no_ordered_cleanup_failure("test")
@@ -899,7 +912,8 @@ def test_second_import_failure_closes_first_lease_and_poisons(region_worker):
     with pytest.raises(RuntimeError, match="second import failed"):
         _materialize_default_region(worker)
 
-    tracked = tuple(worker._region_instance_registry._instances.values())
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
     assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         worker._require_no_ordered_cleanup_failure("test")
@@ -924,7 +938,8 @@ def test_invalid_success_reply_releases_once_and_never_imports(region_worker):
     with pytest.raises(RuntimeError, match="must not overlap"):
         _materialize_default_region(worker)
 
-    tracked = tuple(worker._region_instance_registry._instances.values())
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
     assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         worker._require_no_ordered_cleanup_failure("test")
@@ -958,8 +973,7 @@ def test_allocation_error_without_debt_retires_closed_without_release(region_wor
     with pytest.raises(RegionAllocationError):
         _materialize_default_region(worker)
 
-    tracked = tuple(worker._region_instance_registry._instances.values())
-    assert tracked[0]._state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
     worker._require_no_ordered_cleanup_failure("test")
     assert calls == [("allocate", 64, 128)]
 
@@ -979,12 +993,163 @@ def test_allocation_error_with_debt_is_close_failed_without_release_client(regio
     with pytest.raises(RuntimeError, match="cleanup debt"):
         _materialize_default_region(worker)
 
-    tracked = tuple(worker._region_instance_registry._instances.values())
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
     assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
     assert tracked[0]._release_client is None
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         worker._require_no_ordered_cleanup_failure("test")
     assert calls == [("allocate", 64, 128)]
+
+
+def test_registry_run_membership_cleanup_closes_only_that_run(region_worker):
+    worker, calls, _leases = region_worker()
+    first = _RunResources()
+    second = _RunResources()
+    worker._building_run_resources = first
+    try:
+        first_instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    worker._building_run_resources = second
+    try:
+        second_instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+
+    assert {first_instance, second_instance} == set(_tracked(worker))
+    worker._region_instance_registry.cleanup_run(first)
+    assert first_instance.state is RegionInstanceState.CLOSED
+    assert second_instance.state is RegionInstanceState.LIVE
+    assert _tracked(worker) == (second_instance,)
+    assert [item for item in calls if item[0] == "release"] == [("release", 1, 42)]
+
+    worker._region_instance_registry.cleanup_run(second)
+    assert second_instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
+    assert [item for item in calls if item[0] == "release"] == [("release", 1, 42), ("release", 1, 42)]
+
+
+def test_registry_run_cleanup_closes_live_instances(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+
+    assert instance.state is RegionInstanceState.LIVE
+    assert _tracked(worker) == (instance,)
+    worker._cleanup_worker_chip_regions(resources)
+    assert instance.state is RegionInstanceState.CLOSED
+    assert _tracked(worker) == ()
+    assert calls == [
+        ("allocate", 64, 128),
+        ("import", "payload", 64),
+        ("import", "counter", 128),
+        ("mapping_close", "payload"),
+        ("mapping_close", "counter"),
+        ("release", 1, 42),
+    ]
+
+
+def test_allocation_error_with_debt_survives_run_cleanup_until_sweep_without_release(region_worker):
+    from simpler.comm_provider import RegionAllocationError, RegionControlErrorKind, RegionOperationKind, RegionPartKind
+
+    error = RegionAllocationError(
+        provisional_resource_id=9,
+        control_kind=RegionControlErrorKind.BACKEND_FAILURE,
+        failed_part=RegionPartKind.PAYLOAD,
+        failed_operation=RegionOperationKind.MATERIALIZE,
+        cleanup_debt_remaining=True,
+        message="create left debt",
+    )
+    worker, calls, _leases = region_worker(allocate_error=error)
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        with pytest.raises(RuntimeError, match="cleanup debt"):
+            _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    instance = tracked[0]
+    assert instance._state is RegionInstanceState.CLOSE_FAILED
+    assert instance._release_client is None
+    worker._cleanup_worker_chip_regions(resources)
+    assert _tracked(worker) == (instance,)
+    assert calls == [("allocate", 64, 128)]
+    worker._region_instance_registry.sweep()
+    assert _tracked(worker) == ()
+    assert calls == [("allocate", 64, 128)]
+
+
+def test_provider_release_failure_keeps_diagnostic_until_sweep(region_worker):
+    from simpler.comm_provider_control import RegionControlProtocolError
+
+    worker, calls, _leases = region_worker(fail_release=True)
+    instance = _materialize_default_region(worker)
+    with worker._control_reservation("test_region_instance"):
+        with pytest.raises(RegionControlProtocolError, match="release"):
+            instance.close()
+
+    assert instance.state is RegionInstanceState.CLOSE_FAILED
+    assert _tracked(worker) == (instance,)
+    worker._region_instance_registry.cleanup_run(None)
+    assert _tracked(worker) == (instance,)
+    release_calls = [item for item in calls if item[0] == "release"]
+    assert release_calls == [("release", 1, 42)]
+    worker._region_instance_registry.sweep()
+    assert _tracked(worker) == ()
+    assert [item for item in calls if item[0] == "release"] == release_calls
+
+
+def test_unpublished_close_failed_survives_cleanup_run_until_sweep(region_worker):
+    worker, calls, _leases = region_worker(fail_second_import=True)
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        with pytest.raises(RuntimeError, match="second import failed"):
+            _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    instance = tracked[0]
+    worker._cleanup_worker_chip_regions(resources)
+    assert _tracked(worker) == (instance,)
+    assert calls.count(("release", 1, 42)) == 1
+    worker._region_instance_registry.sweep()
+    assert _tracked(worker) == ()
+    assert calls.count(("release", 1, 42)) == 1
+
+
+def test_data_plane_does_not_consult_registry(region_worker, monkeypatch):
+    worker, _calls, _leases = region_worker()
+    instance = _materialize_default_region(worker)
+    registry = worker._region_instance_registry
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("data-plane must not consult the region instance registry")
+
+    for name in ("track", "close", "cleanup_run", "sweep", "_iter_run", "_settle", "_retire"):
+        monkeypatch.setattr(registry, name, boom)
+    monkeypatch.setattr(PayloadPart, "write", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(PayloadPart, "read", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(CounterPart, "counter", lambda *_args, **_kwargs: "counter")
+
+    with worker._control_reservation("test_region_instance"):
+        instance.payload_write(0, "src")
+        instance.payload_read(0, "dst")
+        assert instance.counter(0) == "counter"
+
+    assert not hasattr(RegionInstanceRegistry, "get")
+    assert not hasattr(RegionInstanceRegistry, "find")
+    assert not hasattr(RegionInstanceRegistry, "__getitem__")
 
 
 def test_live_region_instance_access_requires_control_context(region_worker):
