@@ -55,7 +55,14 @@ void reset_graph_payload(PTO2TaskPayload &payload) {
 bool bind_graph_topology(GraphExecution &execution) {
     if (execution.definition == nullptr) return false;
     const GraphDefinition &definition = *execution.definition;
-    if (definition.boundary_scalar_count > MAX_SCALAR_ARGS) return false;
+    // GRAPH_MAX_SCALAR_ARGS, not MAX_SCALAR_ARGS: this counts the scalars the
+    // Graph BOUNDARY carries, which the recorder sizes with
+    // GraphTaskArgs = Arg<GRAPH_MAX_TENSOR_ARGS, GRAPH_MAX_SCALAR_ARGS> and the
+    // image hands over as a pointer into the submission, never through a node
+    // payload. MAX_SCALAR_ARGS is the per-AICore-task cap (16) and applies to
+    // GraphNodeDefinition::scalar_count below, which is checked separately; using
+    // it here rejected every boundary wider than one kernel call could take.
+    if (definition.boundary_scalar_count > GRAPH_MAX_SCALAR_ARGS) return false;
     const uint32_t *fanin_offsets =
         graph_definition_array<uint32_t>(definition, definition.off_fanin_offsets, definition.task_count + 1);
     const uint16_t *fanin_indices =

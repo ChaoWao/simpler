@@ -20,11 +20,15 @@ through `GraphTaskArgs`, positionally) and the host records it once per identity
 instead of submitting the pass's ~15600 tasks individually. The runtime is
 untouched.
 
-Seven Definitions cover all 43 layers:
+Eight Definitions cover all 43 layers:
 
 - `csa_attn_block` (50 nodes) / `csa_moe_block` (32) and `hca_attn_block` (35) /
   `hca_moe_block` (31) — the decoder loop's two alternating layer shapes, layers
   2..41, plus layer 42 replaying `csa_attn_block` and `hca_moe_block`.
+  `csa_moe_block` records two Definitions: its routing kernel is `route_hash_1`
+  at layer 2 and `route_sort` from layer 4 on, and a body is recorded once per
+  key, so the predicate is a Graph config value rather than a host-side `if` the
+  first recorded layer would settle for every replay.
 - `swa_attn_block` (28) — the two peeled sliding-window attentions of layers 0
   and 1. Their nodes are pairwise alpha-equivalent, so layer 1 replays what layer
   0 recorded.
@@ -71,17 +75,46 @@ size and shape of the real one.
 completion/smoke case: no full-network torch reference exists upstream either,
 and component-level goldens live with the standalone kernels in pypto-lib.
 
-## Status: the host records the Definitions; device replay is blocked in activation
+## Status: the host records the Definitions and the device replays them
 
-With the Graph form the host records the seven Definitions and boots with **129
+With the Graph form the host records the eight Definitions and boots with **129
 submissions from the submitting thread**, two orders of magnitude below
-submitting every task individually — this is measured, on both ranks. The
-device-side replay is **not yet exercised**: an unskipped run fails in Graph
-activation (`sched_error_code=5 INVALID_ARGS` from the scheduler's graph
-queues), so the recorded bodies never replay.
+submitting every task individually — this is measured, on both ranks. The device
+replays all of them and both ranks reach `outcome=0`.
 
-`skip_golden` therefore establishes host-side construction, not numerical
-correctness.
+`skip_golden` still means this establishes completion, not numbers.
+
+Getting the replay running took three fixes. Each is a way a Graph can differ
+from the same body submitted task by task, so they are worth keeping written
+down:
+
+1. **The recorder inferred dependencies from the allocation site, not the last
+   writer.** A recorded node's fanin came only from tensor args classified
+   `INTERNAL` — which names whichever node's packed window holds the bytes, i.e.
+   the allocator — plus explicit `set_dependencies`. Every write-then-read
+   through an `alloc_tensors` buffer or a boundary view was therefore unordered,
+   and a Definition replayed a DAG the body does not have when its tasks are
+   submitted individually. Measured on the pre-split single-Definition form of
+   this body: 1348 edges against the 2143 the ordinary path computes for the same
+   tasks, 543 of 561 comparable nodes short. On device that ran
+   `csa_slots_build_valid_qk_plan` before the `topk` that fills its input, so
+   `qk_pv_1` gathered KV pages at addresses the bus rejected. The recorder now
+   runs the same `compute_task_fanin` / `register_task_outputs` the ring path
+   runs, against a tensor map owned by the recording.
+2. **Two bodies read 64-bit comm handles back as `int32_t`.** `csa_moe_block` and
+   `hca_moe_block` bound `recv_*_ctx`, `*_arrived_ctx` and `routed_y_buf_ctx` as
+   `int32_t` while the entry passes `uint64_t`; the peeled `hash_moe_l*_block`
+   bodies already had it right. The MoE all-to-all pushed to a truncated window
+   address, which surfaces as an AIV MTE bus fault rather than a wrong number.
+3. **A host-side branch inside a body was settled at record time** — the
+   `route_hash_1` / `route_sort` choice described above.
+
+The `sched_error_code=5 INVALID_ARGS` this section used to report came from a
+fourth, separate defect: `bind_graph_topology` bounded the Graph *boundary*
+scalar count by `MAX_SCALAR_ARGS`, the per-AICore-task cap (16), rather than the
+`GRAPH_MAX_SCALAR_ARGS` (64) the recorder's boundary is built with. Cutting the
+pass into blocks brought every boundary under 16 and hid it; it is fixed in the
+runtime, so a wider boundary is legal again.
 
 ### Why `hc_head_linear` carries a row-tail bound
 
@@ -156,6 +189,6 @@ Kernels, fixture and orchestration come from the TMR case; see its
 network shape, regeneration steps and cost. One orchestration file is specific
 to this case: `kernels/orchestration/decode_fwd_graph.cpp`, the TMR
 orchestration carrying the rewrite in the table above and recast as a Graph —
-the forward pass is cut into the seven Definitions listed above, each layer's
+the forward pass is cut into the eight Definitions listed above, each layer's
 task set forming a Graph body whose per-layer views, scales and indices cross
 the boundary positionally.

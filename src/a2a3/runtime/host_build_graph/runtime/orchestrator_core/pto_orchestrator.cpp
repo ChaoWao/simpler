@@ -381,6 +381,32 @@ struct GraphRecording {
     // Indexed by GraphRecordedNode::predicate_index; only predicated nodes
     // contribute an entry.
     std::vector<GraphRecordedPredicate> predicates;
+    // Hazard state for the recorded body, owned per recording because several
+    // graphs record at once, each on its own thread.
+    //
+    // The ordinary submit path reads a task's producers out of orch->tensor_map
+    // (compute_task_fanin, STEP 3) and publishes the task's writes back into it
+    // (register_task_outputs, STEP 4). The shadow-record path replaces
+    // submit_task_common wholesale, so without a map of its own the recorder
+    // can only see the edges tensor-source classification yields — and that
+    // classification answers "which node's packed window holds these bytes",
+    // i.e. who ALLOCATED the buffer, never who wrote it last. A body that
+    // allocates once with alloc_tensors and then writes in place with add_inout
+    // (the shape every generated orchestration uses) would therefore record a
+    // node with no edge to its actual producer, and the Definition would replay
+    // a DAG the same body never had when submitted task by task.
+    DeviceArena tensor_map_arena;
+    PTO2TensorMapLayout tensor_map_layout{};
+    PTO2TensorMap tensor_map{};
+    bool tensor_map_ready{false};
+    // Scope depth as the body sees it. begin_scope/end_scope leave the real
+    // orchestrator stack untouched while recording (a Graph replays flat), but
+    // the manual-scope flag still has to follow the body: a manual scope
+    // suppresses inference on the ring, so it must suppress it here too.
+    int32_t scope_stack_top{-1};
+    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+
+    bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
 };
 
 struct GraphPendingUpload {
@@ -519,6 +545,32 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
         }
     }
     return {};
+}
+
+// Entry capacity for one recorded body's hazard map. A Definition is capped at
+// GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
+// args, so this bounds the worst realistic body while staying a small fraction of
+// the ring path's whole-orchestration pool (PTO2_TENSORMAP_POOL_SIZE). Exhausting
+// it marks the recording unsupported, which graph_commit reports as
+// PTO2_ERROR_INVALID_ARGS -- the outer shell is already submitted by then, so there
+// is no ordinary-path fallback left to take.
+constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
+
+// Stand the recording's hazard map up on its own host allocation. Failure is
+// reported to the caller, which is still before the outer shell is submitted and
+// so can still take the ordinary path, rather than producing a Definition with
+// inferred edges missing.
+bool graph_recording_init_tensor_map(GraphRecording &recording) {
+    recording.tensor_map_layout = PTO2TensorMap::reserve_layout(
+        recording.tensor_map_arena, PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES
+    );
+    if (recording.tensor_map_arena.commit() == nullptr) return false;
+    if (!recording.tensor_map.init_data_from_layout(recording.tensor_map_layout, recording.tensor_map_arena)) {
+        return false;
+    }
+    recording.tensor_map.wire_arena_pointers(recording.tensor_map_layout, recording.tensor_map_arena);
+    recording.tensor_map_ready = true;
+    return true;
 }
 
 bool graph_classify_tensor(
@@ -1093,10 +1145,27 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     }
     // A Graph replays as a flat DAG with no scope structure: scope boundaries only
     // shape scheduling on the ring, and the shadow-record path submits no ring
-    // tasks. Recorded ordering is preserved by the nodes' explicit dependencies
-    // and tensor-source classification, so a scope inside a Graph body is a no-op
-    // during recording and must not touch the real scope stack.
-    if (active_graph_recording(orch) != nullptr) {
+    // tasks. So a scope inside a Graph body must not touch the real scope stack.
+    // Its manual/auto mode still matters, though — the recorder infers a node's
+    // producers with the same compute_task_fanin the ring path uses, and that
+    // inference is suppressed inside a manual scope — so the depth is tracked on
+    // the recording instead.
+    if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
+        // Reject what the ring rejects. An auto scope inside a manual one is a
+        // fatal below; accepting it here would let a Graph record and replay a
+        // body that ordinary submission refuses. The push still happens so
+        // end_scope stays balanced -- the recording is doomed either way, since
+        // graph_commit turns an unsupported recording into PTO2_ERROR_INVALID_ARGS.
+        if (recording->scope_stack_top >= PTO2_MAX_SCOPE_DEPTH - 1 ||
+            (mode == PTO2ScopeMode::AUTO && recording->in_manual_scope())) {
+            recording->unsupported = true;
+        }
+        if (recording->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1) {
+            ++recording->scope_stack_top;
+            if (mode == PTO2ScopeMode::MANUAL && !recording->in_manual_scope()) {
+                recording->manual_begin_depth = recording->scope_stack_top;
+            }
+        }
         return;
     }
     assert(orch->scope_stack_top < static_cast<int32_t>(orch->scope_stack_capacity - 1) && "Scope stack overflow");
@@ -1135,9 +1204,15 @@ void PTO2OrchestratorState::end_scope() {
     if (orch->fatal) {
         return;
     }
-    // Matches begin_scope: a scope inside a Graph body is a no-op during the
-    // shadow-record pass, so it must not touch the scope stack.
-    if (active_graph_recording(orch) != nullptr) {
+    // Matches begin_scope: a scope inside a Graph body never touches the real
+    // scope stack, only the recording's own manual-scope depth.
+    if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
+        if (recording->scope_stack_top >= 0) {
+            if (recording->manual_begin_depth == recording->scope_stack_top) {
+                recording->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+            }
+            --recording->scope_stack_top;
+        }
         return;
     }
     assert(orch->scope_stack_top >= 0 && "Scope stack underflow");
@@ -1890,6 +1965,50 @@ TaskOutputTensors graph_record_submit_node(
         const GraphRecordedTensorSourceRef &source = recording.tensor_sources[node.tensor_source_offset + i];
         if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(source.source_index);
     }
+
+    // Inferred hazards, on the same terms as the ring path. The loop above only
+    // names the node that ALLOCATED each buffer; every write-then-read through a
+    // buffer someone else allocated — an alloc_tensors output written in place
+    // with add_inout, or a view of a boundary tensor — needs the last-writer
+    // lookup compute_task_fanin performs. Running the very same function against
+    // the recording's own map is what keeps a Definition's edge set equal to the
+    // one the body gets when its tasks are submitted individually.
+    //
+    // Producers outside the recording window are dropped: they are reached
+    // through boundary tensors, and the outer Graph shell already carries those
+    // args, so the shell's own fanin orders the whole body behind them.
+    {
+        const DepInputs dep_inputs{
+            tensor_count,
+            args.tensor_data(),
+            args.tag_data(),
+            static_cast<int32_t>(args.explicit_dep_count()),
+            args.explicit_deps_data(),
+        };
+        const bool manual_scope = recording.in_manual_scope();
+        if (!recording.tensor_map_ready) {
+            recording.unsupported = true;
+        } else if (recording.tensor_map.free_entries() < count_registrable_outputs(dep_inputs, manual_scope)) {
+            // Recording one more node would assert inside new_entry(). Abandon the
+            // Definition instead, so the run fails by name at graph_commit rather
+            // than on a hard assert here.
+            LOG_WARN(
+                "[GraphExecution] recording hazard map exhausted at node %zu (%d entries); Graph abandoned", node_index,
+                GRAPH_RECORD_TENSORMAP_POOL_SIZE
+            );
+            recording.unsupported = true;
+        } else {
+            auto emit_inferred = [&recording, &add_fanin, node_index](PTO2TaskId producer) -> bool {
+                const int32_t producer_index = static_cast<int32_t>(producer.local()) - recording.start_local_task_id;
+                if (producer.ring() == 0 && producer_index >= 0 && producer_index < static_cast<int32_t>(node_index)) {
+                    add_fanin(static_cast<size_t>(producer_index));
+                }
+                return true;
+            };
+            (void)compute_task_fanin(dep_inputs, recording.tensor_map, manual_scope, emit_inferred);
+            register_task_outputs(dep_inputs, task_id, recording.tensor_map, manual_scope);
+        }
+    }
     for (uint32_t i = 0; i < args.explicit_dep_count(); ++i) {
         const PTO2TaskId dep = args.explicit_dep(i);
         const int32_t dep_index = static_cast<int32_t>(dep.local()) - recording.start_local_task_id;
@@ -2008,6 +2127,10 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     auto recording = std::make_unique<GraphRecording>();
     recording->full_key = full_key;
     recording->start_local_task_id = orch->ring.task_allocator.active_count();
+    if (!graph_recording_init_tensor_map(*recording)) {
+        LOG_WARN("[GraphExecution] recording hazard map allocation failed; using ordinary path");
+        return result;
+    }
     recording->boundary_scalar_count = args.scalar_count();
     recording->boundary_tensors.reserve(static_cast<size_t>(args.tensor_count()));
     recording->boundary_types.reserve(static_cast<size_t>(args.tensor_count()));
