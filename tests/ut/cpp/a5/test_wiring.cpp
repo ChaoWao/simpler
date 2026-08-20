@@ -25,7 +25,6 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -113,23 +112,11 @@ protected:
         ASSERT_TRUE(ok);
     }
 
-    // Service reclaim-publication requests until the blocked waiter sets
-    // `done`. The waiter thread can start arbitrarily late when ctest runs
-    // several large binaries in parallel, so the servicing loop must keep
-    // draining until the waiter finishes: a request latched after a
-    // fixed-window sample would never be serviced, and the waiter would
-    // burn its 500 ms wall-clock backstop into a false deadlock.
-    bool service_reclaim_publication_until_done(const std::atomic<bool> &done) {
-        bool saw_request = false;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-            if (sched.publication_request_mask.load(std::memory_order_acquire) != 0) {
-                saw_request = true;
-                EXPECT_TRUE(sched.drain_publication_requests());
-            }
-            std::this_thread::yield();
-        }
-        return saw_request;
+    // Ask the scheduler for an exact publication on ring 0, the way a blocked
+    // reclaim consumer does once it has spun without progress.
+    void request_and_drain_publication(int32_t ring_id = 0) {
+        sched.publication_request_mask.store(ring_mask_bit(ring_id), std::memory_order_release);
+        ASSERT_TRUE(sched.drain_publication_requests());
     }
 };
 
@@ -668,7 +655,87 @@ TEST_F(WiringTest, AdvanceRingPointersPublishesDrainedTail) {
     }
 }
 
-TEST_F(WiringTest, TaskAllocatorPressurePublishesWithheldProgress) {
+// =============================================================================
+// Withheld reclaim progress: request -> publish -> reclaim
+//
+// Batched publication lets the shared watermark trail scheduler-local
+// reclamation by PUBLISH_INTERVAL_K - 1 tasks, so a reclaim consumer can run out
+// of space while the scheduler has already retired what it needs. The consumer
+// asks for an exact publication and resumes once it lands.
+//
+// What the tests below assert is that handshake's three steps, each in one
+// thread. They deliberately do not assert the step in between — that a spinning
+// consumer reaches its request after 10 ms of no reclaim progress. That step is
+// a duration, and the same spin carries a 500 ms deadlock backstop, so a test
+// that raced a servicing thread against it would be asserting that the servicing
+// thread gets scheduled in time. Under `ctest -j` on a small runner it does not,
+// and the production code then does exactly what it is specified to do — report
+// the stall and give up — which such a test reports as a failed assertion.
+// =============================================================================
+
+TEST(ReclaimPublicationRequestTest, AcknowledgmentIsScopedToTheOutstandingRequest) {
+    std::atomic<uint32_t> request_mask{0};
+    std::atomic<uint32_t> ack_mask{0};
+    ReclaimPublicationRequest request(&request_mask, &ack_mask, 1);
+    ASSERT_TRUE(request.enabled());
+
+    // An ack that predates the request describes an older watermark, so it is
+    // cleared by the request rather than consumed by it.
+    ack_mask.store(ring_mask_bit(1), std::memory_order_release);
+    EXPECT_FALSE(request.poll_acknowledged());
+
+    request.request();
+    EXPECT_EQ(request_mask.load(std::memory_order_acquire), ring_mask_bit(1));
+    EXPECT_EQ(ack_mask.load(std::memory_order_acquire) & ring_mask_bit(1), 0u);
+    EXPECT_FALSE(request.poll_acknowledged());
+
+    ack_mask.fetch_or(ring_mask_bit(1), std::memory_order_release);
+    EXPECT_TRUE(request.poll_acknowledged());
+    // One acknowledgment proves one publication: a later reclaim spin must
+    // request again rather than re-reading this one.
+    EXPECT_FALSE(request.poll_acknowledged());
+}
+
+TEST(ReclaimPublicationRequestTest, AnUnwiredRequestCountsAsSynchronized) {
+    ReclaimPublicationRequest request(nullptr, nullptr, 0);
+
+    EXPECT_FALSE(request.enabled());
+    // No publisher to ask means the shared watermark is already the only one
+    // there is, so the reclaim spin must not wait for an ack that cannot come.
+    EXPECT_TRUE(request.poll_acknowledged());
+}
+
+TEST_F(WiringTest, DrainPublicationRequestsPublishesWithheldProgress) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    ring->fc.current_task_index.store(129, std::memory_order_release);
+    ring->get_slot_state_by_task_id(128).task_state.store(PTO2_TASK_PENDING);
+    rss.last_task_alive = 128;
+    rss.last_published_to_sm = 113;
+    ring->fc.last_task_alive.store(113, std::memory_order_release);
+
+    // 15 retired tasks short of the publish interval: batching withholds them.
+    rss.sync_to_sm();
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 113);
+
+    sched.publication_request_mask.store(ring_mask_bit(0), std::memory_order_release);
+    EXPECT_TRUE(sched.drain_publication_requests());
+
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 128);
+    EXPECT_EQ(rss.last_published_to_sm, 128);
+    EXPECT_EQ(sched.publication_ack_mask.load() & ring_mask_bit(0), ring_mask_bit(0));
+    EXPECT_EQ(sched.publication_request_mask.load() & ring_mask_bit(0), 0u);
+
+    // The return value reports whether the watermark moved, not whether the
+    // request was serviced: a request with nothing withheld is still acked.
+    sched.publication_request_mask.store(ring_mask_bit(0), std::memory_order_release);
+    EXPECT_FALSE(sched.drain_publication_requests());
+    EXPECT_EQ(sched.publication_ack_mask.load() & ring_mask_bit(0), ring_mask_bit(0));
+    EXPECT_EQ(sched.publication_request_mask.load() & ring_mask_bit(0), 0u);
+}
+
+TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     auto &rss = sched.ring_sched_states[0];
     auto *ring = rss.ring;
 
@@ -690,22 +757,24 @@ TEST_F(WiringTest, TaskAllocatorPressurePublishesWithheldProgress) {
     );
     allocator.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask);
 
-    PTO2TaskAllocResult result{-1, -1, nullptr, nullptr};
-    std::atomic<bool> alloc_done{false};
-    std::thread blocked_allocator([&] {
-        result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
-        alloc_done.store(true, std::memory_order_release);
-    });
+    // A window of 4 admits task 3 only once the watermark retires task 0, and
+    // the watermark the allocator can see still says every task is alive.
+    ASSERT_EQ(allocator.window_size(), 4);
+    ASSERT_EQ(allocator.task_head(), 3);
+    ASSERT_EQ(allocator.task_tail(), 0);
+    ASSERT_EQ(allocator.active_count(), allocator.window_size() - 1);
 
-    EXPECT_TRUE(service_reclaim_publication_until_done(alloc_done));
-    blocked_allocator.join();
+    request_and_drain_publication();
+    ASSERT_EQ(allocator.task_tail(), 1);
+
+    PTO2TaskAllocResult result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 3);
     EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
 }
 
-TEST_F(WiringTest, HeapPressurePublishesWithheldProgress) {
+TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     auto &rss = sched.ring_sched_states[0];
     auto *ring = rss.ring;
 
@@ -732,15 +801,15 @@ TEST_F(WiringTest, HeapPressurePublishesWithheldProgress) {
     ASSERT_EQ(rss.last_task_alive, 1);
     ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
 
-    PTO2TaskAllocResult result{-1, -1, nullptr, nullptr};
-    std::atomic<bool> alloc_done{false};
-    std::thread blocked_allocator([&] {
-        result = allocator.alloc(8);
-        alloc_done.store(true, std::memory_order_release);
-    });
+    // Every heap byte belongs to task 0, which the visible watermark still
+    // counts as alive, so the heap tail cannot move off it.
+    ASSERT_EQ(allocator.heap_available(), 0u);
+    ASSERT_EQ(allocator.heap_tail(), 0u);
 
-    EXPECT_TRUE(service_reclaim_publication_until_done(alloc_done));
-    blocked_allocator.join();
+    request_and_drain_publication();
+    ASSERT_EQ(allocator.task_tail(), 1);
+
+    PTO2TaskAllocResult result = allocator.alloc(8);
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 2);
@@ -748,7 +817,7 @@ TEST_F(WiringTest, HeapPressurePublishesWithheldProgress) {
     EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
 }
 
-TEST_F(WiringTest, DependencyPoolPressurePublishesWithheldProgress) {
+TEST_F(WiringTest, DependencyPoolReclaimsOnceWithheldProgressIsPublished) {
     auto &rss = sched.ring_sched_states[0];
     auto *ring = rss.ring;
 
@@ -763,22 +832,21 @@ TEST_F(WiringTest, DependencyPoolPressurePublishesWithheldProgress) {
     rss.dep_pool.tail = 1;
     rss.dep_pool.last_reclaimed = 64;
 
-    bool has_space = false;
-    std::atomic<bool> ensure_done{false};
-    std::thread blocked_allocator([&] {
-        has_space = rss.dep_pool.ensure_space(*ring, 1);
-        ensure_done.store(true, std::memory_order_release);
-    });
+    // The pool is full, and the watermark it can see is not a reclaim point:
+    // cleanup runs every 64 retired tasks and 113 is under 64 + 64.
+    ASSERT_EQ(rss.dep_pool.available(), 0);
+    rss.dep_pool.reclaim(*ring, ring->fc.last_task_alive.load());
+    ASSERT_EQ(rss.dep_pool.tail, 1);
 
-    EXPECT_TRUE(service_reclaim_publication_until_done(ensure_done));
-    blocked_allocator.join();
+    request_and_drain_publication();
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 128);
 
-    EXPECT_TRUE(has_space);
+    // 128 is a reclaim point, and task 127's mark says entries below 5 are dead.
+    EXPECT_TRUE(rss.dep_pool.ensure_space(*ring, 1));
     EXPECT_EQ(rss.dep_pool.tail, 5);
-    EXPECT_EQ(ring->fc.last_task_alive.load(), 128);
 }
 
-TEST_F(WiringTest, FaninPoolPressurePublishesWithheldProgress) {
+TEST_F(WiringTest, FaninPoolReclaimsOnceWithheldProgressIsPublished) {
     auto &rss = sched.ring_sched_states[0];
     auto *ring = rss.ring;
 
@@ -803,19 +871,17 @@ TEST_F(WiringTest, FaninPoolPressurePublishesWithheldProgress) {
     payload.fanin_spill_start = 1;
     payload.fanin_spill_pool = &pool;
 
-    bool has_space = false;
-    std::atomic<bool> ensure_done{false};
-    std::thread blocked_allocator([&] {
-        has_space = pool.ensure_space(*ring, 1);
-        ensure_done.store(true, std::memory_order_release);
-    });
+    // The pool is full and the only task holding spill entries is task 0, which
+    // the visible watermark has not retired.
+    ASSERT_EQ(pool.available(), 0);
+    pool.reclaim(*ring, ring->fc.last_task_alive.load());
+    ASSERT_EQ(pool.tail, 1);
 
-    EXPECT_TRUE(service_reclaim_publication_until_done(ensure_done));
-    blocked_allocator.join();
+    request_and_drain_publication();
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 1);
 
-    EXPECT_TRUE(has_space);
+    EXPECT_TRUE(pool.ensure_space(*ring, 1));
     EXPECT_EQ(pool.tail, 2);
-    EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
 }
 
 TEST_F(WiringTest, RingReuseResetsPublicationShadow) {
