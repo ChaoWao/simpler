@@ -1,7 +1,7 @@
 # DeepSeek-V4 FLASH full decode network (EP2 / TP2, 2 dies)
 
 The complete DeepSeek-V4 FLASH 43-layer decode forward as one scene test:
-pypto-generated chip orchestration + 367 incore kernels per rank, dispatched to
+pypto-generated chip orchestration + 368 incore kernels per rank, dispatched to
 two dies that cooperate through a communication domain (expert-parallel MoE
 dispatch/combine and a TP-sharded LM head). This is the first pypto-harvested
 **distributed** network in the repo — the single-chip counterpart is
@@ -36,8 +36,16 @@ CI terms: the harvested distributed program compiles, both ranks' graphs
 dispatch, the cross-die window protocol (TPUT/TNOTIFY arrivals, LM-head
 all-gather) drains, and the run terminates cleanly.
 
-It is marked `manual`: compiling 367 incore kernels plus the 7.8k-line chip
+It is marked `manual`: compiling 368 incore kernels plus the 7.8k-line chip
 orchestration takes several minutes, so it does not run in the default sweep.
+
+The six buffer initializations formerly expressed as orchestration-side
+`set_initial_value(0)` calls now run on device. Each of the five
+`sh_gate_up_act_q*` kernels clears the two padded `h_tile_i8` rows owned by its
+logical block. The dedicated `hc_head_mixes_zero` seed kernel clears one
+up-to-16-row chunk of the dynamic `mixes_raw` split-K destination per logical
+block; an explicit task dependency orders all `hc_head_linear` `AtomicAdd`
+stores after it.
 
 ## Status: blocked on the #1644 pto-isa pin bump
 
@@ -85,14 +93,16 @@ Harvested with `RunConfig` defaults (`--start-pos 8192`, `--num-tokens 8`,
 | pypto | `289290e6` |
 | simpler (pypto `runtime/` pin at harvest) | `3165cc89` |
 | ptoas | `v0.57` |
-| pto-isa | `83d01313d9bfc247c4b7c8bcf969d1019f0d106f` (= `pto_isa.pin`) |
+| pto-isa used for generation | `83d01313d9bfc247c4b7c8bcf969d1019f0d106f` |
 
-There are no hand-edits: every `kernels/**/*.cpp` is the pypto codegen output
-plus three mechanical, reproducible transforms — the license header, the repo's
-`clang-format`, and the whole-word renames `L2TaskArgs -> ChipTaskArgs`,
-`L0TaskArgs -> CoreTaskArgs`, `Tensor -> ChipTensor` (pypto's codegen still
-emits the pre-rename identifiers of its pinned runtime `3165cc89`; simpler
-renamed them on main per the role-based naming rule, with no compat alias). `test_deepseek_v4_flash_decode.py`'s
+The harvested files start from pypto codegen output plus three mechanical,
+reproducible transforms — the license header, the repo's `clang-format`, and
+the whole-word renames `L2TaskArgs -> ChipTaskArgs`, `L0TaskArgs -> CoreTaskArgs`,
+`Tensor -> ChipTensor` (pypto's codegen still emits the pre-rename identifiers
+of its pinned runtime `3165cc89`; simpler renamed them on main per the role-based
+naming rule, with no compat alias). The intentional post-harvest edits are the
+`hc_head_linear` row-tail bound and the device-side initialization described
+above; regeneration must reapply both. `test_deepseek_v4_flash_decode.py`'s
 `_KERNELS` / `_ORCH_SIG` tables are transcribed from the harvest's
 `kernel_config.py`, and `_ARG_STEPS` / the comm-domain layout from its
 generated `host_orch.py` (per-rank stacked slices become the `_r0`/`_r1` host
