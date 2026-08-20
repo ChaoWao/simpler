@@ -13,24 +13,37 @@ device can execute what the host built. It is deliberately not a numerics test.
 ## What differs from the TMR case
 
 `kernels/orchestration/decode_fwd_graph.cpp` — the file the test points at — is
-the TMR orchestration with one runtime-specific rewrite, additionally recasting
-the 20-iteration decoder layer loop (40 of the 43 layers) as one
-`rt_submit_graph` per iteration: the
+the TMR orchestration recast as a Graph, with **no runtime-specific rewrite left**:
+the 20-iteration decoder layer loop (40 of the 43 layers) becomes one
+`rt_submit_graph` per iteration, so the
 layer's task set becomes the Graph body (a free function reading its per-layer
 views, scales and indices through `GraphTaskArgs`, positionally), and the host
 records a 744-node Definition once instead of submitting the loop's ~15600
 tasks individually. The runtime is untouched.
 
-| Edit | Sites | Why |
-| ---- | ----- | --- |
-| `get_tensor_data(recv_count_out, …)` → `HBG_RECV_ROWS_PER_EXPERT` | 10 | HBG builds the whole graph before the device runs anything, so a read of a **task-produced** tensor has no value to return. The constant holds the per-expert tile loops at their real trip count (`ceil(16/16) == 1`, which is what the `h_i8 [512, 2048]` layout budgets per expert). |
+The read that used to force a rewrite was `recv_count_out[expert][0]`, driving
+the ten MoE per-expert tile loops. HBG builds the whole graph before the device
+runs anything, so a read of a **task-produced** tensor has no value to return
+here, and the ten sites stood a constant in. Both runtimes now express that
+control flow as **dispatch predicates** instead: a static per-expert tile
+grid, with each of a tile's six tasks predicated on
+`recv_count_out[expert][0] > t0`. The scheduler evaluates it at the dispatch
+point, on device, where the value is current — so the same source is correct
+under both runtimes and the HBG copy no longer encodes a routing the fixture
+does not have. The one value the loops computed from the count,
+`valid_rows = min(count - t0, 16)`, moves into the `exp_gate_up_act*` kernels
+the same way the scale reads did: the orchestration passes `recv_count_out` as
+an extra tensor input and each kernel derives the row count from GM in
+`kernel_entry`.
 
-The only other `get_tensor_data` read left is `ext_num_tokens_per_owner`: its
-value feeds tile counts and launch block numbers — orchestration control flow
-that must run where the graph is built. The 30 former `hc_attn_scale_*` /
-`hc_ffn_scale_*` reads moved data, not control flow, and are gone from both
-runtimes: each `split_pre_post*` / `comb_sinkhorn*` kernel now takes the scale
-view as an extra tensor input and reads its elements from GM itself.
+The only `get_tensor_data` read left is `ext_num_tokens_per_owner`. It is an
+**external** tensor, which the runtime stages with a host view, and it feeds
+`set_block_num` — a launch parameter a predicate cannot express, because a
+predicate decides whether a task dispatches, not how wide it is. The 30 former
+`hc_attn_scale_*` / `hc_ffn_scale_*` reads moved data, not control flow, and are
+gone from both runtimes: each `split_pre_post*` / `comb_sinkhorn*` kernel now
+takes the scale view as an extra tensor input and reads its elements from GM
+itself.
 
 The six former orchestration-side initializations are now identical under both
 runtimes. Each `sh_gate_up_act_q*` producer clears its own two padded
@@ -38,17 +51,19 @@ runtimes. Each `sh_gate_up_act_q*` producer clears its own two padded
 split-K `hc_head_linear` AtomicAdds. The host therefore never writes a GM-heap
 device address.
 
-Everything else — submit order, dependencies, scope nesting, and the
-orchestration-side `valid_rows = min(n_rows - t0, 16)` — is byte-identical to
-the TMR source inside the Graph body. The graph keeps the size and shape of the
-real one (the 15971 device-side tasks; 1131 host-submitted with the Graph
-collapse) but not the fixture's routing, hence `skip_golden`.
+Everything else — submit order, dependencies, scope nesting — is
+byte-identical to the TMR source inside the Graph body. The graph keeps the
+size and shape of the real one.
+
+`skip_golden` is inherited from the TMR case, which is itself a
+completion/smoke case: no full-network torch reference exists upstream either,
+and component-level goldens live with the standalone kernels in pypto-lib.
 
 ## Status: the host records the Definition; device replay is blocked in activation
 
 With the Graph form the host records the 744-node Definition and boots with
-**1131 tasks on host** (down from 15991 when every task is submitted
-individually) — this is measured, on both ranks. The device-side replay of a
+**1131 tasks on host**, an order of magnitude below submitting every task
+individually — this is measured, on both ranks. The device-side replay of a
 Definition that large is **not yet exercised**: an unskipped run fails in Graph
 activation (`sched_error_code=5 INVALID_ARGS` from the scheduler's graph
 queues), so the recorded bodies never replay.

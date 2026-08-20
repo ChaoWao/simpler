@@ -17,6 +17,17 @@
 
 #include "pto_orchestration_api.h"
 
+// Rows this orchestration budgets for each expert.
+//
+// The count an expert actually receives is `recv_count_out[expert][0]`, written
+// on the device by `dispatch_meta`. The budget is what the `h_i8 [512, 2048]`
+// layout reserves: 32 experts, 16 rows each, and a tile is 16 rows, so the
+// per-expert tile grid is one tile wide and fixed at build time. Each of a
+// tile's tasks carries a dispatch predicate on that element instead, so the
+// scheduler reads the count at the dispatch point and an expert whose count
+// does not reach the tile's first row has the tile's tasks retired inline.
+constexpr int32_t EXPERT_ROWS_BUDGET = 16;
+
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
@@ -2151,21 +2162,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 for (int64_t local_i_inline2779_inline9183 = 0; local_i_inline2779_inline9183 < 32;
                      local_i_inline2779_inline9183 += 1) {
                     int64_t flat_base_inline2774_inline9220 = (local_i_inline2779_inline9183 * 16);
-                    uint32_t indices_n_rows_inline2782_inline9442[2] = {
-                        static_cast<uint32_t>(local_i_inline2779_inline9183), 0
-                    };
-                    int32_t n_rows_inline2782_inline9442 =
-                        get_tensor_data<int32_t>(recv_count_out_inline9338, 2, indices_n_rows_inline2782_inline9442);
+                    int32_t n_rows_inline2782_inline9442 = EXPERT_ROWS_BUDGET;
                     int64_t n_tiles_inline2780_inline9415 =
                         ((static_cast<int64_t>(n_rows_inline2782_inline9442) + 15) / 16);
                     for (int64_t t_inline2778_inline9443 = 0; t_inline2778_inline9443 < n_tiles_inline2780_inline9415;
                          t_inline2778_inline9443 += 1) {
                         int64_t t0_inline2784_inline9444 = (t_inline2778_inline9443 * 16);
+                        CoreTaskPredicate expert_rows_pred;
+                        expert_rows_pred.operand.tensor = &recv_count_out_inline9338;
+                        expert_rows_pred.operand.ndims = 2;
+                        expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_i_inline2779_inline9183);
+                        expert_rows_pred.operand.indices[1] = 0;
+                        expert_rows_pred.op = PredicateOp::GT;
+                        expert_rows_pred.target = t0_inline2784_inline9444;
                         int64_t flat_t0_inline2786_inline9408 =
                             (flat_base_inline2774_inline9220 + t0_inline2784_inline9444);
-                        int64_t valid_rows_inline2759_inline9446 = std::min<int64_t>(
-                            (static_cast<int64_t>(n_rows_inline2782_inline9442) - t0_inline2784_inline9444), 16
-                        );
                         PTO2_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline9295_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline9295_ci(
@@ -2195,6 +2206,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t51.add_scalar(flat_t0_inline2786_inline9408);
                             params_t51.add_scalar(local_i_inline2779_inline9183);
                             params_t51.launch_spec.set_block_num(2);
+                            params_t51.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(53, params_t51);
 
                             // Spmd exp_up_mm_spmd: exp_up_mm
@@ -2205,6 +2217,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t52.add_scalar(flat_t0_inline2786_inline9408);
                             params_t52.add_scalar(local_i_inline2779_inline9183);
                             params_t52.launch_spec.set_block_num(2);
+                            params_t52.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(54, params_t52);
 
                             // Spmd exp_gate_up_act_spmd: exp_gate_up_act
@@ -2215,10 +2228,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t53.add_input(recv_scale_out_inline9172);
                             params_t53.add_input(routed_w1_scale_l0_inline654);
                             params_t53.add_input(routed_w3_scale_l0_inline562);
+                            params_t53.add_input(recv_count_out_inline9338);
                             params_t53.add_scalar(local_i_inline2779_inline9183);
                             params_t53.add_scalar(t0_inline2784_inline9444);
-                            params_t53.add_scalar(valid_rows_inline2759_inline9446);
                             params_t53.launch_spec.set_block_num(4);
+                            params_t53.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(55, params_t53);
                             uint32_t h_tile_i8_inline2806_inline9280_offsets[2] = {
                                 static_cast<uint32_t>(flat_t0_inline2786_inline9408), 0
@@ -2269,6 +2283,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t54.add_input(h_tile_fp32_inline2744_inline9423);
                             params_t54.add_inout(h_tile_scale_dq_inline2808_inline9161);
                             params_t54.add_output(h_tile_i8_inline2806_inline9280);
+                            params_t54.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(56, params_t54);
                         }
                     }
@@ -2277,12 +2292,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     for (int64_t local_e_inline2742_inline9382 = 0; local_e_inline2742_inline9382 < 32;
                          local_e_inline2742_inline9382 += 1) {
                         int64_t e_flat_base_inline2746_inline9260 = (local_e_inline2742_inline9382 * 16);
-                        uint32_t indices_e_rows_inline2760_inline9155[2] = {
-                            static_cast<uint32_t>(local_e_inline2742_inline9382), 0
-                        };
-                        int32_t e_rows_inline2760_inline9155 = get_tensor_data<int32_t>(
-                            recv_count_out_inline9338, 2, indices_e_rows_inline2760_inline9155
-                        );
+                        int32_t e_rows_inline2760_inline9155 = EXPERT_ROWS_BUDGET;
                         int64_t e_tiles_inline2741_inline9384 =
                             ((static_cast<int64_t>(e_rows_inline2760_inline9155) + 15) / 16);
                         for (int64_t tt_inline2776_inline9154 = 0;
@@ -2294,6 +2304,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             TaskOutputTensors alloc_27 = alloc_tensors(y_i32_inline2737_inline9279_ci);
                             const ChipTensor &y_i32_inline2737_inline9279 = alloc_27.get_ref(0);
                             int64_t tt0_inline2740_inline9153 = (tt_inline2776_inline9154 * 16);
+                            CoreTaskPredicate expert_rows_pred;
+                            expert_rows_pred.operand.tensor = &recv_count_out_inline9338;
+                            expert_rows_pred.operand.ndims = 2;
+                            expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_e_inline2742_inline9382);
+                            expert_rows_pred.operand.indices[1] = 0;
+                            expert_rows_pred.op = PredicateOp::GT;
+                            expert_rows_pred.target = tt0_inline2740_inline9153;
                             int64_t flat_tt0_inline2738_inline9350 =
                                 (e_flat_base_inline2746_inline9260 + tt0_inline2740_inline9153);
                             uint32_t h_tile_i8_inline2806_inline9280__ssa_v4_offsets[2] = {
@@ -2352,6 +2369,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t55.add_scalar(local_e_inline2742_inline9382);
                             params_t55.launch_spec.set_block_num(4);
                             params_t55.set_allow_early_resolve(true);
+                            params_t55.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_55_outs = rt_submit_aic_task(57, params_t55);
                             uint32_t recv_y_tile_inline2730_inline9150_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline9350), 0
@@ -2387,6 +2405,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t56.add_scalar(tt0_inline2740_inline9153);
                             params_t56.launch_spec.set_block_num(1);
                             params_t56.set_allow_early_resolve(true);
+                            params_t56.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_56_outs = rt_submit_aiv_task(58, params_t56);
                         }
                     }
@@ -3571,21 +3590,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 for (int64_t local_i_inline2779_inline9945 = 0; local_i_inline2779_inline9945 < 32;
                      local_i_inline2779_inline9945 += 1) {
                     int64_t flat_base_inline2774_inline9982 = (local_i_inline2779_inline9945 * 16);
-                    uint32_t indices_n_rows_inline2782_inline10204[2] = {
-                        static_cast<uint32_t>(local_i_inline2779_inline9945), 0
-                    };
-                    int32_t n_rows_inline2782_inline10204 =
-                        get_tensor_data<int32_t>(recv_count_out_inline10100, 2, indices_n_rows_inline2782_inline10204);
+                    int32_t n_rows_inline2782_inline10204 = EXPERT_ROWS_BUDGET;
                     int64_t n_tiles_inline2780_inline10177 =
                         ((static_cast<int64_t>(n_rows_inline2782_inline10204) + 15) / 16);
                     for (int64_t t_inline2778_inline10205 = 0;
                          t_inline2778_inline10205 < n_tiles_inline2780_inline10177; t_inline2778_inline10205 += 1) {
                         int64_t t0_inline2784_inline10206 = (t_inline2778_inline10205 * 16);
+                        CoreTaskPredicate expert_rows_pred;
+                        expert_rows_pred.operand.tensor = &recv_count_out_inline10100;
+                        expert_rows_pred.operand.ndims = 2;
+                        expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_i_inline2779_inline9945);
+                        expert_rows_pred.operand.indices[1] = 0;
+                        expert_rows_pred.op = PredicateOp::GT;
+                        expert_rows_pred.target = t0_inline2784_inline10206;
                         int64_t flat_t0_inline2786_inline10170 =
                             (flat_base_inline2774_inline9982 + t0_inline2784_inline10206);
-                        int64_t valid_rows_inline2759_inline10208 = std::min<int64_t>(
-                            (static_cast<int64_t>(n_rows_inline2782_inline10204) - t0_inline2784_inline10206), 16
-                        );
                         PTO2_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline10057_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline10057_ci(
@@ -3615,6 +3634,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t108.add_scalar(flat_t0_inline2786_inline10170);
                             params_t108.add_scalar(local_i_inline2779_inline9945);
                             params_t108.launch_spec.set_block_num(2);
+                            params_t108.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(112, params_t108);
 
                             // Spmd exp_up_mm_spmd_0: exp_up_mm_0
@@ -3625,6 +3645,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t109.add_scalar(flat_t0_inline2786_inline10170);
                             params_t109.add_scalar(local_i_inline2779_inline9945);
                             params_t109.launch_spec.set_block_num(2);
+                            params_t109.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(113, params_t109);
 
                             // Spmd exp_gate_up_act_spmd_0: exp_gate_up_act_0
@@ -3635,10 +3656,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t110.add_input(recv_scale_out_inline9934);
                             params_t110.add_input(routed_w1_scale_l1_inline668);
                             params_t110.add_input(routed_w3_scale_l1_inline689);
+                            params_t110.add_input(recv_count_out_inline10100);
                             params_t110.add_scalar(local_i_inline2779_inline9945);
                             params_t110.add_scalar(t0_inline2784_inline10206);
-                            params_t110.add_scalar(valid_rows_inline2759_inline10208);
                             params_t110.launch_spec.set_block_num(4);
+                            params_t110.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(114, params_t110);
                             uint32_t h_tile_i8_inline2806_inline10042_offsets[2] = {
                                 static_cast<uint32_t>(flat_t0_inline2786_inline10170), 0
@@ -3689,6 +3711,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t111.add_input(h_tile_fp32_inline2744_inline10185);
                             params_t111.add_inout(h_tile_scale_dq_inline2808_inline9923);
                             params_t111.add_output(h_tile_i8_inline2806_inline10042);
+                            params_t111.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(115, params_t111);
                         }
                     }
@@ -3697,12 +3720,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     for (int64_t local_e_inline2742_inline10144 = 0; local_e_inline2742_inline10144 < 32;
                          local_e_inline2742_inline10144 += 1) {
                         int64_t e_flat_base_inline2746_inline10022 = (local_e_inline2742_inline10144 * 16);
-                        uint32_t indices_e_rows_inline2760_inline9917[2] = {
-                            static_cast<uint32_t>(local_e_inline2742_inline10144), 0
-                        };
-                        int32_t e_rows_inline2760_inline9917 = get_tensor_data<int32_t>(
-                            recv_count_out_inline10100, 2, indices_e_rows_inline2760_inline9917
-                        );
+                        int32_t e_rows_inline2760_inline9917 = EXPERT_ROWS_BUDGET;
                         int64_t e_tiles_inline2741_inline10146 =
                             ((static_cast<int64_t>(e_rows_inline2760_inline9917) + 15) / 16);
                         for (int64_t tt_inline2776_inline9916 = 0;
@@ -3714,6 +3732,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             TaskOutputTensors alloc_54 = alloc_tensors(y_i32_inline2737_inline10041_ci);
                             const ChipTensor &y_i32_inline2737_inline10041 = alloc_54.get_ref(0);
                             int64_t tt0_inline2740_inline9915 = (tt_inline2776_inline9916 * 16);
+                            CoreTaskPredicate expert_rows_pred;
+                            expert_rows_pred.operand.tensor = &recv_count_out_inline10100;
+                            expert_rows_pred.operand.ndims = 2;
+                            expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_e_inline2742_inline10144);
+                            expert_rows_pred.operand.indices[1] = 0;
+                            expert_rows_pred.op = PredicateOp::GT;
+                            expert_rows_pred.target = tt0_inline2740_inline9915;
                             int64_t flat_tt0_inline2738_inline10112 =
                                 (e_flat_base_inline2746_inline10022 + tt0_inline2740_inline9915);
                             uint32_t h_tile_i8_inline2806_inline10042__ssa_v4_offsets[2] = {
@@ -3772,6 +3797,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t112.add_scalar(local_e_inline2742_inline10144);
                             params_t112.launch_spec.set_block_num(4);
                             params_t112.set_allow_early_resolve(true);
+                            params_t112.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_112_outs = rt_submit_aic_task(116, params_t112);
                             uint32_t recv_y_tile_inline2730_inline9912_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline10112), 0
@@ -3807,6 +3833,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t113.add_scalar(tt0_inline2740_inline9915);
                             params_t113.launch_spec.set_block_num(1);
                             params_t113.set_allow_early_resolve(true);
+                            params_t113.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_113_outs = rt_submit_aiv_task(117, params_t113);
                         }
                     }
@@ -6186,22 +6213,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     for (int64_t local_i_inline2779_inline10990 = 0; local_i_inline2779_inline10990 < 32;
                          local_i_inline2779_inline10990 += 1) {
                         int64_t flat_base_inline2774_inline11027 = (local_i_inline2779_inline10990 * 16);
-                        uint32_t indices_n_rows_inline2782_inline11249[2] = {
-                            static_cast<uint32_t>(local_i_inline2779_inline10990), 0
-                        };
-                        int32_t n_rows_inline2782_inline11249 = get_tensor_data<int32_t>(
-                            recv_count_out_inline11145, 2, indices_n_rows_inline2782_inline11249
-                        );
+                        int32_t n_rows_inline2782_inline11249 = EXPERT_ROWS_BUDGET;
                         int64_t n_tiles_inline2780_inline11222 =
                             ((static_cast<int64_t>(n_rows_inline2782_inline11249) + 15) / 16);
                         for (int64_t t_inline2778_inline11250 = 0;
                              t_inline2778_inline11250 < n_tiles_inline2780_inline11222; t_inline2778_inline11250 += 1) {
                             int64_t t0_inline2784_inline11251 = (t_inline2778_inline11250 * 16);
+                            CoreTaskPredicate expert_rows_pred;
+                            expert_rows_pred.operand.tensor = &recv_count_out_inline11145;
+                            expert_rows_pred.operand.ndims = 2;
+                            expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_i_inline2779_inline10990);
+                            expert_rows_pred.operand.indices[1] = 0;
+                            expert_rows_pred.op = PredicateOp::GT;
+                            expert_rows_pred.target = t0_inline2784_inline11251;
                             int64_t flat_t0_inline2786_inline11215 =
                                 (flat_base_inline2774_inline11027 + t0_inline2784_inline11251);
-                            int64_t valid_rows_inline2759_inline11253 = std::min<int64_t>(
-                                (static_cast<int64_t>(n_rows_inline2782_inline11249) - t0_inline2784_inline11251), 16
-                            );
                             PTO2_SCOPE() {
                                 uint32_t gate_tile_i32_inline2749_inline11102_ci_shapes[2] = {16, 2048};
                                 TensorCreateInfo gate_tile_i32_inline2749_inline11102_ci(
@@ -6231,6 +6257,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t188.add_scalar(flat_t0_inline2786_inline11215);
                                 params_t188.add_scalar(local_i_inline2779_inline10990);
                                 params_t188.launch_spec.set_block_num(2);
+                                params_t188.set_predicate(expert_rows_pred);
                                 rt_submit_aic_task(195, params_t188);
 
                                 // Spmd exp_up_mm_spmd_1: exp_up_mm_1
@@ -6241,6 +6268,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t189.add_scalar(flat_t0_inline2786_inline11215);
                                 params_t189.add_scalar(local_i_inline2779_inline10990);
                                 params_t189.launch_spec.set_block_num(2);
+                                params_t189.set_predicate(expert_rows_pred);
                                 rt_submit_aic_task(196, params_t189);
 
                                 // Spmd exp_gate_up_act_spmd_1: exp_gate_up_act_1
@@ -6251,10 +6279,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t190.add_input(recv_scale_out_inline10979);
                                 params_t190.add_input(routed_w1_scale_csa_inline535);
                                 params_t190.add_input(routed_w3_scale_csa_inline713);
+                                params_t190.add_input(recv_count_out_inline11145);
                                 params_t190.add_scalar(local_i_inline2779_inline10990);
                                 params_t190.add_scalar(t0_inline2784_inline11251);
-                                params_t190.add_scalar(valid_rows_inline2759_inline11253);
                                 params_t190.launch_spec.set_block_num(4);
+                                params_t190.set_predicate(expert_rows_pred);
                                 rt_submit_aiv_task(197, params_t190);
                                 uint32_t h_tile_i8_inline2806_inline11087_offsets[2] = {
                                     static_cast<uint32_t>(flat_t0_inline2786_inline11215), 0
@@ -6308,6 +6337,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t191.add_input(h_tile_fp32_inline2744_inline11230);
                                 params_t191.add_inout(h_tile_scale_dq_inline2808_inline10968);
                                 params_t191.add_inout(h_tile_i8_inline2806_inline11087);
+                                params_t191.set_predicate(expert_rows_pred);
                                 rt_submit_aiv_task(198, params_t191);
                             }
                         }
@@ -6316,12 +6346,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         for (int64_t local_e_inline2742_inline11189 = 0; local_e_inline2742_inline11189 < 32;
                              local_e_inline2742_inline11189 += 1) {
                             int64_t e_flat_base_inline2746_inline11067 = (local_e_inline2742_inline11189 * 16);
-                            uint32_t indices_e_rows_inline2760_inline10962[2] = {
-                                static_cast<uint32_t>(local_e_inline2742_inline11189), 0
-                            };
-                            int32_t e_rows_inline2760_inline10962 = get_tensor_data<int32_t>(
-                                recv_count_out_inline11145, 2, indices_e_rows_inline2760_inline10962
-                            );
+                            int32_t e_rows_inline2760_inline10962 = EXPERT_ROWS_BUDGET;
                             int64_t e_tiles_inline2741_inline11191 =
                                 ((static_cast<int64_t>(e_rows_inline2760_inline10962) + 15) / 16);
                             for (int64_t tt_inline2776_inline10961 = 0;
@@ -6334,6 +6359,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 TaskOutputTensors alloc_84 = alloc_tensors(y_i32_inline2737_inline11086_ci);
                                 const ChipTensor &y_i32_inline2737_inline11086 = alloc_84.get_ref(0);
                                 int64_t tt0_inline2740_inline10960 = (tt_inline2776_inline10961 * 16);
+                                CoreTaskPredicate expert_rows_pred;
+                                expert_rows_pred.operand.tensor = &recv_count_out_inline11145;
+                                expert_rows_pred.operand.ndims = 2;
+                                expert_rows_pred.operand.indices[0] =
+                                    static_cast<uint32_t>(local_e_inline2742_inline11189);
+                                expert_rows_pred.operand.indices[1] = 0;
+                                expert_rows_pred.op = PredicateOp::GT;
+                                expert_rows_pred.target = tt0_inline2740_inline10960;
                                 int64_t flat_tt0_inline2738_inline11157 =
                                     (e_flat_base_inline2746_inline11067 + tt0_inline2740_inline10960);
                                 uint32_t h_tile_i8_inline2806_inline11087__ssa_v4_offsets[2] = {
@@ -6392,6 +6425,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t192.add_scalar(local_e_inline2742_inline11189);
                                 params_t192.launch_spec.set_block_num(4);
                                 params_t192.set_allow_early_resolve(true);
+                                params_t192.set_predicate(expert_rows_pred);
                                 TaskOutputTensors task_192_outs = rt_submit_aic_task(199, params_t192);
                                 uint32_t recv_y_tile_inline2730_inline10957_offsets[2] = {
                                     static_cast<uint32_t>(flat_tt0_inline2738_inline11157), 0
@@ -6428,6 +6462,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t193.add_scalar(tt0_inline2740_inline10960);
                                 params_t193.launch_spec.set_block_num(1);
                                 params_t193.set_allow_early_resolve(true);
+                                params_t193.set_predicate(expert_rows_pred);
                                 TaskOutputTensors task_193_outs = rt_submit_aiv_task(200, params_t193);
                             }
                         }
@@ -8306,22 +8341,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     for (int64_t local_i_inline2779_inline11869 = 0; local_i_inline2779_inline11869 < 32;
                          local_i_inline2779_inline11869 += 1) {
                         int64_t flat_base_inline2774_inline11906 = (local_i_inline2779_inline11869 * 16);
-                        uint32_t indices_n_rows_inline2782_inline12128[2] = {
-                            static_cast<uint32_t>(local_i_inline2779_inline11869), 0
-                        };
-                        int32_t n_rows_inline2782_inline12128 = get_tensor_data<int32_t>(
-                            recv_count_out_inline12024, 2, indices_n_rows_inline2782_inline12128
-                        );
+                        int32_t n_rows_inline2782_inline12128 = EXPERT_ROWS_BUDGET;
                         int64_t n_tiles_inline2780_inline12101 =
                             ((static_cast<int64_t>(n_rows_inline2782_inline12128) + 15) / 16);
                         for (int64_t t_inline2778_inline12129 = 0;
                              t_inline2778_inline12129 < n_tiles_inline2780_inline12101; t_inline2778_inline12129 += 1) {
                             int64_t t0_inline2784_inline12130 = (t_inline2778_inline12129 * 16);
+                            CoreTaskPredicate expert_rows_pred;
+                            expert_rows_pred.operand.tensor = &recv_count_out_inline12024;
+                            expert_rows_pred.operand.ndims = 2;
+                            expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_i_inline2779_inline11869);
+                            expert_rows_pred.operand.indices[1] = 0;
+                            expert_rows_pred.op = PredicateOp::GT;
+                            expert_rows_pred.target = t0_inline2784_inline12130;
                             int64_t flat_t0_inline2786_inline12094 =
                                 (flat_base_inline2774_inline11906 + t0_inline2784_inline12130);
-                            int64_t valid_rows_inline2759_inline12132 = std::min<int64_t>(
-                                (static_cast<int64_t>(n_rows_inline2782_inline12128) - t0_inline2784_inline12130), 16
-                            );
                             PTO2_SCOPE() {
                                 uint32_t gate_tile_i32_inline2749_inline11981_ci_shapes[2] = {16, 2048};
                                 TensorCreateInfo gate_tile_i32_inline2749_inline11981_ci(
@@ -8351,6 +8385,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t252.add_scalar(flat_t0_inline2786_inline12094);
                                 params_t252.add_scalar(local_i_inline2779_inline11869);
                                 params_t252.launch_spec.set_block_num(2);
+                                params_t252.set_predicate(expert_rows_pred);
                                 rt_submit_aic_task(261, params_t252);
 
                                 // Spmd exp_up_mm_spmd_2: exp_up_mm_2
@@ -8361,6 +8396,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t253.add_scalar(flat_t0_inline2786_inline12094);
                                 params_t253.add_scalar(local_i_inline2779_inline11869);
                                 params_t253.launch_spec.set_block_num(2);
+                                params_t253.set_predicate(expert_rows_pred);
                                 rt_submit_aic_task(262, params_t253);
 
                                 // Spmd exp_gate_up_act_spmd_2: exp_gate_up_act_2
@@ -8371,10 +8407,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t254.add_input(recv_scale_out_inline11858);
                                 params_t254.add_input(routed_w1_scale_hca_inline687);
                                 params_t254.add_input(routed_w3_scale_hca_inline513);
+                                params_t254.add_input(recv_count_out_inline12024);
                                 params_t254.add_scalar(local_i_inline2779_inline11869);
                                 params_t254.add_scalar(t0_inline2784_inline12130);
-                                params_t254.add_scalar(valid_rows_inline2759_inline12132);
                                 params_t254.launch_spec.set_block_num(4);
+                                params_t254.set_predicate(expert_rows_pred);
                                 rt_submit_aiv_task(263, params_t254);
                                 uint32_t h_tile_i8_inline2806_inline11966_offsets[2] = {
                                     static_cast<uint32_t>(flat_t0_inline2786_inline12094), 0
@@ -8428,6 +8465,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t255.add_input(h_tile_fp32_inline2744_inline12109);
                                 params_t255.add_inout(h_tile_scale_dq_inline2808_inline11847);
                                 params_t255.add_inout(h_tile_i8_inline2806_inline11966);
+                                params_t255.set_predicate(expert_rows_pred);
                                 rt_submit_aiv_task(264, params_t255);
                             }
                         }
@@ -8436,12 +8474,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         for (int64_t local_e_inline2742_inline12068 = 0; local_e_inline2742_inline12068 < 32;
                              local_e_inline2742_inline12068 += 1) {
                             int64_t e_flat_base_inline2746_inline11946 = (local_e_inline2742_inline12068 * 16);
-                            uint32_t indices_e_rows_inline2760_inline11841[2] = {
-                                static_cast<uint32_t>(local_e_inline2742_inline12068), 0
-                            };
-                            int32_t e_rows_inline2760_inline11841 = get_tensor_data<int32_t>(
-                                recv_count_out_inline12024, 2, indices_e_rows_inline2760_inline11841
-                            );
+                            int32_t e_rows_inline2760_inline11841 = EXPERT_ROWS_BUDGET;
                             int64_t e_tiles_inline2741_inline12070 =
                                 ((static_cast<int64_t>(e_rows_inline2760_inline11841) + 15) / 16);
                             for (int64_t tt_inline2776_inline11840 = 0;
@@ -8454,6 +8487,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 TaskOutputTensors alloc_112 = alloc_tensors(y_i32_inline2737_inline11965_ci);
                                 const ChipTensor &y_i32_inline2737_inline11965 = alloc_112.get_ref(0);
                                 int64_t tt0_inline2740_inline11839 = (tt_inline2776_inline11840 * 16);
+                                CoreTaskPredicate expert_rows_pred;
+                                expert_rows_pred.operand.tensor = &recv_count_out_inline12024;
+                                expert_rows_pred.operand.ndims = 2;
+                                expert_rows_pred.operand.indices[0] =
+                                    static_cast<uint32_t>(local_e_inline2742_inline12068);
+                                expert_rows_pred.operand.indices[1] = 0;
+                                expert_rows_pred.op = PredicateOp::GT;
+                                expert_rows_pred.target = tt0_inline2740_inline11839;
                                 int64_t flat_tt0_inline2738_inline12036 =
                                     (e_flat_base_inline2746_inline11946 + tt0_inline2740_inline11839);
                                 uint32_t h_tile_i8_inline2806_inline11966__ssa_v4_offsets[2] = {
@@ -8512,6 +8553,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t256.add_scalar(local_e_inline2742_inline12068);
                                 params_t256.launch_spec.set_block_num(4);
                                 params_t256.set_allow_early_resolve(true);
+                                params_t256.set_predicate(expert_rows_pred);
                                 TaskOutputTensors task_256_outs = rt_submit_aic_task(265, params_t256);
                                 uint32_t recv_y_tile_inline2730_inline11836_offsets[2] = {
                                     static_cast<uint32_t>(flat_tt0_inline2738_inline12036), 0
@@ -8548,6 +8590,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                                 params_t257.add_scalar(tt0_inline2740_inline11839);
                                 params_t257.launch_spec.set_block_num(1);
                                 params_t257.set_allow_early_resolve(true);
+                                params_t257.set_predicate(expert_rows_pred);
                                 TaskOutputTensors task_257_outs = rt_submit_aiv_task(266, params_t257);
                             }
                         }
@@ -10861,21 +10904,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 for (int64_t local_i_inline2779_inline12914 = 0; local_i_inline2779_inline12914 < 32;
                      local_i_inline2779_inline12914 += 1) {
                     int64_t flat_base_inline2774_inline12951 = (local_i_inline2779_inline12914 * 16);
-                    uint32_t indices_n_rows_inline2782_inline13173[2] = {
-                        static_cast<uint32_t>(local_i_inline2779_inline12914), 0
-                    };
-                    int32_t n_rows_inline2782_inline13173 =
-                        get_tensor_data<int32_t>(recv_count_out_inline13069, 2, indices_n_rows_inline2782_inline13173);
+                    int32_t n_rows_inline2782_inline13173 = EXPERT_ROWS_BUDGET;
                     int64_t n_tiles_inline2780_inline13146 =
                         ((static_cast<int64_t>(n_rows_inline2782_inline13173) + 15) / 16);
                     for (int64_t t_inline2778_inline13174 = 0;
                          t_inline2778_inline13174 < n_tiles_inline2780_inline13146; t_inline2778_inline13174 += 1) {
                         int64_t t0_inline2784_inline13175 = (t_inline2778_inline13174 * 16);
+                        CoreTaskPredicate expert_rows_pred;
+                        expert_rows_pred.operand.tensor = &recv_count_out_inline13069;
+                        expert_rows_pred.operand.ndims = 2;
+                        expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_i_inline2779_inline12914);
+                        expert_rows_pred.operand.indices[1] = 0;
+                        expert_rows_pred.op = PredicateOp::GT;
+                        expert_rows_pred.target = t0_inline2784_inline13175;
                         int64_t flat_t0_inline2786_inline13139 =
                             (flat_base_inline2774_inline12951 + t0_inline2784_inline13175);
-                        int64_t valid_rows_inline2759_inline13177 = std::min<int64_t>(
-                            (static_cast<int64_t>(n_rows_inline2782_inline13173) - t0_inline2784_inline13175), 16
-                        );
                         PTO2_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline13026_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline13026_ci(
@@ -10905,6 +10948,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t331.add_scalar(flat_t0_inline2786_inline13139);
                             params_t331.add_scalar(local_i_inline2779_inline12914);
                             params_t331.launch_spec.set_block_num(2);
+                            params_t331.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(343, params_t331);
 
                             // Spmd exp_up_mm_spmd_3: exp_up_mm_3
@@ -10915,6 +10959,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t332.add_scalar(flat_t0_inline2786_inline13139);
                             params_t332.add_scalar(local_i_inline2779_inline12914);
                             params_t332.launch_spec.set_block_num(2);
+                            params_t332.set_predicate(expert_rows_pred);
                             rt_submit_aic_task(344, params_t332);
 
                             // Spmd exp_gate_up_act_spmd_3: exp_gate_up_act_3
@@ -10925,10 +10970,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t333.add_input(recv_scale_out_inline12903);
                             params_t333.add_input(routed_w1_scale_last_inline490);
                             params_t333.add_input(routed_w3_scale_last_inline673);
+                            params_t333.add_input(recv_count_out_inline13069);
                             params_t333.add_scalar(local_i_inline2779_inline12914);
                             params_t333.add_scalar(t0_inline2784_inline13175);
-                            params_t333.add_scalar(valid_rows_inline2759_inline13177);
                             params_t333.launch_spec.set_block_num(4);
+                            params_t333.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(345, params_t333);
                             uint32_t h_tile_i8_inline2806_inline13011_offsets[2] = {
                                 static_cast<uint32_t>(flat_t0_inline2786_inline13139), 0
@@ -10979,6 +11025,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t334.add_input(h_tile_fp32_inline2744_inline13154);
                             params_t334.add_inout(h_tile_scale_dq_inline2808_inline12892);
                             params_t334.add_output(h_tile_i8_inline2806_inline13011);
+                            params_t334.set_predicate(expert_rows_pred);
                             rt_submit_aiv_task(346, params_t334);
                         }
                     }
@@ -10987,12 +11034,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     for (int64_t local_e_inline2742_inline13113 = 0; local_e_inline2742_inline13113 < 32;
                          local_e_inline2742_inline13113 += 1) {
                         int64_t e_flat_base_inline2746_inline12991 = (local_e_inline2742_inline13113 * 16);
-                        uint32_t indices_e_rows_inline2760_inline12886[2] = {
-                            static_cast<uint32_t>(local_e_inline2742_inline13113), 0
-                        };
-                        int32_t e_rows_inline2760_inline12886 = get_tensor_data<int32_t>(
-                            recv_count_out_inline13069, 2, indices_e_rows_inline2760_inline12886
-                        );
+                        int32_t e_rows_inline2760_inline12886 = EXPERT_ROWS_BUDGET;
                         int64_t e_tiles_inline2741_inline13115 =
                             ((static_cast<int64_t>(e_rows_inline2760_inline12886) + 15) / 16);
                         for (int64_t tt_inline2776_inline12885 = 0;
@@ -11005,6 +11047,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             TaskOutputTensors alloc_141 = alloc_tensors(y_i32_inline2737_inline13010_ci);
                             const ChipTensor &y_i32_inline2737_inline13010 = alloc_141.get_ref(0);
                             int64_t tt0_inline2740_inline12884 = (tt_inline2776_inline12885 * 16);
+                            CoreTaskPredicate expert_rows_pred;
+                            expert_rows_pred.operand.tensor = &recv_count_out_inline13069;
+                            expert_rows_pred.operand.ndims = 2;
+                            expert_rows_pred.operand.indices[0] = static_cast<uint32_t>(local_e_inline2742_inline13113);
+                            expert_rows_pred.operand.indices[1] = 0;
+                            expert_rows_pred.op = PredicateOp::GT;
+                            expert_rows_pred.target = tt0_inline2740_inline12884;
                             int64_t flat_tt0_inline2738_inline13081 =
                                 (e_flat_base_inline2746_inline12991 + tt0_inline2740_inline12884);
                             uint32_t h_tile_i8_inline2806_inline13011__ssa_v4_offsets[2] = {
@@ -11063,6 +11112,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t335.add_scalar(local_e_inline2742_inline13113);
                             params_t335.launch_spec.set_block_num(4);
                             params_t335.set_allow_early_resolve(true);
+                            params_t335.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_335_outs = rt_submit_aic_task(347, params_t335);
                             uint32_t recv_y_tile_inline2730_inline12881_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline13081), 0
@@ -11098,6 +11148,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t336.add_scalar(tt0_inline2740_inline12884);
                             params_t336.launch_spec.set_block_num(1);
                             params_t336.set_allow_early_resolve(true);
+                            params_t336.set_predicate(expert_rows_pred);
                             TaskOutputTensors task_336_outs = rt_submit_aiv_task(348, params_t336);
                         }
                     }

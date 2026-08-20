@@ -52,9 +52,34 @@ The 30 orchestration-side `get_tensor_data` reads of `hc_attn_scale_*` /
 values went straight into task scalars for the `split_pre_post*` /
 `comb_sinkhorn*` kernels. Each of those kernels now takes the scale view as an
 extra tensor input and reads scale0/scale1 (`split_pre_post*`) or scale2
-(`comb_sinkhorn*`) from GM itself. The remaining reads — `recv_count_out` and
-`ext_num_tokens_per_owner` — feed loop trip counts and launch block numbers,
-i.e. orchestration control flow, and stay on the orchestrator.
+(`comb_sinkhorn*`) from GM itself.
+
+The ten `recv_count_out` reads that drove the MoE per-expert tile loops are gone
+too. `recv_count_out[expert][0]` is written on the device by `dispatch_meta`, so
+reading it in orchestration stalls the orchestrator on a producer wait. The count
+now steers the loops from the device side, split by role:
+
+- **Trip count → dispatch predicate.** The tile grid is static — the
+  `h_i8 [512, 2048]` layout budgets 16 rows per expert and a tile is 16 rows, so
+  one tile per expert — and each of a tile's six tasks carries a **dispatch
+  predicate** on that element (`recv_count_out[expert][0] > t0`). The scheduler
+  evaluates it at the dispatch point, where the task is already ready and the
+  count is therefore current: an expert whose count does not reach the tile's
+  first row has the tile's tasks retired inline, never dispatched to a core.
+  The predicate declares no dependency of its own, and needs none here — every
+  task in the tile consumes a `dispatch_gather` output, and `dispatch_gather`
+  depends on `dispatch_meta`.
+- **`valid_rows` → kernel-side read.** The one value the loops computed from the
+  count, `valid_rows = min(count - t0, 16)`, is a task arg of `exp_gate_up_act*`.
+  The orchestration passes `recv_count_out` as an extra tensor input instead
+  (taking the former first-scalar slot, as the scale views did), and each of the
+  five kernels derives the row count from GM in `kernel_entry`, after a
+  single-line `dcci` on the element.
+
+`ext_num_tokens_per_owner` is the one read left. It is an **external** tensor, so
+it has a value before the network runs, and it feeds `set_block_num` — a launch
+parameter a predicate cannot express, because a predicate decides whether a task
+dispatches, not how wide it is.
 
 ## Status: blocked on the #1644 pto-isa pin bump
 
@@ -63,9 +88,11 @@ commit whose scene-test plumbing can host it) through #1771 — all of which pin
 pto-isa `83d01313`, the commit these kernels were generated against. From
 `7a1b9b11` ("CI: bump pinned pto-isa for PTOAS v0.55", pto-isa -> `0cefc9a5`)
 onward, including current main, both ranks stall mid-network: two kernels spin
-forever on comm-window arrival counters, the AICPU orchestrator times out
-reading `recv_count_out` (`TENSOR_WAIT_TIMEOUT`, "producer not completed"), and
-the scheduler exits `S1:running-stalled`. The stall layer moves with fixture
+forever on comm-window arrival counters and the scheduler exits
+`S1:running-stalled`. (The orchestrator's own `TENSOR_WAIT_TIMEOUT` on
+`recv_count_out` was a consequence of that stall — the read waited on a producer
+the stalled network never ran — and can no longer occur now that the count is
+read by the scheduler at the dispatch point.) The stall layer moves with fixture
 content (a timing-dependent miss, not a fixed logic error), and the identical
 program + content passes under pypto's own runner against pto-isa `83d01313`
 even with every weight streamed as a host tensor. Bisect evidence: PASS at

@@ -111,7 +111,7 @@ _KERNELS = [
     (52, "dispatch_gather", "aiv", "oiiiooio"),
     (53, "exp_gate_mm", "aic", "oii"),
     (54, "exp_up_mm", "aic", "oii"),
-    (55, "exp_gate_up_act", "aiv", "oiiiii"),
+    (55, "exp_gate_up_act", "aiv", "oiiiiii"),
     (56, "exp_h_q", "aiv", "ixo"),
     (57, "exp_w2_mm", "aic", "oii"),
     (58, "exp_w2_act", "aiv", "iioii"),
@@ -170,7 +170,7 @@ _KERNELS = [
     (111, "dispatch_gather_0", "aiv", "oiiiooio"),
     (112, "exp_gate_mm_0", "aic", "oii"),
     (113, "exp_up_mm_0", "aic", "oii"),
-    (114, "exp_gate_up_act_0", "aiv", "oiiiii"),
+    (114, "exp_gate_up_act_0", "aiv", "oiiiiii"),
     (115, "exp_h_q_0", "aiv", "ixo"),
     (116, "exp_w2_mm_0", "aic", "oii"),
     (117, "exp_w2_act_0", "aiv", "iioii"),
@@ -253,7 +253,7 @@ _KERNELS = [
     (194, "dispatch_gather_1", "aiv", "xiiixxix"),
     (195, "exp_gate_mm_1", "aic", "xii"),
     (196, "exp_up_mm_1", "aic", "xii"),
-    (197, "exp_gate_up_act_1", "aiv", "xiiiii"),
+    (197, "exp_gate_up_act_1", "aiv", "xiiiiii"),
     (198, "exp_h_q_1", "aiv", "ixx"),
     (199, "exp_w2_mm_1", "aic", "xii"),
     (200, "exp_w2_act_1", "aiv", "iixii"),
@@ -319,7 +319,7 @@ _KERNELS = [
     (260, "dispatch_gather_2", "aiv", "xiiixxix"),
     (261, "exp_gate_mm_2", "aic", "xii"),
     (262, "exp_up_mm_2", "aic", "xii"),
-    (263, "exp_gate_up_act_2", "aiv", "xiiiii"),
+    (263, "exp_gate_up_act_2", "aiv", "xiiiiii"),
     (264, "exp_h_q_2", "aiv", "ixx"),
     (265, "exp_w2_mm_2", "aic", "xii"),
     (266, "exp_w2_act_2", "aiv", "iixii"),
@@ -401,7 +401,7 @@ _KERNELS = [
     (342, "dispatch_gather_3", "aiv", "oiiiooio"),
     (343, "exp_gate_mm_3", "aic", "oii"),
     (344, "exp_up_mm_3", "aic", "oii"),
-    (345, "exp_gate_up_act_3", "aiv", "oiiiii"),
+    (345, "exp_gate_up_act_3", "aiv", "oiiiiii"),
     (346, "exp_h_q_3", "aiv", "ixo"),
     (347, "exp_w2_mm_3", "aic", "oii"),
     (348, "exp_w2_act_3", "aiv", "iioii"),
@@ -614,11 +614,15 @@ class TestDeepseekV4FlashDecode(SceneTestCase):
             "config": {
                 "device_count": N_RANKS,
                 "num_sub_workers": 0,
-                # Ring sizing for the 43-layer graph, matching pypto-lib's daily
-                # CI env for this network (PTO2_RING_* 16384 / 16384 / 1 GiB).
+                # Ring sizing for the 43-layer graph. The task window and dep
+                # pool match pypto-lib's daily CI env for this network
+                # (PTO2_RING_* 16384 / 16384). The heap is twice that env's
+                # 1 GiB: the MoE per-expert tile grid is static, so tile scratch
+                # is allocated for all 32 experts of every MoE layer whatever the
+                # routing turns out to be.
                 "runtime_env": {
                     "ring_task_window": 16384,
-                    "ring_heap": 1 << 30,
+                    "ring_heap": 2 << 30,
                     "ring_dep_pool": 16384,
                 },
             },
