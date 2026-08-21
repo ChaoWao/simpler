@@ -2222,7 +2222,7 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
     if (state == nullptr || entry == nullptr) return;
     {
-        std::lock_guard<std::mutex> lock(state->recording_mutex);
+        std::scoped_lock lock(state->recording_mutex);
         entry->recording.reset();
         entry->set_status(GraphRecordingStatus::FAILED);
     }
@@ -2259,7 +2259,7 @@ bool PTO2OrchestratorState::graph_end() {
     );
     bool ready = false;
     {
-        std::lock_guard<std::mutex> lock(state->recording_mutex);
+        std::scoped_lock lock(state->recording_mutex);
         if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
             entry->set_status(GraphRecordingStatus::FAILED);
         } else {
