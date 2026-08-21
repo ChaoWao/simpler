@@ -44,6 +44,7 @@
 // need it include it via runtime.h directly.
 #include "aicore_completion_mailbox.h"
 #include "common/args_dump_task_metadata.h"
+#include "host_build_graph/self_relative_ptr.h"
 #include "pto_submit_types.h"
 #include "pto_task_id.h"
 #include "pto_types.h"
@@ -458,75 +459,6 @@ static_assert(
     sizeof(PTO2TaskPayload) == 640 + MAX_SCALAR_ARGS * sizeof(uint64_t) + MAX_TENSOR_ARGS * sizeof(ChipTensor),
     "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + scalars + tensors"
 );
-
-/**
- * A pointer to a sibling in the same contiguous block, stored as a byte delta
- * from the field's own address.
- *
- * The block is `memcpy`'d to the device as one image, so a delta between two
- * addresses inside it is invariant under the move while a raw pointer is not.
- * Both users below satisfy that precondition: a ring task's payload and
- * descriptor live in the same shared-memory image as its slot state, and a Graph
- * node's live in the same GraphNodeStorage.
- *
- * A zero delta means unbound — a field can never coincide with its own target.
- * Zeroed memory therefore reads as null, which is what the slot's pristine state
- * is.
- *
- * int32_t bounds the distance at 2 GiB. Both blocks are far below it — a
- * GraphNodeStorage is a fixed struct, and the shared-memory image's end is
- * rejected above the bound in attach_populated — and set() leaves the field
- * unbound rather than storing a truncated delta, so an out-of-range target
- * reads back as null instead of as unrelated memory.
- */
-namespace simpler::hbg {
-
-template <typename T>
-class SelfRelativePtr {
-public:
-    SelfRelativePtr() = default;
-
-    // The stored value means something only relative to where it is stored, so
-    // copying it from another field would silently retarget it. Every write goes
-    // through set(), which takes the destination's own address into account. A
-    // whole-block memcpy is unaffected: it moves the field and its target
-    // together, which is the case this representation exists for.
-    SelfRelativePtr(const SelfRelativePtr &) = delete;
-    SelfRelativePtr &operator=(const SelfRelativePtr &) = delete;
-
-    T *get() const {
-        if (delta_ == 0) return nullptr;
-        return reinterpret_cast<T *>(reinterpret_cast<uintptr_t>(this) + static_cast<intptr_t>(delta_));
-    }
-
-    void set(T *target) {
-        if (target == nullptr) {
-            delta_ = 0;
-            return;
-        }
-        const intptr_t delta = reinterpret_cast<intptr_t>(target) - reinterpret_cast<intptr_t>(this);
-        // Narrowing a delta this large would name unrelated memory that a consumer
-        // would then dereference. Unbound is the one value every consumer already
-        // tests for.
-        if (delta < INT32_MIN || delta > INT32_MAX) {
-            delta_ = 0;
-            return;
-        }
-        delta_ = static_cast<int32_t>(delta);
-    }
-
-    T *operator->() const { return get(); }
-    T &operator*() const { return *get(); }
-    explicit operator bool() const { return delta_ != 0; }
-
-    friend bool operator==(const SelfRelativePtr &lhs, std::nullptr_t) { return lhs.delta_ == 0; }
-    friend bool operator!=(const SelfRelativePtr &lhs, std::nullptr_t) { return lhs.delta_ != 0; }
-
-private:
-    int32_t delta_{0};
-};
-
-}  // namespace simpler::hbg
 
 /**
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
