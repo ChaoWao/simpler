@@ -420,8 +420,9 @@ def _pack_allocate_header(
 
 def peek_allocate_reply_resource_id(buf: memoryview | bytes | bytearray) -> int:
     """Return the SUCCESS resource id, or 0 if the reply is not a committed SUCCESS."""
-    view = buf if isinstance(buf, memoryview) else memoryview(buf)
-    if view.nbytes != ALLOCATE_REPLY_BYTES:
+    try:
+        view = _as_memoryview(buf, ALLOCATE_REPLY_BYTES, writable=False)
+    except RegionControlError:
         return 0
     tag = _acquire_tag(view)
     if int(tag) != int(AllocateReplyTag.SUCCESS):

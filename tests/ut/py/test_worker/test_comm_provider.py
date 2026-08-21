@@ -884,15 +884,16 @@ def test_sim_posix_store_creates_two_distinct_named_objects_and_zeros_only_count
     store = ProviderRegionStore(_sim_context())
     result = store.allocate_and_export(_allocation_spec())
     try:
+        from simpler.comm_provider import _posix_shm_create_name
+
         payload_name = result.export_descriptor.payload.import_capability.shm_name
         counter_name = result.export_descriptor.counter.import_capability.shm_name
         assert payload_name != counter_name
-        payload_shm = SharedMemory(name=payload_name)
-        counter_shm = SharedMemory(name=counter_name)
+        payload_shm = SharedMemory(name=_posix_shm_create_name(payload_name))
+        counter_shm = SharedMemory(name=_posix_shm_create_name(counter_name))
         try:
-            assert payload_shm.size == 64
-            assert counter_shm.size == 8
-            assert counter_shm.buf is not None
+            assert payload_shm.buf is not None and payload_shm.buf.nbytes >= 64
+            assert counter_shm.buf is not None and counter_shm.buf.nbytes >= 8
             assert bytes(counter_shm.buf[:8]) == b"\x00" * 8
             payload_view = store.local_view(result.provider_resource_id, RegionPartKind.PAYLOAD)
             counter_view = store.local_view(result.provider_resource_id, RegionPartKind.COUNTER)

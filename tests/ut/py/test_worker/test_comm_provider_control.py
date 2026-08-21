@@ -66,6 +66,7 @@ from simpler.comm_provider_control import (
     encode_release_result_reply,
     handle_ctrl_region_allocate,
     handle_ctrl_region_release,
+    peek_allocate_reply_resource_id,
 )
 
 from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _allocation_spec, _sim_context
@@ -162,6 +163,9 @@ def test_codec_uses_wire_prefix_of_larger_transport_mapping():
     decoded_release = decode_release_reply(release_reply)
     assert isinstance(decoded_release, ProviderReleaseResult)
     assert decoded_release.status is ProviderReleaseStatus.RELEASED
+
+    assert peek_allocate_reply_resource_id(reply) == 11
+    assert peek_allocate_reply_resource_id(bytearray(ALLOCATE_REPLY_BYTES - 1)) == 0
 
 
 @pytest.mark.parametrize(

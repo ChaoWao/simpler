@@ -1209,7 +1209,7 @@ def test_region_allocate_handler_writes_request_error_for_bad_magic():
     ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
     ctrl_buf = memoryview(ctrl_storage)
     try:
-        req_buf[:] = b"\x00" * ALLOCATE_REQUEST_BYTES
+        req_buf[:ALLOCATE_REQUEST_BYTES] = b"\x00" * ALLOCATE_REQUEST_BYTES
         struct.pack_into("<QI", req_buf, 0, 0xDEAD, ALLOCATE_REQUEST_BYTES)
         _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
         _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
