@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -83,6 +84,8 @@ TEST(MpiDirectTransport, ProgressApiIsNonBlocking) {
 
     auto task = make_frame(remote_l3::FrameType::TASK, 21, {7});
     transport.submit_progress_frame(task);
+    EXPECT_THROW(transport.submit_frame(make_frame(remote_l3::FrameType::CONTROL, 22)), std::logic_error);
+    EXPECT_THROW(transport.wait_for_reply(remote_l3::FrameType::CONTROL_REPLY, 22), std::logic_error);
     std::vector<uint8_t> reply;
     EXPECT_FALSE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 21, reply));
 
@@ -90,6 +93,53 @@ TEST(MpiDirectTransport, ProgressApiIsNonBlocking) {
     hub->deliver(MPI_RANK, MpiDirectTag::COMMAND_REPLY, completion);
     ASSERT_TRUE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 21, reply));
     EXPECT_EQ(reply, completion);
+}
+
+TEST(MpiDirectTransport, ShutdownWakesOnlyItsRouteWaiter) {
+    constexpr int32_t OTHER_WORKER_ID = WORKER_ID + 1;
+    constexpr int32_t OTHER_MPI_RANK = MPI_RANK + 1;
+    constexpr uint64_t OTHER_SESSION_ID = SESSION_ID + 1;
+    auto hub = ready_hub();
+    hub->register_route(OTHER_WORKER_ID, OTHER_MPI_RANK, OTHER_SESSION_ID, "sim");
+    MpiDirectTransport transport(hub, WORKER_ID, 1.0, 5.0);
+    MpiDirectTransport other(hub, OTHER_WORKER_ID, 1.0, 5.0);
+
+    auto waiter = std::async(std::launch::async, [&] {
+        return transport.wait_for_reply(remote_l3::FrameType::CONTROL_REPLY, 41);
+    });
+    auto other_waiter = std::async(std::launch::async, [&] {
+        return other.wait_for_reply(remote_l3::FrameType::CONTROL_REPLY, 42);
+    });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_EQ(other_waiter.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+
+    transport.shutdown();
+    ASSERT_EQ(waiter.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+    EXPECT_THROW((void)waiter.get(), std::runtime_error);
+    EXPECT_EQ(other_waiter.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_FALSE(hub->terminal());
+
+    EXPECT_NO_THROW(
+        hub->deliver(MPI_RANK, MpiDirectTag::COMMAND_REPLY, make_frame(remote_l3::FrameType::CONTROL_REPLY, 41))
+    );
+
+    remote_l3::FrameHeader header;
+    header.frame_type = remote_l3::FrameType::CONTROL_REPLY;
+    header.session_id = OTHER_SESSION_ID;
+    header.worker_id = OTHER_WORKER_ID;
+    header.sequence = 42;
+    auto other_reply = remote_l3::encode_frame(header, {});
+    hub->deliver(OTHER_MPI_RANK, MpiDirectTag::COMMAND_REPLY, other_reply);
+    ASSERT_EQ(other_waiter.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+    EXPECT_EQ(other_waiter.get(), other_reply);
+
+    header.frame_type = remote_l3::FrameType::CONTROL;
+    header.sequence = 43;
+    other.submit_frame(remote_l3::encode_frame(header, {}));
+    auto outbound = hub->poll_outbound(0.0);
+    ASSERT_TRUE(outbound.has_value());
+    EXPECT_EQ(outbound->target_rank, OTHER_MPI_RANK);
+    hub->complete_outbound(outbound->ticket);
 }
 
 TEST(MpiDirectTransportHub, RejectsSourceRankMismatchAsTerminal) {

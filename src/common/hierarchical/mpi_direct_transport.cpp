@@ -85,6 +85,15 @@ void MpiDirectTransportHub::throw_if_terminal_locked() const {
     if (closed_) throw std::runtime_error("MpiDirectTransportHub: closed");
 }
 
+void MpiDirectTransportHub::throw_if_route_terminal_locked(const Route &route) const {
+    throw_if_terminal_locked();
+    if (!route.terminal_error.empty()) {
+        throw std::runtime_error(
+            "MpiDirectTransportHub: route worker " + std::to_string(route.worker_id) + ": " + route.terminal_error
+        );
+    }
+}
+
 void MpiDirectTransportHub::fail_locked(const std::string &message) {
     if (terminal_error_.empty()) terminal_error_ = message.empty() ? "terminal failure" : message;
     cv_.notify_all();
@@ -98,6 +107,16 @@ void MpiDirectTransportHub::fail(const std::string &message) {
 void MpiDirectTransportHub::close() {
     std::lock_guard<std::mutex> lk(mu_);
     closed_ = true;
+    cv_.notify_all();
+}
+
+void MpiDirectTransportHub::cancel_route(int32_t worker_id, const std::string &message) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto route_it = routes_by_worker_.find(worker_id);
+    if (route_it == routes_by_worker_.end()) throw std::invalid_argument("MpiDirectTransportHub: unknown worker id");
+    if (route_it->second.terminal_error.empty()) {
+        route_it->second.terminal_error = message.empty() ? "cancelled" : message;
+    }
     cv_.notify_all();
 }
 
@@ -115,13 +134,13 @@ void MpiDirectTransportHub::enqueue(
     auto route_it = routes_by_worker_.find(worker_id);
     if (route_it == routes_by_worker_.end()) throw std::invalid_argument("MpiDirectTransportHub: unknown worker id");
     while (frame.size() > max_pending_frame_bytes_ - pending_frame_bytes_) {
-        throw_if_terminal_locked();
+        throw_if_route_terminal_locked(route_it->second);
         if (cv_.wait_until(lk, deadline) == std::cv_status::timeout) {
             fail_locked("timed out waiting for outbound frame credit");
             throw_if_terminal_locked();
         }
     }
-    throw_if_terminal_locked();
+    throw_if_route_terminal_locked(route_it->second);
     MpiDirectOutboundFrame outbound;
     outbound.ticket = next_ticket_++;
     outbound.target_rank = route_it->second.mpi_rank;
@@ -137,7 +156,7 @@ MpiDirectTransportHub::poll_inbound(int32_t worker_id, remote_l3::FrameType fram
     std::lock_guard<std::mutex> lk(mu_);
     auto route_it = routes_by_worker_.find(worker_id);
     if (route_it == routes_by_worker_.end()) throw std::invalid_argument("MpiDirectTransportHub: unknown worker id");
-    throw_if_terminal_locked();
+    throw_if_route_terminal_locked(route_it->second);
     std::deque<std::vector<uint8_t>> &queue =
         frame_type == remote_l3::FrameType::HELLO ? route_it->second.lifecycle : route_it->second.replies;
     if (queue.empty()) return std::nullopt;
@@ -200,6 +219,7 @@ void MpiDirectTransportHub::deliver(int32_t source_rank, MpiDirectTag tag, const
         throw_if_terminal_locked();
     }
     Route &route = routes_by_worker_.at(worker_it->second);
+    if (!route.terminal_error.empty()) return;
     if (decoded.header.worker_id != route.worker_id || decoded.header.session_id != route.session_id) {
         fail_locked("inbound frame identity does not match manifest route");
         throw_if_terminal_locked();
@@ -239,12 +259,13 @@ std::vector<uint8_t> MpiDirectTransportHub::wait_inbound(
     std::deque<std::vector<uint8_t>> &queue =
         frame_type == remote_l3::FrameType::HELLO ? route_it->second.lifecycle : route_it->second.replies;
     while (queue.empty()) {
-        throw_if_terminal_locked();
+        throw_if_route_terminal_locked(route_it->second);
         if (cv_.wait_until(lk, deadline) == std::cv_status::timeout) {
             fail_locked("timed out waiting for inbound frame");
             throw_if_terminal_locked();
         }
     }
+    throw_if_route_terminal_locked(route_it->second);
     std::vector<uint8_t> frame = std::move(queue.front());
     queue.pop_front();
     auto decoded = remote_l3::decode_frame(frame);
@@ -261,6 +282,7 @@ void MpiDirectTransportHub::expect_hello_ready(int32_t worker_id, double timeout
     auto hello = remote_l3::decode_hello(frame.payload.data(), frame.payload.size());
     std::lock_guard<std::mutex> lk(mu_);
     Route &route = routes_by_worker_.at(worker_id);
+    throw_if_route_terminal_locked(route);
     if (hello.session_id != route.session_id || hello.worker_id != worker_id ||
         hello.ready_state != remote_l3::ReadyState::READY || hello.comm_profile != route.comm_profile) {
         fail_locked("HELLO READY does not match manifest route");
@@ -303,43 +325,54 @@ MpiDirectTransport::MpiDirectTransport(
 void MpiDirectTransport::expect_hello_ready() { hub_->expect_hello_ready(worker_id_, attach_timeout_s_); }
 
 void MpiDirectTransport::submit_frame(const std::vector<uint8_t> &frame) {
-    if (closed_) throw std::runtime_error("MpiDirectTransport: closed");
+    if (closed_.load(std::memory_order_acquire)) throw std::runtime_error("MpiDirectTransport: closed");
+    if (progress_active_.load(std::memory_order_acquire)) {
+        throw std::logic_error("MpiDirectTransport: progress command is active");
+    }
     auto decoded = remote_l3::decode_frame(frame);
     hub_->enqueue(worker_id_, outbound_tag(decoded.header.frame_type), frame, runtime_timeout_s_);
 }
 
 std::vector<uint8_t> MpiDirectTransport::wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) {
-    if (closed_) throw std::runtime_error("MpiDirectTransport: closed");
+    if (closed_.load(std::memory_order_acquire)) throw std::runtime_error("MpiDirectTransport: closed");
+    if (progress_active_.load(std::memory_order_acquire)) {
+        throw std::logic_error("MpiDirectTransport: progress command is active");
+    }
     return hub_->wait_inbound(worker_id_, frame_type, sequence, runtime_timeout_s_);
 }
 
 void MpiDirectTransport::submit_progress_frame(const std::vector<uint8_t> &frame) {
-    if (closed_) throw std::runtime_error("MpiDirectTransport: closed");
-    if (progress_active_) throw std::logic_error("MpiDirectTransport: progress command is already active");
+    if (closed_.load(std::memory_order_acquire)) throw std::runtime_error("MpiDirectTransport: closed");
+    if (progress_active_.load(std::memory_order_acquire)) {
+        throw std::logic_error("MpiDirectTransport: progress command is already active");
+    }
     auto decoded = remote_l3::decode_frame(frame);
     hub_->enqueue(worker_id_, outbound_tag(decoded.header.frame_type), frame, runtime_timeout_s_);
     progress_deadline_ = deadline_from_now(runtime_timeout_s_);
-    progress_active_ = true;
+    progress_active_.store(true, std::memory_order_release);
 }
 
 bool MpiDirectTransport::poll_progress_reply(
     remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply
 ) {
-    if (closed_) throw std::runtime_error("MpiDirectTransport: closed");
-    if (!progress_active_) throw std::logic_error("MpiDirectTransport: no progress command is active");
+    if (closed_.load(std::memory_order_acquire)) throw std::runtime_error("MpiDirectTransport: closed");
+    if (!progress_active_.load(std::memory_order_acquire)) {
+        throw std::logic_error("MpiDirectTransport: no progress command is active");
+    }
     if (std::chrono::steady_clock::now() >= progress_deadline_) {
-        progress_active_ = false;
+        progress_active_.store(false, std::memory_order_release);
         hub_->fail("MpiDirectTransport: progress command timed out");
         throw std::runtime_error("MpiDirectTransport: progress command timed out");
     }
     auto result = hub_->poll_inbound(worker_id_, frame_type, sequence);
     if (!result.has_value()) return false;
-    progress_active_ = false;
+    progress_active_.store(false, std::memory_order_release);
     reply = std::move(*result);
     return true;
 }
 
 void MpiDirectTransport::shutdown() {
-    closed_ = true;
-    progress_active_ = false;
+    closed_.store(true, std::memory_order_release);
+    progress_active_.store(false, std::memory_order_release);
+    hub_->cancel_route(worker_id_, "transport shut down");
 }

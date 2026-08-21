@@ -565,7 +565,7 @@ inline void bind_worker(nb::module_ &m) {
         // INITIALIZING and failing fast. init/close remain same-thread-only
         // (enforced by Worker.close()).
         .def("init", &Worker::init, nb::call_guard<nb::gil_scoped_release>(), "Start the Scheduler thread.")
-        .def("close", &Worker::close, "Stop the Scheduler thread.")
+        .def("close", &Worker::close, nb::call_guard<nb::gil_scoped_release>(), "Stop the Scheduler thread.")
 
         .def(
             "get_orchestrator", &Worker::get_orchestrator, nb::rv_policy::reference_internal,
