@@ -1222,7 +1222,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
     }
 }
 
-void csa_moe_block(const GraphTaskArgs &args) {
+void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
     const ChipTensor &hc_ffn_fn_csa_inline547 = args.tensor(0).ref();
     const ChipTensor &hc_ffn_scale_csa_inline543 = args.tensor(1).ref();
     const ChipTensor &hc_ffn_base_csa_inline542 = args.tensor(2).ref();
@@ -1253,18 +1253,23 @@ void csa_moe_block(const GraphTaskArgs &args) {
     const ChipTensor &ext_routed_y_buf = args.tensor(27).ref();
     const ChipTensor &x_attn_csa_inline721 = args.tensor(28).ref();
     const ChipTensor &hidden_mid_inline726 = args.tensor(29).ref();
+    // Each binding keeps the type its submit site passes. The comm-window handles
+    // are 64-bit device contexts; read one back as int32_t and the MoE all-to-all
+    // pushes to a truncated window address — an MTE bus fault on the AIV, not a
+    // wrong number. The peeled hash_moe_l*_block bodies below already bind them
+    // this way.
     int32_t csa_layer_inline714 = static_cast<int32_t>(args.scalar(0));
     int32_t csa_moe_epoch_inline715 = static_cast<int32_t>(args.scalar(1));
-    int32_t arrived_ctx = static_cast<int32_t>(args.scalar(2));
-    int32_t combine_arrived_ctx = static_cast<int32_t>(args.scalar(3));
-    int32_t data_arrived_ctx = static_cast<int32_t>(args.scalar(4));
-    int64_t my_rank = static_cast<int64_t>(args.scalar(5));
-    int64_t nt_inline677__rv_v2 = static_cast<int64_t>(args.scalar(6));
-    int32_t recv_meta_ctx = static_cast<int32_t>(args.scalar(7));
-    int32_t recv_x_ctx = static_cast<int32_t>(args.scalar(8));
-    int32_t recv_aux_ctx = static_cast<int32_t>(args.scalar(9));
-    int32_t recv_route_ctx = static_cast<int32_t>(args.scalar(10));
-    int32_t routed_y_buf_ctx = static_cast<int32_t>(args.scalar(11));
+    uint64_t arrived_ctx = args.scalar(2);
+    uint64_t combine_arrived_ctx = args.scalar(3);
+    uint64_t data_arrived_ctx = args.scalar(4);
+    int32_t my_rank = static_cast<int32_t>(args.scalar(5));
+    int32_t nt_inline677__rv_v2 = static_cast<int32_t>(args.scalar(6));
+    uint64_t recv_meta_ctx = args.scalar(7);
+    uint64_t recv_x_ctx = args.scalar(8);
+    uint64_t recv_aux_ctx = args.scalar(9);
+    uint64_t recv_route_ctx = args.scalar(10);
+    uint64_t routed_y_buf_ctx = args.scalar(11);
     PTO2_SCOPE() {
         uint32_t x_mixed_inline11049_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11049_ci(x_mixed_inline11049_ci_shapes, 2, DataType::BFLOAT16);
@@ -1528,7 +1533,14 @@ void csa_moe_block(const GraphTaskArgs &args) {
         params_t176.set_allow_early_resolve(true);
         TaskOutputTensors task_176_outs = rt_submit_task(mixed_176, params_t176);
         int64_t active_route_tiles_inline2579_inline11064 = ((active_tokens_inline2578_inline11042__phi_v4 + 7) / 8);
-        if ((static_cast<int64_t>(csa_layer_inline714) < 3)) {
+        // A body is recorded once per Definition key, so a host-side branch on a
+        // per-layer boundary scalar would bake the first recorded layer's arm into
+        // every replay — layer 2 takes route_hash_1, layers 4..40 must take
+        // route_sort. `route_by_hash` carries the predicate as a Graph config
+        // value, which rt_submit_graph folds into the key: two Definitions, each
+        // layer replaying its own. (Eight in total for the pass, which is what the
+        // recorder pool prewarms.)
+        if (route_by_hash) {
             // Spmd route_hash_spmd_1: route_hash_1
             CoreTaskArgs params_t177;
             params_t177.add_input(ext_input_ids);
@@ -2950,17 +2962,22 @@ void hca_moe_block(const GraphTaskArgs &args) {
     const ChipTensor &ext_routed_y_buf = args.tensor(25).ref();
     const ChipTensor &hidden_inline709 = args.tensor(26).ref();
     const ChipTensor &x_attn_hca_inline723 = args.tensor(27).ref();
+    // Each binding keeps the type its submit site passes. The comm-window handles
+    // are 64-bit device contexts; read one back as int32_t and the MoE all-to-all
+    // pushes to a truncated window address — an MTE bus fault on the AIV, not a
+    // wrong number. The peeled hash_moe_l*_block bodies below already bind them
+    // this way.
     int32_t hca_moe_epoch_inline716 = static_cast<int32_t>(args.scalar(0));
-    int32_t arrived_ctx = static_cast<int32_t>(args.scalar(1));
-    int32_t combine_arrived_ctx = static_cast<int32_t>(args.scalar(2));
-    int32_t data_arrived_ctx = static_cast<int32_t>(args.scalar(3));
-    int64_t my_rank = static_cast<int64_t>(args.scalar(4));
-    int64_t nt_inline677__rv_v2 = static_cast<int64_t>(args.scalar(5));
-    int32_t recv_meta_ctx = static_cast<int32_t>(args.scalar(6));
-    int32_t recv_x_ctx = static_cast<int32_t>(args.scalar(7));
-    int32_t recv_aux_ctx = static_cast<int32_t>(args.scalar(8));
-    int32_t recv_route_ctx = static_cast<int32_t>(args.scalar(9));
-    int32_t routed_y_buf_ctx = static_cast<int32_t>(args.scalar(10));
+    uint64_t arrived_ctx = args.scalar(1);
+    uint64_t combine_arrived_ctx = args.scalar(2);
+    uint64_t data_arrived_ctx = args.scalar(3);
+    int32_t my_rank = static_cast<int32_t>(args.scalar(4));
+    int32_t nt_inline677__rv_v2 = static_cast<int32_t>(args.scalar(5));
+    uint64_t recv_meta_ctx = args.scalar(6);
+    uint64_t recv_x_ctx = args.scalar(7);
+    uint64_t recv_aux_ctx = args.scalar(8);
+    uint64_t recv_route_ctx = args.scalar(9);
+    uint64_t routed_y_buf_ctx = args.scalar(10);
     PTO2_SCOPE() {
         uint32_t x_mixed_inline11928_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11928_ci(x_mixed_inline11928_ci_shapes, 2, DataType::BFLOAT16);
@@ -7963,7 +7980,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         csa_moe_block_args.add_scalar(csa_layer_inline714, csa_moe_epoch_inline715, arrived_ctx, combine_arrived_ctx);
         csa_moe_block_args.add_scalar(data_arrived_ctx, my_rank, nt_inline677__rv_v2, recv_meta_ctx);
         csa_moe_block_args.add_scalar(recv_x_ctx, recv_aux_ctx, recv_route_ctx, routed_y_buf_ctx);
-        rt_submit_graph(&csa_moe_block, csa_moe_block_args);
+        rt_submit_graph(&csa_moe_block, csa_moe_block_args, static_cast<int64_t>(csa_layer_inline714) < 3);
     };
     auto submit_hca_attn_block = [&](int32_t hca_layer_inline704, int64_t loop_i_inline712,
                                      const ChipTensor &x_attn_hca_inline723, const ChipTensor &hidden_mid_inline726) {

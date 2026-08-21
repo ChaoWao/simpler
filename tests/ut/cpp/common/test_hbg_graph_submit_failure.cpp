@@ -289,6 +289,41 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     EXPECT_TRUE(orch.fatal) << "A shell whose Definition never arrived cannot be completed";
 }
 
+// The ordinary path reports PTO2_ERROR_INVALID_ARGS for an auto scope opened
+// inside a manual one. The recording pass keeps a scope depth of its own — the
+// manual flag has to reach compute_task_fanin, which suppresses inference inside
+// a manual scope — so it has to refuse the same nesting. Accepting it would let a
+// Graph record and replay a body ordinary submission rejects outright.
+TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecording) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x171d, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
+
+    orch.begin_scope(PTO2ScopeMode::MANUAL);
+    orch.begin_scope(PTO2ScopeMode::AUTO);
+
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+
+    orch.end_scope();
+    orch.end_scope();
+
+    EXPECT_THROW(orch.graph_end(), AssertionError) << "an auto scope inside a manual one must not publish";
+    orch.graph_abort(graph.recording_handle);
+    orch.graph_commit();
+    EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
+}
+
 // A Graph body may allocate. The allocation records as a kernel-less node, the
 // same shape submit_dummy_task records, so the recording stays publishable and
 // the commit latches no fatal.
