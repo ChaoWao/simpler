@@ -18,7 +18,7 @@ import logging
 import struct
 from enum import IntEnum
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
 
