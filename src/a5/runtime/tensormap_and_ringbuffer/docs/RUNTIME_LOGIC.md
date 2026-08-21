@@ -45,7 +45,7 @@ The host builds the complete task graph before launching device execution. The o
 - **Scheduling**: AICPU receives the pre-built graph and dispatches tasks by traversing dependencies
 - **Use case**: development and debugging; no device-side orchestration overhead
 
-### 1.2 tensormap_and_ringbuffer (PTO2)
+### 1.2 tensormap_and_ringbuffer
 
 The primary production runtime. Uses ring buffers for task slots and output memory, with a TensorMap for automatic dependency tracking.
 
@@ -53,7 +53,7 @@ The primary production runtime. Uses ring buffers for task slots and output memo
 - **Memory**: GM Heap ring for output buffer allocation
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
 - **Thread model**: `aicpu_thread_num - 1` scheduler threads + 1 orchestrator
-  thread on AICPU; the common four-thread configuration uses 3 schedulers
+  thread on AICPU; the default five-thread configuration uses 4 schedulers
 - **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `PTO2_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
 - **Use case**: production workloads; supports streaming, flow control, and large batch sizes
 
@@ -542,19 +542,20 @@ verified by review.
 
 ### 8.1 Thread Model
 
-With `aicpu_thread_num=4`, the AICPU runs 4 threads. The core counts below
+With the default `aicpu_thread_num=5`, the AICPU runs 5 threads. The core counts below
 describe the 36-cluster target in §2.3; the runtime partitions the detected
 cores across the scheduler threads, so smaller SKUs use proportionally smaller
 slices.
 
 | Thread | Role | Cores |
 | ------ | ---- | ----- |
-| 0 | Scheduler | 12 AIC + 24 AIV |
-| 1 | Scheduler | 12 AIC + 24 AIV |
-| 2 | Scheduler | 12 AIC + 24 AIV |
-| 3 | Orchestrator | none |
+| 0 | Scheduler | 9 AIC + 18 AIV |
+| 1 | Scheduler | 9 AIC + 18 AIV |
+| 2 | Scheduler | 9 AIC + 18 AIV |
+| 3 | Scheduler | 9 AIC + 18 AIV |
+| 4 | Orchestrator | none |
 
-Core assignment: AICs and AIVs are divided equally among the 3 scheduler threads.
+Core assignment: AICs and AIVs are divided equally among the 4 scheduler threads.
 
 ### 8.2 Scheduler Main Loop
 
@@ -890,7 +891,7 @@ extern "C" void aicpu_orchestration_entry(uint64_t* args, int arg_count);
 
 ## 12. Example: Batch Paged Attention
 
-### 12.1 Kernel Configuration (`kernel_config.py`)
+### 12.1 Scene-test Configuration
 
 ```python
 KERNELS = [
@@ -906,12 +907,17 @@ ORCHESTRATION = {
     "function_name": "aicpu_orchestration_entry",
 }
 
-RUNTIME_CONFIG = {
-    "runtime": "tensormap_and_ringbuffer",
-    "aicpu_thread_num": 4,
-    "block_dim": 24,
-}
+@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+class TestBatchPagedAttention(SceneTestCase):
+    CALLABLE = {"orchestration": ORCHESTRATION, "incores": KERNELS}
+    CASES = [
+        {"name": "default", "platforms": ["a5sim", "a5"], "params": {}},
+    ]
 ```
+
+The omitted config selects the A5 default of five AICPU threads. Every run uses
+the detected device width, up to 36 clusters; there is no per-run `block_dim`
+knob.
 
 ### 12.2 Orchestration Structure
 

@@ -37,7 +37,6 @@ def _cases():
             {
                 "name": "MXFP8_TMATMUL_MX",
                 "platforms": ["a5"],
-                "config": {"aicpu_thread_num": 2, "block_dim": 1},
                 "params": {"mode": 0},
             }
         )
@@ -46,7 +45,6 @@ def _cases():
             {
                 "name": "MXFP4_TMATMUL_MX",
                 "platforms": ["a5"],
-                "config": {"aicpu_thread_num": 2, "block_dim": 1},
                 "params": {"mode": 1},
             }
         )

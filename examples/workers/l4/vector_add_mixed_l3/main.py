@@ -327,7 +327,6 @@ def run(
             orch.submit_next_level(remote_handle, remote_args, cfg, worker=remote_worker)
 
         config = CallConfig()
-        config.aicpu_thread_num = 4
         worker.run(parent_orch, args=None, config=config)
 
         worker.remote_copy_from(remote_handles[2], remote_outputs["f0"][0], TENSOR_NBYTES)

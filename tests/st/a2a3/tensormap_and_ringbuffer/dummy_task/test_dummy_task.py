@@ -75,6 +75,8 @@ class TestDummyTask(SceneTestCase):
         ],
     }
 
+    # One scheduler owns every core, so these cases isolate dummy-ready-queue
+    # ordering and retirement from cross-scheduler routing.
     CASES = [
         {
             "name": "SingleDummyAutoDep",

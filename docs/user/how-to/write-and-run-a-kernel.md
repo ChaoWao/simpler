@@ -55,7 +55,6 @@ class TestMyExample(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],                # sim needs no hardware
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
@@ -91,8 +90,10 @@ python examples/my_example/test_my_example.py -p a2a3sim
 ```
 
 `level` and `runtime` are decorator arguments; **platforms are declared per case
-in `CASES`**, not on the decorator. Per-case knobs go under `"config"` —
-`aicpu_thread_num`, and `runtime_env` for ring sizing on
+in `CASES`**, not on the decorator. Ordinary cases should omit `"config"` and
+use the architecture's automatic AICPU thread count. Add `aicpu_thread_num`
+only when a test specifically depends on a thread-count or scheduler-topology
+behavior; `runtime_env` holds ring-sizing overrides for
 `tensormap_and_ringbuffer`. See the [Python API reference](../reference/python-api.md)
 for the full `CallConfig` field list.
 

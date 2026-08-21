@@ -653,7 +653,6 @@ class TestMyKernel(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
@@ -701,6 +700,14 @@ Key fields:
   where nothing survived (that means the SDK is missing). Used by
   [`qwen3_14b_decode`](../examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/)
   for its CANN attention extern.
+- `CASES[].config` is optional. Ordinary cases should omit `aicpu_thread_num`
+  and use the architecture default; set it only when the test specifically
+  exercises a thread-count or scheduler-topology behavior.
+- The framework owns the `config` namespace. Its keys are
+  `aicpu_thread_num`, `runtime_env`, `device_count`, and `num_sub_workers`;
+  `runtime_env` accepts `ring_task_window`, `ring_heap`, and `ring_dep_pool`.
+  Unknown keys fail when the `@scene_test` class is imported instead of being
+  silently ignored. Case-level extension keys outside `config` remain allowed.
 
 ### Output Validation
 

@@ -64,7 +64,6 @@ class TestPipelineSlotsTmr(SceneTestCase):
         {
             "name": "slot_topology",
             "platforms": ["a5", "a5sim"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
             "params": {},
         },
     ]
@@ -96,7 +95,7 @@ class TestPipelineSlotsTmr(SceneTestCase):
         golden = test_args.clone()
         self.compute_golden(golden, {})
         signature = self.CALLABLE["orchestration"]["signature"]
-        config = self._build_config(self.CASES[0]["config"])
+        config = self._build_config(self.CASES[0].get("config", {}))
         if slot_id is None:
             args, output_names = _build_l2_ref_args(test_args, signature, worker)
             worker.run(handle, args, config=config)

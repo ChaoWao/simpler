@@ -78,6 +78,8 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
         ],
     }
 
+    # Three AICPU threads provide two schedulers. The full-device cohorts span
+    # both ownership partitions, covering cross-scheduler pending-slot staging.
     CASES = [
         {
             "name": "Case1",

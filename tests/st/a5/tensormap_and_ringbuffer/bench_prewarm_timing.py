@@ -96,7 +96,6 @@ def _run_scenario(*, device_id: int, platform: str, prewarm: bool) -> None:
         args, _output_names = _build_l2_ref_args(test_args, orch_sig, worker)
 
         run_cfg = CallConfig()
-        run_cfg.block_dim = config_dict.get("block_dim", 1)
         run_cfg.aicpu_thread_num = config_dict.get("aicpu_thread_num", 2)
         run_cfg.runtime_env.ring_task_window = _RING
 

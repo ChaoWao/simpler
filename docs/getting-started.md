@@ -210,14 +210,21 @@ In `src/{arch}/runtime/host_build_graph/runtime/runtime.h`:
 
 ### Runtime Configuration
 
-Runtime behavior is configured via `kernel_config.py` in each example:
+Scene tests select their runtime with `@scene_test` and keep optional per-case
+overrides under `CASES[*]["config"]`:
 
 ```python
-RUNTIME_CONFIG = {
-    "runtime": "host_build_graph",    # Runtime to use
-    "aicpu_thread_num": 0,            # Auto-select AICPU threads
-}
+@scene_test(level=2, runtime="host_build_graph")
+class TestVectorExample(SceneTestCase):
+    CASES = [
+        {"name": "default", "platforms": ["a2a3sim", "a2a3"], "params": {}},
+    ]
 ```
+
+Omitting `aicpu_thread_num` selects the architecture default. Set it only when
+the workload intentionally requires a particular AICPU thread topology.
+Programmatic users select the runtime when constructing `Worker` and may pass a
+`CallConfig` to `worker.run()` for the same per-run overrides.
 
 Device selection is done via CLI flag:
 

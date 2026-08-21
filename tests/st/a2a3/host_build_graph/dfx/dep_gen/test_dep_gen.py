@@ -232,6 +232,8 @@ class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
         ],
     }
 
+    # One scheduler owns every core, so the captured graph exercises the
+    # predicate and explicit-dependency hooks without cross-shard merging.
     CASES = [
         {
             "name": "gate_open",

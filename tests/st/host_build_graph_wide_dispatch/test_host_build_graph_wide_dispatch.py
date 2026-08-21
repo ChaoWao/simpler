@@ -84,6 +84,8 @@ class TestHostBuildGraphWideDispatch(SceneTestCase):
         ],
     }
 
+    # Two AICPU threads leave one scheduler, which owns every cluster used by
+    # the AIV and MIX placement assertions.
     CASES = [
         {
             "name": "TwoThreads",

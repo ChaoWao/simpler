@@ -79,6 +79,8 @@ class TestDepGenChain(SceneTestCase):
     SENTINEL = 42.0
     INIT_VAL = -1.0
 
+    # One scheduler owns every core, keeping the capture shard topology fixed
+    # while the explicit-dependency count crosses overflow boundaries.
     CASES = [
         {
             "name": "n_64_no_chain",

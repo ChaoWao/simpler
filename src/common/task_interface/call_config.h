@@ -56,8 +56,8 @@ inline constexpr int RUNTIME_ENV_UINT64_FIELD_COUNT = RUNTIME_ENV_FIELD_GROUPS *
 #pragma pack(push, 1)
 // Per-task runtime-environment overrides — the programmatic equivalent of the
 // `PTO2_RING_*` env vars, grouped under their own sub-struct so they read as a
-// distinct configuration tier from the top-level execution knobs (block_dim,
-// aicpu_thread_num). Consumed by tensormap_and_ringbuffer only; other runtimes
+// distinct configuration tier from the top-level `aicpu_thread_num` knob.
+// Consumed by tensormap_and_ringbuffer only; other runtimes
 // ignore them.
 //
 // Each resource is a per-scope-depth-ring array (index 0..3). A 0 entry is

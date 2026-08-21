@@ -182,8 +182,9 @@ git diff --name-only
    - Examples: `examples/{arch}/<runtime>/<name>/`
    - Device-only scene tests: `tests/st/{arch}/<runtime>/<name>/`
 2. Add `test_<name>.py` with a `@scene_test`-decorated class (see [docs/testing.md](../../docs/testing.md) for the full template: `CALLABLE`, `CASES`, `generate_args`, `compute_golden`). End with `if __name__ == "__main__": SceneTestCase.run_module(__name__)` so the file runs standalone.
-3. Add kernel source files under `kernels/aic/`, `kernels/aiv/`, and/or `kernels/orchestration/` — referenced by `CALLABLE["orchestration"]["source"]` / `CALLABLE["incores"][*]["source"]` as paths relative to the test file.
-4. Pytest auto-discovers any `test_*.py` under `examples/` and `tests/st/`; no registration needed.
+3. Omit `CASES[*]["config"]["aicpu_thread_num"]` unless the test specifically exercises a thread-count or scheduler-topology behavior. The default automatically selects the correct count for each architecture; do not copy or pin that default. When an override is necessary, add a nearby comment explaining the test dependency. The framework rejects unknown `config` keys at import time; the accepted keys are `aicpu_thread_num`, `runtime_env`, `device_count`, and `num_sub_workers`, with `ring_task_window`, `ring_heap`, and `ring_dep_pool` under `runtime_env`.
+4. Add kernel source files under `kernels/aic/`, `kernels/aiv/`, and/or `kernels/orchestration/` — referenced by `CALLABLE["orchestration"]["source"]` / `CALLABLE["incores"][*]["source"]` as paths relative to the test file.
+5. Pytest auto-discovers any `test_*.py` under `examples/` and `tests/st/`; no registration needed.
 
 ## Related Skills
 

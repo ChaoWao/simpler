@@ -84,7 +84,7 @@ class TestL3LaunchAcceptance(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"device_count": 1, "num_sub_workers": 0, "aicpu_thread_num": 4},
+            "config": {"device_count": 1, "num_sub_workers": 0},
             "params": {},
         },
     ]
