@@ -120,6 +120,65 @@ def test_allocate_request_is_exactly_48_bytes_at_normative_offsets():
     assert decode_allocate_request(buf) == spec
 
 
+def test_codec_uses_wire_prefix_of_larger_transport_mapping():
+    spec = _allocation_spec()
+    req = bytearray(4096)
+    encode_allocate_request(req, spec)
+    assert req[ALLOCATE_REQUEST_BYTES:] == b"\x00" * (4096 - ALLOCATE_REQUEST_BYTES)
+    assert decode_allocate_request(req) == spec
+    req[ALLOCATE_REQUEST_BYTES] = 1
+    assert decode_allocate_request(req) == spec
+
+    release_req = bytearray(4096)
+    encode_release_request(release_req, 13)
+    assert decode_release_request(release_req) == 13
+    release_req[RELEASE_REQUEST_BYTES] = 1
+    assert decode_release_request(release_req) == 13
+
+    result, payload, counter = _success_result()
+    reply = bytearray(4096)
+    encode_allocate_success_reply(reply, result, payload, counter)
+    tag, decoded, decoded_payload, decoded_counter, error = decode_allocate_reply(reply)
+    assert tag is AllocateReplyTag.SUCCESS
+    assert error is None
+    assert decoded == result
+    assert decoded_payload == payload
+    assert decoded_counter == counter
+    reply[ALLOCATE_REPLY_BYTES] = 1
+    tag, decoded, decoded_payload, decoded_counter, error = decode_allocate_reply(reply)
+    assert tag is AllocateReplyTag.SUCCESS
+    assert decoded == result
+
+    release_reply = bytearray(4096)
+    encode_release_result_reply(
+        release_reply,
+        ProviderReleaseResult(provider_resource_id=13, status=ProviderReleaseStatus.RELEASED),
+    )
+    decoded_release = decode_release_reply(release_reply)
+    assert isinstance(decoded_release, ProviderReleaseResult)
+    assert decoded_release.provider_resource_id == 13
+    assert decoded_release.status is ProviderReleaseStatus.RELEASED
+    release_reply[RELEASE_REPLY_BYTES] = 1
+    decoded_release = decode_release_reply(release_reply)
+    assert isinstance(decoded_release, ProviderReleaseResult)
+    assert decoded_release.status is ProviderReleaseStatus.RELEASED
+
+
+@pytest.mark.parametrize(
+    ("decoder", "size"),
+    [
+        (decode_allocate_request, ALLOCATE_REQUEST_BYTES),
+        (decode_allocate_reply, ALLOCATE_REPLY_BYTES),
+        (decode_release_request, RELEASE_REQUEST_BYTES),
+        (decode_release_reply, RELEASE_REPLY_BYTES),
+    ],
+)
+def test_codec_rejects_transport_mapping_smaller_than_wire_frame(decoder, size):
+    with pytest.raises(RegionControlError) as exc_info:
+        decoder(bytearray(size - 1))
+    assert exc_info.value.kind is RegionControlErrorKind.BAD_MESSAGE_SIZE
+
+
 def test_allocate_reply_exports_and_views_use_offsets_40_112_184_208():
     result, payload, counter = _success_result()
     buf = bytearray(ALLOCATE_REPLY_BYTES)
@@ -297,11 +356,13 @@ class _LoopbackMailbox:
         reply = SharedMemory(name=reply_shm_name)
         assert req.buf is not None
         assert reply.buf is not None
+        req_view = memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES]
+        reply_view = memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES]
         try:
-            handle_ctrl_region_allocate(
-                memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES], memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES], self.store
-            )
+            handle_ctrl_region_allocate(req_view, reply_view, self.store)
         finally:
+            req_view.release()
+            reply_view.release()
             req.close()
             reply.close()
 
@@ -312,11 +373,13 @@ class _LoopbackMailbox:
         reply = SharedMemory(name=reply_shm_name)
         assert req.buf is not None
         assert reply.buf is not None
+        req_view = memoryview(req.buf)[:RELEASE_REQUEST_BYTES]
+        reply_view = memoryview(reply.buf)[:RELEASE_REPLY_BYTES]
         try:
-            handle_ctrl_region_release(
-                memoryview(req.buf)[:RELEASE_REQUEST_BYTES], memoryview(reply.buf)[:RELEASE_REPLY_BYTES], self.store
-            )
+            handle_ctrl_region_release(req_view, reply_view, self.store)
         finally:
+            req_view.release()
+            reply_view.release()
             req.close()
             reply.close()
 

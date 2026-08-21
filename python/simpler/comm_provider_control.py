@@ -145,11 +145,16 @@ class RegionControlProtocolError(RegionControlError):
 
 def _as_memoryview(buf: memoryview | bytes | bytearray, size: int, *, writable: bool) -> memoryview:
     view = buf if isinstance(buf, memoryview) else memoryview(buf)
-    if view.nbytes != size:
+    # POSIX shm mappings may be larger than the requested create size (page
+    # rounding). The private wire frame is still exactly `size` bytes and lives
+    # in the prefix; trailing mapping bytes are not part of the protocol.
+    if view.nbytes < size:
         raise RegionControlError(
             RegionControlErrorKind.BAD_MESSAGE_SIZE,
-            f"buffer must be exactly {size} bytes",
+            f"buffer must hold a {size}-byte wire frame",
         )
+    if view.nbytes > size:
+        view = memoryview(view).cast("B")[:size]
     if writable and view.readonly:
         raise RegionControlError(
             RegionControlErrorKind.INTERNAL_INVARIANT,
