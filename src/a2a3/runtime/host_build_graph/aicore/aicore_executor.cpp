@@ -194,13 +194,18 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 __gm__ char *src = reinterpret_cast<__gm__ char *>(exec_payload->src_payload);
                 int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
                 int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-                __gm__ uint64_t *src_scalars =
-                    reinterpret_cast<__gm__ uint64_t *>(src + PTO2_TASKPAYLOAD_SCALARS_OFFSET);
+                // Each region is named by an int32 delta from the naming field's own
+                // address, so resolve the field, then add what it holds.
+                __gm__ char *tensors_field = src + PTO2_TASKPAYLOAD_TENSORS_DELTA_OFFSET;
+                __gm__ char *src_tensors = tensors_field + *reinterpret_cast<__gm__ int32_t *>(tensors_field);
+                __gm__ char *scalars_field = src + PTO2_TASKPAYLOAD_SCALARS_DELTA_OFFSET;
+                __gm__ uint64_t *src_scalars = reinterpret_cast<__gm__ uint64_t *>(
+                    scalars_field + *reinterpret_cast<__gm__ int32_t *>(scalars_field)
+                );
                 int n = 0;
                 for (int32_t i = 0; i < tensor_count; i++) {
-                    exec_payload->args[n++] = reinterpret_cast<uint64_t>(
-                        src + PTO2_TASKPAYLOAD_TENSORS_OFFSET + i * PTO2_TASKPAYLOAD_TENSOR_STRIDE
-                    );
+                    exec_payload->args[n++] =
+                        reinterpret_cast<uint64_t>(src_tensors + i * PTO2_TASKPAYLOAD_TENSOR_STRIDE);
                 }
                 for (int32_t i = 0; i < scalar_count; i++) {
                     exec_payload->args[n++] = src_scalars[i];

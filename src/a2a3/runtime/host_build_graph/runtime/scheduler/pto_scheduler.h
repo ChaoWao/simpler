@@ -577,7 +577,7 @@ struct PTO2SchedulerState {
 
     // Unmet-fanin classification. Returns -1 (all fanins met -> route to ready)
     // or the index of an unmet fanin (register on that producer's wake list).
-    // Scan direction is load-bearing: the builder fills fanin_local_ids in
+    // Scan direction is load-bearing: the builder fills the fanin region in
     // submission order, so the last unmet entry is the latest-submitted
     // producer -- the one likeliest to complete last. Targeting it minimises
     // wake-list transfers (a consumer re-registered onto a second producer once
@@ -587,8 +587,9 @@ struct PTO2SchedulerState {
     int classify_fanin_state(const PTO2TaskSlotState *s) const {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        const int32_t *fanin = p.fanin_data();
         for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
-            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return i;
+            if (!ring.is_completion_flag_set(fanin[i])) return i;
         }
         return -1;
     }
@@ -614,7 +615,7 @@ struct PTO2SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &ring.get_slot_state_by_task_id(consumer->payload->fanin_local_ids[state]);
+            producer = &ring.get_slot_state_by_task_id(consumer->payload->fanin_data()[state]);
         }
     }
 
@@ -643,7 +644,7 @@ struct PTO2SchedulerState {
             if (state < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_wake(&ring.get_slot_state_by_task_id(waiter->payload->fanin_local_ids[state]), waiter);
+                register_wake(&ring.get_slot_state_by_task_id(waiter->payload->fanin_data()[state]), waiter);
             }
             waiter = next;
         }

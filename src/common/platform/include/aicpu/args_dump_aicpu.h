@@ -158,6 +158,7 @@ inline void dump_args_for_task(
     int32_t covered_count = 0;
     const CoreCallable &sig = *sig_src;
 
+    const auto *pl_tensors = pl.tensor_data();
     for (int32_t sig_idx = 0; sig_idx < sig.sig_count(); sig_idx++) {
         ArgDirection dir = sig.sig(sig_idx);
         if (dir == ArgDirection::SCALAR) {
@@ -178,7 +179,7 @@ inline void dump_args_for_task(
             !should_dump_arg(dump_arg_mask, slot)) {
             continue;
         }
-        const auto &t = pl.tensors[slot];
+        const auto &t = pl_tensors[slot];
         ArgsDumpInfo info = {};
         info.buffer_addr = t.buffer.addr;
         info.dtype = static_cast<uint8_t>(t.dtype);
@@ -226,6 +227,7 @@ inline void dump_args_for_task(
             has_scalar_dtypes =
                 get_dump_args_task_scalar_dtypes(slot_state.task->task_id.raw, &dtype_scalar_count, scalar_dtypes);
         }
+        const uint64_t *pl_scalars = pl.scalar_data();
         for (int32_t scalar_index = 0; scalar_index < pl.scalar_count; scalar_index++) {
             int32_t scalar_arg_index = pl.tensor_count + scalar_index;
             if (!should_dump_arg(dump_arg_mask, scalar_arg_index)) {
@@ -245,7 +247,7 @@ inline void dump_args_for_task(
             for (int32_t i = 0; i < active_count; i++) {
                 info.func_ids[i] = active_fids[i];
             }
-            info.scalar_value = pl.scalars[scalar_index];
+            info.scalar_value = pl_scalars[scalar_index];
             if (has_dump_arg_flag(dump_arg_flags, scalar_arg_index)) {
                 info.flags = ARGS_DUMP_RECORD_FLAG_ARG_INDEX_AMBIGUOUS;
             }

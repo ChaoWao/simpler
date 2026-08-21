@@ -22,21 +22,23 @@ namespace {
 // The storage is the tail of the outer GRAPH task's heap allocation, so its
 // bytes are whatever that region last held; every field an execution needs is
 // written here or by the materialize pass, never inherited from those bytes.
-GraphExecution *
-acquire_host_execution_storage(uintptr_t storage_addr, size_t storage_bytes, int32_t node_count, size_t node_stride) {
-    size_t nodes_offset = 0;
-    size_t required_bytes = 0;
+GraphExecution *acquire_host_execution_storage(
+    uintptr_t storage_addr, size_t storage_bytes, int32_t node_count, uint32_t tensor_arg_count,
+    uint32_t scalar_arg_count
+) {
+    GraphExecutionStorageLayout layout{};
     if (storage_addr == 0 || storage_addr % alignof(GraphNodeStorage) != 0 ||
-        !graph_execution_storage_layout(node_count, node_stride, &nodes_offset, &required_bytes) ||
-        required_bytes > storage_bytes) {
+        !graph_execution_storage_layout(node_count, tensor_arg_count, scalar_arg_count, &layout) ||
+        layout.total_bytes > storage_bytes) {
         return nullptr;
     }
     auto *execution = new (reinterpret_cast<void *>(storage_addr)) GraphExecution{};
     execution->node_count = node_count;
-    execution->node_stride = node_stride;
     execution->remaining_nodes.store(node_count, std::memory_order_relaxed);
-    execution->node_storage =
-        reinterpret_cast<GraphNodeStorage *>(reinterpret_cast<uint8_t *>(execution) + nodes_offset);
+    auto *base = reinterpret_cast<uint8_t *>(execution);
+    execution->node_storage = reinterpret_cast<GraphNodeStorage *>(base + layout.nodes_offset);
+    execution->node_tensor_pool = reinterpret_cast<ChipTensor *>(base + layout.tensors_offset);
+    execution->node_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
     return execution;
 }
 
@@ -374,7 +376,7 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
 
     GraphExecution *execution = acquire_host_execution_storage(
         outer_base + definition->required_heap, definition->execution_storage_bytes,
-        static_cast<int32_t>(definition->task_count), definition->node_stride
+        static_cast<int32_t>(definition->task_count), definition->tensor_arg_count, definition->scalar_arg_count
     );
     if (execution == nullptr) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
@@ -522,6 +524,15 @@ GraphMaterializeResult graph_execution_materialize_slice(
             execution.materialize_busy.store(0, std::memory_order_release);
             return GraphMaterializeResult::INVALID;
         }
+        // A node's arguments occupy the same span in this execution's pools as in the
+        // Definition's arg tables, so the region starts at the node's own offset. No
+        // fanin region: its dependencies come from the Definition's CSR, and
+        // reset_graph_payload below keeps fanin_count at 0.
+        payload.bind_regions(
+            execution.node_tensor_pool + source.tensor_offset, execution.node_scalar_pool + source.scalar_offset,
+            nullptr
+        );
+        ChipTensor *node_tensors = payload.tensor_data();
         for (int32_t j = 0; j < source.tensor_count; ++j) {
             const uint32_t tensor_index = source.tensor_offset + static_cast<uint32_t>(j);
             GraphTensor rebound;
@@ -533,19 +544,20 @@ GraphMaterializeResult graph_execution_materialize_slice(
                 return GraphMaterializeResult::INVALID;
             }
             execution.consumed_tensor_args++;
-            graph_tensor_unpack(rebound, &payload.tensors[j]);
+            graph_tensor_unpack(rebound, &node_tensors[j]);
         }
+        uint64_t *node_scalars = payload.scalar_data();
         for (int32_t j = 0; j < source.scalar_count; ++j) {
             const uint32_t scalar_index = source.scalar_offset + static_cast<uint32_t>(j);
             const GraphScalarSourceRef &ref = scalar_sources[scalar_index];
             if (ref.source == static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE)) {
-                payload.scalars[j] = definition_scalars[scalar_index];
+                node_scalars[j] = definition_scalars[scalar_index];
             } else if (ref.source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY)) {
                 if (ref.source_index >= execution.boundary_scalar_count || execution.boundary_scalars == nullptr) {
                     execution.materialize_busy.store(0, std::memory_order_release);
                     return GraphMaterializeResult::INVALID;
                 }
-                payload.scalars[j] = execution.boundary_scalars[ref.source_index];
+                node_scalars[j] = execution.boundary_scalars[ref.source_index];
             } else {
                 execution.materialize_busy.store(0, std::memory_order_release);
                 return GraphMaterializeResult::INVALID;

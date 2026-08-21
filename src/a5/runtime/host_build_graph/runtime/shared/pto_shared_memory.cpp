@@ -46,16 +46,21 @@ uint64_t PTO2SharedMemoryHandle::calculate_size_per_ring(const uint64_t task_win
 // =============================================================================
 
 void PTO2SharedMemoryHandle::setup_pointers_per_ring(
-    const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch, uint64_t payload_stride
+    const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch
 ) {
     (void)task_window_sizes;
     char *base = (char *)sm_base;
     header = (PTO2SharedMemoryHeader *)base;
 
-    // Per-ring descriptors / payloads / slot_states — offsets from the single
-    // source of truth (pto2_sm_layout::ring_segment_offsets), so this setup and
-    // the device-address helpers cannot drift.
-    auto off = pto2_sm_layout::ring_segment_offsets(pitch, payload_stride);
+    // Per-ring descriptors / payloads / slot_states — offsets from the single source
+    // of truth (pto2_sm_layout::ring_segment_offsets), so this setup and the
+    // device-address helpers cannot drift.
+    //
+    // Only the four slot-pitched segments, and no argument pool: the pool extents
+    // differ between the mirror and the image, while these four depend on the pitch
+    // alone. The orchestrator holds the mirror's pool bases; the device resolves an
+    // argument region through the payload's delta and needs no base at all.
+    auto off = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents({pitch, 0, 0, 0}));
     auto &ring = header->ring;
     ring.task_descriptors = (PTO2TaskDescriptor *)(base + off.descriptors);
     ring.task_payloads = (PTO2TaskPayload *)(base + off.payloads);
@@ -68,7 +73,7 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t task_window_size) {
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         task_window_sizes[r] = task_window_size;
     }
-    setup_pointers_per_ring(task_window_sizes, task_window_size, sizeof(PTO2TaskPayload));
+    setup_pointers_per_ring(task_window_sizes, task_window_size);
 }
 
 bool PTO2SharedMemoryHandle::init(
@@ -88,19 +93,28 @@ bool PTO2SharedMemoryHandle::init_per_ring(
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
-    if (sm_size_arg < calculate_size_per_ring(task_window_sizes)) return false;
+    const uint64_t mirror_bytes = calculate_size_per_ring(task_window_sizes);
+    // The mirror has to stay inside an int32 delta's reach: a payload names its
+    // argument regions that way, and set() leaves a field unbound rather than
+    // truncating, so a pool out of reach would read back as null and be dereferenced
+    // as one. attach_populated makes the same check on the shipped image.
+    //
+    // Tested before the region's own size, because this rejects the ring capacity
+    // itself: no region, however large, makes such a window usable.
+    if (mirror_bytes > static_cast<uint64_t>(INT32_MAX)) return false;
+    if (sm_size_arg < mirror_bytes) return false;
 
     sm_base = sm_base_arg;
     sm_size = sm_size_arg;
     is_owner = false;
-    setup_pointers_per_ring(task_window_sizes, task_window_sizes[0], sizeof(PTO2TaskPayload));
+    setup_pointers_per_ring(task_window_sizes, task_window_sizes[0]);
     init_header_per_ring(task_window_sizes, heap_sizes);
     return true;
 }
 
 bool PTO2SharedMemoryHandle::attach_populated(
     void *sm_base_arg, uint64_t sm_size_arg, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t live_slots,
-    uint64_t payload_stride
+    uint64_t image_bytes
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
     // A pitch above the capacity would name a slot the ring cannot address, and one
@@ -108,21 +122,24 @@ bool PTO2SharedMemoryHandle::attach_populated(
     // short. This is the whole contract between the two sides, checked once at
     // attach rather than trusted.
     if (live_slots == 0 || live_slots > task_window_sizes[0]) return false;
-    // A stride past the type's size would read between payloads; one below the tensor
-    // array's own offset could not hold a payload's fixed head at all.
-    if (payload_stride > sizeof(PTO2TaskPayload) || payload_stride < offsetof(PTO2TaskPayload, tensors)) return false;
+    // The image must at least hold the four slot-pitched segments; anything beyond
+    // that is its argument pools, whose extents are the bind's cursors and are not
+    // recomputable here. The first pool's offset is exactly where those four end.
+    const uint64_t slots_end =
+        pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
+    if (image_bytes < slots_end) return false;
     // The region holds the compacted image, so that is what has to fit — the ring
     // capacity is no longer its size.
-    const uint64_t image_end = pto2_sm_layout::ring_segment_offsets(live_slots, payload_stride).end;
-    if (sm_size_arg < image_end) return false;
+    if (sm_size_arg < image_bytes) return false;
     // A slot state names its payload and descriptor by an int32 delta from its own
-    // address, so no two positions in the image may be further apart than that.
-    if (image_end > static_cast<uint64_t>(INT32_MAX)) return false;
+    // address, and a payload names its argument regions the same way, so no two
+    // positions in the image may be further apart than that.
+    if (image_bytes > static_cast<uint64_t>(INT32_MAX)) return false;
 
     sm_base = sm_base_arg;
     sm_size = sm_size_arg;
     is_owner = false;
-    setup_pointers_per_ring(task_window_sizes, live_slots, payload_stride);
+    setup_pointers_per_ring(task_window_sizes, live_slots);
     // Deliberately NO init_header_per_ring: the SM already holds the host
     // orchestrator's task graph (descriptors, slot states, ring counters).
     return true;

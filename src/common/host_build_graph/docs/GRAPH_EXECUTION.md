@@ -362,11 +362,19 @@ For a cache hit, the Host Orchestrator:
 5. emits one outer `GRAPH` task;
 6. stages the exact-size POD submission image for upload after orchestration.
 
-Internal nodes consume no ring task-window slots. Their descriptor, payload,
-and slot state live in the tail of the outer `GRAPH` task's own heap block,
-past `required_heap`: one `PTO2TaskAllocator::alloc` covers both halves the
-task owns, so the storage is reclaimed with the task's packed outputs and
-needs no separate device allocation, retention keying or release path.
+Internal nodes consume no ring task-window slots. Their descriptor, payload, slot
+state, and argument pools live in the tail of the outer `GRAPH` task's own heap
+block, past `required_heap`: one `PTO2TaskAllocator::alloc` covers both halves the
+task owns, so the storage is reclaimed with the task's packed outputs and needs no
+separate device allocation, retention keying or release path.
+
+A node payload holds no argument array of its own — it names each region by a delta,
+like any other payload. Its pools are the last two regions of the execution storage,
+sized by the Definition's `tensor_arg_count` / `scalar_arg_count` and indexed by the
+node's own `tensor_offset` / `scalar_offset`, so a node's arguments occupy the same
+span in the pool as in the Definition's arg table. There is no fanin region: node
+dependencies come from the Definition's fanin CSR, so a node's `fanin_count` stays 0
+and its fanin delta unbound.
 
 The execution address is therefore not on the wire — both sides compute
 `packed_buffer_base + required_heap` and read the size from the Definition. The

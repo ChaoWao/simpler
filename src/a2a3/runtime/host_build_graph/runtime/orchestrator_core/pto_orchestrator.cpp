@@ -838,22 +838,17 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.tensor_arg_count = static_cast<uint32_t>(tensors.size());
     definition.scalar_arg_count = static_cast<uint32_t>(scalars.size());
     definition.predicate_count = static_cast<uint32_t>(predicates.size());
-    // The widest node sets the stride every entry of this Definition's execution
-    // storage gets; nodes[] carries each node's declared tensor count.
-    int32_t widest_node_tensor_count = 0;
-    for (const GraphNodeDefinition &node : nodes) {
-        if (node.tensor_count > widest_node_tensor_count) widest_node_tensor_count = node.tensor_count;
-    }
-    const size_t node_stride = graph_node_stride(widest_node_tensor_count);
+    // An execution's storage is the node array plus this Definition's two argument
+    // pools, which the nodes index by their own tensor_offset / scalar_offset — so the
+    // arg-table counts size them, and no per-node scan is needed.
     size_t execution_storage_bytes = 0;
-    if (node_stride > UINT32_MAX ||
-        !graph_execution_storage_bytes(
-            static_cast<int32_t>(definition.task_count), node_stride, &execution_storage_bytes
+    if (!graph_execution_storage_bytes(
+            static_cast<int32_t>(definition.task_count), definition.tensor_arg_count, definition.scalar_arg_count,
+            &execution_storage_bytes
         ) ||
         execution_storage_bytes > UINT32_MAX) {
         return false;
     }
-    definition.node_stride = static_cast<uint32_t>(node_stride);
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     // Every section's byte count is known now, so the image grows once instead of
     // resizing eleven times. Each append aligns its start, hence the per-section
@@ -955,7 +950,7 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
 
 // Polling: fanin is a flat array of position-independent producer local ids on
 // the payload (no dep-pool spill, no producer pointers). The builder writes them
-// directly into payload->fanin_local_ids as producers are appended, deduping by
+// directly into the payload's fanin region as producers are appended, deduping by
 // slot and hard-capping at PTO2_MAX_FANIN. self_local is this task's own local id
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
@@ -965,12 +960,16 @@ struct PTO2FaninBuilder {
         orch(orch),
         seen_epoch(seen_epoch),
         self_local(self_local),
-        payload(payload) {}
+        payload(payload),
+        slots(payload->fanin_data()) {}
     int32_t count{0};
     PTO2OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
     int32_t self_local{0};
     PTO2TaskPayload *payload{nullptr};
+    // The payload's fanin region, resolved once: the appends below would otherwise
+    // re-resolve the delta per producer. Requires the regions bound before construction.
+    int32_t *slots{nullptr};
 
     bool mark_seen(uint8_t prod_ring, int32_t prod_slot) {
         if (prod_ring >= PTO2_MAX_RING_DEPTH || prod_slot < 0) {
@@ -1005,7 +1004,7 @@ static bool append_fanin_or_fail(
         LOG_ERROR("========================================");
         LOG_ERROR("FATAL: Fanin Capacity Exhausted!");
         LOG_ERROR("========================================");
-        LOG_ERROR("HBG stores every producer dependency inline on the consumer task.");
+        LOG_ERROR("HBG stores every producer dependency in the consumer task's fanin region.");
         LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, PTO2_MAX_FANIN);
         LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
         LOG_ERROR("Solution:");
@@ -1015,7 +1014,7 @@ static bool append_fanin_or_fail(
         orch_mark_fatal(orch, PTO2_ERROR_DEP_POOL_OVERFLOW);
         return false;
     }
-    fanin_builder->payload->fanin_local_ids[fanin_builder->count++] = static_cast<int32_t>(producer_task_id.local());
+    fanin_builder->slots[fanin_builder->count++] = static_cast<int32_t>(producer_task_id.local());
 
     // Reclaim gate: record this task as a consumer of the producer. The producer
     // slot retires once the per-ring completed_watermark reaches this consumer id.
@@ -1079,6 +1078,24 @@ static bool prepare_task(
     out->slot_state = &orch->sm_header->ring.get_slot_state_by_slot(out->alloc_result.slot);
     out->task = &orch->sm_header->ring.task_descriptors[out->alloc_result.slot];
     out->payload = &orch->sm_header->ring.task_payloads[out->alloc_result.slot];
+
+    // Bind the three argument regions before prefetch() and init(), both of which
+    // dereference them. The scalar cursor advances in whole cache lines because init()
+    // rounds its scalar memcpy up to one; a packed advance would let that rounding
+    // write into the next task's region. A tensor region is aligned for any count,
+    // ChipTensor being two cache lines. The fanin cursor advances at publish, not
+    // here — see the comment where it does.
+    const uint64_t window = orch->sm_header->ring.task_window_size;
+    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= window * MAX_TENSOR_ARGS);
+    debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
+    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + PTO2_MAX_FANIN <= window * PTO2_MAX_FANIN);
+    out->payload->bind_regions(
+        orch->tensor_pool + orch->tensor_pool_cursor, orch->scalar_pool + orch->scalar_pool_cursor,
+        orch->fanin_pool + orch->fanin_pool_cursor
+    );
+    orch->tensor_pool_cursor += args.tensor_count();
+    orch->scalar_pool_cursor += scalar_span;
 
     // Init-on-write: this slot's dynamic scheduling fields and completion flag are
     // initialized here, as the orchestrator claims the slot. whole-graph-resident
@@ -1437,7 +1454,7 @@ static TaskOutputTensors submit_task_common(
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
     // append_fanin_or_fail wrote each producer's local id straight into
-    // payload.fanin_local_ids and bumped its last_consumer_local_id; the count is
+    // the payload's fanin region and bumped its last_consumer_local_id; the count is
     // published in STEP 6 below. payload.init does not touch the fanin region.
     payload.init(args, result, prepared.alloc_result, layout);
 
@@ -1463,7 +1480,7 @@ static TaskOutputTensors submit_task_common(
 
     // === STEP 6: publish the inline fanin count (device boot classifies) ===
     // Polling + host-orch: append_fanin_or_fail already wrote each producer's
-    // local id into payload.fanin_local_ids and bumped its last_consumer_local_id.
+    // local id into the payload's fanin region and bumped its last_consumer_local_id.
     // All that remains is to record how many. There is NO fanout adjacency, NO
     // dep_pool, and NO ready routing here — the initial device boot scan classifies
     // each task once. A -1 result from classify_fanin_state routes the task through
@@ -1474,6 +1491,12 @@ static TaskOutputTensors submit_task_common(
     // a flat array of position-independent integers, so it crosses to the device
     // unchanged.
     payload.fanin_count = fanin_builder.count;
+    // The region's length is settled, so the cursor closes it at the real count. The
+    // equality holds only while nothing between the bind and here bound another fanin
+    // region, which is what makes the deferred advance safe.
+    debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
+    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+
     (void)sched;
 
     CYCLE_COUNT_LAP(g_orch_fanin_cycle);
@@ -1689,6 +1712,10 @@ bool graph_submit_outer(
     ring.completion_flags[allocation.slot].store(0, std::memory_order_relaxed);
 
     slot.bind_buffers(&payload, &task);
+    // An outer GRAPH task holds a real ring slot, so its fanin comes from the pool like
+    // any other task's. It has no tensor or scalar region: its boundary travels inside
+    // the submission image, and graph_reset_outer_payload zeroes both counts below.
+    payload.bind_regions(nullptr, nullptr, orch->fanin_pool + orch->fanin_pool_cursor);
     slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
     slot.last_consumer_local_id = static_cast<int32_t>(task_id.local());
     slot.active_mask = ActiveMask{};
@@ -1739,6 +1766,11 @@ bool graph_submit_outer(
     }
     register_task_outputs(boundary_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
     payload.fanin_count = fanin_builder.count;
+    // The region's length is settled, so the cursor closes it at the real count. The
+    // equality holds only while nothing between the bind and here bound another fanin
+    // region, which is what makes the deferred advance safe.
+    debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
+    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(std::move(pending));
@@ -2222,7 +2254,7 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
     if (state == nullptr || entry == nullptr) return;
     {
-        std::lock_guard<std::mutex> lock(state->recording_mutex);
+        std::scoped_lock lock(state->recording_mutex);
         entry->recording.reset();
         entry->set_status(GraphRecordingStatus::FAILED);
     }
@@ -2259,7 +2291,7 @@ bool PTO2OrchestratorState::graph_end() {
     );
     bool ready = false;
     {
-        std::lock_guard<std::mutex> lock(state->recording_mutex);
+        std::scoped_lock lock(state->recording_mutex);
         if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
             entry->set_status(GraphRecordingStatus::FAILED);
         } else {

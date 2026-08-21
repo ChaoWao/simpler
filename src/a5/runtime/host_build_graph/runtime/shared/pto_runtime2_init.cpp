@@ -257,6 +257,16 @@ bool PTO2OrchestratorState::init_data_from_layout(
 
     orch->ring.task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
+    // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
+    // so it holds for whichever SM this orchestrator was pointed at — the host-orch
+    // path re-inits against the host mirror before orchestration. The cursors reset
+    // with the rest of the state above.
+    auto *sm_bytes = static_cast<char *>(sm_dev_base);
+    const auto pools = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::mirror_extents(task_window_size));
+    orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
+    orch->tensor_pool = reinterpret_cast<ChipTensor *>(sm_bytes + pools.tensor_pool);
+    orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
+
     const size_t seen_epoch_bytes =
         PTO2_ALIGN_UP(static_cast<size_t>(layout.tensor_map.task_window_size) * sizeof(uint32_t), PTO2_ALIGN_SIZE);
     auto *seen_epoch = static_cast<uint32_t *>(arena.region_ptr(layout.off_fanin_seen_epoch));

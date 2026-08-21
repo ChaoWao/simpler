@@ -28,8 +28,9 @@ The shared graph image separates stable task identity from scheduling state:
 
 - `PTO2TaskDescriptor` contains the task ID, kernel IDs, and packed-buffer
   addresses.
-- `PTO2TaskPayload` contains tensors, scalars, predicates, and position-
-  independent `fanin_local_ids[]`.
+- `PTO2TaskPayload` contains the argument counts, predicate, and a delta naming
+  each of its tensor, scalar and position-independent fanin-id regions. The
+  arguments live in the pool segments, not in the payload.
 - `PTO2TaskSlotState` contains the active mask, task attributes, logical block
   count, subtask counters, completion state, and descriptor/payload bindings.
 
@@ -76,8 +77,8 @@ must launch as one cohort:
 ## Dependency and Readiness Flow
 
 1. Host orchestration allocates a task slot and builds its payload.
-2. TensorMap and explicit dependencies append producer local IDs to
-   `fanin_local_ids[]`.
+2. TensorMap and explicit dependencies append producer local IDs to the payload's
+   fanin region.
 3. Submit publishes only the finished graph data; it does not push ready tasks.
 4. After H2D, device boot scans every submitted task exactly once.
 5. A task with every fanin complete is routed to its ready queue; otherwise it

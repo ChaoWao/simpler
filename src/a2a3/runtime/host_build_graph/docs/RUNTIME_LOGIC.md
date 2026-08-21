@@ -73,13 +73,16 @@ The shared image uses three per-slot structures:
 | Structure | Purpose |
 | --------- | ------- |
 | `PTO2TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
-| `PTO2TaskPayload` | Tensors, scalars, predicate, local-ID fanins, dispatch metadata |
+| `PTO2TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
 | `PTO2TaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
 
 The host/device boundary is POD and position-independent. Fanins are integer
-producer IDs, not pointers, and a slot state names its payload and descriptor by a
-delta from its own address — so the image needs no fixup on either side of the
-copy.
+producer IDs, not pointers, and a slot state names its payload and descriptor — and
+a payload names its three argument regions — by a delta from the naming field's own
+address, so the image needs no fixup on either side of the copy. A delta is only
+correct for the layout it was taken in, so `compact_live_image` re-takes every one
+of them against the shipped image; the copy to the device moves a field and its
+target together and leaves them all correct.
 
 ### 3.1 What Ships: the Arena's Three Zones
 
@@ -242,8 +245,8 @@ AIC/MIX tasks use the available cluster count.
 TensorMap maps tensor regions to producer task IDs. For every task:
 
 1. INPUT/INOUT regions look up overlapping producers.
-2. Explicit and discovered producers are deduplicated into
-   `fanin_local_ids[]`.
+2. Explicit and discovered producers are deduplicated into the payload's fanin
+   region.
 3. OUTPUT/INOUT regions register the new task as producer.
 4. Each producer tracks its highest consumer local ID for completion metadata.
 
