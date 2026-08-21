@@ -18,7 +18,7 @@ import logging
 import struct
 from enum import IntEnum
 from multiprocessing.shared_memory import SharedMemory
-from typing import Protocol, TypeVar
+from typing import Any, TypeVar
 
 from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
 
@@ -44,15 +44,6 @@ from .comm_provider import (
     VmmShareableHandleImport,
     validate_independent_local_views,
 )
-
-
-class _ControlShm(Protocol):
-    name: str
-
-    def close(self) -> None: ...
-
-    def unlink(self) -> None: ...
-
 
 PROVIDER_REGION_CTRL_MAGIC = 0x50524354
 PROVIDER_REGION_CTRL_ABI_MAJOR = 1
@@ -405,7 +396,7 @@ def _zero_reply(view: memoryview) -> None:
     view[:] = b"\x00" * view.nbytes
 
 
-def _discard_control_shm(shm: _ControlShm) -> None:
+def _discard_control_shm(shm: Any) -> None:
     name = getattr(shm, "name", "<unnamed>")
     logger = logging.getLogger("simpler")
     try:
