@@ -2055,10 +2055,19 @@ bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTas
     // fields it binds below. Taking that mutex here lets the main thread's
     // same-key submit burst starve prepare and collapse the intended overlap, so
     // the status read goes through the atomic instead.
-    if (entry->status() != GraphRecordingStatus::RECORDING || entry->recording == nullptr ||
-        !graph_recording_boundary_matches(*entry->recording, args)) {
+    if (entry->status() != GraphRecordingStatus::RECORDING || entry->recording == nullptr) {
         return false;
     }
+    // The recording was created from this very boundary at graph_begin, and the
+    // handle names that recording rather than being searched for, so a mismatch
+    // here is unreachable. The comparison walks up to 128 ChipTensor descriptors on
+    // the thread whose start-up latency this path exists to keep short, so it is an
+    // assertion: debug builds still catch a boundary that stopped matching, release
+    // builds compile it out.
+    debug_assert(
+        graph_recording_boundary_matches(*entry->recording, args) &&
+        "the recording thread's boundary copy must match the boundary graph_begin recorded"
+    );
     args.anchor_scalar_sources();
     entry->recording->boundary_args = &args;
     g_active_graph_entry = entry;

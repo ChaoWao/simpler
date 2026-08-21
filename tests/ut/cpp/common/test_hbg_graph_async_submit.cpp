@@ -161,8 +161,10 @@ const PTO2RuntimeOps kFakeOps = {
 
 }  // namespace
 
-TEST(HbgGraphAsyncSubmit, PrewarmedRecorderPoolGrowsForFiveConcurrentGraphs) {
-    constexpr int kGraphCount = 5;
+TEST(HbgGraphAsyncSubmit, PrewarmedRecorderPoolGrowsPastThePrewarmedCount) {
+    // One more than the prewarmed count, so the pool must create a worker for
+    // the last job rather than queue it behind a busy one.
+    constexpr int kGraphCount = 9;
     GraphAsyncRecordingState pool;
     ASSERT_TRUE(pool.prewarm());
     std::mutex gate_mutex;
@@ -197,7 +199,7 @@ TEST(HbgGraphAsyncSubmit, PrewarmedRecorderPoolGrowsForFiveConcurrentGraphs) {
 
     EXPECT_TRUE(all_entered) << "every Graph recording must start before any one of them finishes";
     EXPECT_EQ(worker_ids.size(), static_cast<size_t>(kGraphCount))
-        << "a fifth Graph must grow the four-worker prewarmed pool instead of queueing";
+        << "a concurrent miss past the prewarmed count must grow the pool instead of queueing";
 }
 
 TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit) {

@@ -14,14 +14,13 @@ orchestration with the host g++, runs it on the host CPU instead of the AICPU,
 and ships the built SM image to the device, which boots scheduler-only.
 
 ``kernels/orchestration/decode_fwd_graph.cpp`` is that case's orchestration
-with the runtime untouched, recast as a Graph: the 20-iteration decoder layer
-loop (40 of the 43 layers) submits one ``rt_submit_graph`` per iteration whose
-body is the layer's full task set, so the host records a 744-node Definition
-once and the full network collapses to 1131 host-submitted tasks. The ten
-``recv_count_out`` reads that drove the MoE per-expert tile loops (a
-task-produced tensor, unreadable while the host builds the graph) are now
-dispatch predicates the scheduler evaluates on device. Tensor initialization is
-shared with the TMR case and runs in AIV kernels, and the attention/FFN scale
+with the runtime untouched, recast as a Graph: the whole forward pass is cut
+into seven Graph blocks covering all 43 layers, so the host records seven
+Definitions and submits 129 tasks itself, the rest being built on the recording
+threads. The ten ``recv_count_out`` reads that drove the MoE per-expert tile
+loops (a task-produced tensor, unreadable while the host builds the graph) are
+now dispatch predicates the scheduler evaluates on device. Tensor initialization
+is shared with the TMR case and runs in AIV kernels, and the attention/FFN scale
 factors travel as kernel tensor inputs read from GM, so the host never writes a
 GM-heap device address and never copies tensor data into task scalars. The
 orchestration source is therefore the TMR one recast as a Graph, with no
@@ -29,7 +28,7 @@ runtime-specific rewrite. ``skip_golden`` is inherited from the TMR case, which
 is itself a completion/smoke case; ``manual`` because the 368-kernel compile
 takes minutes.
 
-Host construction and Graph recording complete (1131 tasks on host). An
+Host construction and Graph recording complete (129 host submissions). An
 unskipped device run is currently blocked in Graph activation, so the recorded
 bodies never replay. See README.md for the measurements and the remaining
 Graph-runtime limitation.

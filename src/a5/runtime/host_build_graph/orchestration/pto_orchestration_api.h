@@ -189,10 +189,10 @@ public:
     GraphAsyncRecordingState(const GraphAsyncRecordingState &) = delete;
     GraphAsyncRecordingState &operator=(const GraphAsyncRecordingState &) = delete;
 
-    // The common four-Definition case should not create pthreads between outer
-    // shell submissions. Callable registration parks those workers before the
-    // first run; start() can still grow to the Definition limit if a workload
-    // records more identities concurrently.
+    // A workload that cuts its forward pass into up to eight Definitions should
+    // not create pthreads between outer shell submissions. Callable registration
+    // parks those workers before the first run; start() can still grow to the
+    // Definition limit if a workload records more identities concurrently.
     bool prewarm() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_) return false;
@@ -268,7 +268,7 @@ public:
     }
 
 private:
-    static constexpr size_t kPrewarmedWorkerCount = 4;
+    static constexpr size_t kPrewarmedWorkerCount = 8;
     static constexpr size_t kMaxWorkerCount = GRAPH_MAX_DEFINITIONS;
     static constexpr size_t kJobCapacity = GRAPH_MAX_DEFINITIONS;
 
