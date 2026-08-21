@@ -348,7 +348,7 @@ dump skips `SCALAR` entries (they do not consume a positional tensor slot).
 
 Both `host_build_graph` and `tensormap_and_ringbuffer` share the
 same code path: the AICPU dump-collector reads geometry directly from
-`PTO2TaskPayload::tensors[]`, which carries shape and offset info
+the payload's tensor region, which carries shape and offset info
 alongside the device-packed arguments. For allocated output tensors,
 `alloc_tensors` supplies a `TensorCreateInfo` at orchestration time
 that is embedded in the payload by submit. For tensors that already
@@ -496,7 +496,7 @@ AICPU has device addresses and sizes — the logical shape, dtype,
 and view geometry come from the runtime. Both `host_build_graph`
 and `tensormap_and_ringbuffer` share the same code path: the
 AICPU dump-collector reads geometry directly from
-`PTO2TaskPayload::tensors[]`, which carries shape and offset info
+the payload's tensor region, which carries shape and offset info
 alongside the device-packed arguments. For allocated output tensors,
 `alloc_tensors` supplies a `TensorCreateInfo` at orchestration time
 that is embedded in the payload by submit. For tensors that already

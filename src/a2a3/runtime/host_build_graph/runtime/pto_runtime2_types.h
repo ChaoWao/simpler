@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <type_traits>
 
 #include "profiling_config.h"
 #include "pto_constants.h"
@@ -110,11 +111,17 @@
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64
 
-// Polling-scheduler inline fanin cap. The polling model stores producer
-// dependencies as flat position-independent local-id integers on the payload
-// (no dep-pool spill), so a task's fanin degree is hard-capped here. Must cover
-// the worst-case fanin of any workload (paged_attention is the densest).
+// Polling-scheduler fanin cap. The polling model stores producer dependencies as
+// flat position-independent local-id integers in the fanin pool (no dep-pool
+// spill), so a task's fanin degree is hard-capped here. Must cover the worst-case
+// fanin of any workload (paged_attention is the densest).
 #define PTO2_MAX_FANIN 128
+
+// Alignment of every per-task region inside an argument pool. Each region starts
+// and ends on a cache line so PTO2TaskPayload::init's round-up scalar memcpy stays
+// inside the task's own region — see its comment. ChipTensor is already 2 cache
+// lines, so only the fanin and scalar regions need the round-up.
+inline constexpr int32_t ARG_POOL_ALIGN = 64;
 
 // Dependency-degree diagnostic: warn once when a task's fanin or a producer's
 // fanout first exceeds this degree, so dense dependency graphs surface without
@@ -260,35 +267,42 @@ enum PTO2EarlySyncDrainState : uint8_t {
 inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
 struct PTO2TaskPayload {
-    // === Cache lines 0-8 (576B) — metadata + inline fanin ===
+    // === Cache line 0 (64B) — the dispatch path's own line ===
+    // sizeof is independent of PTO2_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
+    // widening a cap costs pool bytes for the tasks that need them, not a control
+    // block on every task.
     int32_t tensor_count{0};
     int32_t scalar_count{0};
     int32_t fanin_count{0};  // Producer dependency count (raw, no +1 redundance)
-    // Producer dependencies as position-independent local task ids. Single-ring
-    // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned
-    // by classify_fanin_state against the ring completion_flags. A -1 result
-    // means every fanin is complete; otherwise it is the first unmet
-    // fanin index. Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
-    int32_t fanin_local_ids[PTO2_MAX_FANIN];
-    // Reserved: preserves the early-dispatch block and tensors[] offsets. tensors
-    // must stay at byte 576 (AICore arg-materialization contract), so this fanin
-    // region keeps its original 528-byte footprint.
-    int32_t _fanin_reserved[3];
-    // Early-dispatch metadata (AICPU-side only). Ordered by descending
-    // alignment (8B mask, 4B fanin, then 2B/1B counters and flags) so the block packs with no
-    // internal padding. Kept here after the fanin array (not moved up front): on
-    // cache line 8 it shares only with the rarely-touched fanin tail, whereas in
-    // line 0 the early-dispatch atomics (written during staging) would false-share with
-    // tensor_count/scalar_count (read by build_payload at dispatch). Fits in the 40B
-    // between the fanin array (offset 536) and the 64B-aligned tensors[] (offset
-    // 576), so sizeof and tensors[] are unchanged.
+
+    // This task's three argument regions, each in a pool outside this struct and
+    // named by a delta from the naming field's own address. A delta holds only for
+    // the layout it was taken in, so every one is bound twice on the host: against
+    // the mirror when the slot is claimed, and against the image in
+    // compact_live_image, which re-pitches the segments.
+    //
+    // fanin holds flat position-independent producer local task ids. Single-ring
+    // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned by
+    // classify_fanin_state against the ring completion_flags. Hard-capped at
+    // PTO2_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
+    // dependencies live in the Definition's fanin CSR instead.
+    simpler::hbg::SelfRelativePtr<ChipTensor> tensors;
+    simpler::hbg::SelfRelativePtr<uint64_t> scalars;
+    simpler::hbg::SelfRelativePtr<int32_t> fanin;
+
+    // === Cache line 1 — early-dispatch metadata (AICPU-side only) ===
+    // Ordered by descending alignment (8B mask, 4B fanin, then 2B/1B counters and
+    // flags) so the block packs with no internal padding. On its own line rather
+    // than line 0: these atomics are written during staging while line 0's counts
+    // and region deltas are read by build_payload at dispatch, so sharing a line
+    // would false-share.
     //
     // Bitmask of global core_ids this consumer is pre-staged (gated) on. Concurrent
     // stagers publish bits with atomic fetch_or. A regular consumer destructively
     // splits them between release and late-stager owners; a sync_start cohort keeps
     // the completed mask stable for its single launch owner, whether staging is local
     // or uses the global drain fallback.
-    std::atomic<uint64_t> staged_core_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS]{};
+    alignas(64) std::atomic<uint64_t> staged_core_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS]{};
     // Early-dispatch CANDIDATE detection (event-driven, dual of fanin_refcount):
     // seeded at wiring with producers already complete, then a flagged producer
     // bumps each consumer after all of its logical blocks are published.
@@ -326,49 +340,57 @@ struct PTO2TaskPayload {
     // reinitialization. READY records that producer release observed OWNER;
     // only cancellation clears OWNER during the current task lifetime.
     std::atomic<uint8_t> early_sync_drain_state{PTO2_EARLY_SYNC_DRAIN_NONE};
-    // === Cache line 9 (byte 576) — dispatch predicate (AICPU-only) ===
-    // Offset is a fixed 576, independent of MAX_TENSOR_ARGS / MAX_SCALAR_ARGS.
-    // AICore never reads it — args are materialized from the tensor_count / tensors
-    // / scalars offsets only. Resolved at submit; evaluated by the scheduler at
-    // dispatch.
+    // === Cache line 2 — dispatch predicate + dump metadata (AICPU-only) ===
+    // AICore never reads either — args are materialized from line 0's counts and
+    // region deltas. Resolved at submit; evaluated by the scheduler at dispatch.
     alignas(64) DispatchPredicate predicate;
     ArgsDumpTaskMetadata dump_metadata;
-    // === Cache lines 10-11 (128B) — scalars ===
-    // alignas is load-bearing: the AICore reads this at a compile-time offset, and
-    // uint64_t alone would let it start right after dump_metadata instead of on the
-    // next cache line. tensors got its 640 for free from ChipTensor's own alignment.
-    alignas(64) uint64_t scalars[MAX_SCALAR_ARGS];
-    // === Cache lines 12-75 (4096B) — tensors (alignas(64) forces alignment) ===
-    //
-    // Last on purpose. This is the only region whose used extent varies per task —
-    // one to seventeen entries of thirty-two on a measured decode — so putting it at
-    // the end makes everything a task reads a contiguous prefix, which is what lets
-    // the shipped image carry less than the whole array.
-    ChipTensor tensors[MAX_TENSOR_ARGS];
 
-    // Layout verification (size checks that don't need offsetof).
-    static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
-    static_assert(MAX_SCALAR_ARGS * sizeof(uint64_t) == 128, "scalar region must be 128B (2 cache lines)");
+    // --- Argument region access ---
+    // Each accessor resolves its delta once and hands back the region's first
+    // element, so a caller indexes the region directly. Deliberately no per-element
+    // accessor: one inside a loop would re-resolve the delta on every iteration, and
+    // a store through an unrelated pointer in the loop body is enough to stop the
+    // compiler hoisting that load — build_payload's args[] writes are exactly that.
+    ChipTensor *tensor_data() { return tensors.get(); }
+    const ChipTensor *tensor_data() const { return tensors.get(); }
+    uint64_t *scalar_data() { return scalars.get(); }
+    const uint64_t *scalar_data() const { return scalars.get(); }
+    int32_t *fanin_data() { return fanin.get(); }
+    const int32_t *fanin_data() const { return fanin.get(); }
+
+    /**
+     * Point this payload's three argument regions at pool-resident storage. Must run
+     * before prefetch() and init(), which dereference them.
+     *
+     * A Graph node passes nullptr for fanin: its dependencies come from the
+     * Definition's CSR, so the region does not exist and fanin_count stays 0.
+     */
+    void bind_regions(ChipTensor *tensor_region, uint64_t *scalar_region, int32_t *fanin_region) {
+        tensors.set(tensor_region);
+        scalars.set(scalar_region);
+        fanin.set(fanin_region);
+    }
 
     /**
      * Prefetch (for write) the regions init() is about to fill so the stores land
      * in warm cache. tensor_count/scalar_count come from the Arg — the payload's
-     * own counts are not set until init(). Warms the early-dispatch block at
-     * offset 536 (cache line 8) too. A member fn lowers to the same prefetch
+     * own counts are not set until init(). A member fn lowers to the same prefetch
      * instructions as a free function (`this` is just a register), no cache impact.
      */
     void prefetch(int32_t tensor_count, int32_t scalar_count) const {
+        const ChipTensor *t = tensor_data();
         for (int32_t i = 0; i < tensor_count; i++) {
-            __builtin_prefetch(&tensors[i], 1, 3);
-            __builtin_prefetch(reinterpret_cast<const char *>(&tensors[i]) + 64, 1, 3);
+            __builtin_prefetch(&t[i], 1, 3);
+            __builtin_prefetch(reinterpret_cast<const char *>(&t[i]) + 64, 1, 3);
         }
+        const uint64_t *s = scalar_data();
         for (int32_t i = 0; i < scalar_count; i += 8) {
-            __builtin_prefetch(&scalars[i], 1, 3);
+            __builtin_prefetch(&s[i], 1, 3);
         }
         __builtin_prefetch(this, 1, 3);
         __builtin_prefetch(reinterpret_cast<const char *>(this) + 64, 1, 3);
         __builtin_prefetch(reinterpret_cast<const char *>(this) + 128, 1, 3);
-        __builtin_prefetch(reinterpret_cast<const char *>(this) + 512, 1, 3);  // early-dispatch fields (cache line 8)
     }
 
     /**
@@ -387,23 +409,31 @@ struct PTO2TaskPayload {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 
-        // int32_t out_idx = 0;
+        // bind_regions must already have run: an unbound region reads back as null and
+        // the stores below would go through it. A count of zero needs no region, which
+        // is how an outer GRAPH task reaches here with both unbound.
+        debug_assert(args.tensor_count() == 0 || tensor_data() != nullptr);
+        debug_assert(args.scalar_count() == 0 || scalar_data() != nullptr);
+
+        ChipTensor *dst = tensor_data();
         for (int32_t i = 0; i < args.tensor_count(); i++) {
             if (args.tag(i) != TensorArgType::OUTPUT) {
-                tensors[i].copy(args.tensor(i).ref());
+                dst[i].copy(args.tensor(i).ref());
             } else {
                 init_tensor_from_create_info(
-                    tensors[i], args.tensor(i).create_info(),
+                    dst[i], args.tensor(i).create_info(),
                     reinterpret_cast<void *>(reinterpret_cast<char *>(alloc_result.packed_base) + layout.offsets[i]),
                     layout.buffer_sizes[i]
                 );
-                tensors[i].owner_task_id = result.task_id();
-                result.materialize_output(tensors[i]);
+                dst[i].owner_task_id = result.task_id();
+                result.materialize_output(dst[i]);
             }
         }
-        // Round up to cache line boundary. Both arrays are 128B so no overrun.
-        // Eliminates branches; extra bytes within the same CL have zero additional cost.
-        memcpy(scalars, args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
+        // Round up to cache line boundary. Every scalar region is a whole number of
+        // cache lines (ARG_POOL_ALIGN), so the rounded copy stays inside this
+        // task's own region. Eliminates branches; extra bytes within the same CL have
+        // zero additional cost.
+        memcpy(scalar_data(), args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
         dump_metadata = {};
 #if SIMPLER_DFX
@@ -416,7 +446,7 @@ struct PTO2TaskPayload {
         // fields. reset_for_reuse MUST NOT touch the payload (it runs at slot
         // init and would pull this cold cache line across structures);
         // prepare_task only allocates/binds. prefetch() warms this
-        // line (offset 512) so these writes land in warm cache.
+        // line (cache line 1) so these writes land in warm cache.
         //
         // early_dispatch_state / staged_core_mask / dispatch_fanin are all CONSUMER-side: a
         // task whose own allow_early_resolve is false still has them touched when
@@ -437,28 +467,36 @@ struct PTO2TaskPayload {
     }
 };
 
-// PTO2TaskPayload layout verification (offsetof requires complete type).
-static_assert(offsetof(PTO2TaskPayload, fanin_local_ids) == 12, "inline fanin id array must follow fanin_count");
+// PTO2TaskPayload layout verification (offsetof requires complete type). The counts
+// and region deltas share the first cache line, the early-dispatch atomics own the
+// second, and the AICPU-only predicate + dump metadata own the third.
+static_assert(offsetof(PTO2TaskPayload, tensors) == 12, "region deltas must follow the three counts");
 static_assert(
-    offsetof(PTO2TaskPayload, predicate) == 576,
-    "dispatch predicate occupies cache line 9 at fixed byte 576 (before the arg arrays, never moves)"
+    offsetof(PTO2TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
+    "counts + region deltas must fit the first cache line"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 640,
-    "dump metadata must fit in the AICPU-only cache line before the arg arrays"
+    offsetof(PTO2TaskPayload, staged_core_mask) == 64,
+    "the early-dispatch atomics own cache line 1: they are written during staging while "
+    "line 0's counts and deltas are read at dispatch, so sharing a line would false-share"
+);
+static_assert(offsetof(PTO2TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
+static_assert(
+    offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
+    "dump metadata must fit the predicate's cache line"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, scalars) == 640, "scalars must start at byte 640 (cache line 10, after predicate)"
+    sizeof(PTO2TaskPayload) == 192, "PTO2TaskPayload is three cache lines and independent of every argument cap"
 );
+// compact_live_image restacks the payload segment with one memcpy and the device
+// copy moves the whole image, so the payload has to be a POD wire struct. Deleting
+// SelfRelativePtr's copy operations does not cost it that — a deleted special member
+// is trivial — but only an assertion keeps a future member from doing so silently.
 static_assert(
-    offsetof(PTO2TaskPayload, tensors) == 640 + MAX_SCALAR_ARGS * sizeof(uint64_t),
-    "tensors must immediately follow scalars, and must be the last region: the shipped "
-    "image carries only as much of the array as a task uses, so nothing may sit past it"
+    std::is_trivially_copyable_v<PTO2TaskPayload> && std::is_standard_layout_v<PTO2TaskPayload>,
+    "PTO2TaskPayload crosses to the device by memcpy"
 );
-static_assert(
-    sizeof(PTO2TaskPayload) == 640 + MAX_SCALAR_ARGS * sizeof(uint64_t) + MAX_TENSOR_ARGS * sizeof(ChipTensor),
-    "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + scalars + tensors"
-);
+static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
 
 /**
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)

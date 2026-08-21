@@ -251,9 +251,15 @@ struct PTO2SharedMemoryHandle {
     // the wrong address, so both sides derive it from the same submitted count.
     // The capacity and mask in the header are unchanged, and `local_id & mask`
     // yields `local_id`, which is below `live_slots` for every ring task.
+    //
+    // `image_bytes` is what the host shipped, pools included. The device cannot
+    // recompute it — the pool extents are the bind's cursors, which only the host saw
+    // — and it does not need to: a payload names its argument regions by delta, so no
+    // pool base is resolved here. The value bounds the region and checks the int32
+    // delta reach.
     bool attach_populated(
         void *sm_base, uint64_t sm_size, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t live_slots,
-        uint64_t payload_stride
+        uint64_t image_bytes
     );
 
     void destroy();
@@ -266,13 +272,10 @@ private:
         const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
     );
     void setup_pointers(uint64_t task_window_size);
-    // `pitch` is the slot count the arrays are dimensioned for. init_per_ring
-    // passes the ring capacity (the mirror the orchestrator writes into);
-    // attach_populated passes the submitted count (the compacted image that
-    // shipped).
-    void setup_pointers_per_ring(
-        const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch, uint64_t payload_stride
-    );
+    // `pitch` is the slot count the arrays are dimensioned for. init_per_ring passes
+    // the ring capacity (the mirror the orchestrator writes into); attach_populated
+    // passes the submitted count (the compacted image that shipped).
+    void setup_pointers_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch);
 };
 
 // =============================================================================
@@ -310,49 +313,87 @@ inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noe
     );
 }
 
-// Byte offsets (from the SM base) of the ring's three segments. The layout is:
-// header, then descriptors -> payloads -> slot_states, every segment
-// PTO2_ALIGN_UP-padded.
+// Byte offsets (from the SM base) of the ring's segments. The layout is: header, then
+// descriptors -> payloads -> slot_states -> completion_flags -> the three argument
+// pools, every segment PTO2_ALIGN_UP-padded. RingImageExtents dimensions them: the
+// mirror for the worst case the API allows, the image for what this bind holds, which
+// is what makes the live prefixes contiguous and the upload one copy.
 //
-// Two parameters, and the host mirror and the shipped image differ in both.
-//
-// The *pitch* is how many slots the arrays are dimensioned for: the mirror uses the
-// ring capacity, the image uses the submitted count, which is what makes the four
-// live prefixes contiguous and the upload one copy.
-//
-// The *payload stride* is how far apart consecutive payloads sit. The mirror uses
-// sizeof(PTO2TaskPayload), whose tensor array is dimensioned for the widest task the
-// API allows. The image uses the widest task in this bind — the array is the last
-// field, so anything past that task's entries is read by nobody.
+// The pools sit last because nothing on the device resolves a segment past
+// completion_flags: a payload names its argument regions by delta, so the four
+// slot-pitched offsets are all the attach path computes.
 struct PTO2RingSegmentOffsets {
     uint64_t descriptors;
     uint64_t payloads;
     uint64_t slot_states;
     uint64_t completion_flags;  // polling-completion byte array (1 byte/slot)
-    uint64_t end;               // offset just past completion_flags (total SM size)
+    uint64_t fanin_pool;
+    uint64_t tensor_pool;
+    uint64_t scalar_pool;
+    uint64_t end;  // offset just past the last segment (total image size)
 };
 
-// Single source of truth for the SM segment layout. Returns offsets (not
-// pointers), so it serves BOTH the host-side pointer setup (`setup_pointers`,
-// which adds `sm_base`) and the device-address helpers below (which add
-// `sm_dev_base`). Adding or reordering a segment is a one-line edit here; every
-// consumer follows automatically, so the layout walk can never silently
-// disagree across call sites.
-inline PTO2RingSegmentOffsets
-ring_segment_offsets(uint64_t task_window_size, uint64_t payload_stride = sizeof(PTO2TaskPayload)) noexcept {
+// How many slots and how many pool elements a layout is dimensioned for.
+struct RingImageExtents {
+    uint64_t slots;
+    uint64_t fanin_elems;
+    uint64_t tensor_elems;
+    uint64_t scalar_elems;
+};
+
+// The mirror the orchestrator writes into: the ring capacity, every pool sized so the
+// worst case cannot overflow a bump — task_window tasks each at their full cap. That
+// bound is what lets prepare_task advance a cursor with no capacity check.
+inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
+    return RingImageExtents{
+        task_window_size,
+        task_window_size * PTO2_MAX_FANIN,
+        task_window_size * MAX_TENSOR_ARGS,
+        task_window_size * MAX_SCALAR_ARGS,
+    };
+}
+
+// Single source of truth for the SM segment layout. Returns offsets (not pointers),
+// so it serves BOTH the host-side pointer setup (`setup_pointers`, which adds
+// `sm_base`) and the device-address helpers below (which add `sm_dev_base`). Adding
+// or reordering a segment is a one-line edit here; every consumer follows
+// automatically, so the layout walk can never silently disagree across call sites.
+inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
     uint64_t off = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
     PTO2RingSegmentOffsets o{};
     o.descriptors = off;
-    off += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
     o.payloads = off;
-    off += PTO2_ALIGN_UP(task_window_size * payload_stride, PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
     o.completion_flags = off;
-    off += PTO2_ALIGN_UP(task_window_size * sizeof(std::atomic<uint8_t>), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), PTO2_ALIGN_SIZE);
+    o.fanin_pool = off;
+    off += PTO2_ALIGN_UP(e.fanin_elems * sizeof(int32_t), PTO2_ALIGN_SIZE);
+    o.tensor_pool = off;
+    off += PTO2_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), PTO2_ALIGN_SIZE);
+    o.scalar_pool = off;
+    off += PTO2_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), PTO2_ALIGN_SIZE);
     o.end = off;
     return o;
 }
+
+inline PTO2RingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) noexcept {
+    return ring_segment_offsets(mirror_extents(task_window_size));
+}
+
+// Every per-task region starts on a cache line, which PTO2TaskPayload::init's
+// round-up scalar memcpy relies on. ChipTensor is 2 cache lines, so a tensor region
+// is aligned for any count; the fanin and scalar strides need it stated.
+static_assert(
+    (PTO2_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
+    "the fanin region's cap must be a whole number of cache lines"
+);
+static_assert(
+    (MAX_SCALAR_ARGS * sizeof(uint64_t)) % ARG_POOL_ALIGN == 0,
+    "the scalar region's cap must be a whole number of cache lines"
+);
 
 // The pitch the shipped image uses for a given submitted task count. A bind that
 // submits nothing still ships its header and still attaches, and a zero-length
@@ -361,47 +402,54 @@ inline uint64_t live_slot_pitch(uint64_t submitted_tasks) noexcept {
     return submitted_tasks == 0 ? 1 : submitted_tasks;
 }
 
-// The stride a shipped payload array uses for a given widest task. The tensor array
-// is the payload's last field, so a task reads nothing past its own entries and the
-// stride need only cover them — but every payload in the image shares one stride, so
-// it is the widest task that sets it.
-//
-// Rounded up to PTO2_ALIGN_SIZE because PTO2TaskPayload's own alignment is 64 and the
-// image places consecutive payloads at multiples of the stride.
-inline uint64_t shipped_payload_stride(int32_t widest_tensor_count) noexcept {
-    constexpr uint64_t kTensorsOffset = offsetof(PTO2TaskPayload, tensors);
-    const uint64_t used = static_cast<uint64_t>(widest_tensor_count < 0 ? 0 : widest_tensor_count) * sizeof(ChipTensor);
-    const uint64_t stride = PTO2_ALIGN_UP(kTensorsOffset + used, PTO2_ALIGN_SIZE);
-    return stride > sizeof(PTO2TaskPayload) ? sizeof(PTO2TaskPayload) : stride;
+// What a bind actually holds, for the shipped image's extents. Each pool ships only the
+// prefix its cursor reached, which is why a run of narrow tasks ships a small fraction
+// of the mirror's pools.
+struct BindUsage {
+    uint64_t submitted_tasks;
+    uint64_t fanin_elems;
+    uint64_t tensor_elems;
+    uint64_t scalar_elems;
+};
+
+inline RingImageExtents image_extents(const BindUsage &used) noexcept {
+    return RingImageExtents{
+        live_slot_pitch(used.submitted_tasks),
+        used.fanin_elems,
+        used.tensor_elems,
+        used.scalar_elems,
+    };
 }
 
 // Restack the live prefix of every ring segment from the ring-pitched mirror the
-// orchestrator wrote into an image pitched to `submitted_tasks`, where the four
+// orchestrator wrote into an image dimensioned for what this bind holds, where the
 // prefixes are contiguous and can travel as one copy.
 //
 // `out_base` must be PTO2_ALIGN_SIZE-aligned and hold
-// `ring_segment_offsets(live_slot_pitch(submitted_tasks)).end` bytes. Returns that
-// byte count.
+// `ring_segment_offsets(image_extents(used)).end` bytes. Returns that byte count.
 //
 // Two things the restack has to fix up, both because the image is not the mirror:
 //
 //   - the ring header's data pointers name the mirror's arrays, so they leave as
 //     null rather than carrying host addresses into device memory (the device
 //     resolves them in attach_populated);
-//   - a slot state names its payload and descriptor by a delta from its own
-//     address, and the restack changed those distances, so each binding is
-//     re-taken against the image.
-inline uint64_t compact_live_image(
-    const char *mirror_base, uint64_t task_window_size, uint64_t submitted_tasks, uint64_t payload_stride,
-    char *out_base
-) noexcept {
-    // The mirror is pitched to the capacity and to the type, so a larger live count
-    // or a wider stride reads past the segment it is copying from and ships a corrupt
-    // image. attach_populated tests the same two bounds on the device side.
-    always_assert(submitted_tasks <= task_window_size);
-    always_assert(payload_stride <= sizeof(PTO2TaskPayload));
-    const PTO2RingSegmentOffsets from = ring_segment_offsets(task_window_size);
-    const PTO2RingSegmentOffsets to = ring_segment_offsets(live_slot_pitch(submitted_tasks), payload_stride);
+//   - a slot state names its payload and descriptor, and a payload names its three
+//     argument regions, by a delta from the naming field's own address; the restack
+//     changed those distances, so every one is re-taken against the image. A region
+//     keeps its position within its pool, so the re-take is the same arithmetic with
+//     the image's bases.
+inline uint64_t
+compact_live_image(const char *mirror_base, uint64_t task_window_size, const BindUsage &used, char *out_base) noexcept {
+    // The mirror is dimensioned for the worst case, so a live count or a cursor past
+    // it reads beyond the segment it is copying from and ships a corrupt image.
+    // attach_populated tests the slot bound again on the device side.
+    const RingImageExtents mirror = mirror_extents(task_window_size);
+    always_assert(used.submitted_tasks <= mirror.slots);
+    always_assert(used.fanin_elems <= mirror.fanin_elems);
+    always_assert(used.tensor_elems <= mirror.tensor_elems);
+    always_assert(used.scalar_elems <= mirror.scalar_elems);
+    const PTO2RingSegmentOffsets from = ring_segment_offsets(mirror);
+    const PTO2RingSegmentOffsets to = ring_segment_offsets(image_extents(used));
 
     // The header and the descriptors offset are pitch-independent, so the header
     // lands where it already was.
@@ -412,24 +460,54 @@ inline uint64_t compact_live_image(
     out_ring.slot_states = nullptr;
     out_ring.completion_flags = nullptr;
 
-    const uint64_t nt = submitted_tasks;
+    const uint64_t nt = used.submitted_tasks;
     std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(PTO2TaskDescriptor));
-    // Per payload, because the source and destination strides differ: the mirror is
-    // pitched to the type, the image to the widest task in this bind.
-    for (uint64_t i = 0; i < nt; ++i) {
-        std::memcpy(
-            out_base + to.payloads + i * payload_stride, mirror_base + from.payloads + i * sizeof(PTO2TaskPayload),
-            payload_stride
-        );
-    }
+    // One copy, not one per payload: PTO2TaskPayload is fixed-size, so the mirror and
+    // the image share a stride. Each pool is likewise one copy of its own prefix.
+    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(PTO2TaskPayload));
     std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(PTO2TaskSlotState));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
+    std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
+    std::memcpy(out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(ChipTensor));
+    std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
     auto *out_slots = reinterpret_cast<PTO2TaskSlotState *>(out_base + to.slot_states);
     auto *out_descriptors = reinterpret_cast<PTO2TaskDescriptor *>(out_base + to.descriptors);
+    auto *out_payloads = reinterpret_cast<PTO2TaskPayload *>(out_base + to.payloads);
+    const auto *mirror_payloads = reinterpret_cast<const PTO2TaskPayload *>(mirror_base + from.payloads);
+    auto *out_fanin = reinterpret_cast<int32_t *>(out_base + to.fanin_pool);
+    auto *out_tensors = reinterpret_cast<ChipTensor *>(out_base + to.tensor_pool);
+    auto *out_scalars = reinterpret_cast<uint64_t *>(out_base + to.scalar_pool);
+    const auto *mirror_fanin = reinterpret_cast<const int32_t *>(mirror_base + from.fanin_pool);
+    const auto *mirror_tensors = reinterpret_cast<const ChipTensor *>(mirror_base + from.tensor_pool);
+    const auto *mirror_scalars = reinterpret_cast<const uint64_t *>(mirror_base + from.scalar_pool);
+    // An unbound region stays unbound: a Graph node's payload never gets a fanin
+    // region, and its count is 0, so no consumer resolves it. A bound one is inside
+    // its own mirror pool by construction — the only binder is a bump cursor on that
+    // pool — and the translation below depends on it, so it is asserted rather than
+    // re-derived.
     for (uint64_t i = 0; i < nt; ++i) {
-        auto *out_payload = reinterpret_cast<PTO2TaskPayload *>(out_base + to.payloads + i * payload_stride);
-        out_slots[i].bind_buffers(out_payload, &out_descriptors[i]);
+        out_slots[i].bind_buffers(&out_payloads[i], &out_descriptors[i]);
+        const PTO2TaskPayload &src = mirror_payloads[i];
+        const ChipTensor *src_tensors = src.tensor_data();
+        const uint64_t *src_scalars = src.scalar_data();
+        const int32_t *src_fanin = src.fanin_data();
+        debug_assert(
+            src_tensors == nullptr ||
+            (src_tensors >= mirror_tensors && src_tensors <= mirror_tensors + used.tensor_elems)
+        );
+        debug_assert(
+            src_scalars == nullptr ||
+            (src_scalars >= mirror_scalars && src_scalars <= mirror_scalars + used.scalar_elems)
+        );
+        debug_assert(
+            src_fanin == nullptr || (src_fanin >= mirror_fanin && src_fanin <= mirror_fanin + used.fanin_elems)
+        );
+        out_payloads[i].bind_regions(
+            src_tensors == nullptr ? nullptr : out_tensors + (src_tensors - mirror_tensors),
+            src_scalars == nullptr ? nullptr : out_scalars + (src_scalars - mirror_scalars),
+            src_fanin == nullptr ? nullptr : out_fanin + (src_fanin - mirror_fanin)
+        );
     }
     return to.end;
 }

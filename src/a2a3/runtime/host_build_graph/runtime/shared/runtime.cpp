@@ -35,7 +35,7 @@ Runtime::Runtime() {
     aicpu_allowed_cpu_count = 0;
     aicpu_launch_count = 0;
     host_total_tasks = 0;
-    sm_payload_stride = sizeof(PTO2TaskPayload);
+    sm_image_bytes = 0;
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;

@@ -337,6 +337,14 @@ struct PTO2TaskPayload {
     static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
     static_assert(MAX_SCALAR_ARGS * sizeof(uint64_t) == 128, "scalar region must be 128B (2 cache lines)");
 
+    // Argument region access. Shared AICPU code (args_dump_aicpu.h) reads a payload's
+    // arguments through these, so both runtimes offer them whether the arguments sit
+    // inline as they do here or in a pool.
+    ChipTensor *tensor_data() { return tensors; }
+    const ChipTensor *tensor_data() const { return tensors; }
+    uint64_t *scalar_data() { return scalars; }
+    const uint64_t *scalar_data() const { return scalars; }
+
     /**
      * Prefetch for write the regions init() fills. tensor_count/scalar_count
      * come from the argument because the payload counts are not initialized

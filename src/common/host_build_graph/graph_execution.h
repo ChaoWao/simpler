@@ -166,11 +166,6 @@ struct GraphDefinition {
     // required_heap + this, and the execution lives at
     // packed_buffer_base + required_heap.
     uint32_t execution_storage_bytes;
-    // Distance between consecutive GraphNodeStorage entries in an execution of this
-    // Definition. The payload is the last field of both the storage and the payload
-    // itself, so a node reads only as much of its tensor array as it declares — this
-    // is sized to the widest node here rather than to sizeof(GraphNodeStorage).
-    uint32_t node_stride;
     uint32_t off_fanout_offsets;
     uint32_t off_fanout_indices;
     uint32_t off_fanin_offsets;
@@ -380,10 +375,11 @@ struct GraphExecution {
     PTO2TaskSlotState *outer_slot{nullptr};
     GraphNodeStorage *nodes{nullptr};
     GraphNodeStorage *node_storage{nullptr};
-    // Entries sit this far apart, which is at most sizeof(GraphNodeStorage) and usually
-    // less. Reach one through node_at(); indexing node_storage as an array of the type
-    // would land between entries.
-    size_t node_stride{sizeof(GraphNodeStorage)};
+    // This execution's node argument pools, in the storage tail past node_storage.
+    // Every node payload's tensor and scalar deltas point here; its pool position is
+    // the Definition's tensor_offset / scalar_offset.
+    ChipTensor *node_tensor_pool{nullptr};
+    uint64_t *node_scalar_pool{nullptr};
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
@@ -392,64 +388,61 @@ struct GraphExecution {
     const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};
 
-    // One multiply — the same one the compiler already emitted for node_storage[i],
-    // since sizeof(GraphNodeStorage) is not a power of two and the scale was never a
-    // shift. Callers on the dispatch path pay nothing for the stride becoming a
-    // runtime value.
-    GraphNodeStorage &node_at(int32_t index) const {
-        return *reinterpret_cast<GraphNodeStorage *>(
-            reinterpret_cast<uint8_t *>(node_storage) + static_cast<size_t>(index) * node_stride
-        );
-    }
+    GraphNodeStorage &node_at(int32_t index) const { return node_storage[index]; }
 };
 
 static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
+// The tensor pool starts right after the node array, so the node stride has to carry
+// ChipTensor's alignment; the scalar pool then starts after a whole number of
+// ChipTensors. Neither holds by construction — both are properties of the two types.
 static_assert(
-    offsetof(GraphNodeStorage, payload) + sizeof(PTO2TaskPayload) == sizeof(GraphNodeStorage),
-    "the payload must be GraphNodeStorage's last field: the execution storage is strided by how much "
-    "of it a node uses, so anything placed after it would be cut off"
+    alignof(GraphNodeStorage) % alignof(ChipTensor) == 0,
+    "a node entry must be at least ChipTensor-aligned: the tensor pool follows the node array"
 );
+static_assert(sizeof(ChipTensor) % alignof(uint64_t) == 0, "the tensor stride must keep the scalar pool aligned");
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 
-// The execution occupies [GraphExecution][GraphNodeStorage x node_count] at the
-// tail of the outer GRAPH task's heap allocation.
-// The smallest stride that still holds a node's payload head. A node reads that head
-// plus as many tensor entries as it declares, and the tensor array is the last field of
-// the payload, which is in turn the last field of the storage.
-inline constexpr size_t graph_node_stride_floor() noexcept {
-    return offsetof(GraphNodeStorage, payload) + offsetof(PTO2TaskPayload, tensors);
-}
+// The execution occupies
+// [GraphExecution][GraphNodeStorage x node_count][ChipTensor x tensor_arg_count]
+// [uint64_t x scalar_arg_count] at the tail of the outer GRAPH task's heap allocation.
+//
+// The last two regions are the node payloads' argument pools, indexed by the
+// Definition's own tensor_offset / scalar_offset — which is why the Definition's
+// arg-table counts size them rather than a per-node sum: node i's arguments occupy
+// [offset, offset + count) in both the table and the pool. There is no fanin region:
+// node dependencies live in the Definition's fanin CSR, so a node's fanin_count stays
+// 0 and its fanin delta unbound.
+struct GraphExecutionStorageLayout {
+    size_t nodes_offset;
+    size_t tensors_offset;
+    size_t scalars_offset;
+    size_t total_bytes;
+};
 
-// The stride an execution uses for a given widest node. Rounded up to
-// GraphNodeStorage's own alignment, since the array places consecutive entries at
-// multiples of the stride, and clamped to the type: that is the widest an execution can
-// ever need.
-inline size_t graph_node_stride(int32_t widest_tensor_count) noexcept {
-    constexpr size_t ALIGNMENT = alignof(GraphNodeStorage);
-    const size_t used = static_cast<size_t>(widest_tensor_count < 0 ? 0 : widest_tensor_count) * sizeof(ChipTensor);
-    const size_t stride = (graph_node_stride_floor() + used + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
-    return stride > sizeof(GraphNodeStorage) ? sizeof(GraphNodeStorage) : stride;
-}
-
-inline bool
-graph_execution_storage_layout(int32_t node_count, size_t node_stride, size_t *nodes_offset, size_t *storage_bytes) {
-    if (nodes_offset == nullptr || storage_bytes == nullptr || node_count <= 0 ||
-        node_count > static_cast<int32_t>(GRAPH_MAX_NODES) || node_stride > sizeof(GraphNodeStorage) ||
-        node_stride < graph_node_stride_floor() || node_stride % alignof(GraphNodeStorage) != 0) {
+inline bool graph_execution_storage_layout(
+    int32_t node_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, GraphExecutionStorageLayout *out
+) {
+    if (out == nullptr || node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES)) {
         return false;
     }
     constexpr size_t ALIGNMENT = alignof(GraphNodeStorage);
-    *nodes_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
-    // Entries sit node_stride apart, but each one is created by placement-new of a
-    // whole GraphNodeStorage, so the last entry's object has to fit: the reservation
-    // ends at its full size rather than at its stride.
-    *storage_bytes = *nodes_offset + static_cast<size_t>(node_count - 1) * node_stride + sizeof(GraphNodeStorage);
+    out->nodes_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    out->tensors_offset = out->nodes_offset + static_cast<size_t>(node_count) * sizeof(GraphNodeStorage);
+    out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(ChipTensor);
+    out->total_bytes = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
     return true;
 }
 
-inline bool graph_execution_storage_bytes(int32_t node_count, size_t node_stride, size_t *storage_bytes) {
-    size_t nodes_offset = 0;
-    return graph_execution_storage_layout(node_count, node_stride, &nodes_offset, storage_bytes);
+inline bool graph_execution_storage_bytes(
+    int32_t node_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, size_t *storage_bytes
+) {
+    GraphExecutionStorageLayout layout{};
+    if (storage_bytes == nullptr ||
+        !graph_execution_storage_layout(node_count, tensor_arg_count, scalar_arg_count, &layout)) {
+        return false;
+    }
+    *storage_bytes = layout.total_bytes;
+    return true;
 }
 
 GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot);

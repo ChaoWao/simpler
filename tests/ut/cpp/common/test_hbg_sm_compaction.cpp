@@ -31,6 +31,15 @@ namespace {
 constexpr uint64_t WINDOW = 64;  // stands in for the ring capacity
 constexpr uint64_t SUBMITTED = 5;
 
+// The per-task argument shape these tests write. Deliberately far below every cap, so
+// the compacted pools are a small fraction of the mirror's and the difference is
+// visible in the shipped byte count. The fanin stride is what the orchestrator
+// advances by — a whole number of cache lines, since a region has to start on one.
+constexpr int32_t TENSORS_PER_TASK = 2;
+constexpr int32_t SCALARS_PER_TASK = 3;
+constexpr int32_t FANIN_PER_TASK = 4;
+constexpr int32_t FANIN_STRIDE = static_cast<int32_t>(ARG_POOL_ALIGN / sizeof(int32_t));
+
 // A buffer aligned the way both the arena mirror and the device SM base are;
 // PTO2TaskSlotState is alignas(64) and every segment offset is a multiple of
 // PTO2_ALIGN_SIZE.
@@ -72,9 +81,27 @@ public:
         ring.completion_flags = completion_flags();
         (void)off;
 
+        // Each live slot takes a packed region in each pool, exactly as the
+        // orchestrator's bump cursors hand them out, and gets content that identifies
+        // the slot so the compaction can be checked element by element.
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
             descriptors()[i].task_id = PTO2TaskId::make(0, static_cast<uint32_t>(i));
-            payloads()[i].tensor_count = static_cast<int32_t>(100 + i);
+            payloads()[i].tensor_count = TENSORS_PER_TASK;
+            payloads()[i].scalar_count = SCALARS_PER_TASK;
+            payloads()[i].fanin_count = FANIN_PER_TASK;
+            payloads()[i].bind_regions(
+                tensor_pool() + i * TENSORS_PER_TASK, scalar_pool() + i * SCALARS_PER_TASK,
+                fanin_pool() + i * FANIN_STRIDE
+            );
+            for (int32_t j = 0; j < TENSORS_PER_TASK; ++j) {
+                payloads()[i].tensor_data()[j].buffer.addr = 0x1000 + i * 0x10 + j;
+            }
+            for (int32_t j = 0; j < SCALARS_PER_TASK; ++j) {
+                payloads()[i].scalar_data()[j] = 0x3000 + i * 0x10 + j;
+            }
+            for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
+                payloads()[i].fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
+            }
             slot_states()[i].last_consumer_local_id = static_cast<int32_t>(i);
             slot_states()[i].graph_node_index = static_cast<int32_t>(200 + i);
             slot_states()[i].bind_buffers(&payloads()[i], &descriptors()[i]);
@@ -96,6 +123,15 @@ public:
             image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).payloads
         );
     }
+    ChipTensor *tensor_pool() {
+        return reinterpret_cast<ChipTensor *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).tensor_pool);
+    }
+    uint64_t *scalar_pool() {
+        return reinterpret_cast<uint64_t *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).scalar_pool);
+    }
+    int32_t *fanin_pool() {
+        return reinterpret_cast<int32_t *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).fanin_pool);
+    }
     PTO2TaskSlotState *slot_states() {
         return reinterpret_cast<PTO2TaskSlotState *>(
             image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).slot_states
@@ -111,28 +147,35 @@ private:
     AlignedImage image_;
 };
 
+// What a bind of `submitted` tasks put in the pools, given the per-task shape the
+// Mirror writes. This is the same arithmetic the orchestrator's cursors perform.
+inline pto2_sm_layout::BindUsage usage_for(uint64_t submitted) {
+    return pto2_sm_layout::BindUsage{
+        submitted,
+        submitted * static_cast<uint64_t>(FANIN_STRIDE),
+        submitted * static_cast<uint64_t>(TENSORS_PER_TASK),
+        submitted * static_cast<uint64_t>(SCALARS_PER_TASK),
+    };
+}
+
 struct Compacted {
     AlignedImage image;
     uint64_t bytes;
-    uint64_t stride;
+    pto2_sm_layout::BindUsage used;
 
-    explicit Compacted(
-        Mirror &mirror, uint64_t submitted = SUBMITTED, uint64_t payload_stride = sizeof(PTO2TaskPayload)
-    ) :
-        image(
-            pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::live_slot_pitch(submitted), payload_stride).end, 0xAA
-        ),
+    explicit Compacted(Mirror &mirror, uint64_t submitted = SUBMITTED) :
+        image(pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
         bytes(0),
-        stride(payload_stride) {
-        bytes = pto2_sm_layout::compact_live_image(mirror.base(), WINDOW, submitted, payload_stride, image.base());
+        used(usage_for(submitted)) {
+        bytes = pto2_sm_layout::compact_live_image(mirror.base(), WINDOW, used, image.base());
     }
 
     pto2_sm_layout::PTO2RingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
-        return pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::live_slot_pitch(submitted), stride);
+        return pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted)));
     }
 
     PTO2TaskPayload *payload_at(uint64_t i) {
-        return reinterpret_cast<PTO2TaskPayload *>(image.base() + off().payloads + i * stride);
+        return reinterpret_cast<PTO2TaskPayload *>(image.base() + off().payloads) + i;
     }
     PTO2TaskDescriptor *descriptors() {
         return reinterpret_cast<PTO2TaskDescriptor *>(image.base() + off().descriptors);
@@ -152,7 +195,7 @@ TEST(HbgSmCompaction, ShipsOnlyTheLivePrefix) {
     Mirror mirror;
     Compacted compacted(mirror);
 
-    EXPECT_EQ(compacted.bytes, pto2_sm_layout::ring_segment_offsets(SUBMITTED).end);
+    EXPECT_EQ(compacted.bytes, compacted.off().end);
     EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(WINDOW).end);
 }
 
@@ -162,7 +205,8 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         EXPECT_EQ(compacted.descriptors()[i].task_id.local(), i) << "slot " << i;
-        EXPECT_EQ(compacted.payload_at(i)->tensor_count, static_cast<int32_t>(100 + i)) << "slot " << i;
+        EXPECT_EQ(compacted.payload_at(i)->tensor_count, TENSORS_PER_TASK) << "slot " << i;
+        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
         EXPECT_EQ(compacted.slot_states()[i].last_consumer_local_id, static_cast<int32_t>(i)) << "slot " << i;
         EXPECT_EQ(compacted.slot_states()[i].graph_node_index, static_cast<int32_t>(200 + i)) << "slot " << i;
         EXPECT_EQ(compacted.completion_flags()[i].load(std::memory_order_relaxed), static_cast<uint8_t>(i & 1))
@@ -196,7 +240,10 @@ TEST(HbgSmCompaction, BindingsSurviveTheCopyToTheDevice) {
 
     AlignedImage landed(compacted.bytes);
     std::memcpy(landed.base(), compacted.image.base(), compacted.bytes);
-    const auto off = pto2_sm_layout::ring_segment_offsets(SUBMITTED);
+    // The image's own layout, not the mirror's. The four slot-pitched offsets happen
+    // to agree between the two, but reading them off the mirror overload here would
+    // stop being true the moment a pool moved ahead of them.
+    const auto off = compacted.off();
     auto *slots = reinterpret_cast<PTO2TaskSlotState *>(landed.base() + off.slot_states);
     auto *payloads = reinterpret_cast<PTO2TaskPayload *>(landed.base() + off.payloads);
     auto *descriptors = reinterpret_cast<PTO2TaskDescriptor *>(landed.base() + off.descriptors);
@@ -221,54 +268,131 @@ TEST(HbgSmCompaction, LeavesNoHostPointerInTheHeader) {
     EXPECT_EQ(ring.completion_flags, nullptr);
 }
 
-// A bind that submits nothing still ships its header and still attaches.
+// A bind that submits nothing still ships its header and still attaches. Its pools
+// are empty, so what travels is the header plus one slot's worth of pitch — far below
+// the mirror, whose pools are dimensioned for the whole window.
 TEST(HbgSmCompaction, ZeroSubmittedShipsTheHeaderAlone) {
     Mirror mirror;
     Compacted compacted(mirror, /*submitted=*/0);
 
-    EXPECT_EQ(compacted.bytes, pto2_sm_layout::ring_segment_offsets(1).end);
+    EXPECT_EQ(compacted.bytes, compacted.off(0).end);
+    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(1).end);
     auto &ring = reinterpret_cast<const PTO2SharedMemoryHeader *>(compacted.image.base())->ring;
     EXPECT_EQ(ring.task_window_size, WINDOW);
     EXPECT_EQ(ring.task_descriptors, nullptr);
 }
 
-// The image strides its payload array by the widest task in the bind, not by the
-// type. Everything a task reads is a prefix of its payload, so a narrower stride
-// carries the same information in fewer bytes.
-TEST(HbgSmCompaction, CompactedStrideShipsFewerBytesAndStillResolves) {
+// The pools ship what the bind used, not what the mirror is dimensioned for. That
+// is the same property the payload stride used to carry, moved to the pools: fewer
+// bytes, and every argument still resolves.
+TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
     Mirror mirror;
-    for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        mirror.payloads()[i].tensor_count = 2;
-        mirror.payloads()[i].scalar_count = 1;
-        mirror.payloads()[i].tensors[0].buffer.addr = 0x1000 + i;
-        mirror.payloads()[i].tensors[1].buffer.addr = 0x2000 + i;
-        mirror.payloads()[i].scalars[0] = 0x3000 + i;
-    }
+    Compacted compacted(mirror);
 
-    const uint64_t stride = pto2_sm_layout::shipped_payload_stride(2);
-    ASSERT_LT(stride, sizeof(PTO2TaskPayload));
-    ASSERT_EQ(stride % PTO2_ALIGN_SIZE, 0u);
-
-    Compacted compacted(mirror, SUBMITTED, stride);
-    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(SUBMITTED).end);
+    // The mirror's pools cover WINDOW tasks at their full caps; the image's cover
+    // SUBMITTED tasks at the shape they actually used.
+    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(WINDOW).end);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         PTO2TaskPayload *shipped = compacted.payload_at(i);
-        EXPECT_EQ(shipped->tensor_count, 2) << "slot " << i;
-        EXPECT_EQ(shipped->scalar_count, 1) << "slot " << i;
-        EXPECT_EQ(shipped->tensors[0].buffer.addr, 0x1000 + i) << "slot " << i;
-        EXPECT_EQ(shipped->tensors[1].buffer.addr, 0x2000 + i) << "slot " << i;
-        EXPECT_EQ(shipped->scalars[0], 0x3000 + i) << "slot " << i;
-        // The binding has to follow the compacted stride, not the type's.
+        EXPECT_EQ(shipped->tensor_count, TENSORS_PER_TASK) << "slot " << i;
+        EXPECT_EQ(shipped->scalar_count, SCALARS_PER_TASK) << "slot " << i;
+        EXPECT_EQ(shipped->fanin_count, FANIN_PER_TASK) << "slot " << i;
+        // Every element resolves through the re-taken delta, and lands on this slot's
+        // own region rather than a neighbour's.
+        for (int32_t j = 0; j < TENSORS_PER_TASK; ++j) {
+            EXPECT_EQ(shipped->tensor_data()[j].buffer.addr, 0x1000 + i * 0x10 + j) << "slot " << i << " arg " << j;
+        }
+        for (int32_t j = 0; j < SCALARS_PER_TASK; ++j) {
+            EXPECT_EQ(shipped->scalar_data()[j], 0x3000 + i * 0x10 + j) << "slot " << i << " arg " << j;
+        }
+        for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
+            EXPECT_EQ(shipped->fanin_data()[j], static_cast<int32_t>(0x50 + i * 0x10 + j))
+                << "slot " << i << " arg " << j;
+        }
         EXPECT_EQ(compacted.slot_states()[i].payload.get(), shipped) << "slot " << i;
     }
 }
 
-// A stride covering the whole array is the identity case, and must not be exceeded:
-// the type is the widest an image can ever be.
-TEST(HbgSmCompaction, StrideNeverExceedsTheType) {
-    EXPECT_EQ(pto2_sm_layout::shipped_payload_stride(MAX_TENSOR_ARGS), sizeof(PTO2TaskPayload));
-    EXPECT_EQ(pto2_sm_layout::shipped_payload_stride(MAX_TENSOR_ARGS * 4), sizeof(PTO2TaskPayload));
-    EXPECT_EQ(pto2_sm_layout::shipped_payload_stride(0), offsetof(PTO2TaskPayload, tensors));
-    EXPECT_EQ(pto2_sm_layout::shipped_payload_stride(-1), offsetof(PTO2TaskPayload, tensors));
+// A region's delta is only correct for the layout it was taken in, so the restack has
+// to re-take it. Proof: every shipped region lies inside the image's own pools, which
+// the mirror's addresses could not satisfy.
+TEST(HbgSmCompaction, RebindsEveryArgumentRegionInsideTheImage) {
+    Mirror mirror;
+    Compacted compacted(mirror);
+
+    const auto off = compacted.off();
+    const char *base = compacted.image.base();
+    const char *tensor_begin = base + off.tensor_pool;
+    const char *tensor_end = tensor_begin + compacted.used.tensor_elems * sizeof(ChipTensor);
+    const char *scalar_begin = base + off.scalar_pool;
+    const char *scalar_end = scalar_begin + compacted.used.scalar_elems * sizeof(uint64_t);
+    const char *fanin_begin = base + off.fanin_pool;
+    const char *fanin_end = fanin_begin + compacted.used.fanin_elems * sizeof(int32_t);
+
+    for (uint64_t i = 0; i < SUBMITTED; ++i) {
+        PTO2TaskPayload *shipped = compacted.payload_at(i);
+        const char *t = reinterpret_cast<const char *>(shipped->tensor_data());
+        const char *s = reinterpret_cast<const char *>(shipped->scalar_data());
+        const char *f = reinterpret_cast<const char *>(shipped->fanin_data());
+        EXPECT_GE(t, tensor_begin) << "slot " << i;
+        EXPECT_LT(t, tensor_end) << "slot " << i;
+        EXPECT_GE(s, scalar_begin) << "slot " << i;
+        EXPECT_LT(s, scalar_end) << "slot " << i;
+        EXPECT_GE(f, fanin_begin) << "slot " << i;
+        EXPECT_LT(f, fanin_end) << "slot " << i;
+    }
+}
+
+// An outer GRAPH task binds only a fanin region: its boundary arguments travel inside
+// the submission image and both argument counts are 0. The restack must carry that
+// unbound state through rather than resolving it to the pool base, which is what the
+// consumers' count guards assume.
+TEST(HbgSmCompaction, UnboundRegionsStayUnbound) {
+    Mirror mirror;
+    // Slot 2 stands in for the outer GRAPH task.
+    constexpr uint64_t GRAPH_SLOT = 2;
+    mirror.payloads()[GRAPH_SLOT].tensor_count = 0;
+    mirror.payloads()[GRAPH_SLOT].scalar_count = 0;
+    mirror.payloads()[GRAPH_SLOT].bind_regions(nullptr, nullptr, mirror.fanin_pool() + GRAPH_SLOT * FANIN_STRIDE);
+
+    Compacted compacted(mirror);
+
+    PTO2TaskPayload *shipped = compacted.payload_at(GRAPH_SLOT);
+    EXPECT_EQ(shipped->tensor_data(), nullptr);
+    EXPECT_EQ(shipped->scalar_data(), nullptr);
+    // Its fanin region still resolves, and still inside the image.
+    const char *f = reinterpret_cast<const char *>(shipped->fanin_data());
+    EXPECT_GE(f, compacted.image.base() + compacted.off().fanin_pool);
+    EXPECT_LT(f, compacted.image.base() + compacted.off().tensor_pool);
+    for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
+        EXPECT_EQ(shipped->fanin_data()[j], static_cast<int32_t>(0x50 + GRAPH_SLOT * 0x10 + j)) << "arg " << j;
+    }
+    // Its neighbours are untouched by the unbound slot.
+    EXPECT_EQ(compacted.payload_at(1)->tensor_data()[0].buffer.addr, 0x1000 + 1 * 0x10);
+    EXPECT_EQ(compacted.payload_at(3)->tensor_data()[0].buffer.addr, 0x1000 + 3 * 0x10);
+}
+
+// A slot names its payload, and a payload names its regions, by an int32 delta, so
+// neither the mirror nor the image may span more than that reach. `init_per_ring` and
+// `attach_populated` each reject a layout that does; what is checked here is the
+// arithmetic they test — that the default capacity is comfortably inside the bound, and
+// that the layout is what decides where the bound falls. Growing a segment enough to
+// put the default capacity out of reach fails here.
+TEST(HbgSmCompaction, LayoutStaysWithinDeltaReach) {
+    Mirror mirror;
+    Compacted compacted(mirror);
+    EXPECT_LT(compacted.bytes, static_cast<uint64_t>(INT32_MAX));
+
+    constexpr uint64_t REACH = static_cast<uint64_t>(INT32_MAX);
+    EXPECT_LE(pto2_sm_layout::ring_segment_offsets(PTO2_TASK_WINDOW_SIZE).end, REACH);
+
+    // The bound is a property of the layout, not of the capacity alone: there is a
+    // capacity past which the mirror no longer fits, and it is above the default.
+    uint64_t window = PTO2_TASK_WINDOW_SIZE;
+    while (window <= (UINT64_MAX / 2) && pto2_sm_layout::ring_segment_offsets(window).end <= REACH) {
+        window *= 2;
+    }
+    EXPECT_GT(window, static_cast<uint64_t>(PTO2_TASK_WINDOW_SIZE));
+    EXPECT_GT(pto2_sm_layout::ring_segment_offsets(window).end, REACH);
 }

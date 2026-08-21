@@ -173,12 +173,12 @@ public:
     // the boot thread reads this instead of counting SM ring heads.
     int32_t host_total_tasks;
 
-    // Distance between consecutive payloads in the shipped shared-memory image.
-    // Smaller than sizeof(PTO2TaskPayload) whenever the bind's widest task uses
-    // fewer tensors than the array holds, which is the usual case. Set by the host
-    // before the image is copied; the AICPU needs it at attach to place every
-    // segment that follows the payload array.
-    uint64_t sm_payload_stride;
+    // Size of the shipped shared-memory image, argument pools included. Set by the
+    // host before the image is copied; the AICPU cannot recompute it because the pool
+    // extents are the bind's cursors, which only the host saw. It bounds the region at
+    // attach and checks the int32 delta reach — it places no segment, since a payload
+    // names its argument regions by delta.
+    uint64_t sm_image_bytes;
 
 private:
     // Kernel binary tracking for cleanup

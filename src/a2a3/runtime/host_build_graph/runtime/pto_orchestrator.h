@@ -115,6 +115,24 @@ struct PTO2OrchestratorState {
     // crosses to the device.
     GraphHostState *graph_host_state{nullptr};
 
+    // === ARGUMENT POOLS (host-only) ===
+    // The mirror's three argument pools and the next free element in each. A submit
+    // binds its region at the cursor and advances it by what the task uses, so the
+    // pools stay packed and the bind path reads the cursors as the image's pool
+    // extents. Nothing is ever returned, and the pools are dimensioned for the worst
+    // case (task_window tasks each at their full cap), so a bump cannot overflow.
+    // The bases live here, not in the ring header: nothing on the device resolves one.
+    //
+    // The fanin cursor does not advance at bind time. PTO2FaninBuilder appends and
+    // dedups producers afterwards, so the region's length is known only when the count
+    // is published, and it advances there.
+    int32_t *fanin_pool{nullptr};
+    ChipTensor *tensor_pool{nullptr};
+    uint64_t *scalar_pool{nullptr};
+    int32_t fanin_pool_cursor{0};
+    int32_t tensor_pool_cursor{0};
+    int32_t scalar_pool_cursor{0};
+
     // === STATISTICS ===
 #if SIMPLER_DFX
     int64_t tasks_submitted;
@@ -143,8 +161,8 @@ struct PTO2OrchestratorState {
     );
 
     // Phase 3b: write the arena-internal pointer fields (scope_tasks,
-    // scope_begins, ring.fanin_pool.base, tensor_map.{buckets,entry_pool,
-    // free_entry_list,task_entry_heads}, scheduler reference).
+    // scope_begins, tensor_map.{buckets,entry_pool,free_entry_list,
+    // task_entry_heads}, scheduler reference).
     // Idempotent — host runs once on the image, AICPU runs once after attach.
     void wire_arena_pointers(const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler);
 

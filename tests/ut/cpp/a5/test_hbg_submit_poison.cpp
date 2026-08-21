@@ -184,5 +184,5 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     // The consumer's fanin is written: two duplicate deps dedupe to one.
     const PTO2TaskPayload &cons_pl = ring.task_payloads[ring.get_slot_by_task_id(consumer.task_id().local())];
     EXPECT_EQ(cons_pl.fanin_count, 1);
-    EXPECT_EQ(cons_pl.fanin_local_ids[0], static_cast<int32_t>(root.task_id().local()));
+    EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(root.task_id().local()));
 }

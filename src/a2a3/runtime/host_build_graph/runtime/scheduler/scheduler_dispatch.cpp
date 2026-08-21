@@ -42,8 +42,8 @@
 // Pin those constants to the real layout here, where the struct is fully visible.
 static_assert(offsetof(PTO2TaskPayload, tensor_count) == PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
 static_assert(offsetof(PTO2TaskPayload, scalar_count) == PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, tensors) == PTO2_TASKPAYLOAD_TENSORS_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, scalars) == PTO2_TASKPAYLOAD_SCALARS_OFFSET);
+static_assert(offsetof(PTO2TaskPayload, tensors) == PTO2_TASKPAYLOAD_TENSORS_DELTA_OFFSET);
+static_assert(offsetof(PTO2TaskPayload, scalars) == PTO2_TASKPAYLOAD_SCALARS_DELTA_OFFSET);
 static_assert(sizeof(ChipTensor) == PTO2_TASKPAYLOAD_TENSOR_STRIDE);
 
 // =============================================================================
@@ -143,11 +143,18 @@ void SchedulerContext::build_payload(
         // Ready task: fill args here; src_payload = 0 signals AICore to run on pickup.
         dispatch_payload.src_payload = 0;
         int n = 0;
-        for (int32_t i = 0; i < payload.tensor_count; i++) {
-            dispatch_payload.args[n++] = reinterpret_cast<uint64_t>(&payload.tensors[i]);
+        // Both regions are resolved once: the args[] stores below could alias the
+        // payload as far as the compiler knows, so re-resolving a delta per element
+        // would reload it on every iteration.
+        const ChipTensor *tensors = payload.tensor_data();
+        const int32_t tensor_count = payload.tensor_count;
+        for (int32_t i = 0; i < tensor_count; i++) {
+            dispatch_payload.args[n++] = reinterpret_cast<uint64_t>(&tensors[i]);
         }
-        for (int32_t i = 0; i < payload.scalar_count; i++) {
-            dispatch_payload.args[n++] = payload.scalars[i];
+        const uint64_t *scalars = payload.scalar_data();
+        const int32_t scalar_count = payload.scalar_count;
+        for (int32_t i = 0; i < scalar_count; i++) {
+            dispatch_payload.args[n++] = scalars[i];
         }
     }
     dispatch_payload.local_context.block_idx = block_idx;

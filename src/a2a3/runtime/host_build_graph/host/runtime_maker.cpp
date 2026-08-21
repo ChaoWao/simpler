@@ -683,22 +683,18 @@ int32_t run_host_orchestration(
     // with the same pitch. The ring capacity and mask are untouched: `local_id &
     // mask` is `local_id`, which is below the pitch for every ring task.
     const uint64_t nt = static_cast<uint64_t>(total_tasks);
-    // The widest task in this bind sets the stride every payload in the image gets.
-    // Read from the mirror, which orchestration has finished writing.
-    int32_t widest_tensor_count = 0;
-    {
-        const auto *mirror_payloads =
-            reinterpret_cast<const PTO2TaskPayload *>(static_cast<const char *>(host_sm) + sm_segs.payloads);
-        for (uint64_t i = 0; i < nt; ++i) {
-            if (mirror_payloads[i].tensor_count > widest_tensor_count) {
-                widest_tensor_count = mirror_payloads[i].tensor_count;
-            }
-        }
-    }
-    const uint64_t payload_stride = pto2_sm_layout::shipped_payload_stride(widest_tensor_count);
-    runtime->sm_payload_stride = payload_stride;
-    const uint64_t image_bytes =
-        pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::live_slot_pitch(nt), payload_stride).end;
+    // What this bind actually put in the pools. The orchestrator's cursors are the
+    // exact populated extent of each one — no scan of the mirror is needed, and the
+    // image ships that much rather than the worst case the mirror is dimensioned for.
+    const PTO2OrchestratorState &orch_state = rt->orchestrator;
+    const pto2_sm_layout::BindUsage bind_usage{
+        nt,
+        static_cast<uint64_t>(orch_state.fanin_pool_cursor),
+        static_cast<uint64_t>(orch_state.tensor_pool_cursor),
+        static_cast<uint64_t>(orch_state.scalar_pool_cursor),
+    };
+    const uint64_t image_bytes = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(bind_usage)).end;
+    runtime->sm_image_bytes = image_bytes;
 
     // Only now is the size known, so this is where the device region grows to cover
     // its shared-memory tail. setup_static_arena grows per region and
@@ -756,7 +752,7 @@ int32_t run_host_orchestration(
     runtime_clear_host_only_pointers(rt);
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
     const uint64_t compacted = pto2_sm_layout::compact_live_image(
-        static_cast<const char *>(host_sm), eff_task_window_sizes[0], nt, payload_stride, upload_base + copied_bytes
+        static_cast<const char *>(host_sm), eff_task_window_sizes[0], bind_usage, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
 
@@ -766,11 +762,15 @@ int32_t run_host_orchestration(
         return -1;
     }
     {
-        char attrs[96];
+        // Eight uint64 fields plus their labels; 96 would truncate the trailing
+        // `args=` counts on a large bind, which are the ones this marker exists for.
+        char attrs[224];
         snprintf(
             attrs, sizeof(attrs),
-            "nt=%" PRIu64 " bytes=%" PRIu64 " copied=%" PRIu64 " sm=%" PRIu64 " subs=%" PRIu64 " pstride=%" PRIu64, nt,
-            upload_bytes, copied_bytes, image_bytes, submission_block_bytes, payload_stride
+            "nt=%" PRIu64 " bytes=%" PRIu64 " copied=%" PRIu64 " sm=%" PRIu64 " subs=%" PRIu64 " args=%" PRIu64
+            "/%" PRIu64 "/%" PRIu64,
+            nt, upload_bytes, copied_bytes, image_bytes, submission_block_bytes, bind_usage.fanin_elems,
+            bind_usage.tensor_elems, bind_usage.scalar_elems
         );
         record_bind_phase(HostPhaseKind::BindArenaH2d, t_h2d_ns, attrs, upload_bytes);
     }

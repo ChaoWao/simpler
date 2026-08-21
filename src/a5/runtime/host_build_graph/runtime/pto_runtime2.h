@@ -267,8 +267,7 @@ void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayou
 
 /**
  * Phase 3b — wire the orchestrator's pointers into the host-only zone
- * (orchestrator.{scope_tasks, scope_begins, scheduler, tensor_map.*,
- * ring.fanin_pool.base}).
+ * (orchestrator.{scope_tasks, scope_begins, scheduler, tensor_map.*}).
  *
  * Host-only by construction: that zone is past layout.device_bytes and so is not
  * allocated on the device, which makes the addresses this writes unrepresentable
