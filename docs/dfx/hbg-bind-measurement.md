@@ -168,7 +168,7 @@ in one pass what a duration comparison cannot answer in ten.
 
 The summed `bind phase=` lines cannot be placed on a timeline inside
 `host_orch`: they are cost shares. The per-event view comes from the runtime's
-rotating record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
+per-producer record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
 one record per orchestrator operation, each with its own interval.
 
 Three conditions must all hold, and each one silently produces an empty result:

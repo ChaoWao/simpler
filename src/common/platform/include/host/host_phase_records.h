@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -20,21 +21,89 @@
 #include "common/platform_config.h"
 
 /**
- * Rotating pool of host phase records, written on host_build_graph's prepare
- * path and read by whichever diagnostics are enabled for the run.
+ * Pool of host phase records, written on host_build_graph's prepare path and read
+ * by whichever diagnostics are enabled for the run.
  *
  * The pool is a platform resource with two independently gated readers — the
  * chip-swimlane export at level 4, and the per-event artifact the host trace
  * tooling consumes — so it belongs to neither of them. Storage and lifetime are
- * the platform's; the write cursor lives in the pool head, exactly as the
- * device sched/orch pools put it in shared memory for the AICPU to advance.
+ * the platform's.
  *
  * Recording is a header-inline store into platform-allocated memory rather than
  * a call through HostApi: a pass performs a few hundred operations a few
  * microseconds apart on the very path whose budget is under measurement, so the
- * per-event cost must stay at two clock reads and a store. HostApi carries only
- * the once-per-pass arm and finish.
+ * per-event cost must stay at two clock reads, one slot claim and a store.
+ * HostApi carries only the once-per-pass arm and finish.
+ *
+ * Every producer thread of a pass writes concurrently — a Graph workload records
+ * one thread per concurrent Definition alongside the submitting thread — so the
+ * pool is a flat array of slots claimed by one atomic increment, not a rotating
+ * active buffer. See `host_phase_pool_append` for what that replaced and why.
  */
+
+/**
+ * Record storage for one pass, written by every producer thread concurrently.
+ *
+ * A producer claims a whole buffer and fills it alone, so its records are
+ * contiguous and no cache line is ever shared with another producer's record.
+ * That is the whole design: the producers are independent — each records its own
+ * Definition and counts only its own operations — so nothing about a record needs
+ * coordination, and the per-record path has no shared write at all.
+ *
+ * `generation` invalidates a producer's cached buffer when a new pass is armed;
+ * without it a producer left over from the previous pass would append at its old
+ * offset into a buffer `arm()` has already cleared.
+ *
+ * At namespace scope alongside `HostPhaseRecord` and `HostPhaseRecordBuffer`, so
+ * the header-inline producer below and its callers name all three the same way.
+ */
+struct HostPhaseRecordPool {
+    std::atomic<uint32_t> next_buffer{0};
+    std::atomic<uint32_t> generation{0};
+    // Only touched when a producer is denied a buffer, i.e. never in a sized run.
+    std::atomic<uint64_t> dropped{0};
+    HostPhaseRecordBuffer *buffers{nullptr};
+    uint32_t buffer_count{0};
+};
+
+/**
+ * One producer's place in the pool: which buffer it owns and how much of it is
+ * used. Thread-local, so reading and advancing it is private to that thread.
+ */
+struct HostPhaseProducerLane {
+    const HostPhaseRecordPool *pool{nullptr};
+    uint32_t generation{0};
+    uint32_t buffer{0};
+    uint32_t used{0};
+    bool denied{false};
+};
+
+inline HostPhaseProducerLane &host_phase_producer_lane() {
+    static thread_local HostPhaseProducerLane lane;
+    return lane;
+}
+
+/**
+ * Take the next unclaimed buffer as this producer's own.
+ *
+ * Cold path: once per PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER records, plus once
+ * per pass per producer. Returns false when every buffer is claimed, which is the
+ * pool's only lossy outcome; the lane remembers it so a denied producer does not
+ * retry the atomic on every later record.
+ */
+inline bool host_phase_lane_claim_buffer(HostPhaseRecordPool *pool, HostPhaseProducerLane &lane, uint32_t generation) {
+    const uint32_t buffer = pool->next_buffer.fetch_add(1, std::memory_order_relaxed);
+    lane.pool = pool;
+    lane.generation = generation;
+    if (buffer >= pool->buffer_count) {
+        lane.denied = true;
+        return false;
+    }
+    lane.buffer = buffer;
+    lane.used = 0;
+    lane.denied = false;
+    return true;
+}
 
 namespace simpler::dfx {
 
@@ -87,27 +156,31 @@ public:
      */
     int write_records_jsonl(const std::string &path);
 
-    /** Records in rotation order. Empty unless a pass was armed with collection. */
+    /** Records in start-time order. Empty unless a pass was armed with collection. */
     std::vector<HostPhaseRecord> records() const;
 
-    /** Records whose kind submits a task, in rotation order. */
+    /** Records whose kind submits a task, in start-time order. */
     std::vector<HostPhaseRecord> submit_records() const;
 
-    /** Records whose kind is a host-to-device transfer, in rotation order. */
+    /** Records whose kind is a host-to-device transfer, in start-time order. */
     std::vector<HostPhaseRecord> device_upload_records() const;
 
     bool armed() const { return armed_; }
     bool finished() const { return finished_; }
     uint64_t submitted_tasks() const { return submitted_tasks_; }
     uint64_t invocation_id() const { return invocation_id_; }
-    uint64_t total_records() const { return pool_.head.total_record_count; }
-    uint64_t dropped_records() const { return pool_.head.dropped_record_count; }
+    /** Records the producers emitted, whether or not each one found a buffer. */
+    uint64_t total_records() const { return stored_records() + dropped_records(); }
+    uint64_t dropped_records() const { return pool_.dropped.load(std::memory_order_relaxed); }
     /** Capacity in records, i.e. how many fit before any is dropped. */
     static constexpr size_t capacity() {
         return static_cast<size_t>(PLATFORM_HOST_PHASE_BUFFERS) * PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER;
     }
 
 private:
+    /** Records that reached a buffer, summed across the buffers producers filled. */
+    uint64_t stored_records() const;
+
     HostPhaseRecordPool pool_{};
     std::vector<HostPhaseRecordBuffer> buffers_{};
     bool armed_{false};
@@ -120,26 +193,27 @@ private:
 }  // namespace simpler::dfx
 
 /**
- * Take the next free buffer as the active one.
- *
- * Cold path: reached once per PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER records, and
- * on the pass's first record. Returns nullptr when the free queue is exhausted,
- * which is the pool's only lossy outcome and is counted in the head.
- */
-inline HostPhaseRecordBuffer *host_phase_pool_rotate(HostPhaseRecordPool *pool) {
-    ChipSwimlaneFreeQueue &free_queue = pool->free_queue;
-    if (free_queue.head == free_queue.tail) return nullptr;
-    const uint32_t slot = free_queue.head % PLATFORM_PROF_SLOT_COUNT;
-    auto *next = reinterpret_cast<HostPhaseRecordBuffer *>(free_queue.buffer_ptrs[slot]);
-    free_queue.head = free_queue.head + 1;
-    pool->head.current_buf_ptr = reinterpret_cast<uint64_t>(next);
-    pool->head.current_buf_seq = pool->head.current_buf_seq + 1;
-    return next;
-}
-
-/**
  * Append one record. A null pool means this pass collects no records, which is
  * the common case and costs one branch.
+ *
+ * No shared write: the record goes into the buffer this thread owns, at the offset
+ * this thread tracks, and `count` is published on that same private line. The one
+ * atomic is a buffer claim, taken once per PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER
+ * records, and it measures as free.
+ *
+ * That matters because all of this runs after the record's own end timestamp, so
+ * whatever it costs is invisible except as a gap between two records. The
+ * predecessor -- a global mutex over one shared active buffer -- cost the emitting
+ * thread 3.3 us per record at eight producers against 0.1 us at one, and a flat
+ * per-record slot claim still cost 1.1 us because a 40-byte record leaves adjacent
+ * slots, owned by different threads, sharing a cache line. Per-producer buffers
+ * are flat at ~50 ns from one producer to sixteen, which is what two
+ * `clock_gettime` calls cost on their own.
+ *
+ * A written record is visible to a reader only after that producer stops, so a
+ * reader must not read a pass before its producers are done.
+ * `host_phase_trace_end()` guarantees that: it clears `active` and drains the
+ * in-flight count to zero before `finish()`.
  *
  * @param start_ns,end_ns  host monotonic nanoseconds
  * @param payload          task id for kinds that submit a task, else a detail count
@@ -151,16 +225,23 @@ inline void host_phase_pool_append(
     uint32_t thread_id = 0
 ) {
     if (pool == nullptr) return;
-    pool->head.total_record_count = pool->head.total_record_count + 1;
-    auto *active = reinterpret_cast<HostPhaseRecordBuffer *>(pool->head.current_buf_ptr);
-    if (active == nullptr || active->count >= PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER) {
-        active = host_phase_pool_rotate(pool);
-        if (active == nullptr) {
-            pool->head.dropped_record_count = pool->head.dropped_record_count + 1;
+    HostPhaseProducerLane &lane = host_phase_producer_lane();
+    const uint32_t generation = pool->generation.load(std::memory_order_acquire);
+    const bool fresh_pass = lane.pool != pool || lane.generation != generation;
+    if (fresh_pass || (!lane.denied && lane.used >= PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER)) {
+        if (!host_phase_lane_claim_buffer(pool, lane, generation)) {
+            pool->dropped.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+    } else if (lane.denied) {
+        pool->dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
-    active->records[active->count] =
+    HostPhaseRecordBuffer &buffer = pool->buffers[lane.buffer];
+    buffer.records[lane.used] =
         HostPhaseRecord{start_ns, end_ns, payload, static_cast<uint32_t>(kind), index, thread_id, 0};
-    active->count = active->count + 1;
+    lane.used++;
+    // This producer is the only writer of this buffer's count, and the reader
+    // needs it to know how far the buffer is filled.
+    buffer.count = lane.used;
 }

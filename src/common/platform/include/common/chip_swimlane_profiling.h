@@ -748,15 +748,16 @@ using ChipSwimlaneAicpuOrchPhaseBuffer =
 using ChipSwimlaneAicpuSchedPhasePool = ChipSwimlaneAicpuTaskPool;
 using ChipSwimlaneAicpuOrchPhasePool = ChipSwimlaneAicpuTaskPool;
 
-// The host phase pool is the same head + free_queue plumbing over host DDR
-// instead of device shared memory: producers are serialized by the host trace
-// sink while rotating through a fixed set of fixed-size buffers, and a reader
-// walks them in rotation order. Its buffers are
-// smaller and fewer than a device thread's because its producer emits hundreds
-// of records per pass rather than tens of thousands (see
+// The host phase pool holds the same fixed-size record buffers over host DDR
+// instead of device shared memory, but not the head + free_queue plumbing: those
+// exist so a single device producer can hand filled buffers to a host reader
+// mid-run, and the host pool has many concurrent producers and one reader that
+// only ever looks after the pass is closed. It is defined in
+// host/host_phase_records.h, which owns that host-only shape; the buffers are
+// smaller and fewer than a device thread's because a producer emits hundreds of
+// records per pass rather than tens of thousands (see
 // PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER).
 using HostPhaseRecordBuffer = TypedBuffer<HostPhaseRecord, PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER>;
-using HostPhaseRecordPool = ChipSwimlaneAicpuTaskPool;
 
 // =============================================================================
 // Helper Functions - Memory Layout
