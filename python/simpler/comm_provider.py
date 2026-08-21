@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import logging
 import uuid
 from dataclasses import dataclass
 from enum import Enum, IntEnum
@@ -493,10 +494,7 @@ ShellFactory = Callable[..., Any]
 
 
 def _generate_posix_shm_token() -> str:
-    token = "smp_" + uuid.uuid4().hex[:24]
-    if getattr(SharedMemory, "_prepend_leading_slash", True):
-        token = "/" + token
-    return _require_posix_shm_token(token)
+    return _require_posix_shm_token("smp_" + uuid.uuid4().hex[:24])
 
 
 def _posix_shm_create_name(token: str) -> str:
@@ -518,8 +516,12 @@ def _unlink_posix_shm_token(token: str) -> None:
         raise
     try:
         resource_tracker.unregister(name, "shared_memory")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("simpler").warning(
+            "POSIX shm resource-tracker unregister failed: token=%s error=%s",
+            token,
+            exc,
+        )
 
 
 def _require_shm_buf(shm: SharedMemory) -> memoryview:

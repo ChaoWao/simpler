@@ -125,7 +125,7 @@ def test_onboard_provider_region_host_two_lifecycles(st_platform, st_device_ids,
         first = events[:]
         _assert_run_teardown(first, resource_ids[0])
         assert worker._region_instance_registry._instances == {}
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
 
         events.clear()
         worker.run(orch)
@@ -134,7 +134,7 @@ def test_onboard_provider_region_host_two_lifecycles(st_platform, st_device_ids,
         assert {first[0][2], first[1][2]}.isdisjoint({second[0][2], second[1][2]})
         assert resource_ids[0] != resource_ids[1]
         assert worker._region_instance_registry._instances == {}
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
     finally:
         worker.close()
         assert worker._region_instance_registry._instances == {}

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import struct
 from multiprocessing.shared_memory import SharedMemory
 
@@ -53,6 +54,7 @@ from simpler.comm_provider_control import (
     ProviderReleaseClient,
     RegionControlProtocolError,
     ReleaseReplyTag,
+    _discard_control_shm,
     decode_allocate_reply,
     decode_allocate_request,
     decode_release_reply,
@@ -279,6 +281,8 @@ def test_allocate_allocation_error_carries_provisional_id_and_zero_sections():
     tag, result, payload, counter, decoded = decode_allocate_reply(buf)
     assert tag is AllocateReplyTag.ALLOCATION_ERROR
     assert result is None
+    assert payload is None
+    assert counter is None
     assert isinstance(decoded, RegionAllocationError)
     assert decoded.provisional_resource_id == 7
     assert decoded.cleanup_debt_remaining is True
@@ -421,7 +425,7 @@ def test_handler_request_error_does_not_call_store():
     assert factory.world.calls == []
 
 
-def test_publication_failure_releases_the_active_resource_once():
+def test_publication_failure_releases_the_active_resource_once(monkeypatch):
     factory = FakeShellFactory()
     store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
     req = bytearray(ALLOCATE_REQUEST_BYTES)
@@ -433,13 +437,9 @@ def test_publication_failure_releases_the_active_resource_once():
 
     from simpler import comm_provider_control as control
 
-    original = control.encode_allocate_success_reply
-    control.encode_allocate_success_reply = _boom  # type: ignore[method-assign]
-    try:
-        with pytest.raises(RuntimeError, match="publish failed"):
-            handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
-    finally:
-        control.encode_allocate_success_reply = original  # type: ignore[method-assign]
+    monkeypatch.setattr(control, "encode_allocate_success_reply", _boom)
+    with pytest.raises(RuntimeError, match="publish failed"):
+        handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
     assert factory.payloads[0].release_count == 1
     assert factory.counters[0].release_count == 1
     assert store.release(1).status is ProviderReleaseStatus.ALREADY_GONE
@@ -466,14 +466,18 @@ def test_release_client_terminalizes_transport_failure_without_retry():
     assert mailbox.calls == 1
 
 
-def test_allocate_client_transport_failure_does_not_call_store_or_release():
+@pytest.mark.parametrize("failure_timing", ["before_reply", "after_touching_reply"])
+def test_allocate_client_transport_failure_does_not_call_store_or_release(failure_timing):
     class _BoomMailbox:
         def __init__(self) -> None:
             self.allocate_calls = 0
 
         def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-            del worker_id, request_shm_name, reply_shm_name
+            del worker_id, request_shm_name
             self.allocate_calls += 1
+            if failure_timing == "after_touching_reply":
+                reply = SharedMemory(name=reply_shm_name)
+                reply.close()
             raise RuntimeError("mailbox down")
 
         def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
@@ -485,6 +489,7 @@ def test_allocate_client_transport_failure_does_not_call_store_or_release():
     with pytest.raises(RuntimeError, match="mailbox down"):
         client.allocate(_allocation_spec())
     assert mailbox.allocate_calls == 1
+    assert client.dispatch_started is True
     assert client.committed_resource_id == 0
 
 
@@ -506,6 +511,7 @@ def test_allocate_client_missing_commit_is_a_decode_failure():
     with pytest.raises(RegionControlProtocolError, match="commit"):
         client.allocate(_allocation_spec())
     assert mailbox.allocate_calls == 1
+    assert client.dispatch_started is True
     assert client.committed_resource_id == 0
 
 
@@ -535,27 +541,8 @@ def test_allocate_client_old_version_reply_is_a_decode_failure():
         client.allocate(_allocation_spec())
     assert exc_info.value.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
     assert mailbox.allocate_calls == 1
+    assert client.dispatch_started is True
     assert client.committed_resource_id == 0
-
-
-def test_allocate_client_transport_failure_does_not_call_store():
-    class _BoomMailbox:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-            del worker_id, request_shm_name, reply_shm_name
-            self.calls += 1
-            raise RuntimeError("mailbox down")
-
-        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-            raise AssertionError("release must not be called")
-
-    mailbox = _BoomMailbox()
-    client = ProviderAllocateClient(mailbox, 1)
-    with pytest.raises(RuntimeError, match="mailbox down"):
-        client.allocate(_allocation_spec())
-    assert mailbox.calls == 1
 
 
 def test_allocate_client_uncommitted_reply_does_not_call_store_again():
@@ -577,3 +564,282 @@ def test_allocate_client_uncommitted_reply_does_not_call_store_again():
     with pytest.raises(RegionControlProtocolError, match="commit"):
         client.allocate(_allocation_spec())
     assert mailbox.calls == 2
+    assert client.dispatch_started is True
+    assert client.committed_resource_id == 0
+
+
+class _CommitThenRaiseMailbox(_LoopbackMailbox):
+    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        super().control_region_allocate(worker_id, request_shm_name, reply_shm_name)
+        raise RuntimeError("mailbox down after commit")
+
+
+class _MalformedSuccessMailbox:
+    def __init__(self) -> None:
+        self.allocate_calls = 0
+
+    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        del worker_id, request_shm_name
+        self.allocate_calls += 1
+        reply = SharedMemory(name=reply_shm_name)
+        try:
+            assert reply.buf is not None
+            struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
+        finally:
+            reply.close()
+
+    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        del worker_id, request_shm_name, reply_shm_name
+        raise AssertionError("malformed SUCCESS must not issue release")
+
+
+def test_allocate_client_records_committed_id_when_mailbox_raises_after_handler():
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    mailbox = _CommitThenRaiseMailbox(store)
+    client = ProviderAllocateClient(mailbox, 3)
+    with pytest.raises(RuntimeError, match="mailbox down after commit"):
+        client.allocate(_allocation_spec())
+    assert client.dispatch_started is True
+    assert client.committed_resource_id == 1
+
+
+def test_allocate_client_malformed_success_does_not_commit_an_id():
+    mailbox = _MalformedSuccessMailbox()
+    client = ProviderAllocateClient(mailbox, 1)
+    with pytest.raises(RegionControlError):
+        client.allocate(_allocation_spec())
+    assert client.dispatch_started is True
+    assert client.committed_resource_id == 0
+
+
+def test_allocate_client_encode_failure_does_not_start_dispatch(monkeypatch):
+    from simpler import comm_provider_control as control
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("encode failed")
+
+    class _UnusedMailbox:
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("encode failure must not dispatch")
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("encode failure must not issue release")
+
+    monkeypatch.setattr(control, "encode_allocate_request", _boom)
+    client = ProviderAllocateClient(_UnusedMailbox(), 1)
+    with pytest.raises(RuntimeError, match="encode failed"):
+        client.allocate(_allocation_spec())
+    assert client.dispatch_started is False
+    assert client.committed_resource_id == 0
+
+
+def test_handler_success_does_not_release_the_active_resource():
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    req = bytearray(ALLOCATE_REQUEST_BYTES)
+    encode_allocate_request(req, _allocation_spec())
+    reply = bytearray(ALLOCATE_REPLY_BYTES)
+    handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
+    assert struct.unpack_from("<I", reply, COMMIT_TAG_OFFSET)[0] == AllocateReplyTag.SUCCESS
+    assert factory.payloads[0].release_count == 0
+    assert factory.counters[0].release_count == 0
+    assert store.release(1).status is ProviderReleaseStatus.RELEASED
+
+
+def test_handler_body_encode_failure_keeps_empty_tag_and_releases_once(monkeypatch):
+    from simpler import comm_provider_control as control
+
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    req = bytearray(ALLOCATE_REQUEST_BYTES)
+    encode_allocate_request(req, _allocation_spec())
+    reply = bytearray(ALLOCATE_REPLY_BYTES)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("body encode failed")
+
+    monkeypatch.setattr(control, "_encode_export_part", _boom)
+    with pytest.raises(RuntimeError, match="body encode failed"):
+        handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
+    assert struct.unpack_from("<I", reply, COMMIT_TAG_OFFSET)[0] == AllocateReplyTag.EMPTY
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert store.release(1).status is ProviderReleaseStatus.ALREADY_GONE
+
+
+def test_handler_does_not_release_after_success_tag_publish_fault(monkeypatch):
+    from simpler import comm_provider_control as control
+
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    req = bytearray(ALLOCATE_REQUEST_BYTES)
+    encode_allocate_request(req, _allocation_spec())
+    reply = bytearray(ALLOCATE_REPLY_BYTES)
+    original = control._publish_tag
+
+    def _write_then_boom(view, tag):
+        original(view, tag)
+        if int(tag) == int(AllocateReplyTag.SUCCESS):
+            raise RuntimeError("publish interrupted")
+
+    monkeypatch.setattr(control, "_publish_tag", _write_then_boom)
+    with pytest.raises(RuntimeError, match="publish interrupted"):
+        handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
+    assert struct.unpack_from("<I", reply, COMMIT_TAG_OFFSET)[0] == AllocateReplyTag.SUCCESS
+    assert factory.payloads[0].release_count == 0
+    assert factory.counters[0].release_count == 0
+    assert store.release(1).status is ProviderReleaseStatus.RELEASED
+
+
+def test_handler_store_lifecycle_leaves_empty_reply():
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    store.sweep()
+    req = bytearray(ALLOCATE_REQUEST_BYTES)
+    encode_allocate_request(req, _allocation_spec())
+    reply = bytearray(ALLOCATE_REPLY_BYTES)
+    with pytest.raises(RegionControlError) as exc_info:
+        handle_ctrl_region_allocate(memoryview(req), memoryview(reply), store)
+    assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert struct.unpack_from("<I", reply, COMMIT_TAG_OFFSET)[0] == AllocateReplyTag.EMPTY
+    assert factory.world.calls == []
+
+
+def test_malformed_release_request_roundtrip_decodes_release_error_id_zero():
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    req = bytearray(RELEASE_REQUEST_BYTES)
+    encode_release_request(req, 13)
+    struct.pack_into("<Q", req, 16, 0)
+    reply = bytearray(RELEASE_REPLY_BYTES)
+    handle_ctrl_region_release(memoryview(req), memoryview(reply), store)
+    assert struct.unpack_from("<I", reply, COMMIT_TAG_OFFSET)[0] == ReleaseReplyTag.RELEASE_ERROR
+    decoded = decode_release_reply(reply)
+    assert isinstance(decoded, RegionControlError)
+    assert decoded.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+
+def test_release_error_with_nonzero_id_roundtrips_as_typed_control_error():
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    store.sweep()
+    req = bytearray(RELEASE_REQUEST_BYTES)
+    encode_release_request(req, 4)
+    reply = bytearray(RELEASE_REPLY_BYTES)
+    handle_ctrl_region_release(memoryview(req), memoryview(reply), store)
+    decoded = decode_release_reply(reply)
+    assert isinstance(decoded, RegionControlError)
+    assert decoded.kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert struct.unpack_from("<Q", reply, 16)[0] == 4
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProviderReleaseStatus.RELEASED,
+        ProviderReleaseStatus.ALREADY_GONE,
+        ProviderReleaseStatus.UNKNOWN_RESOURCE,
+        ProviderReleaseStatus.CLEANUP_INCOMPLETE,
+    ],
+)
+def test_lifecycle_release_reply_rejects_id_zero(status):
+    failures = ()
+    if status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+        failures = (
+            ProviderCleanupFailure(
+                part=RegionPartKind.PAYLOAD,
+                backend_operation=RegionOperationKind.RELEASE,
+                typed_cause=RegionCleanupCause.BACKEND_ERROR,
+            ),
+        )
+    reply = bytearray(RELEASE_REPLY_BYTES)
+    encode_release_result_reply(
+        reply,
+        ProviderReleaseResult(provider_resource_id=13, status=status, failures=failures),
+    )
+    struct.pack_into("<Q", reply, 16, 0)
+    with pytest.raises(RegionControlError) as exc_info:
+        decode_release_reply(reply)
+    assert exc_info.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+
+def test_release_error_rejects_nonzero_failure_entry():
+    buf = bytearray(RELEASE_REPLY_BYTES)
+    encode_release_error_reply(buf, RegionControlErrorKind.STORE_LIFECYCLE, provider_resource_id=4)
+    struct.pack_into("<I", buf, RELEASE_PAYLOAD_FAILURE_OFFSET, 1)
+    with pytest.raises(RegionControlError) as exc_info:
+        decode_release_reply(buf)
+    assert exc_info.value.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+
+class _RecordingShm:
+    def __init__(self, name: str, *, close_error=None, unlink_error=None) -> None:
+        self.name = name
+        self.ops: list[str] = []
+        self._close_error = close_error
+        self._unlink_error = unlink_error
+
+    def close(self) -> None:
+        self.ops.append("close")
+        if self._close_error is not None:
+            raise self._close_error
+
+    def unlink(self) -> None:
+        self.ops.append("unlink")
+        if self._unlink_error is not None:
+            raise self._unlink_error
+
+
+def test_discard_control_shm_unlinks_after_close_failure(caplog):
+    shm = _RecordingShm("pto_close_fail", close_error=BufferError("still mapped"))
+    with caplog.at_level(logging.WARNING, logger="simpler"):
+        _discard_control_shm(shm)
+    assert shm.ops == ["close", "unlink"]
+    assert "pto_close_fail" in caplog.text
+    assert "close" in caplog.text
+    assert "still mapped" in caplog.text
+
+
+def test_discard_control_shm_logs_unlink_failure_once(caplog):
+    shm = _RecordingShm("pto_unlink_fail", unlink_error=OSError("busy"))
+    with caplog.at_level(logging.WARNING, logger="simpler"):
+        _discard_control_shm(shm)
+    assert shm.ops == ["close", "unlink"]
+    assert "pto_unlink_fail" in caplog.text
+    assert "unlink" in caplog.text
+    assert "busy" in caplog.text
+
+
+def test_discard_control_shm_treats_missing_unlink_as_done():
+    shm = _RecordingShm("pto_missing", unlink_error=FileNotFoundError("gone"))
+    _discard_control_shm(shm)
+    assert shm.ops == ["close", "unlink"]
+
+
+def test_allocate_and_release_survive_control_shm_cleanup_failure(monkeypatch, caplog):
+    from simpler import comm_provider_control as control
+
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    mailbox = _LoopbackMailbox(store)
+    original = control._discard_control_shm
+    ops: list[str] = []
+
+    def _failing_discard(shm):
+        wrapper = _RecordingShm(shm.name, close_error=BufferError("still mapped"), unlink_error=OSError("busy"))
+        original(wrapper)
+        ops.extend(wrapper.ops)
+        original(shm)
+
+    monkeypatch.setattr(control, "_discard_control_shm", _failing_discard)
+    with caplog.at_level(logging.WARNING, logger="simpler"):
+        allocated, _payload, _counter = ProviderAllocateClient(mailbox, 3).allocate(_allocation_spec())
+        released = ProviderReleaseClient(mailbox, 3).release(allocated.provider_resource_id)
+    assert allocated.provider_resource_id == 1
+    assert released.status is ProviderReleaseStatus.RELEASED
+    assert ops == ["close", "unlink", "close", "unlink", "close", "unlink", "close", "unlink"]
+    assert caplog.text.count("operation=close") == 4
+    assert caplog.text.count("operation=unlink") == 4

@@ -10,12 +10,13 @@
 """Unit tests for the private region materializer."""
 
 import dataclasses
+import struct
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Optional, Union
 
 import pytest
 from simpler import comm_endpoints as ce
-from simpler.comm_provider import RegionAllocationSpec, RegionPartAllocationSpec
+from simpler.comm_provider import RegionAllocationSpec, RegionPartAllocationSpec, RegionPartKind
 from simpler.comm_region import (
     CounterPart,
     HostVmmCopyAccess,
@@ -527,6 +528,7 @@ def region_worker(monkeypatch):
             calls.append(("allocate", int(spec.payload.logical_bytes), int(spec.counter.logical_bytes)))
             if allocate_error is not None:
                 raise allocate_error
+            self.dispatch_started = True
             self.committed_resource_id = 42
             result, payload_view, counter_view = _committed_success(spec)
             if mutate_success is not None:
@@ -572,7 +574,6 @@ def test_worker_materializes_region_instance_and_closes_single_region(region_wor
         instance.close()
         instance.close()
     assert instance.state is RegionInstanceState.CLOSED
-    assert worker._live_worker_chip_regions == []
     assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
@@ -728,7 +729,7 @@ def test_callback_region_close_before_submit_retired_from_run_cleanup(region_wor
 
     assert instance.state is RegionInstanceState.CLOSED
     assert _tracked(worker) == ()
-    worker._cleanup_worker_chip_regions(resources)
+    worker._region_instance_registry.cleanup_run(resources)
     assert _tracked(worker) == ()
     assert calls == [
         ("allocate", 64, 128),
@@ -755,7 +756,7 @@ def test_callback_region_run_cleanup_then_later_close_is_idempotent(region_worke
     finally:
         worker._building_run_resources = None
 
-    worker._cleanup_worker_chip_regions(resources)
+    worker._region_instance_registry.cleanup_run(resources)
 
     assert instance.state is RegionInstanceState.CLOSED
     assert _tracked(worker) == ()
@@ -772,30 +773,6 @@ def test_callback_region_run_cleanup_then_later_close_is_idempotent(region_worke
     ]
 
 
-def test_retire_worker_chip_region_tracking_does_not_retry_base_exception():
-    class FailingTrackingList(list):
-        def __init__(self, values):
-            super().__init__(values)
-            self.assignments = 0
-
-        def __setitem__(self, key, value):
-            self.assignments += 1
-            raise KeyboardInterrupt("tracking interrupted")
-
-    worker = _l3(device_ids=[8, 9])
-    region = object()
-    failing_tracking = FailingTrackingList([region])
-    succeeding_tracking = [region]
-    resources = _RunResources(worker_chip_regions=failing_tracking)
-    worker._live_worker_chip_regions = succeeding_tracking
-
-    with pytest.raises(KeyboardInterrupt, match="tracking interrupted"):
-        worker._retire_worker_chip_region_tracking(region, resources)
-
-    assert failing_tracking.assignments == 1
-    assert succeeding_tracking == []
-
-
 def test_materialize_tracks_before_allocate_and_create_failure_is_not_live(region_worker):
     worker, calls, _leases = region_worker(allocate_error=RuntimeError("create failed"))
 
@@ -806,7 +783,6 @@ def test_materialize_tracks_before_allocate_and_create_failure_is_not_live(regio
             ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
         )
 
-    assert worker._live_worker_chip_regions == []
     assert calls == [("allocate", 64, 128)]
     assert _tracked(worker) == ()
     worker._require_no_ordered_cleanup_failure("test")
@@ -1038,7 +1014,7 @@ def test_registry_run_cleanup_closes_live_instances(region_worker):
 
     assert instance.state is RegionInstanceState.LIVE
     assert _tracked(worker) == (instance,)
-    worker._cleanup_worker_chip_regions(resources)
+    worker._region_instance_registry.cleanup_run(resources)
     assert instance.state is RegionInstanceState.CLOSED
     assert _tracked(worker) == ()
     assert calls == [
@@ -1076,7 +1052,7 @@ def test_allocation_error_with_debt_survives_run_cleanup_until_sweep_without_rel
     instance = tracked[0]
     assert instance._state is RegionInstanceState.CLOSE_FAILED
     assert instance._release_client is None
-    worker._cleanup_worker_chip_regions(resources)
+    worker._region_instance_registry.cleanup_run(resources)
     assert _tracked(worker) == (instance,)
     assert calls == [("allocate", 64, 128)]
     worker._region_instance_registry.sweep()
@@ -1117,7 +1093,7 @@ def test_unpublished_close_failed_survives_cleanup_run_until_sweep(region_worker
     tracked = _tracked(worker)
     assert len(tracked) == 1
     instance = tracked[0]
-    worker._cleanup_worker_chip_regions(resources)
+    worker._region_instance_registry.cleanup_run(resources)
     assert _tracked(worker) == (instance,)
     assert calls.count(("release", 1, 42)) == 1
     worker._region_instance_registry.sweep()
@@ -1133,7 +1109,16 @@ def test_data_plane_does_not_consult_registry(region_worker, monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("data-plane must not consult the region instance registry")
 
-    for name in ("track", "close", "cleanup_run", "sweep", "_iter_run", "_settle", "_retire"):
+    for name in (
+        "track",
+        "close",
+        "cleanup_run",
+        "sweep",
+        "record_data_plane_failure",
+        "_iter_run",
+        "_settle",
+        "_retire",
+    ):
         monkeypatch.setattr(registry, name, boom)
     monkeypatch.setattr(PayloadPart, "write", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(PayloadPart, "read", lambda *_args, **_kwargs: None)
@@ -1171,6 +1156,156 @@ def test_live_region_instance_access_requires_control_context(region_worker):
         ("mapping_close", "counter"),
         ("release", 1, 42),
     ]
+
+
+def test_local_view_returns_completed_materialization_only(region_worker):
+    worker, _calls, _leases = region_worker()
+    instance = _materialize_default_region(worker)
+    assert instance.provider_resource_id == 42
+    payload = instance.local_view(RegionPartKind.PAYLOAD)
+    counter = instance.local_view(RegionPartKind.COUNTER)
+    assert payload is instance._payload_local_view
+    assert counter is instance._counter_local_view
+    assert payload is not None and counter is not None
+    instance._state = RegionInstanceState.CLOSED
+    assert instance.local_view(RegionPartKind.PAYLOAD) is None
+    assert instance.local_view(RegionPartKind.COUNTER) is None
+
+
+def test_live_resource_inventory_reports_registry_instance_count(region_worker):
+    worker, _calls, _leases = region_worker()
+    assert "region instance" not in worker._describe_live_resources()
+    _materialize_default_region(worker)
+    assert "1 region instance(s)" in worker._describe_live_resources()
+
+
+def test_record_data_plane_failure_matches_single_region(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    error = RuntimeError("issued local operation failed")
+    worker._region_instance_registry.record_data_plane_failure(resources, instance.provider_resource_id, error)
+    assert instance.data_plane_error is error
+    assert instance._close_attempted is False
+    assert instance.state is RegionInstanceState.LIVE
+    assert [item for item in calls if item[0] == "release"] == []
+
+
+def test_record_data_plane_failure_matches_only_target_among_multiple(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        first = _materialize_default_region(worker)
+        second = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    second._provider_resource_id = 43
+    error = RuntimeError("issued local operation failed")
+    worker._region_instance_registry.record_data_plane_failure(resources, first.provider_resource_id, error)
+    assert first.data_plane_error is error
+    assert second.data_plane_error is None
+    assert first._close_attempted is False
+    assert second._close_attempted is False
+    assert [item for item in calls if item[0] == "release"] == []
+
+
+def test_record_data_plane_failure_unknown_resource_is_routing_error(region_worker):
+    worker, _calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    with pytest.raises(MaterializationError, match="no region instance for resource 99"):
+        worker._region_instance_registry.record_data_plane_failure(resources, 99, RuntimeError("unused"))
+    assert instance.data_plane_error is None
+    assert instance._close_attempted is False
+
+
+def test_record_data_plane_failure_duplicate_match_is_invariant_error(region_worker):
+    worker, _calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        first = _materialize_default_region(worker)
+        second = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    second._provider_resource_id = first.provider_resource_id
+    with pytest.raises(MaterializationError, match="duplicate region instances for resource 42"):
+        worker._region_instance_registry.record_data_plane_failure(
+            resources, first.provider_resource_id, RuntimeError("unused")
+        )
+    assert first.data_plane_error is None
+    assert second.data_plane_error is None
+
+
+def _endpoint_error(resource_id: int) -> RuntimeError:
+    return RuntimeError(
+        f"L3-L2 endpoint error op=payload_write kind=5 region={int(resource_id)} "
+        "msg=issued local operation failed"
+    )
+
+
+def test_endpoint_unknown_resource_poisons_worker(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    assert worker._poison_worker_chip_region_from_endpoint_error(_endpoint_error(99), resources) is True
+    assert instance.data_plane_error is None
+    assert instance._close_attempted is False
+    assert [item for item in calls if item[0] == "release"] == []
+    _assert_poisoned(worker)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)
+
+
+def test_endpoint_duplicate_match_poisons_worker(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        first = _materialize_default_region(worker)
+        second = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    second._provider_resource_id = first.provider_resource_id
+    assert worker._poison_worker_chip_region_from_endpoint_error(_endpoint_error(first.provider_resource_id), resources)
+    assert first.data_plane_error is None
+    assert second.data_plane_error is None
+    assert [item for item in calls if item[0] == "release"] == []
+    _assert_poisoned(worker)
+
+
+def test_data_plane_poison_still_completes_registry_cleanup_and_release(region_worker):
+    worker, calls, _leases = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        instance = _materialize_default_region(worker)
+    finally:
+        worker._building_run_resources = None
+    error = _endpoint_error(instance.provider_resource_id)
+    assert worker._poison_worker_chip_region_from_endpoint_error(error, resources) is True
+    assert instance.data_plane_error is error
+    assert instance._close_attempted is False
+    assert instance.state is RegionInstanceState.LIVE
+    worker._region_instance_registry.cleanup_run(resources)
+    assert instance.state is RegionInstanceState.CLOSED
+    assert calls.count(("release", 1, 42)) == 1
+    _assert_poisoned(worker, cause=error)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)
 
 
 def test_shape_validation_rejects_foreign_registry_context():
@@ -1334,3 +1469,228 @@ def test_compatibility_create_uses_projection_result_not_a_fabricated_spec(monke
     assert consumer.path == "L3"
     assert consumer.deployment is ce.HOST_CPU
     assert set(plan.ordered_members) == {provider.identity, consumer.identity}
+
+
+class _StoreControlMailbox:
+    def __init__(
+        self,
+        store,
+        *,
+        fail_before_allocate: BaseException | None = None,
+        fail_after_allocate: BaseException | None = None,
+        reply_mode: str = "handler",
+    ) -> None:
+        self.store = store
+        self.allocate_calls = 0
+        self.release_calls = 0
+        self.released_ids: list[int] = []
+        self._fail_before_allocate = fail_before_allocate
+        self._fail_after_allocate = fail_after_allocate
+        self._reply_mode = reply_mode
+
+    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        from simpler.comm_provider_control import (
+            ALLOCATE_REPLY_BYTES,
+            ALLOCATE_REQUEST_BYTES,
+            COMMIT_TAG_OFFSET,
+            AllocateReplyTag,
+            handle_ctrl_region_allocate,
+        )
+
+        del worker_id
+        self.allocate_calls += 1
+        if self._fail_before_allocate is not None:
+            raise self._fail_before_allocate
+        req = SharedMemory(name=request_shm_name)
+        reply = SharedMemory(name=reply_shm_name)
+        assert req.buf is not None
+        assert reply.buf is not None
+        req_view = memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES]
+        reply_view = memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES]
+        try:
+            if self._reply_mode == "handler":
+                handle_ctrl_region_allocate(req_view, reply_view, self.store)
+            elif self._reply_mode == "malformed":
+                struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
+            if self._fail_after_allocate is not None:
+                raise self._fail_after_allocate
+        finally:
+            req_view.release()
+            reply_view.release()
+            req.close()
+            reply.close()
+
+    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+        from simpler.comm_provider_control import (
+            RELEASE_REPLY_BYTES,
+            RELEASE_REQUEST_BYTES,
+            decode_release_request,
+            handle_ctrl_region_release,
+        )
+
+        del worker_id
+        self.release_calls += 1
+        req = SharedMemory(name=request_shm_name)
+        reply = SharedMemory(name=reply_shm_name)
+        assert req.buf is not None
+        assert reply.buf is not None
+        req_view = memoryview(req.buf)[:RELEASE_REQUEST_BYTES]
+        reply_view = memoryview(reply.buf)[:RELEASE_REPLY_BYTES]
+        try:
+            self.released_ids.append(decode_release_request(req_view))
+            handle_ctrl_region_release(req_view, reply_view, self.store)
+        finally:
+            req_view.release()
+            reply_view.release()
+            req.close()
+            reply.close()
+
+
+def _live_control_worker(mailbox, monkeypatch, device_ids=(8, 9)):
+    worker = _l3(device_ids=device_ids)
+    worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": list(device_ids)}
+    worker._worker = mailbox
+    monkeypatch.setattr(worker, "_consume_worker_host_mapped_cleanup_error", lambda _api: None)
+    return worker
+
+
+def _assert_poisoned(worker, *, cause: BaseException | None = None) -> RuntimeError:
+    with pytest.raises(RuntimeError, match="no further work is admitted") as poison_info:
+        worker._require_no_ordered_cleanup_failure("test")
+    if cause is not None:
+        chain: list[BaseException] = []
+        current: BaseException | None = poison_info.value
+        while current is not None and current not in chain:
+            chain.append(current)
+            current = current.__cause__
+        assert any(item is cause or item == cause for item in chain)
+    return poison_info.value
+
+
+def test_handler_commit_then_mailbox_error_releases_once_and_poisons(monkeypatch):
+    from simpler.comm_provider import ProviderRegionStore
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    mailbox = _StoreControlMailbox(store, fail_after_allocate=RuntimeError("mailbox down after commit"))
+    worker = _live_control_worker(mailbox, monkeypatch)
+    with pytest.raises(RuntimeError, match="mailbox down after commit") as exc_info:
+        _materialize_default_region(worker)
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    assert tracked[0]._provider_resource_id == 1
+    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
+    assert mailbox.release_calls == 1
+    assert mailbox.released_ids == [1]
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    _assert_poisoned(worker, cause=exc_info.value)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)
+
+
+def test_dispatch_empty_reply_does_not_release_and_poisons(monkeypatch):
+    from simpler.comm_provider import ProviderRegionStore
+    from simpler.comm_provider_control import RegionControlProtocolError
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+    mailbox = _StoreControlMailbox(store, reply_mode="empty")
+    worker = _live_control_worker(mailbox, monkeypatch)
+    with pytest.raises(RegionControlProtocolError):
+        _materialize_default_region(worker)
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    assert tracked[0]._provider_resource_id == 0
+    assert mailbox.release_calls == 0
+    _assert_poisoned(worker)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)
+
+
+def test_dispatch_malformed_reply_does_not_release_and_poisons(monkeypatch):
+    from simpler.comm_provider import ProviderRegionStore, RegionControlError
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+    mailbox = _StoreControlMailbox(store, reply_mode="malformed")
+    worker = _live_control_worker(mailbox, monkeypatch)
+    with pytest.raises(RegionControlError):
+        _materialize_default_region(worker)
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    assert tracked[0]._provider_resource_id == 0
+    assert mailbox.release_calls == 0
+    _assert_poisoned(worker)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)
+
+
+def test_request_encode_failure_does_not_dispatch_or_poison(monkeypatch):
+    from simpler import comm_provider_control as control
+    from simpler.comm_provider import ProviderRegionStore
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+    mailbox = _StoreControlMailbox(store)
+    worker = _live_control_worker(mailbox, monkeypatch)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(control, "encode_allocate_request", _boom)
+    with pytest.raises(RuntimeError, match="encode failed"):
+        _materialize_default_region(worker)
+    assert mailbox.allocate_calls == 0
+    assert mailbox.release_calls == 0
+    assert _tracked(worker) == ()
+    worker._require_no_ordered_cleanup_failure("test")
+
+
+def test_mailbox_error_before_handler_poisons_and_keeps_transport_type(monkeypatch):
+    from simpler.comm_provider import ProviderRegionStore
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+    mailbox = _StoreControlMailbox(store, fail_before_allocate=RuntimeError("mailbox down before handler"))
+    worker = _live_control_worker(mailbox, monkeypatch)
+    with pytest.raises(RuntimeError, match="mailbox down before handler") as exc_info:
+        _materialize_default_region(worker)
+    assert mailbox.allocate_calls == 1
+    assert mailbox.release_calls == 0
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    assert tracked[0]._provider_resource_id == 0
+    _assert_poisoned(worker, cause=exc_info.value)
+    with pytest.raises(RuntimeError, match="no further work is admitted") as admission_info:
+        _materialize_default_region(worker)
+    assert admission_info.value.__cause__ is worker._ordered_cleanup_error
+
+
+def test_store_lifecycle_allocate_is_terminal_ambiguity(monkeypatch):
+    from simpler.comm_provider import ProviderRegionStore, RegionControlError, RegionControlErrorKind
+
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    store.sweep()
+    mailbox = _StoreControlMailbox(store)
+    worker = _live_control_worker(mailbox, monkeypatch)
+    with pytest.raises(RegionControlError) as exc_info:
+        _materialize_default_region(worker)
+    assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert mailbox.release_calls == 0
+    assert factory.world.calls == []
+    tracked = _tracked(worker)
+    assert len(tracked) == 1
+    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
+    _assert_poisoned(worker, cause=exc_info.value)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        _materialize_default_region(worker)

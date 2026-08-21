@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import logging
+import sys
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
@@ -538,6 +540,15 @@ def _open_store(factory: FakeShellFactory | None = None) -> tuple[ProviderRegion
     return store, factory
 
 
+def _mutating_shell_factory(factory: FakeShellFactory, mutate):
+    def _factory(context, kind, spec):
+        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+        mutate(shell, kind)
+        return shell
+
+    return _factory
+
+
 def _backend_failure(part: RegionPartKind) -> ProviderCleanupFailure:
     return ProviderCleanupFailure(
         part=part,
@@ -678,13 +689,11 @@ def test_sweep_first_cleans_untouched_resources_and_does_not_reissue_failed_clea
 def test_counter_materialize_failure_cleans_both_installed_shells_and_stays_open():
     factory = FakeShellFactory()
 
-    def _factory(context, kind, spec):
-        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+    def _mutate(shell, kind):
         if kind is RegionPartKind.COUNTER:
             shell.fail_materialize = RuntimeError("counter materialize")
-        return shell
 
-    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_mutating_shell_factory(factory, _mutate))
     with pytest.raises(RegionAllocationError) as exc_info:
         store.allocate_and_export(_allocation_spec())
     error = exc_info.value
@@ -715,13 +724,11 @@ def test_counter_materialize_failure_cleans_both_installed_shells_and_stays_open
 def test_create_path_failures_are_classified_and_cleanup_runs_once(attr, exc, part, operation):
     factory = FakeShellFactory()
 
-    def _factory(context, kind, spec):
-        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+    def _mutate(shell, kind):
         if kind is part:
             setattr(shell, attr, exc)
-        return shell
 
-    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_mutating_shell_factory(factory, _mutate))
     with pytest.raises(RegionAllocationError) as exc_info:
         store.allocate_and_export(_allocation_spec())
     error = exc_info.value
@@ -737,15 +744,13 @@ def test_create_path_failures_are_classified_and_cleanup_runs_once(attr, exc, pa
 def test_create_cleanup_failure_retains_record_and_close_failed():
     factory = FakeShellFactory()
 
-    def _factory(context, kind, spec):
-        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+    def _mutate(shell, kind):
         if kind is RegionPartKind.COUNTER:
             shell.fail_materialize = RuntimeError("counter materialize")
         if kind is RegionPartKind.PAYLOAD:
             shell.release_step_failures = [_backend_failure(RegionPartKind.PAYLOAD)]
-        return shell
 
-    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_mutating_shell_factory(factory, _mutate))
     with pytest.raises(RegionAllocationError) as exc_info:
         store.allocate_and_export(_allocation_spec())
     error = exc_info.value
@@ -777,12 +782,10 @@ def test_fake_release_keeps_later_failures_local_and_summarizes_the_first():
 def test_overlapping_local_views_are_an_internal_invariant_and_are_cleaned():
     factory = FakeShellFactory()
 
-    def _factory(context, kind, spec):
-        shell = FakeShellFactory.__call__(factory, context, kind, spec)
+    def _mutate(shell, _kind):
         shell._local_base = 0
-        return shell
 
-    store = ProviderRegionStore(_sim_context(), _shell_factory=_factory)
+    store = ProviderRegionStore(_sim_context(), _shell_factory=_mutating_shell_factory(factory, _mutate))
     with pytest.raises(RegionAllocationError) as exc_info:
         store.allocate_and_export(_allocation_spec())
     error = exc_info.value
@@ -1015,6 +1018,99 @@ def test_sim_posix_unlink_failure_is_summarized_after_successful_close():
         pass
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_posix_token_has_no_slash_on_linux_and_macos(monkeypatch, platform):
+    from simpler.comm_provider import _generate_posix_shm_token, _posix_shm_create_name
+
+    monkeypatch.setattr(sys, "platform", platform)
+    token = _generate_posix_shm_token()
+    assert token.startswith("smp_")
+    assert "/" not in token
+    assert _posix_shm_create_name(token) == token
+    shell = SimPosixShmAllocation(_sim_context(), RegionPartKind.PAYLOAD, _payload_spec(8, BackendKind.POSIX_SHM))
+    try:
+        shell.materialize()
+        capability = shell.import_capability()
+        assert "/" not in shell.candidate_name
+        assert capability.shm_name == shell.candidate_name
+        assert "/" not in capability.shm_name
+        consumer = SharedMemory(name=_posix_shm_create_name(capability.shm_name))
+        try:
+            assert consumer.buf is not None
+        finally:
+            consumer.close()
+    finally:
+        assert shell.release_once() is None
+
+
+def test_posix_token_does_not_use_shared_memory_prepend_attr():
+    assert "_prepend_leading_slash" not in _COMM_PROVIDER_PATH.read_text()
+
+
+def test_posix_unlink_and_tracker_use_the_same_single_leading_slash(monkeypatch):
+    from multiprocessing import resource_tracker
+    from simpler.comm_provider import _unlink_posix_shm_token
+
+    unlinks: list[str] = []
+    unregisters: list[tuple[str, str]] = []
+
+    class _FakePosix:
+        @staticmethod
+        def shm_unlink(name: str) -> None:
+            unlinks.append(name)
+
+    monkeypatch.setitem(sys.modules, "_posixshmem", _FakePosix)
+    monkeypatch.setattr(
+        resource_tracker,
+        "unregister",
+        lambda name, kind: unregisters.append((name, kind)),
+    )
+    _unlink_posix_shm_token("smp_deadbeefcafebabe01234567")
+    assert unlinks == ["/smp_deadbeefcafebabe01234567"]
+    assert unregisters == [("/smp_deadbeefcafebabe01234567", "shared_memory")]
+
+
+def test_posix_repeated_unlink_treats_enoent_as_done(monkeypatch):
+    from multiprocessing import resource_tracker
+    from simpler.comm_provider import _unlink_posix_shm_token
+
+    class _FakePosix:
+        calls = 0
+
+        @staticmethod
+        def shm_unlink(name: str) -> None:
+            _FakePosix.calls += 1
+            if _FakePosix.calls > 1:
+                raise FileNotFoundError(name)
+
+    monkeypatch.setitem(sys.modules, "_posixshmem", _FakePosix)
+    monkeypatch.setattr(resource_tracker, "unregister", lambda *_args: None)
+    _unlink_posix_shm_token("smp_deadbeefcafebabe01234567")
+    _unlink_posix_shm_token("smp_deadbeefcafebabe01234567")
+    assert _FakePosix.calls == 2
+
+
+def test_posix_unregister_failure_warns_without_changing_result(monkeypatch, caplog):
+    from multiprocessing import resource_tracker
+    from simpler.comm_provider import _unlink_posix_shm_token
+
+    class _FakePosix:
+        @staticmethod
+        def shm_unlink(name: str) -> None:
+            del name
+
+    monkeypatch.setitem(sys.modules, "_posixshmem", _FakePosix)
+    monkeypatch.setattr(
+        resource_tracker,
+        "unregister",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("tracker boom")),
+    )
+    caplog.set_level(logging.WARNING, logger="simpler")
+    _unlink_posix_shm_token("smp_deadbeefcafebabe01234567")
+    assert "smp_deadbeefcafebabe01234567" in caplog.text
+    assert "tracker boom" in caplog.text
+
+
 def test_sim_posix_first_cleanup_failure_is_close_when_both_steps_fail():
     from simpler.comm_provider import _posix_shm_create_name
 
@@ -1053,7 +1149,7 @@ def _onboard_context(device_id: int = 0) -> RegionAllocationContext:
 @pytest.fixture
 def fake_vmm():
     from _task_interface import (  # pyright: ignore[reportMissingImports]
-        _region_vmm_release,
+        _region_vmm_inspect,
         _region_vmm_test_live_handles,
         _region_vmm_test_reset_hooks,
         _region_vmm_test_use_fake_driver,
@@ -1064,16 +1160,9 @@ def fake_vmm():
     before = set(_region_vmm_test_live_handles())
     yield
     _region_vmm_test_reset_hooks()
-    for handle in _region_vmm_test_live_handles():
-        if handle in before:
-            continue
-        try:
-            _region_vmm_release(handle)
-        except Exception:
-            try:
-                _region_vmm_release(handle)
-            except Exception:
-                pass
+    leftover = [handle for handle in _region_vmm_test_live_handles() if handle not in before]
+    unclean = [handle for handle in leftover if not _region_vmm_inspect(handle).release_once_done]
+    assert unclean == [], f"fake VMM leaked live handles: {unclean}"
 
 
 def test_region_vmm_begin_has_no_physical_side_effect(fake_vmm):
@@ -1358,6 +1447,98 @@ def test_region_vmm_physical_free_failure_retains_record_without_reissue(fake_vm
         _region_vmm_release(handle)
     assert _region_vmm_test_issued_ops() == []
     assert _region_vmm_inspect(handle).physical_allocated is True
+
+
+def test_region_vmm_release_bind_failure_keeps_ledger_and_does_not_retry(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+    )
+
+    handle = _region_vmm_begin(3)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("bind_device", "before")
+    with pytest.raises(RuntimeError, match="bind_device failed:") as first:
+        _region_vmm_release(handle)
+    inspect = _region_vmm_inspect(handle)
+    issued = _region_vmm_test_issued_ops()
+    assert inspect.present is True
+    assert inspect.mapped is True
+    assert inspect.va_reserved is True
+    assert inspect.physical_allocated is True
+    assert inspect.unmap_attempted is False
+    assert inspect.va_release_attempted is False
+    assert inspect.physical_free_attempted is False
+    assert inspect.release_once_done is True
+    assert inspect.first_cleanup_failure == str(first.value)
+    assert inspect.first_cleanup_failure.startswith("bind_device failed:")
+    assert inspect.local_cleanup_details == [inspect.first_cleanup_failure]
+    assert issued == ["bind_device"]
+    _region_vmm_test_reset_hooks()
+    with pytest.raises(RuntimeError, match="bind_device failed:") as second:
+        _region_vmm_release(handle)
+    assert str(second.value) == str(first.value)
+    assert _region_vmm_test_issued_ops() == []
+    later = _region_vmm_inspect(handle)
+    assert later.mapped is True
+    assert later.va_reserved is True
+    assert later.physical_allocated is True
+    assert later.first_cleanup_failure == inspect.first_cleanup_failure
+
+
+def test_region_vmm_zero_binds_record_device_before_zero(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+        _region_vmm_zero_bytes,
+    )
+
+    handle = _region_vmm_begin(4)
+    _region_vmm_allocate_export(handle, 8)
+    other = _region_vmm_allocate_export(_region_vmm_begin(9), 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_zero_bytes(handle, 0, 8)
+    assert _region_vmm_test_issued_ops() == ["bind_device", "zero_bytes"]
+    assert _region_vmm_inspect(handle).device_id == 4
+    assert _region_vmm_inspect(other.registry_handle).device_id == 9
+    _region_vmm_release(handle)
+    _region_vmm_release(other.registry_handle)
+
+
+def test_region_vmm_zero_bind_failure_does_not_issue_zero(fake_vmm):
+    from _task_interface import (  # pyright: ignore[reportMissingImports]
+        _region_vmm_allocate_export,
+        _region_vmm_begin,
+        _region_vmm_inspect,
+        _region_vmm_release,
+        _region_vmm_test_fail_stage,
+        _region_vmm_test_issued_ops,
+        _region_vmm_test_reset_hooks,
+        _region_vmm_zero_bytes,
+    )
+
+    handle = _region_vmm_begin(4)
+    _region_vmm_allocate_export(handle, 8)
+    _region_vmm_test_reset_hooks()
+    _region_vmm_test_fail_stage("bind_device", "before")
+    with pytest.raises(RuntimeError, match="injected region VMM before bind_device"):
+        _region_vmm_zero_bytes(handle, 0, 8)
+    assert _region_vmm_test_issued_ops() == ["bind_device"]
+    inspect = _region_vmm_inspect(handle)
+    assert inspect.present is True
+    assert inspect.mapped is True
+    _region_vmm_test_reset_hooks()
+    _region_vmm_release(handle)
 
 
 def test_vmm_allocation_stores_handle_before_allocate_and_zeros_only_logical_bytes(fake_vmm):

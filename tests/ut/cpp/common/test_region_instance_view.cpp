@@ -10,6 +10,7 @@
  */
 
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 
@@ -210,6 +211,61 @@ TEST(RegionInstanceViewTest, IssuedLocalOpsFailureIsSticky) {
 
     RegionPayloadView inner{};
     EXPECT_FALSE(view.payload().read(0, 4, inner));
+    EXPECT_EQ(view.error().kind, RegionViewErrorKind::ISSUED_FAILURE);
+}
+
+TEST(RegionInstanceViewTest, DefaultInvalidAndIssuedFailedViewsHaveNoReset) {
+    RegionInstanceView uninitialized;
+    EXPECT_TRUE(uninitialized.failed());
+    EXPECT_EQ(uninitialized.error().kind, RegionViewErrorKind::INVALID_VIEW);
+    RegionPayloadView unread{};
+    EXPECT_FALSE(uninitialized.payload().read(0, 1, unread));
+    EXPECT_EQ(uninitialized.error().kind, RegionViewErrorKind::INVALID_VIEW);
+
+    RegionInstanceView overlap(RegionPartLocalSpan{0, 128}, RegionPartLocalSpan{64, 64});
+    EXPECT_TRUE(overlap.failed());
+    const uint8_t byte = 1;
+    EXPECT_FALSE(overlap.payload().write(0, &byte, 1));
+    EXPECT_EQ(overlap.error().kind, RegionViewErrorKind::INVALID_VIEW);
+    EXPECT_EQ(overlap.error().op, RegionViewOp::CONSTRUCT);
+}
+
+TEST(RegionInstanceViewTest, AddUsesDefined32BitWrap) {
+    RegionStorage storage{};
+    RegionInstanceView view = make_view(&storage);
+    ASSERT_FALSE(view.failed()) << view.error().message;
+
+    ASSERT_TRUE(view.counter().notify(0, INT32_MAX, RegionNotifyOp::Set)) << view.error().message;
+    ASSERT_TRUE(view.counter().notify(0, 1, RegionNotifyOp::Add)) << view.error().message;
+    EXPECT_EQ(storage.counters[0], INT32_MIN);
+
+    ASSERT_TRUE(view.counter().notify(0, INT32_MIN, RegionNotifyOp::Set)) << view.error().message;
+    ASSERT_TRUE(view.counter().notify(0, -1, RegionNotifyOp::Add)) << view.error().message;
+    EXPECT_EQ(storage.counters[0], INT32_MAX);
+
+    ASSERT_TRUE(view.counter().notify(0, 10, RegionNotifyOp::Set)) << view.error().message;
+    ASSERT_TRUE(view.counter().notify(0, 4, RegionNotifyOp::Add)) << view.error().message;
+    EXPECT_EQ(storage.counters[0], 14);
+
+    ASSERT_TRUE(view.counter().notify(0, 10, RegionNotifyOp::Set)) << view.error().message;
+    ASSERT_TRUE(view.counter().notify(0, -3, RegionNotifyOp::Add)) << view.error().message;
+    EXPECT_EQ(storage.counters[0], 7);
+}
+
+struct FailingInvalidateOps : LocalMemoryOps {
+    bool invalidate(const void *, size_t) const { return false; }
+};
+
+TEST(RegionInstanceViewTest, IssuedPayloadReadFailureIsSticky) {
+    RegionStorage storage{};
+    RegionInstanceViewImpl<FailingInvalidateOps> view(payload_span(&storage), counter_span(&storage));
+    ASSERT_FALSE(view.failed()) << view.error().message;
+    RegionPayloadView inner{};
+    EXPECT_FALSE(view.payload().read(0, 4, inner));
+    EXPECT_TRUE(view.failed());
+    EXPECT_EQ(view.error().kind, RegionViewErrorKind::ISSUED_FAILURE);
+    EXPECT_EQ(view.error().op, RegionViewOp::PAYLOAD_READ);
+    EXPECT_FALSE(view.payload().write(0, "x", 1));
     EXPECT_EQ(view.error().kind, RegionViewErrorKind::ISSUED_FAILURE);
 }
 

@@ -14,6 +14,7 @@ import worker-chip compatibility types, W2 planning, or W5a identity.
 
 from __future__ import annotations
 
+import logging
 import struct
 from enum import IntEnum
 from multiprocessing.shared_memory import SharedMemory
@@ -395,6 +396,29 @@ def _zero_reply(view: memoryview) -> None:
     view[:] = b"\x00" * view.nbytes
 
 
+def _discard_control_shm(shm: SharedMemory) -> None:
+    name = getattr(shm, "name", "<unnamed>")
+    logger = logging.getLogger("simpler")
+    try:
+        shm.close()
+    except BaseException as exc:  # noqa: BLE001
+        logger.warning(
+            "provider control shm cleanup failed: name=%s operation=close error=%s",
+            name,
+            exc,
+        )
+    try:
+        shm.unlink()
+    except FileNotFoundError:
+        return
+    except BaseException as exc:  # noqa: BLE001
+        logger.warning(
+            "provider control shm cleanup failed: name=%s operation=unlink error=%s",
+            name,
+            exc,
+        )
+
+
 def _pack_allocate_header(
     view: memoryview,
     *,
@@ -745,10 +769,6 @@ def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderRelease
     _require_magic(int(magic))
     if int(reply_bytes) != RELEASE_REPLY_BYTES:
         raise RegionControlError(RegionControlErrorKind.BAD_MESSAGE_SIZE, "release reply_bytes must be 48")
-    if int(resource_id) == 0:
-        raise RegionControlError(
-            RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply resource id must be nonzero"
-        )
     if tag is ReleaseReplyTag.RELEASE_ERROR:
         _require_zero_release_side_fields(
             int(mask),
@@ -765,6 +785,10 @@ def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderRelease
                 "RELEASE_ERROR kind is not allowed",
             )
         return RegionControlError(kind)
+    if int(resource_id) == 0:
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE, "release reply resource id must be nonzero"
+        )
     if int(error_kind) != 0:
         raise RegionControlError(
             RegionControlErrorKind.INVALID_FIELD_VALUE,
@@ -818,14 +842,12 @@ def handle_ctrl_region_allocate(req_buf: memoryview, reply_buf: memoryview, stor
     except RegionAllocationError as exc:
         encode_allocate_allocation_error_reply(reply, exc)
         return
-    published = False
     try:
         payload_view = store.local_view(result.provider_resource_id, RegionPartKind.PAYLOAD)
         counter_view = store.local_view(result.provider_resource_id, RegionPartKind.COUNTER)
         encode_allocate_success_reply(reply, result, payload_view, counter_view)
-        published = True
     finally:
-        if not published:
+        if _acquire_tag(reply) != int(AllocateReplyTag.SUCCESS):
             store.release(result.provider_resource_id)
 
 
@@ -854,23 +876,30 @@ class ProviderAllocateClient:
     def __init__(self, mailbox: RegionControlMailbox, worker_id: int) -> None:
         self._mailbox = mailbox
         self._worker_id = int(worker_id)
+        self.dispatch_started = False
         self.committed_resource_id = 0
 
     def allocate(
         self, spec: RegionAllocationSpec
     ) -> tuple[RegionAllocationResult, RegionPartLocalView, RegionPartLocalView]:
+        self.dispatch_started = False
+        self.committed_resource_id = 0
         req_shm = SharedMemory(create=True, size=ALLOCATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=ALLOCATE_REPLY_BYTES)
         req_buf = memoryview(_require_shm_buf(req_shm))
         reply_buf = memoryview(_require_shm_buf(reply_shm))
-        self.committed_resource_id = 0
         try:
             encode_allocate_request(req_buf, spec)
-            self._mailbox.control_region_allocate(self._worker_id, req_shm.name, reply_shm.name)
-            self.committed_resource_id = peek_allocate_reply_resource_id(reply_buf)
+            self.dispatch_started = True
+            try:
+                self._mailbox.control_region_allocate(self._worker_id, req_shm.name, reply_shm.name)
+            except BaseException:
+                self._observe_committed_success(reply_buf)
+                raise
             tag, result, payload_view, counter_view, error = decode_allocate_reply(reply_buf)
             if tag is AllocateReplyTag.SUCCESS:
                 assert result is not None and payload_view is not None and counter_view is not None
+                self.committed_resource_id = int(result.provider_resource_id)
                 return result, payload_view, counter_view
             if error is not None:
                 raise error
@@ -880,12 +909,19 @@ class ProviderAllocateClient:
         finally:
             del req_buf
             del reply_buf
-            for shm in (req_shm, reply_shm):
-                try:
-                    shm.close()
-                    shm.unlink()
-                except (BufferError, FileNotFoundError, OSError):
-                    pass
+            _discard_control_shm(req_shm)
+            _discard_control_shm(reply_shm)
+
+    def _observe_committed_success(self, reply_buf: memoryview) -> None:
+        try:
+            view = _as_memoryview(reply_buf, ALLOCATE_REPLY_BYTES, writable=False)
+            if _acquire_tag(view) != int(AllocateReplyTag.SUCCESS):
+                return
+            tag, result, _payload, _counter, _error = decode_allocate_reply(reply_buf)
+        except Exception:
+            return
+        if tag is AllocateReplyTag.SUCCESS and result is not None:
+            self.committed_resource_id = int(result.provider_resource_id)
 
 
 class ProviderReleaseClient:
@@ -933,9 +969,5 @@ class ProviderReleaseClient:
         finally:
             del req_buf
             del reply_buf
-            for shm in (req_shm, reply_shm):
-                try:
-                    shm.close()
-                    shm.unlink()
-                except (BufferError, FileNotFoundError, OSError):
-                    pass
+            _discard_control_shm(req_shm)
+            _discard_control_shm(reply_shm)

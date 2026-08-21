@@ -163,10 +163,13 @@ from .comm_provider import (
     DeviceAllocationTarget,
     PosixShmImport,
     ProviderRegionStore,
+    ProviderReleaseResult,
+    ProviderReleaseStatus,
     RegionAllocationContext,
     RegionAllocationSpec,
     RegionEnvironmentKind,
     RegionPartExportDescriptor,
+    RegionPartKind,
     VmmShareableHandleImport,
 )
 from .comm_provider_control import (
@@ -175,6 +178,7 @@ from .comm_provider_control import (
 )
 from .comm_region import (
     MaterializationContext,
+    MaterializationError,
     RegionInstance,
     RegionInstanceRegistry,
     RegionInstanceState,
@@ -2599,12 +2603,67 @@ def _handle_ctrl_global_domain_copy(
 
 
 def _sweep_l2_global_domains(cw: ChipWorker, store: _L2GlobalDomainStore) -> None:
-    for domain_id in list(store.domains):
+    failures: list[tuple[int, BaseException]] = []
+    first: BaseException | None = None
+    for domain_id in sorted(store.domains):
         store.domains.pop(domain_id, None)
         try:
             cw._impl.comm_global_domain_release(int(domain_id))
-        except Exception:  # noqa: BLE001
-            pass
+        except BaseException as exc:  # noqa: BLE001
+            if first is None:
+                first = exc
+            failures.append((int(domain_id), exc))
+    if not failures:
+        return
+    error = RuntimeError(
+        "domain cleanup failed: " + "; ".join(f"domain {domain_id}: {exc}" for domain_id, exc in failures)
+    )
+    error.__cause__ = first
+    raise error
+
+
+def _provider_sweep_debt_errors(results: tuple[ProviderReleaseResult, ...]) -> list[BaseException]:
+    errors: list[BaseException] = []
+    for result in results:
+        if result.status is not ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+            continue
+        if result.failures:
+            detail = ", ".join(
+                f"{failure.part.name} {failure.backend_operation.name} {failure.typed_cause.name}"
+                for failure in result.failures
+            )
+        else:
+            detail = "CLEANUP_INCOMPLETE"
+        errors.append(RuntimeError(f"provider resource {result.provider_resource_id}: {detail}"))
+    return errors
+
+
+def _teardown_chip_process_resources(
+    import_registry: ImportRegistry,
+    cw: ChipWorker,
+    global_domain_store: _L2GlobalDomainStore,
+    provider_region_store: ProviderRegionStore,
+) -> None:
+    errors: list[BaseException] = []
+    try:
+        import_registry.close()
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    try:
+        _sweep_l2_global_domains(cw, global_domain_store)
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    try:
+        errors.extend(_provider_sweep_debt_errors(provider_region_store.sweep()))
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    if not errors:
+        return
+    aggregated = RuntimeError(
+        "chip process resource teardown failed: " + "; ".join(str(item) for item in errors)
+    )
+    aggregated.__cause__ = errors[0]
+    raise aggregated
 
 
 def _handle_ctrl_release_domain(cw: ChipWorker, buf: memoryview) -> None:
@@ -3144,9 +3203,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         else:
             _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
-        import_registry.close()
-        _sweep_l2_global_domains(cw, global_domain_store)
-        provider_region_store.sweep()
+        _teardown_chip_process_resources(import_registry, cw, global_domain_store, provider_region_store)
 
 
 def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins, identity tables, log config, prewarm sizing) must cross the fork as explicit COW args; the child cannot read parent state after os.fork
@@ -3715,7 +3772,6 @@ class _RunResources:
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
     live_global_domains: dict[str, GlobalCommDomainHandle] = field(default_factory=dict)
     pending_release_global_domains: list[GlobalCommDomainHandle] = field(default_factory=list)
-    worker_chip_regions: list[Any] = field(default_factory=list)
     worker_chip_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
     # Every Buffer identity a NEXT_LEVEL dispatch (submit_next_level / _group) sent as a Tensor
     # arg during this run. release_buffer() checks this set across every not-yet-settled run before
@@ -4475,7 +4531,6 @@ class Worker:
         self._endpoint_registry_epoch: int = 0
         self._region_access_service: RegionAccessService | None = None
 
-        self._live_worker_chip_regions: list[Any] = []
         self._region_instance_registry = RegionInstanceRegistry()
         self._worker_chip_orch_comm_host_buffers: dict[int, int] = {}
 
@@ -8157,13 +8212,21 @@ class Worker:
         region_id = int(match.group(1))
         if region_id == 0:
             return False
-        poisoned = False
-        regions = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
-        for region in regions:
-            if int(region.region_id) == region_id:
-                region._poison()
-                poisoned = True
-        return poisoned
+        try:
+            self._region_instance_registry.record_data_plane_failure(resources, region_id, exc)
+        except MaterializationError as routing:
+            self._record_unreclaimable(
+                f"region instance: data-plane failure routing failed for resource {region_id}; "
+                "no further work is admitted",
+                routing,
+            )
+            return True
+        self._record_unreclaimable(
+            f"region instance: issued local operation failed for resource {region_id}; "
+            "no further work is admitted",
+            exc,
+        )
+        return True
 
     def _register_worker_chip_orch_comm_host_buffer(self, handle) -> None:
         if not isinstance(handle, Buffer):
@@ -8291,39 +8354,27 @@ class Worker:
         try:
             ctx = self._admitted_worker_chip_region_context(int(worker_id), int(payload_bytes), int(counter_bytes))
             instance = materialize_region_instance(ctx)
-            payload_view = instance._payload_local_view
-            counter_view = instance._counter_local_view
+            payload_view = instance.local_view(RegionPartKind.PAYLOAD)
+            counter_view = instance.local_view(RegionPartKind.COUNTER)
             if payload_view is None or counter_view is None:
                 raise RuntimeError("create_worker_chip_region: materialized instance is missing local views")
             desc = worker_chip_orch_region_desc_from_local_views(
-                instance._provider_resource_id, payload_view, counter_view
+                instance.provider_resource_id, payload_view, counter_view
             )
             region = WorkerChipOrchRegion(self, instance, desc)
-            self._live_worker_chip_regions.append(region)
             if resources is not None:
-                resources.worker_chip_regions.append(region)
                 resources.requires_ordered_cleanup = True
             return region
         except BaseException:
-            if region is not None:
-                try:
-                    self._live_worker_chip_regions.remove(region)
-                except ValueError:
-                    pass
-                if resources is not None:
-                    try:
-                        resources.worker_chip_regions.remove(region)
-                    except ValueError:
-                        pass
-                    resources.requires_ordered_cleanup = required_ordered_cleanup_before
-                region._expire()
+            if resources is not None:
+                resources.requires_ordered_cleanup = required_ordered_cleanup_before
             if instance is not None and instance._state is RegionInstanceState.LIVE and not instance._close_attempted:
                 try:
                     self._region_instance_registry.close(instance)
                 except BaseException as close_exc:  # noqa: BLE001
                     raise self._record_unreclaimable(
                         f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
-                        f"{int(instance._provider_resource_id)} on worker {int(worker_id)}; "
+                        f"{int(instance.provider_resource_id)} on worker {int(worker_id)}; "
                         "it is leaked and no further work is admitted",
                         close_exc,
                     )
@@ -8331,7 +8382,7 @@ class Worker:
                 "create_worker_chip_region rollback"
             )
             if deferred_native_cleanup_error is not None:
-                region_id = int(instance._provider_resource_id) if instance is not None else 0
+                region_id = int(instance.provider_resource_id) if instance is not None else 0
                 raise self._record_unreclaimable(
                     f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
                     f"{region_id} on worker {int(worker_id)}; it is leaked and no further work is admitted",
@@ -8339,63 +8390,12 @@ class Worker:
                 )
             raise
 
-    def _close_worker_chip_region(
-        self,
-        region,
-        resources: _RunResources | None = None,
-    ) -> None:
-        if not getattr(region, "expired", False):
-            region._expire()
-        self._retire_worker_chip_region_tracking(region, resources)
-
-    def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
-        tracking_lists = [self._live_worker_chip_regions]
-        if resources is not None and resources.worker_chip_regions is not self._live_worker_chip_regions:
-            tracking_lists.insert(0, resources.worker_chip_regions)
-        errors: list[BaseException] = []
-
-        for owned_regions in tracking_lists:
-            try:
-                owned_regions[:] = [owned for owned in owned_regions if owned is not region]
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
-
-    def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
-        # Compatibility WorkerChipOrchRegion lists are deletion-tracked mirrors.
-        # RegionInstance lifetime is owned by the registry.
-        tracked = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
-        regions = list(tracked)
-        errors: list[BaseException] = []
-        for region in regions:
-            try:
-                self._close_worker_chip_region(region, resources)
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        registry = getattr(self, "_region_instance_registry", None)
-        if registry is not None:
-            try:
-                if resources is None:
-                    registry.sweep()
-                else:
-                    registry.cleanup_run(resources)
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
+    def _sweep_region_instances(self) -> None:
+        self._region_instance_registry.sweep()
 
     def _close_worker_chip_orch_comm(self) -> None:
-        for region in self._live_worker_chip_regions:
-            try:
-                region._expire()
-            except RuntimeError:
-                pass
-        self._live_worker_chip_regions.clear()
         self._worker_chip_orch_comm_host_buffers.clear()
-        registry = getattr(self, "_region_instance_registry", None)
-        if registry is not None:
-            registry.sweep()
+        self._region_instance_registry.sweep()
 
     # ------------------------------------------------------------------
     # Dynamic CommDomain allocation (driven by Orchestrator.allocate_domain;
@@ -10929,7 +10929,7 @@ class Worker:
                     ("endpoint_poison", _poison_endpoint),
                     ("remote_slot_refs", lambda: self._release_active_remote_slot_refs(resources)),
                     ("remote_frees", self._flush_pending_remote_frees),
-                    ("worker_chip_regions", lambda: self._cleanup_worker_chip_regions(resources)),
+                    ("region_instances", lambda: self._region_instance_registry.cleanup_run(resources)),
                     ("worker_chip_host_buffers", resources.worker_chip_orch_comm_host_buffers.clear),
                     (
                         "pending_global_domains",
@@ -11090,7 +11090,6 @@ class Worker:
             or bool(self._sub_pids or self._chip_pids or self._next_level_pids)
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
             or any(group.process is not None or group.ready_dir is not None for group in self._mpi_l3_groups)
-            or bool(self._live_worker_chip_regions)
             or bool(self._region_instance_registry._instances)
             or bool(self._live_domains)
             or bool(self._live_global_domains or self._failed_global_domain_releases)
@@ -11115,8 +11114,6 @@ class Worker:
         n_mpi = sum(1 for group in self._mpi_l3_groups if group.process is not None or group.ready_dir is not None)
         if n_mpi:
             parts.append(f"{n_mpi} mpirun group(s)")
-        if self._live_worker_chip_regions:
-            parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
         n_instances = len(self._region_instance_registry._instances)
         if n_instances:
             parts.append(f"{n_instances} region instance(s)")
@@ -11600,7 +11597,7 @@ class Worker:
         # entries. Any survivor fences the transport teardown below.
         pre_transport_keys: set[tuple[str, str]] = set()
         for kind, identity, cleanup in (
-            ("region", "all Worker-Chip regions", self._cleanup_worker_chip_regions),
+            ("region", "all region instances", self._sweep_region_instances),
             ("domain", "all Global CommDomains", self._release_all_live_global_domains),
             ("domain", "Global CommDomain nodes", self._release_all_global_domain_nodes),
             ("domain", "all CommDomains", self._release_all_live_domains),

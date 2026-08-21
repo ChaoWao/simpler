@@ -15,7 +15,9 @@ from typing import Any
 
 from .comm_provider import RegionPartLocalView, validate_independent_local_views
 from .comm_region import (
+    MaterializationError,
     NotifyOp,
+    RegionInstanceState,
     SignalTestResult,
     WaitCmp,
 )
@@ -99,8 +101,6 @@ class WorkerChipOrchRegion:
         self._worker_id = int(instance.worker_id)
         self._descriptor = desc
         self._released = False
-        self._poisoned = False
-        self._expired = False
 
     @property
     def descriptor(self) -> WorkerChipOrchRegionDesc:
@@ -112,7 +112,10 @@ class WorkerChipOrchRegion:
 
     @property
     def expired(self) -> bool:
-        return self._expired
+        try:
+            return self._instance.state is not RegionInstanceState.LIVE
+        except MaterializationError:
+            return True
 
     def _validate_host_buffer(self, buffer: Any) -> None:
         self._owner._validate_worker_chip_orch_comm_host_buffer(buffer)
@@ -124,23 +127,23 @@ class WorkerChipOrchRegion:
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         try:
-            self._payload_part().write(offset, host_buffer, nbytes)
-        except Exception:
-            self._poison()
+            self._instance.payload_write(offset, host_buffer, nbytes)
+        except Exception as exc:
+            self._remember_data_plane_error(exc)
             raise
 
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         try:
-            self._payload_part().read(offset, host_buffer, nbytes)
-        except Exception:
-            self._poison()
+            self._instance.payload_read(offset, host_buffer, nbytes)
+        except Exception as exc:
+            self._remember_data_plane_error(exc)
             raise
 
     def counter(self, offset: int) -> WorkerChipOrchCounter:
         self._ensure_live()
         offset = int(offset)
-        self._counter_part().counter(offset)
+        self._instance.counter(offset)
         return WorkerChipOrchCounter(self, offset)
 
     def free(self) -> None:
@@ -148,52 +151,38 @@ class WorkerChipOrchRegion:
             return
         self._released = True
 
-    def _expire(self) -> None:
-        self._expired = True
-
-    def _poison(self) -> None:
-        self._poisoned = True
+    def _remember_data_plane_error(self, error: BaseException) -> None:
+        if self._instance.data_plane_error is None:
+            self._instance._data_plane_error = error
 
     def _ensure_live(self) -> None:
-        if self._expired:
+        if self.expired:
             raise RuntimeError(f"L3-L2 region {self.region_id} expired after orchestration run")
         if self._released:
             raise RuntimeError(f"L3-L2 region {self.region_id} has been released")
-        if self._poisoned:
+        if self._instance.data_plane_error is not None:
             raise RuntimeError(f"L3-L2 region {self.region_id} is poisoned")
-
-    def _payload_part(self) -> Any:
-        part = self._instance._payload_part
-        if part is None:
-            raise RuntimeError(f"L3-L2 region {self.region_id} has no payload part")
-        return part
-
-    def _counter_part(self) -> Any:
-        part = self._instance._counter_part
-        if part is None:
-            raise RuntimeError(f"L3-L2 region {self.region_id} has no counter part")
-        return part
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
         try:
-            self._counter_part().notify(offset, int(value), NotifyOp(op))
-        except Exception:
-            self._poison()
+            self._instance.counter(offset).notify(int(value), NotifyOp(op))
+        except Exception as exc:
+            self._remember_data_plane_error(exc)
             raise
 
     def _direct_counter_test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
         try:
-            return self._counter_part().test(offset, int(cmp_value), WaitCmp(cmp))
-        except Exception:
-            self._poison()
+            return self._instance.counter(offset).test(int(cmp_value), WaitCmp(cmp))
+        except Exception as exc:
+            self._remember_data_plane_error(exc)
             raise
 
     def _direct_counter_wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout_ns: int) -> int:
         timeout = float(timeout_ns) / 1_000_000_000
         try:
-            return self._counter_part().wait(offset, int(cmp_value), WaitCmp(cmp), timeout)
+            return self._instance.counter(offset).wait(int(cmp_value), WaitCmp(cmp), timeout)
         except TimeoutError:
             raise
-        except Exception:
-            self._poison()
+        except Exception as exc:
+            self._remember_data_plane_error(exc)
             raise

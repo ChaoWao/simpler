@@ -353,6 +353,19 @@ class RegionInstanceRegistry:
         if errors:
             raise errors[0]
 
+    def record_data_plane_failure(self, run_scope: Any, resource_id: int, error: BaseException) -> None:
+        resource_id = int(resource_id)
+        matches = [
+            instance for instance in self._iter_run(run_scope) if int(instance.provider_resource_id) == resource_id
+        ]
+        if not matches:
+            raise MaterializationError(f"no region instance for resource {resource_id}")
+        if len(matches) > 1:
+            raise MaterializationError(f"duplicate region instances for resource {resource_id}")
+        instance = matches[0]
+        if instance._data_plane_error is None:
+            instance._data_plane_error = error
+
     def _iter_run(self, run_scope: Any) -> tuple[RegionInstance, ...]:
         return tuple(instance for key, instance in self._instances.items() if self._run_scopes[key] is run_scope)
 
@@ -397,12 +410,31 @@ class RegionInstance:
         self._close_attempted = False
         self._ever_live = False
         self._provider_release_committed = False
+        self._data_plane_error: BaseException | None = None
 
     @property
     def state(self) -> RegionInstanceState:
         if self._state is None:
             raise MaterializationError("region instance is not published")
         return self._state
+
+    @property
+    def provider_resource_id(self) -> int:
+        return int(self._provider_resource_id)
+
+    @property
+    def data_plane_error(self) -> BaseException | None:
+        return self._data_plane_error
+
+    def local_view(self, part: RegionPartKind) -> RegionPartLocalView | None:
+        if self._state is not RegionInstanceState.LIVE:
+            return None
+        selected = RegionPartKind(part)
+        if selected is RegionPartKind.PAYLOAD:
+            return self._payload_local_view
+        if selected is RegionPartKind.COUNTER:
+            return self._counter_local_view
+        raise ValueError("region part must be PAYLOAD or COUNTER")
 
     @classmethod
     def planned(cls, ctx: MaterializationContext, shape: SingleOwnerRegionShape) -> RegionInstance:
@@ -466,19 +498,11 @@ class RegionInstance:
                 raise error
             self._state = RegionInstanceState.CLOSED
             raise
-        except BaseException as exc:
+        except BaseException:
             committed = int(self._allocate_client.committed_resource_id)
             if committed:
                 self._provider_resource_id = committed
                 self._release_client = ProviderReleaseClient(native, self.worker_id)
-            elif not isinstance(exc, Exception):
-                self._fail_terminal(
-                    self._worker._record_unreclaimable(
-                        f"region instance: interrupted on worker {self.worker_id} before the region id was "
-                        "read back; a region may be live on the chip and no further work is admitted",
-                        exc,
-                    )
-                )
             raise
         self._provider_resource_id = int(result.provider_resource_id)
         self._release_client = ProviderReleaseClient(native, self.worker_id)
@@ -517,13 +541,11 @@ class RegionInstance:
         self._state = RegionInstanceState.LIVE
 
     def _abort_materialization(self, cause: BaseException) -> None:
-        committed = int(self._provider_resource_id) != 0 or self._release_client is not None
         if isinstance(cause, RegionAllocationError):
             poison = bool(cause.cleanup_debt_remaining)
-        elif not isinstance(cause, Exception):
-            poison = True
         else:
-            poison = committed
+            client = self._allocate_client
+            poison = bool(client is not None and client.dispatch_started)
         close_error: BaseException | None = None
         try:
             self._close_owned(poison_on_error=False)
@@ -536,6 +558,8 @@ class RegionInstance:
                 self._cleanup_error = close_error
                 self._state = RegionInstanceState.CLOSE_FAILED
             return
+        if close_error is not None and close_error.__cause__ is None:
+            close_error.__cause__ = cause
         self._cleanup_error = self._worker._record_unreclaimable(
             f"region instance: committed allocation could not be published on worker {self.worker_id}; "
             "no further work is admitted",
@@ -563,18 +587,18 @@ class RegionInstance:
             return None
         try:
             result = self._release_client.release(int(self._provider_resource_id))
-            if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
-                self._provider_release_committed = True
-                return None
-            if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
-                raise RuntimeError(
-                    f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
-                )
-            if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
-                raise RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
-            return None
         except BaseException as exc:  # noqa: BLE001
             return exc
+        if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
+            self._provider_release_committed = True
+            return None
+        if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+            return RuntimeError(
+                f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
+            )
+        if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
+            return RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
+        return None
 
     def _close_owned(self, *, poison_on_error: bool) -> None:
         if self._state is RegionInstanceState.CLOSED:

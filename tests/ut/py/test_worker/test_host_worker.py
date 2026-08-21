@@ -214,6 +214,273 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
     assert published_frame_counts == [2]
 
 
+def _dummy_l2_domain(domain_id: int):
+    return worker_mod._L2GlobalDomain(
+        domain_id=domain_id,
+        generation=1,
+        domain_rank=0,
+        rank_count=1,
+        descriptor=object(),
+        local_window_base=0,
+        mapping_size=8,
+        requested_window_size=8,
+    )
+
+
+class _RecordingImportRegistry:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.error: BaseException | None = None
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+class _RecordingDomainImpl:
+    def __init__(self) -> None:
+        self.released: list[int] = []
+        self.errors: dict[int, BaseException] = {}
+
+    def comm_global_domain_release(self, domain_id: int) -> None:
+        self.released.append(int(domain_id))
+        error = self.errors.get(int(domain_id))
+        if error is not None:
+            raise error
+
+
+class _TeardownPartShell:
+    def __init__(self, part, spec) -> None:
+        self.part = part
+        self.spec = spec
+        self.release_count = 0
+        self.release_step_failures = []
+        self._local_base = 0x1000 if part.name == "PAYLOAD" else 0x2000
+
+    def materialize(self) -> None:
+        return None
+
+    def mapping_bytes(self) -> int:
+        return self.spec.logical_bytes
+
+    def import_capability(self):
+        from simpler.comm_provider import PosixShmImport
+
+        return PosixShmImport(shm_name=f"smp_{self.part.name.lower()}{id(self):016x}"[:32])
+
+    def local_base(self) -> int:
+        return self._local_base
+
+    def zero_bytes(self, offset: int, nbytes: int) -> None:
+        del offset, nbytes
+
+    def release_once(self):
+        self.release_count += 1
+        if self.release_step_failures:
+            return self.release_step_failures[0]
+        return None
+
+
+class _TeardownShellFactory:
+    def __init__(self) -> None:
+        self.payloads: list[_TeardownPartShell] = []
+        self.counters: list[_TeardownPartShell] = []
+
+    def __call__(self, context, part, spec):
+        del context
+        shell = _TeardownPartShell(part, spec)
+        if part.name == "PAYLOAD":
+            self.payloads.append(shell)
+        else:
+            self.counters.append(shell)
+        return shell
+
+
+def test_sweep_l2_global_domains_attempts_every_domain_and_lists_failures_by_id():
+    impl = _RecordingDomainImpl()
+    impl.errors[7] = RuntimeError("domain 7 failed")
+    impl.errors[3] = RuntimeError("domain 3 failed")
+    store = worker_mod._L2GlobalDomainStore(
+        domains={
+            7: _dummy_l2_domain(7),
+            3: _dummy_l2_domain(3),
+            5: _dummy_l2_domain(5),
+        }
+    )
+    with pytest.raises(RuntimeError, match="domain cleanup failed") as exc_info:
+        worker_mod._sweep_l2_global_domains(SimpleNamespace(_impl=impl), store)
+    assert impl.released == [3, 5, 7]
+    assert store.domains == {}
+    message = str(exc_info.value)
+    assert message.index("domain 3:") < message.index("domain 7:")
+    assert "domain 3: domain 3 failed" in message
+    assert "domain 7: domain 7 failed" in message
+    assert "domain 5" not in message
+    assert exc_info.value.__cause__ is impl.errors[3]
+
+
+def test_teardown_chip_process_resources_continues_and_aggregates_in_order():
+    from simpler.buffer import BackendKind
+    from simpler.comm_provider import (
+        DeviceAllocationTarget,
+        ProviderCleanupFailure,
+        ProviderRegionStore,
+        RegionAllocationContext,
+        RegionAllocationSpec,
+        RegionCleanupCause,
+        RegionEnvironmentKind,
+        RegionOperationKind,
+        RegionPartAllocationSpec,
+        RegionPartKind,
+    )
+    registry = _RecordingImportRegistry()
+    registry.error = RuntimeError("import close failed")
+    impl = _RecordingDomainImpl()
+    impl.errors[4] = RuntimeError("domain 4 failed")
+    domains = worker_mod._L2GlobalDomainStore(domains={4: _dummy_l2_domain(4)})
+    factory = _TeardownShellFactory()
+    store = ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=RegionEnvironmentKind.SIM,
+            target=DeviceAllocationTarget(device_id=0),
+        ),
+        _shell_factory=factory,
+    )
+    result = store.allocate_and_export(
+        RegionAllocationSpec(
+            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
+            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+        )
+    )
+    factory.payloads[0].release_step_failures = [
+        ProviderCleanupFailure(
+            part=RegionPartKind.PAYLOAD,
+            backend_operation=RegionOperationKind.RELEASE,
+            typed_cause=RegionCleanupCause.BACKEND_ERROR,
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
+        worker_mod._teardown_chip_process_resources(
+            registry,
+            SimpleNamespace(_impl=impl),
+            domains,
+            store,
+        )
+    assert registry.close_calls == 1
+    assert impl.released == [4]
+    assert factory.payloads[0].release_count == 1
+    message = str(exc_info.value)
+    assert message.index("import close failed") < message.index("domain cleanup failed")
+    assert message.index("domain cleanup failed") < message.index(f"provider resource {result.provider_resource_id}")
+    assert "PAYLOAD" in message
+    assert "RELEASE" in message
+    assert "BACKEND_ERROR" in message
+    assert exc_info.value.__cause__ is registry.error
+
+
+def test_teardown_chip_process_resources_lists_every_retained_resource():
+    from simpler.buffer import BackendKind
+    from simpler.comm_provider import (
+        DeviceAllocationTarget,
+        ProviderCleanupFailure,
+        ProviderRegionStore,
+        RegionAllocationContext,
+        RegionAllocationSpec,
+        RegionCleanupCause,
+        RegionEnvironmentKind,
+        RegionOperationKind,
+        RegionPartAllocationSpec,
+        RegionPartKind,
+    )
+    factory = _TeardownShellFactory()
+    store = ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=RegionEnvironmentKind.SIM,
+            target=DeviceAllocationTarget(device_id=0),
+        ),
+        _shell_factory=factory,
+    )
+    spec = RegionAllocationSpec(
+        payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
+        counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+    )
+    first = store.allocate_and_export(spec)
+    second = store.allocate_and_export(spec)
+    factory.payloads[0].release_step_failures = [
+        ProviderCleanupFailure(
+            part=RegionPartKind.PAYLOAD,
+            backend_operation=RegionOperationKind.RELEASE,
+            typed_cause=RegionCleanupCause.BACKEND_ERROR,
+        )
+    ]
+    factory.counters[1].release_step_failures = [
+        ProviderCleanupFailure(
+            part=RegionPartKind.COUNTER,
+            backend_operation=RegionOperationKind.RELEASE,
+            typed_cause=RegionCleanupCause.INTERRUPTED,
+        )
+    ]
+    with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
+        worker_mod._teardown_chip_process_resources(
+            _RecordingImportRegistry(),
+            SimpleNamespace(_impl=_RecordingDomainImpl()),
+            worker_mod._L2GlobalDomainStore(),
+            store,
+        )
+    message = str(exc_info.value)
+    assert f"provider resource {first.provider_resource_id}" in message
+    assert f"provider resource {second.provider_resource_id}" in message
+    assert "PAYLOAD RELEASE BACKEND_ERROR" in message
+    assert "COUNTER RELEASE INTERRUPTED" in message
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert factory.payloads[1].release_count == 1
+    assert factory.counters[1].release_count == 1
+
+
+def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_once():
+    from simpler.buffer import BackendKind
+    from simpler.comm_provider import (
+        DeviceAllocationTarget,
+        ProviderRegionStore,
+        ProviderRegionStoreState,
+        RegionAllocationContext,
+        RegionAllocationSpec,
+        RegionEnvironmentKind,
+        RegionPartAllocationSpec,
+    )
+    registry = _RecordingImportRegistry()
+    impl = _RecordingDomainImpl()
+    domains = worker_mod._L2GlobalDomainStore()
+    factory = _TeardownShellFactory()
+    store = ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=RegionEnvironmentKind.SIM,
+            target=DeviceAllocationTarget(device_id=0),
+        ),
+        _shell_factory=factory,
+    )
+    store.allocate_and_export(
+        RegionAllocationSpec(
+            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
+            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+        )
+    )
+    worker_mod._teardown_chip_process_resources(
+        registry,
+        SimpleNamespace(_impl=impl),
+        domains,
+        store,
+    )
+    assert registry.close_calls == 1
+    assert impl.released == []
+    assert factory.payloads[0].release_count == 1
+    assert factory.counters[0].release_count == 1
+    assert store.state is ProviderRegionStoreState.CLOSED
+
+
 @pytest.mark.parametrize(
     ("platform", "runtime", "depth", "expected"),
     [
@@ -4015,18 +4282,23 @@ class TestRunHandle:
             def _release_slot_ref(self):
                 self.releases += 1
 
-        class Region:
-            def __init__(self, region_id):
-                self.region_id = region_id
-                self._worker_id = 0
-                self._expired = False
+        class FakeInstance:
+            def __init__(self, resource_id):
+                self.provider_resource_id = resource_id
+                self._close_attempted = False
+                self._state = worker_mod.RegionInstanceState.LIVE
+                self._cleanup_error = None
+                self._ever_live = True
+                self._provider_release_committed = False
+                self._data_plane_error = None
 
-            @property
-            def expired(self):
-                return self._expired
+            def _retains_cleanup_only_reachability(self):
+                return False
 
-            def _expire(self):
-                self._expired = True
+            def _close_owned(self, *, poison_on_error):
+                self._close_attempted = True
+                self._state = worker_mod.RegionInstanceState.CLOSED
+                self._provider_release_committed = True
 
         class NativeWorker:
             def __init__(self):
@@ -4060,20 +4332,19 @@ class TestRunHandle:
         first = worker_mod._RunResources()
         second = worker_mod._RunResources()
         first_ref, second_ref = SlotRef(), SlotRef()
-        first_region, second_region = Region(11), Region(22)
+        first_instance, second_instance = FakeInstance(11), FakeInstance(22)
         first_live, second_live = domain("first-live", 1), domain("second-live", 2)
         first_pending, second_pending = domain("first-pending", 3), domain("second-pending", 4)
         first.remote_slot_refs.append(cast(Any, first_ref))
         second.remote_slot_refs.append(cast(Any, second_ref))
-        first.worker_chip_regions.append(first_region)
-        second.worker_chip_regions.append(second_region)
         first.worker_chip_orch_comm_host_buffers[0x1000] = 64
         second.worker_chip_orch_comm_host_buffers[0x2000] = 128
         first.live_domains[first_live.name] = first_live
         second.live_domains[second_live.name] = second_live
         first.pending_release_domains.append(first_pending)
         second.pending_release_domains.append(second_pending)
-        worker._live_worker_chip_regions.extend([first_region, second_region])
+        worker._region_instance_registry.track(cast(Any, first_instance), first)
+        worker._region_instance_registry.track(cast(Any, second_instance), second)
         worker._live_domains.update({first_live.name: first_live, second_live.name: second_live})
 
         released_domains = []
@@ -4093,9 +4364,10 @@ class TestRunHandle:
         assert first_ref.releases == 1
         assert second_ref.releases == 0
         assert native_worker.released_regions == []
-        assert first_region.expired
-        assert not second_region.expired
-        assert worker._live_worker_chip_regions == [second_region]
+        assert first_instance._state is worker_mod.RegionInstanceState.CLOSED
+        assert second_instance._state is worker_mod.RegionInstanceState.LIVE
+        assert first_instance not in worker._region_instance_registry._instances.values()
+        assert second_instance in worker._region_instance_registry._instances.values()
         assert first.worker_chip_orch_comm_host_buffers == {}
         assert second.worker_chip_orch_comm_host_buffers == {0x2000: 128}
         assert released_domains == [first_pending, first_live]
@@ -4108,20 +4380,6 @@ class TestRunHandle:
     def test_region_mapping_failure_still_releases_child_and_poisons_successor(self):
         mapping_error = KeyboardInterrupt("mapping close")
         release_error = SystemExit("child release")
-
-        class Region:
-            region_id = 11
-            _worker_id = 0
-
-            def __init__(self):
-                self._expired = False
-
-            @property
-            def expired(self):
-                return self._expired
-
-            def _expire(self):
-                self._expired = True
 
         class FakeInstance:
             def __init__(self):
@@ -4165,9 +4423,6 @@ class TestRunHandle:
         worker._orch = cast(Any, NativeOrchestrator())
         resources = worker_mod._RunResources()
         resources.requires_ordered_cleanup = True
-        region = Region()
-        resources.worker_chip_regions.append(region)
-        worker._live_worker_chip_regions.append(region)
         instance = FakeInstance()
         worker._region_instance_registry.track(cast(Any, instance), resources)
         handle = RunHandle(worker, 1, (), resources)
@@ -4176,64 +4431,11 @@ class TestRunHandle:
         assert worker._finalize_run_handle(handle, 1, None) is mapping_error
 
         assert native_worker.released_regions == [(0, 11)]
-        assert region.expired
-        assert resources.worker_chip_regions == []
-        assert worker._live_worker_chip_regions == []
+        assert instance._state is worker_mod.RegionInstanceState.CLOSE_FAILED
+        assert worker._region_instance_registry._instances == {}
         assert worker._ordered_cleanup_error is not None
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
-
-    def test_region_tracking_interrupt_still_retires_every_region(self):
-        interrupt = KeyboardInterrupt("region tracking removal")
-
-        class InterruptingList(list):
-            def __init__(self, values):
-                super().__init__(values)
-                self.interrupted = False
-
-            def __setitem__(self, key, value):
-                super().__setitem__(key, value)
-                if isinstance(key, slice) and not self.interrupted:
-                    self.interrupted = True
-                    raise interrupt
-
-        class Region:
-            def __init__(self, region_id):
-                self.region_id = region_id
-                self._worker_id = 0
-                self.expires = 0
-
-            @property
-            def expired(self):
-                return self.expires > 0
-
-            def _expire(self):
-                self.expires += 1
-
-        class NativeWorker:
-            def __init__(self):
-                self.released_regions = []
-
-            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
-                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
-
-        first, second = Region(11), Region(22)
-        resources = worker_mod._RunResources()
-        resources.worker_chip_regions = cast(Any, InterruptingList([first, second]))
-        worker = Worker(level=3, num_sub_workers=0)
-        native_worker = NativeWorker()
-        worker._worker = cast(Any, native_worker)
-        worker._live_worker_chip_regions.extend([first, second])
-
-        with pytest.raises(KeyboardInterrupt) as caught:
-            worker._cleanup_worker_chip_regions(resources)
-
-        assert caught.value is interrupt
-        assert native_worker.released_regions == []
-        assert first.expires == 1
-        assert second.expires == 1
-        assert resources.worker_chip_regions == []
-        assert worker._live_worker_chip_regions == []
 
     def test_domain_released_after_its_run_retired_is_freed_inline(self):
         """A late release has no fence left to defer behind, so it frees now.
@@ -6916,10 +7118,26 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _failed(*_args):
-            raise RuntimeError("chip refused the region")
+            from simpler.comm_provider import (
+                RegionAllocationError,
+                RegionControlErrorKind,
+                RegionOperationKind,
+                RegionPartKind,
+            )
+
+            raise RegionAllocationError(
+                provisional_resource_id=7,
+                control_kind=RegionControlErrorKind.BACKEND_FAILURE,
+                failed_part=RegionPartKind.PAYLOAD,
+                failed_operation=RegionOperationKind.MATERIALIZE,
+                cleanup_debt_remaining=False,
+                message="chip refused the region",
+            )
 
         worker._worker = cast(Any, SimpleNamespace(control_region_allocate=_failed))
-        with pytest.raises(RuntimeError, match="chip refused the region"):
+        from simpler.comm_provider import RegionAllocationError
+
+        with pytest.raises(RegionAllocationError, match="chip refused the region"):
             worker._create_worker_chip_region(0, 4096, 64)
         assert worker._ordered_cleanup_error is None, "an ordinary failure must not shut the worker"
 

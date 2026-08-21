@@ -202,6 +202,32 @@ TEST(WorkerChipOrchCommTest, CompileTimeAlignmentRequiresPowerOfTwoAbiAlignment)
     EXPECT_FALSE(worker_chip_orch_comm_is_aligned_runtime(24, 3));
 }
 
+TEST(WorkerChipOrchCommTest, NeutralHelpersMatchCompatibilityDelegation) {
+    EXPECT_EQ(worker_chip_orch_comm_add_overflows(7, 9), region_add_overflows(7, 9));
+    EXPECT_EQ(worker_chip_orch_comm_add_overflows(UINT64_MAX - 1, 2), region_add_overflows(UINT64_MAX - 1, 2));
+    EXPECT_EQ(
+        worker_chip_orch_comm_ranges_overlap(0, 64, 32, 64),
+        region_spans_overlap(RegionPartLocalSpan{0, 64}, RegionPartLocalSpan{32, 64})
+    );
+    EXPECT_EQ(
+        worker_chip_orch_comm_ranges_overlap(0, 64, 256, 64),
+        region_spans_overlap(RegionPartLocalSpan{0, 64}, RegionPartLocalSpan{256, 64})
+    );
+
+    RegionNotifyOp notify{};
+    ASSERT_TRUE(worker_chip_orch_comm_as_region_notify_op(WorkerChipOrchNotifyOp::Set, notify));
+    EXPECT_TRUE(region_valid_notify_op(notify));
+    EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Set));
+    EXPECT_FALSE(worker_chip_orch_comm_as_region_notify_op(static_cast<WorkerChipOrchNotifyOp>(2), notify));
+
+    RegionWaitCmp cmp{};
+    ASSERT_TRUE(worker_chip_orch_comm_as_region_wait_cmp(WorkerChipOrchWaitCmp::GE, cmp));
+    EXPECT_EQ(
+        worker_chip_orch_comm_compare_counter(5, 5, WorkerChipOrchWaitCmp::GE), region_compare_counter(5, 5, cmp)
+    );
+    EXPECT_FALSE(worker_chip_orch_comm_as_region_wait_cmp(static_cast<WorkerChipOrchWaitCmp>(6), cmp));
+}
+
 TEST(WorkerChipOrchCommTest, NotifyOpAndWaitCmpValidationRejectUnknownValues) {
     EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Set));
     EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Add));

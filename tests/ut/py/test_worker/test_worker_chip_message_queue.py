@@ -61,6 +61,7 @@ _DESC_BID = itertools.count(1)
 class _CompatInstance:
     def __init__(self, payload_handle: int, counter_handle: int, payload_bytes: int, counter_bytes: int) -> None:
         self.worker_id = 0
+        self._data_plane_error = None
         self._payload_part = comm_region.PayloadPart(
             comm_region.RegionPartSpan(offset=0, nbytes=int(payload_bytes)),
             comm_region.HostVmmCopyAccess(payload_handle),
@@ -69,6 +70,23 @@ class _CompatInstance:
             comm_region.RegionPartSpan(offset=0, nbytes=int(counter_bytes)),
             comm_region.HostVmmCopyAccess(counter_handle),
         )
+
+    @property
+    def state(self):
+        return comm_region.RegionInstanceState.LIVE
+
+    @property
+    def data_plane_error(self):
+        return self._data_plane_error
+
+    def payload_write(self, offset, host_buffer, nbytes=None):
+        self._payload_part.write(offset, host_buffer, nbytes)
+
+    def payload_read(self, offset, host_buffer, nbytes=None):
+        self._payload_part.read(offset, host_buffer, nbytes)
+
+    def counter(self, offset):
+        return self._counter_part.counter(offset)
 
 
 def _fake_alloc_handle(orch, nbytes):
@@ -312,6 +330,9 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
     worker._worker = _FakeCWorker()
     worker._chip_shms = [shm]
     worker._worker_chip_test_fake_client = fake_client
+    reservation = worker._control_reservation("test_worker_chip_queue")
+    reservation.__enter__()
+    worker._worker_chip_test_reservation = reservation
     worker_module._worker_host_mapped_region_import_sim = fake_client.import_region
     comm_region._worker_host_mapped_region_close = lambda _handle: None
     comm_region._host_vmm_copy_to = fake_client.payload_write
@@ -323,6 +344,10 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
 
 
 def _close(worker: Worker, shm: SharedMemory) -> None:
+    reservation = getattr(worker, "_worker_chip_test_reservation", None)
+    if reservation is not None:
+        reservation.__exit__(None, None, None)
+        worker._worker_chip_test_reservation = None
     worker._close_worker_chip_orch_comm()
     fake_client = getattr(worker, "_worker_chip_test_fake_client", None)
     if fake_client is not None:
@@ -477,8 +502,7 @@ def test_create_worker_chip_queue_frees_region_on_post_region_alloc_failure():
         with pytest.raises(RuntimeError, match="injected alloc failure"):
             orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
 
-        assert len(worker._live_worker_chip_regions) == 1
-        assert worker._live_worker_chip_regions[0]._released is True
+        assert len(worker._region_instance_registry._instances) == 1
     finally:
         orch._o.alloc = original_alloc_ref
         _close(worker, shm)
@@ -991,7 +1015,7 @@ def test_expired_queue_rejects_later_operations_without_abort_flag():
     orch, worker, shm, fake_client = _make_orchestrator()
     try:
         queue = orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
-        queue.region._expire()
+        queue.region._instance._state = comm_region.RegionInstanceState.CLOSED
         fake_client.requests.clear()
 
         with pytest.raises(RuntimeError, match="expired"):

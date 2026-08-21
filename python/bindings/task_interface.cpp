@@ -907,6 +907,7 @@ enum class RegionVmmStage {
     VaRelease,
     PhysicalFree,
     ZeroBytes,
+    BindDevice,
 };
 
 enum class RegionVmmFailWhen { Before, After };
@@ -1017,6 +1018,8 @@ const char *region_vmm_stage_name(RegionVmmStage stage) {
         return "physical_free";
     case RegionVmmStage::ZeroBytes:
         return "zero_bytes";
+    case RegionVmmStage::BindDevice:
+        return "bind_device";
     case RegionVmmStage::None:
         return "none";
     }
@@ -1051,6 +1054,9 @@ RegionVmmStage region_vmm_parse_stage(const std::string &name) {
     if (name == "zero_bytes") {
         return RegionVmmStage::ZeroBytes;
     }
+    if (name == "bind_device") {
+        return RegionVmmStage::BindDevice;
+    }
     throw std::invalid_argument("unknown region VMM stage: " + name);
 }
 
@@ -1079,6 +1085,9 @@ void *region_vmm_next_fake_ptr() {
 
 void region_vmm_bind_device(int device_id) {
     region_vmm_record_issued("bind_device");
+    if (region_vmm_consume_fail(RegionVmmStage::BindDevice, RegionVmmFailWhen::Before)) {
+        region_vmm_throw_stage_failure(RegionVmmStage::BindDevice, "before");
+    }
     if (region_vmm_test_hooks().use_fake) {
         if (device_id < 0) {
             throw std::runtime_error("region VMM fake driver requires a non-negative device id");
@@ -1417,7 +1426,12 @@ void region_vmm_release(uint64_t handle) {
         return;
     }
     record.release_once_done = true;
-    region_vmm_bind_device(record.device_id);
+    try {
+        region_vmm_bind_device(record.device_id);
+    } catch (const std::exception &exc) {
+        region_vmm_note_cleanup_failure(record, std::string("bind_device failed: ") + exc.what());
+        throw std::runtime_error(record.first_cleanup_failure);
+    }
 
     bool unmap_ok = true;
     if (record.mapped) {
@@ -1485,6 +1499,7 @@ void region_vmm_zero_range(uint64_t handle, uint64_t offset, uint64_t nbytes) {
     if (end < offset || end > record.mapping_bytes) {
         throw std::invalid_argument("region VMM zero_bytes range exceeds mapping_bytes");
     }
+    region_vmm_bind_device(record.device_id);
     if (region_vmm_consume_fail(RegionVmmStage::ZeroBytes, RegionVmmFailWhen::Before)) {
         region_vmm_throw_stage_failure(RegionVmmStage::ZeroBytes, "before");
     }

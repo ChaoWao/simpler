@@ -103,7 +103,7 @@ def test_combined_host_worker_chip_region_helpers_are_removed():
         "_release_host_worker_chip_region",
         "_create_sim_worker_chip_region",
         "_create_onboard_worker_chip_region",
-        "_sweep_host_worker_chip_regions",
+        "_sweep_host_" + "worker_chip" + "_regions",
         "_close_worker_host_mapping",
     ):
         assert legacy_name not in source
@@ -338,10 +338,11 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
 
         region = worker._create_worker_chip_region(0, 64, 128)
         payload = wrap_fork_inherited(0x1234_0000, 16, mint_owner_instance_id(), 1, "L3")
-        region.payload_write(0, payload, nbytes=8)
-        region.payload_read(8, payload, nbytes=8)
-        result = region.counter(64).test(7, WaitCmp.EQ)
-        region.counter(64).notify(3, NotifyOp.Set)
+        with worker._control_reservation("test_sim_direct_region"):
+            region.payload_write(0, payload, nbytes=8)
+            region.payload_read(8, payload, nbytes=8)
+            result = region.counter(64).test(7, WaitCmp.EQ)
+            region.counter(64).notify(3, NotifyOp.Set)
 
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
@@ -381,7 +382,8 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_worker_host
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        region.counter(64).notify(9, NotifyOp.Set)
+        with worker._control_reservation("test_onboard_direct_region"):
+            region.counter(64).notify(9, NotifyOp.Set)
 
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200030000, 1, 0xDEAD_0000, 64, 0xDEAD_1000, 128]
@@ -434,7 +436,9 @@ def test_sim_direct_create_import_failure_rolls_back_l2_host_region(monkeypatch)
 
         assert fake_c_worker.create_calls
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_worker_chip_regions == []
+        unpublished = tuple(worker._region_instance_registry._instances.values())
+        assert len(unpublished) == 1
+        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -449,7 +453,9 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
             worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_worker_chip_regions == []
+        unpublished = tuple(worker._region_instance_registry._instances.values())
+        assert len(unpublished) == 1
+        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -457,28 +463,31 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
 
 
 @pytest.mark.parametrize(
-    ("reply_updates", "match"),
+    ("reply_updates", "exc_type", "match", "released_id"),
     [
-        ({"reply_magic": 0xBAD}, "unsupported provider control version"),
-        ({"reply_magic": 0x4C334C3200020000}, "unsupported provider control version"),
-        ({"region_id": 0}, "SUCCESS requires a resource id"),
+        ({"reply_magic": 0xBAD}, RegionControlError, "unsupported provider control version", None),
+        ({"reply_magic": 0x4C334C3200020000}, RegionControlError, "unsupported provider control version", None),
+        ({"region_id": 0}, RegionControlError, "SUCCESS requires a resource id", None),
         (
             {"access_profile": _ACCESS_ONBOARD_VMM},
+            RuntimeError,
             "committed import capability does not match",
+            1,
         ),
     ],
 )
-def test_direct_create_validation_failure_rolls_back_l2_host_region(reply_updates, match):
+def test_direct_create_validation_failure_rolls_back_l2_host_region(reply_updates, exc_type, match, released_id):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     for name, value in reply_updates.items():
         setattr(fake_c_worker, name, value)
-    expected_region_id = int(reply_updates.get("region_id", 1))
     try:
-        with pytest.raises((RuntimeError, RegionControlError), match=match):
+        with pytest.raises(exc_type, match=match):
             worker._create_worker_chip_region(0, 64, 128)
 
-        assert fake_c_worker.release_calls == ([(0, expected_region_id)] if expected_region_id else [])
-        assert worker._live_worker_chip_regions == []
+        assert fake_c_worker.release_calls == ([] if released_id is None else [(0, released_id)])
+        unpublished = tuple(worker._region_instance_registry._instances.values())
+        assert len(unpublished) == 1
+        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -535,13 +544,7 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
         shm.unlink()
 
 
-@pytest.mark.parametrize("interrupted_publication", ["worker", "run"])
-def test_direct_region_create_rolls_back_partially_published_region(monkeypatch, interrupted_publication):
-    class _AppendThenInterrupt(list):
-        def append(self, item) -> None:
-            super().append(item)
-            raise KeyboardInterrupt(f"interrupted {interrupted_publication} publication")
-
+def test_direct_region_create_rolls_back_when_compat_wrapper_fails(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     resources = worker_module._RunResources()
     worker._building_run_resources = resources
@@ -552,42 +555,39 @@ def test_direct_region_create_rolls_back_partially_published_region(monkeypatch,
         "_worker_host_mapped_region_close",
         lambda handle: close_calls.append(int(handle)),
     )
-    if interrupted_publication == "worker":
-        worker._live_worker_chip_regions = _AppendThenInterrupt()
-    else:
-        resources.worker_chip_regions = _AppendThenInterrupt()
+    monkeypatch.setattr(
+        worker_module,
+        "worker_chip_orch_region_desc_from_local_views",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt("interrupted wrapper publication")),
+    )
 
     try:
-        with pytest.raises(KeyboardInterrupt, match=f"interrupted {interrupted_publication} publication"):
+        with pytest.raises(KeyboardInterrupt, match="interrupted wrapper publication"):
             worker._create_worker_chip_region(0, 64, 128)
 
-        assert worker._live_worker_chip_regions == []
-        assert resources.worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
         assert resources.requires_ordered_cleanup is False
         assert close_calls == [55, 55]
         assert fake_c_worker.release_calls == [(0, 1)]
     finally:
         worker._building_run_resources = None
-        worker._live_worker_chip_regions.clear()
-        resources.worker_chip_regions.clear()
         worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
 
 def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatch):
-    class _AppendThenInterrupt(list):
-        def append(self, item) -> None:
-            super().append(item)
-            raise KeyboardInterrupt("interrupted publication")
-
     worker, shm, fake_c_worker = _make_started_sim_worker()
-    worker._live_worker_chip_regions = _AppendThenInterrupt()
     monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
         comm_region,
         "_worker_host_mapped_region_close",
         lambda _handle: (_ for _ in ()).throw(RuntimeError("mapping close failed")),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "worker_chip_orch_region_desc_from_local_views",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt("interrupted wrapper publication")),
     )
 
     try:
@@ -596,11 +596,10 @@ def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatc
 
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
     finally:
-        worker._live_worker_chip_regions.clear()
         worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
@@ -938,7 +937,7 @@ def test_close_replay_does_not_double_release_worker_chip_region_after_mapping_c
 
         assert close_calls == [77, 78]
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
         assert region.expired
 
         worker.close()
@@ -1634,8 +1633,9 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
 
         region = worker._create_worker_chip_region(0, 64, 128)
         payload = wrap_fork_inherited(0x1234_0000, 16, mint_owner_instance_id(), 1, "L3")
-        with pytest.raises(RuntimeError, match="copy failed"):
-            region.payload_write(0, payload, nbytes=8)
+        with worker._control_reservation("test_sim_direct_transfer_failure"):
+            with pytest.raises(RuntimeError, match="copy failed"):
+                region.payload_write(0, payload, nbytes=8)
         with pytest.raises(RuntimeError, match="poisoned"):
             region.descriptor_scalars()
     finally:
@@ -1657,8 +1657,9 @@ def test_sim_direct_counter_failure_poisons_only_region(monkeypatch):
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        with pytest.raises(RuntimeError, match="counter failed"):
-            region.counter(0).notify(1, NotifyOp.Set)
+        with worker._control_reservation("test_sim_direct_counter_failure"):
+            with pytest.raises(RuntimeError, match="counter failed"):
+                region.counter(0).notify(1, NotifyOp.Set)
         with pytest.raises(RuntimeError, match="poisoned"):
             region.descriptor_scalars()
     finally:
@@ -1696,13 +1697,37 @@ def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(mo
 
         region = worker._create_worker_chip_region(0, 64, 128)
         region.free()
-        worker._cleanup_worker_chip_regions()
+        worker._sweep_region_instances()
 
         assert events == [("close", 77), ("close", 77), ("release", 1)]
         with pytest.raises(RuntimeError, match="expired"):
             region.descriptor_scalars()
         assert region._instance._close_attempted
     finally:
+        worker._close_worker_chip_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_compat_wrapper_expires_after_run_cleanup(monkeypatch):
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    resources = worker_module._RunResources()
+    worker._building_run_resources = resources
+    try:
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
+        )
+        region = worker._create_worker_chip_region(0, 64, 128)
+        assert region.expired is False
+        worker._building_run_resources = None
+        worker._region_instance_registry.cleanup_run(resources)
+        assert region.expired is True
+        with pytest.raises(RuntimeError, match="expired"):
+            region.descriptor_scalars()
+        assert fake_c_worker.release_calls == [(0, 1)]
+        assert worker._region_instance_registry._instances == {}
+    finally:
+        worker._building_run_resources = None
         worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
@@ -1800,7 +1825,7 @@ def test_public_create_worker_chip_region_uses_admitted_w2_plan_and_two_imports(
         region.free()
         assert fake_c_worker.release_calls == []
         assert region._instance._state is comm_region.RegionInstanceState.LIVE
-        worker._cleanup_worker_chip_regions()
+        worker._sweep_region_instances()
         assert fake_c_worker.release_calls == [(0, 1)]
         assert worker._region_instance_registry._instances == {}
     finally:
@@ -1924,7 +1949,7 @@ def test_sim_public_api_two_shm_objects_and_two_consecutive_lifecycles(platform,
         assert first_pair[0][0] != first_pair[1][0]
         assert {first_pair[0][1], first_pair[1][1]} == {16, 128}
         assert worker._region_instance_registry._instances == {}
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
         for name in leftover_names:
             with pytest.raises(FileNotFoundError):
                 SharedMemory(name=name)
@@ -1936,7 +1961,7 @@ def test_sim_public_api_two_shm_objects_and_two_consecutive_lifecycles(platform,
         assert second_pair[0][0] != second_pair[1][0]
         assert {name for name, _size in first_pair}.isdisjoint({name for name, _size in second_pair})
         assert worker._region_instance_registry._instances == {}
-        assert worker._live_worker_chip_regions == []
+        assert worker._region_instance_registry._instances == {}
         for name in leftover_names:
             with pytest.raises(FileNotFoundError):
                 SharedMemory(name=name)
