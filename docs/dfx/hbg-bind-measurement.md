@@ -109,7 +109,7 @@ execution works. One property is load-bearing while it exists:
 A skipped run still writes `host_phase_records.jsonl`, so Recipe B works without
 touching the device. Every phase in that artifact is produced on the host during
 bind, so the skip path writes it exactly as the device-run teardown does; what
-still gates it is `--rounds`, not the device (see Recipe B).
+gates it is Recipe B's three conditions, none of which is the device.
 
 ### Reading the segments out
 
@@ -171,13 +171,16 @@ The summed `bind phase=` lines cannot be placed on a timeline inside
 rotating record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
 one record per orchestrator operation, each with its own interval.
 
-Two conditions must both hold, and each one silently produces an empty result:
+Three conditions must all hold, and each one silently produces an empty result:
 
-1. **A diagnostic flag must be on**, because that is what makes
+1. **`SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1`**, which is what arms the pool.
+   `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` does not: it gates the summed
+   `bind phase=` lines alone, so Recipe A's environment collects no records.
+2. **A diagnostic flag must be on**, because that is what makes
    `CallConfig.output_prefix` non-empty. `--enable-scope-stats` is the cheapest
    for an L3 case; `--enable-chip-swimlane` raises `NotImplementedError` for
    `level=3` (per-chip-process filename collision).
-2. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag.
+3. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag.
 
 The device run may be skipped or may fail; neither costs you the artifact. Every
 phase recorded is host work done during bind, so both `SIMPLER_SKIP_DEVICE_RUN`
@@ -187,7 +190,8 @@ swimlane for a case that hangs on device is cheaper to take with the variable se
 than to take by waiting out the stall.
 
 ```bash
-export SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_LOG_LEVEL=TIMING TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1
+export SIMPLER_LOG_LEVEL=TIMING TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 task-submit --device auto --device-num 1 --timeout 2400 --max-time 2400 --run \
   "python examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py \
@@ -234,6 +238,7 @@ signal than any duration on a shared box.
 | dsv4 run through the module runner's L3 phase | log has zero `bind phase=` lines, test passes | run the L3 child command directly (Recipe A) |
 | `SIMPLER_SKIP_DEVICE_RUN=0` | run still skips the device, "PASSED" means nothing ran | `unset` the variable |
 | `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts | one round for artifacts, many rounds for numbers |
+| Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
 | Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the five segments; `arena_h2d` is not adjacent |
 | Single pass, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
 | `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the conditions and require the sign to agree per pass |

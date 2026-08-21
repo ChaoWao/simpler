@@ -37,16 +37,30 @@
  * Whether this runtime asks for its own prepare-path breakdown.
  *
  * True only when `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` starts with `1`, `t` or
- * `T`, read once on first use. This is the producer's own condition; the runner
- * ORs it with the chip-swimlane level when deciding whether to arm the pool, so
- * a level-4 run collects records with the variable unset, and this variable
- * collects them with the level at 0.
+ * `T`, read once on first use. It gates the counters' `LOG_TIMING` lines alone:
+ * the breakdown needs no pool, and the pool has readers that do not want the
+ * lines.
  *
  * "Breakdown" rather than "timing" because the bind stage's *duration* is
  * already published as the `chip.run.bind` `[STRACE]` marker; what this adds
  * is the division of that one number into its parts.
  */
-bool host_phase_timing_enabled();
+bool host_phase_breakdown_enabled();
+
+/**
+ * Whether this runtime asks for per-event records.
+ *
+ * True only when `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE` starts with `1`, `t`
+ * or `T`, read once on first use. This is the producer's own condition for
+ * collection; the runner ORs it with the chip-swimlane level when deciding
+ * whether to arm the pool, so a level-4 run collects records with the variable
+ * unset, and this variable collects them with the level at 0.
+ *
+ * Collection only. Whether a collected pass also reaches
+ * `host_phase_records.jsonl` is the runner's decision, and it turns on the run
+ * having an output directory.
+ */
+bool host_phase_records_enabled();
 
 /**
  * Host monotonic nanoseconds, or 0 when this pass records nothing — which is

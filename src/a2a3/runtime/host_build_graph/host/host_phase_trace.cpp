@@ -110,6 +110,14 @@ void drain_in_flight_records(TraceState &s) {
 
 bool is_bind_kind(uint32_t kind) { return kind < static_cast<uint32_t>(HostPhaseKind::OrchSubmitTask); }
 
+// Opt-in spelling shared by this runtime's switches, matching the runtime's
+// other default-off switch, SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE, so that
+// `=false` / `=off` / `=no` read as off rather than as a non-zero string.
+bool env_opt_in(const char *name) {
+    const char *env = std::getenv(name);
+    return env != nullptr && (env[0] == '1' || env[0] == 't' || env[0] == 'T');
+}
+
 uint32_t current_thread_id() {
     // A thread's identity is fixed for its lifetime, so resolve it once. This
     // runs per record on the path being measured, where a syscall would inflate
@@ -152,15 +160,15 @@ void reset_counter(KindCounter &counter) {
 
 }  // namespace
 
-bool host_phase_timing_enabled() {
+bool host_phase_breakdown_enabled() {
     // Read once: the value cannot change within a process, and the orchestrator
-    // asks per submit-level operation. Opt-in spelling matches the runtime's
-    // other default-off switch, SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE, so that
-    // `=false` / `=off` / `=no` read as off rather than as a non-zero string.
-    static const bool enabled = [] {
-        const char *env = std::getenv("SIMPLER_HBG_BIND_BREAKDOWN_ENABLE");
-        return env != nullptr && (env[0] == '1' || env[0] == 't' || env[0] == 'T');
-    }();
+    // asks per submit-level operation.
+    static const bool enabled = env_opt_in("SIMPLER_HBG_BIND_BREAKDOWN_ENABLE");
+    return enabled;
+}
+
+bool host_phase_records_enabled() {
+    static const bool enabled = env_opt_in("SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE");
     return enabled;
 }
 
@@ -214,18 +222,19 @@ void host_phase_trace_begin(const void *host_api) {
     drain_in_flight_records(s);
     s.api = static_cast<const HostApi *>(host_api);
     HostPhaseRecordPool *pool =
-        s.api != nullptr ? static_cast<HostPhaseRecordPool *>(s.api->host_phase_pool_arm(host_phase_timing_enabled())) :
-                           nullptr;
+        s.api != nullptr ?
+            static_cast<HostPhaseRecordPool *>(s.api->host_phase_pool_arm(host_phase_records_enabled())) :
+            nullptr;
     s.pool.store(pool, std::memory_order_release);
     // Timestamps are taken whenever either sink wants them. Gating the clock on
-    // the environment variable alone would leave a level-4 run recording zeros.
+    // one switch alone would leave the other sink recording zeros.
     s.submitted_tasks.store(0, std::memory_order_relaxed);
     for (KindCounter &counter : s.counters)
         reset_counter(counter);
     for (auto &attrs : s.bind_attrs) {
         attrs[0] = '\0';
     }
-    s.active.store(s.pool != nullptr || host_phase_timing_enabled(), std::memory_order_release);
+    s.active.store(s.pool != nullptr || host_phase_breakdown_enabled(), std::memory_order_release);
 }
 
 void host_phase_trace_note_submitted(uint64_t submitted_tasks) {
@@ -260,7 +269,7 @@ void host_phase_trace_end() {
         s.api->host_phase_pool_finish(s.submitted_tasks.load(std::memory_order_relaxed), inv);
     }
     s.pool.store(nullptr, std::memory_order_release);
-    if (!host_phase_timing_enabled()) {
+    if (!host_phase_breakdown_enabled()) {
         // Records were collected for a per-event reader alone, which has its own
         // report; this breakdown was not asked for.
         return;
