@@ -1044,6 +1044,13 @@ NB_MODULE(_task_interface, m) {
     m.attr("HOST_STRACE_ENABLED") = false;
 #endif
     m.def(
+        "_host_spans_active",
+        [] {
+            return simpler::host_trace::enabled();
+        },
+        "Return whether this extension currently emits TIMING-level host spans."
+    );
+    m.def(
         "_initialize_host_log",
         [](int level) {
             if (!simpler::log::is_valid_level(level)) return false;

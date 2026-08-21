@@ -33,12 +33,15 @@
 
 namespace simpler::host_trace {
 
+inline bool enabled() noexcept { return unified_log_host_span_enabled() != 0; }
+
 inline int64_t now_ns() noexcept { return simpler::log::monotonic_now_ns(); }
 
 inline void emit(
     const char *name, uint64_t invocation_id, uint64_t callable_hash, int32_t depth, int64_t timestamp_ns,
     int64_t duration_ns, const char *attributes
 ) noexcept {
+    if (!enabled()) return;
     const SimplerHostSpan span{
         SIMPLER_HOST_SPAN_ABI_VERSION,
         sizeof(SimplerHostSpan),
@@ -93,6 +96,7 @@ private:
 
 namespace simpler::host_trace {
 
+inline bool enabled() noexcept { return false; }
 inline int64_t now_ns() noexcept { return 0; }
 inline void emit(const char *, uint64_t, uint64_t, int32_t, int64_t, int64_t, const char *) noexcept {}
 

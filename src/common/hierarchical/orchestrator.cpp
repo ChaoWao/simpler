@@ -136,7 +136,7 @@ void Orchestrator::finish_run_if_ready(const std::shared_ptr<RunState> &run) {
             return;
         }
         bool failed = run->submission_failed || static_cast<bool>(run->first_error);
-        run->trace_terminal_ns = simpler::host_trace::now_ns();
+        run->trace_terminal_ns = simpler::host_trace::enabled() ? simpler::host_trace::now_ns() : 0;
         run->phase.store(failed ? RunPhase::FAILED : RunPhase::COMPLETED, std::memory_order_release);
         notify = true;
     }
@@ -374,13 +374,15 @@ void Orchestrator::release_run(RunId run_id) {
 
     compact_if_quiescent();
 #if SIMPLER_HOST_STRACE
-    std::ostringstream retire_attrs;
-    retire_attrs << "run_id=" << run_id << " slot_id=" << lease.slot_id << " generation=" << lease.generation
-                 << " role=facade";
-    simpler::host_trace::emit(
-        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::PostFenceRetirement), run_id, 0, 0,
-        terminal_ns, simpler::host_trace::now_ns() - terminal_ns, retire_attrs.str().c_str()
-    );
+    if (terminal_ns != 0 && simpler::host_trace::enabled()) {
+        std::ostringstream retire_attrs;
+        retire_attrs << "run_id=" << run_id << " slot_id=" << lease.slot_id << " generation=" << lease.generation
+                     << " role=facade";
+        simpler::host_trace::emit(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::PostFenceRetirement), run_id, 0, 0,
+            terminal_ns, simpler::host_trace::now_ns() - terminal_ns, retire_attrs.str().c_str()
+        );
+    }
 #endif
 }
 
@@ -734,7 +736,7 @@ SubmitResult Orchestrator::submit_impl(
 
 #if SIMPLER_HOST_STRACE
     std::optional<simpler::host_trace::SpanScope> submit_trace;
-    if (worker_type == WorkerType::NEXT_LEVEL) {
+    if (worker_type == WorkerType::NEXT_LEVEL && simpler::host_trace::enabled()) {
         uint64_t trace_callable_hash = 0;
         std::memcpy(&trace_callable_hash, callable.digest.data(), sizeof(trace_callable_hash));
         std::ostringstream trace_attrs;

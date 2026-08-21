@@ -989,10 +989,13 @@ add_a5_runtime_test(test_a5_aicore_completion_mailbox a5/test_aicore_completion_
 # Host logger silent/off behavior — no runtime deps, just compile the same
 # self-contained host logger sources used by production consumers.
 set(SIMPLER_LOG_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/log)
-add_executable(test_host_log_off
-    a5/test_host_log_off.cpp
+set(HOST_LOG_TEST_SOURCES
     ${SIMPLER_LOG_DIR}/host_log.cpp
     ${SIMPLER_LOG_DIR}/unified_log_host.cpp
+)
+add_executable(test_host_log_off
+    a5/test_host_log_off.cpp
+    ${HOST_LOG_TEST_SOURCES}
 )
 target_include_directories(test_host_log_off PRIVATE
     ${GTEST_INCLUDE_DIRS}
@@ -1006,6 +1009,25 @@ target_link_libraries(test_host_log_off PRIVATE
     pthread
 )
 add_test(NAME test_host_log_off COMMAND test_host_log_off)
+
+# A separate process verifies the private pre-bind fallback before another
+# test target binds its singleton to process-owned state.
+add_executable(test_host_log_unbound
+    common/test_host_log_unbound.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_include_directories(test_host_log_unbound PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_unbound PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_host_log_unbound COMMAND test_host_log_unbound)
 
 set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
 function(add_device_phase_capture_test name host_strace device_strace expected)

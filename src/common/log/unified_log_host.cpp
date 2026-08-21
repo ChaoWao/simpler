@@ -30,6 +30,8 @@ using simpler::log::LogLevel;
 #pragma GCC visibility push(hidden)
 #endif
 
+int unified_log_host_span_enabled() { return HostLogger::get_instance().is_enabled(LogLevel::TIMING) ? 1 : 0; }
+
 void unified_log_host_span(const SimplerHostSpan *span) { HostLogger::get_instance().log_host_span(span); }
 
 void unified_log_error(const char *func, const char *fmt, ...) {

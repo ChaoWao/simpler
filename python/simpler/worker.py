@@ -108,6 +108,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     materialize_task_args,
     read_args_from_blob,
 )
+from _task_interface import (
+    _host_spans_active as _native_host_spans_active,
+)
 
 from . import _log as _simpler_log
 from .buffer import (
@@ -268,8 +271,8 @@ _WORKER_CHIP_ENDPOINT_ERROR_REGION_RE = re.compile(r"\bL3-L2 endpoint error\b[^\
 
 
 def _host_spans_active() -> bool:
-    """Whether host-span emission was compiled into this extension."""
-    return HOST_STRACE_ENABLED
+    """Whether host-span emission is compiled in and enabled at runtime."""
+    return HOST_STRACE_ENABLED and _native_host_spans_active()
 
 
 # ---------------------------------------------------------------------------
