@@ -36,10 +36,12 @@ uint32_t next_pass_generation() {
 }  // namespace
 
 HostPhaseRecordPool *HostPhaseRecordStore::arm(bool collect_records) {
-    // Publishing a new generation is what retires the previous pass's producer
-    // lanes: a thread that recorded then still holds a buffer index and an offset,
-    // and must not append at that offset into a buffer cleared below.
-    pool_.generation.store(next_pass_generation(), std::memory_order_release);
+    // Everything a producer reads about this pass is written before the generation
+    // is published, and the generation is published last with a release. That store
+    // is the pass's only publication point: a producer acquires the generation and
+    // is then guaranteed to see the buffer pointer and count that go with it.
+    // Publishing the generation first would let a producer pair a new generation
+    // with the null pointer below and dereference it.
     pool_.next_buffer.store(0, std::memory_order_relaxed);
     pool_.dropped.store(0, std::memory_order_relaxed);
     pool_.buffers = nullptr;
@@ -55,6 +57,10 @@ HostPhaseRecordPool *HostPhaseRecordStore::arm(bool collect_records) {
     if (!collect_records) {
         buffers_.clear();
         buffers_.shrink_to_fit();
+        // Still a new pass, and publishing it is what retires the producer lanes a
+        // previous pass handed out — a producer holding one must not append into
+        // storage this call just released.
+        pool_.generation.store(next_pass_generation(), std::memory_order_release);
         return nullptr;
     }
 
@@ -67,6 +73,8 @@ HostPhaseRecordPool *HostPhaseRecordStore::arm(bool collect_records) {
     pool_.buffers = buffers_.data();
     pool_.buffer_count = static_cast<uint32_t>(buffers_.size());
     armed_ = true;
+    // Last, and with a release: see the top of this function.
+    pool_.generation.store(next_pass_generation(), std::memory_order_release);
     return &pool_;
 }
 
