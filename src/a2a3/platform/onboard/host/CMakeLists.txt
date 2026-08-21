@@ -117,6 +117,9 @@ target_compile_options(host_runtime
 # Platform name baked into the shared get_platform() impl in
 # src/common/platform/shared/host/platform_compile_info.cpp.
 target_compile_definitions(host_runtime PRIVATE SIMPLER_PLATFORM_NAME="a2a3")
+if(NOT SIMPLER_SANITIZERS)
+    target_compile_definitions(host_runtime PRIVATE NDEBUG)
+endif()
 
 if(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE)
     target_compile_definitions(host_runtime PRIVATE SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=1)

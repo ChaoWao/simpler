@@ -48,7 +48,6 @@
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <unordered_map>
 #include <vector>
 
 #include "../common/pto_runtime_status.h"
@@ -387,77 +386,60 @@ typedef void (*OrchestrationPrewarmFunc)();
 struct HostOrchEntryPoints {
     OrchestrationEntryFunc entry{nullptr};
     OrchestrationBindFunc bind{nullptr};
+    GraphHostStatePtr graph_state;
 };
 
-// One submission's place in the block: where its bytes come from, which outer task
-// reads it, and how far into the block it sits.
-struct StagedSubmission {
+struct StagedDefinition {
     const std::byte *host_image;
-    PTO2TaskSlotState *outer_slot;
     size_t bytes;
+    uint64_t full_key;
+    uint64_t content_hash;
     uint64_t offset;
 };
 
-// Validate every pending submission, bind it to its uploaded Definition, and lay
-// the block out. No device call and no device address: the block lands in the
-// runtime arena's tail, whose base is not known until that region is grown to fit
-// the shared-memory image as well.
+// One submission's place in the block: where its bytes come from, which outer
+// task reads it, which staged Definition it names, and its block offset.
+struct StagedSubmission {
+    std::byte *host_image;
+    PTO2TaskSlotState *outer_slot;
+    size_t bytes;
+    uint64_t offset;
+    uint64_t definition_offset;
+};
+
+// Validate every Definition and submission, then lay one Graph block out in the
+// runtime arena's tail. The device address is intentionally unknown here: the
+// arena can grow only after the completed task count determines the compact SM
+// size.
 //
 // Submissions sit PTO2_ALIGN_SIZE apart. activation_gate is OR-ed by the outer task
 // and by the node path for the length of the graph, so two submissions sharing a
 // cache line would false-share on that word throughout.
 bool plan_graph_submissions(
-    const HostApi *api, GraphHostState &graph_state, std::vector<StagedSubmission> *staged, uint64_t *block_bytes,
-    uint64_t &uploaded_bytes
+    GraphHostState &graph_state, std::vector<StagedDefinition> *staged_definitions,
+    std::vector<StagedSubmission> *staged_submissions, uint64_t *block_bytes, uint64_t &uploaded_bytes
 ) {
     uploaded_bytes = 0;
     const size_t count = graph_host_upload_count(graph_state);
-    // Pass 1: upload each distinct Definition once as a shared device object
-    // ([GraphDefinitionHeader][Definition image]) keyed by content identity.
-    // Submissions reference the object's GM address, so this pass completing
-    // before any submission is uploaded is what makes the reference safe —
-    // the device boots only after both passes.
     GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
-    struct UploadedDefinition {
-        void *device_object;               // GM address; host must not dereference
-        const GraphDefinition *host_view;  // the host-side image the object was built from
-    };
-    std::unordered_map<uint64_t, UploadedDefinition> definition_objects;
-    for (const GraphHostDefinition &entry : definitions.entries) {
+    staged_definitions->reserve(definitions.size());
+    *block_bytes = 0;
+    for (const GraphHostDefinition &entry : definitions) {
         if (entry.data == nullptr || entry.bytes < sizeof(GraphDefinition)) continue;
         const auto *definition = reinterpret_cast<const GraphDefinition *>(entry.data);
         if (definition->total_bytes != entry.bytes || definition->full_key != entry.full_key) continue;
-        const size_t object_bytes = sizeof(GraphDefinitionHeader) + entry.bytes;
-        void *object =
-            api->acquire_graph_definition_buffer(entry.full_key, object_bytes, alignof(GraphDefinitionHeader));
-        if (object == nullptr) {
-            LOG_ERROR(
-                "host-orch: failed to retain %zu bytes for Graph Definition key=%#llx", object_bytes,
-                static_cast<unsigned long long>(entry.full_key)
-            );
+        if (entry.bytes > UINT64_MAX - sizeof(GraphDefinitionHeader)) return false;
+        const uint64_t object_bytes = sizeof(GraphDefinitionHeader) + entry.bytes;
+        const uint64_t offset = PTO2_ALIGN_UP(*block_bytes, alignof(GraphDefinitionHeader));
+        if (offset < *block_bytes || object_bytes > UINT64_MAX - offset) {
+            LOG_ERROR("host-orch: Graph Definition block size overflows uint64_t");
             return false;
         }
-        std::vector<std::byte> staging(object_bytes, std::byte{0});
-        auto *header = reinterpret_cast<GraphDefinitionHeader *>(staging.data());
-        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-        header->verify_state.store(
-            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
-        );
-        header->definition_bytes = static_cast<uint32_t>(entry.bytes);
-        header->content_hash = definition->content_hash;
-        header->full_key = definition->full_key;
-        std::memcpy(staging.data() + sizeof(GraphDefinitionHeader), entry.data, entry.bytes);
-        if (api->copy_to_device(object, staging.data(), object_bytes) != 0) {
-            LOG_ERROR("host-orch: failed to upload Graph Definition object");
-            return false;
-        }
-        definition_objects.emplace(definition->content_hash, UploadedDefinition{object, definition});
-        uploaded_bytes += object_bytes;
+        staged_definitions->push_back({entry.data, entry.bytes, entry.full_key, definition->content_hash, offset});
+        *block_bytes = offset + object_bytes;
     }
 
-    // Pass 2: validate every submission and lay the block out.
-    staged->reserve(count);
-    *block_bytes = 0;
+    staged_submissions->reserve(count);
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
         if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
@@ -471,40 +453,55 @@ bool plan_graph_submissions(
             LOG_ERROR("host-orch: Graph submission size does not match its POD image");
             return false;
         }
-        auto object_it = definition_objects.find(submission->definition_hash);
-        if (object_it == definition_objects.end() || object_it->second.device_object == nullptr) {
-            LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
+        const auto definition_it =
+            std::find_if(staged_definitions->begin(), staged_definitions->end(), [&](const StagedDefinition &entry) {
+                return entry.content_hash == submission->definition_hash;
+            });
+        if (definition_it == staged_definitions->end()) {
+            LOG_ERROR("host-orch: Graph submission has no staged Definition object");
             return false;
         }
-        // Checked against the host-side Definition image the device object was
-        // built from; the GM object itself is never dereferenced on the host.
-        // Execution storage needs no retained buffer: it is the tail of the
-        // outer task's own heap allocation, which graph_submit_definition sized
-        // to required_heap + execution_storage_bytes.
-        const GraphDefinition *definition = object_it->second.host_view;
+        const GraphDefinition *definition = reinterpret_cast<const GraphDefinition *>(definition_it->host_image);
         if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
             definition->full_key != submission->graph_key || definition->execution_storage_bytes == 0) {
             LOG_ERROR("host-orch: invalid Graph Definition for submission");
             return false;
         }
-        submission->definition_addr = reinterpret_cast<uint64_t>(object_it->second.device_object);
         submission->local_execution = 0;
         submission->activation_gate = 0;
-
-        staged->push_back({upload->data, upload->outer_slot, upload->bytes, *block_bytes});
-        *block_bytes += PTO2_ALIGN_UP(static_cast<uint64_t>(upload->bytes), PTO2_ALIGN_SIZE);
+        const uint64_t offset = PTO2_ALIGN_UP(*block_bytes, PTO2_ALIGN_SIZE);
+        const uint64_t padded_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(upload->bytes), PTO2_ALIGN_SIZE);
+        if (offset < *block_bytes || padded_bytes > UINT64_MAX - offset) {
+            LOG_ERROR("host-orch: Graph submission block size overflows uint64_t");
+            return false;
+        }
+        staged_submissions->push_back({upload->data, upload->outer_slot, upload->bytes, offset, definition_it->offset});
+        *block_bytes = offset + padded_bytes;
     }
-    uploaded_bytes += *block_bytes;
+    uploaded_bytes = *block_bytes;
     return true;
 }
 
-// Copy the planned block into `block_base` and point each outer task at the device
-// address its submission will occupy. The graph_context write lands in the host
-// shared-memory mirror, which has not been compacted or copied yet.
-void stage_graph_submissions(
-    const std::vector<StagedSubmission> &staged, char *block_base, const char *device_block_base
+// Build every Definition object and patch/copy every submission into the one
+// bind image. graph_context writes land in the host SM mirror before compaction.
+void stage_graph_block(
+    const std::vector<StagedDefinition> &definitions, const std::vector<StagedSubmission> &submissions,
+    char *block_base, const char *device_block_base
 ) {
-    for (const StagedSubmission &entry : staged) {
+    for (const StagedDefinition &entry : definitions) {
+        auto *header = reinterpret_cast<GraphDefinitionHeader *>(block_base + entry.offset);
+        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+        header->verify_state.store(
+            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
+        );
+        header->definition_bytes = static_cast<uint32_t>(entry.bytes);
+        header->content_hash = entry.content_hash;
+        header->full_key = entry.full_key;
+        std::memcpy(block_base + entry.offset + sizeof(GraphDefinitionHeader), entry.host_image, entry.bytes);
+    }
+    for (const StagedSubmission &entry : submissions) {
+        auto *submission = reinterpret_cast<GraphSubmission *>(entry.host_image);
+        submission->definition_addr = reinterpret_cast<uint64_t>(device_block_base + entry.definition_offset);
         std::memcpy(block_base + entry.offset, entry.host_image, entry.bytes);
         entry.outer_slot->graph_context = const_cast<char *>(device_block_base) + entry.offset;
     }
@@ -560,12 +557,14 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    GraphHostStatePtr graph_state = make_graph_host_state();
-    if (!graph_state) {
-        LOG_ERROR("host-orch: failed to allocate Graph host state");
+    auto *entry_points = reinterpret_cast<HostOrchEntryPoints *>(host_orch_func_ptr);
+    if (entry_points == nullptr || entry_points->graph_state == nullptr ||
+        !graph_host_begin_run(*entry_points->graph_state)) {
+        LOG_ERROR("host-orch: failed to begin callable Graph state");
         return -1;
     }
-    GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
+    GraphHostState &graph_state = *entry_points->graph_state;
+    GraphHostStateBinding graph_binding(rt->orchestrator, &graph_state);
 
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
@@ -577,7 +576,6 @@ int32_t run_host_orchestration(
     );
     rt->mode = PTO2_MODE_EXECUTE;
 
-    const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
     if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
         return -1;
@@ -648,19 +646,21 @@ int32_t run_host_orchestration(
     // After the span closes: the reduction walks a few hundred records and emits
     // five markers, which must not be charged to the pass it measures.
 
-    // Uploads each distinct Definition as its own retained device object and lays
-    // out the submission block. The block itself is staged below, into the arena's
-    // second device tail, so nothing here allocates or copies it.
+    // Plan all Definition objects and submissions as one arena-tail block. No
+    // device call occurs until the complete bind image is transferred below.
     const int64_t t_graph_ns = bind_now_ns();
     uint64_t graph_bytes = 0;
+    std::vector<StagedDefinition> staged_definitions;
     std::vector<StagedSubmission> staged_submissions;
-    uint64_t submission_block_bytes = 0;
-    if (!plan_graph_submissions(api, *graph_state, &staged_submissions, &submission_block_bytes, graph_bytes)) {
+    uint64_t graph_block_bytes = 0;
+    if (!plan_graph_submissions(
+            graph_state, &staged_definitions, &staged_submissions, &graph_block_bytes, graph_bytes
+        )) {
         return -1;
     }
     {
         char attrs[96];
-        snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(*graph_state), graph_bytes);
+        snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(graph_state), graph_bytes);
         record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, graph_bytes);
     }
 
@@ -710,11 +710,10 @@ int32_t run_host_orchestration(
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         total_heap_size += eff_heap_sizes[r];
     }
-    // Two device tails past off_copied_end, in this order: the shared-memory image,
-    // then the Graph submission block. Both are per-run content of the region the
-    // device already owns, so neither needs an allocation of its own.
-    const uint64_t off_submissions = layout.off_copied_end + image_bytes;
-    const uint64_t device_arena_bytes = off_submissions + submission_block_bytes;
+    // Two device tails past off_copied_end: the shared-memory image, then all
+    // Graph Definition objects and submissions.
+    const uint64_t off_graph = layout.off_copied_end + image_bytes;
+    const uint64_t device_arena_bytes = off_graph + graph_block_bytes;
     if (api->setup_static_arena(total_heap_size, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
         LOG_ERROR("host-orch: failed to commit %" PRIu64 " bytes of device runtime arena", device_arena_bytes);
         return -1;
@@ -734,12 +733,12 @@ int32_t run_host_orchestration(
     }
 
     // One host source for one copy: the copied zone, the shared-memory image, and
-    // the submission block, at exactly the offsets they occupy on the device.
+    // the Graph block, at exactly the offsets they occupy on the device.
     // Over-allocated and rounded up because every segment offset is
     // PTO2_ALIGN_SIZE-aligned and PTO2TaskSlotState is alignas(64), which a byte
     // vector's data() is not.
     const uint64_t copied_bytes = layout.off_copied_end - layout.off_copied_begin;
-    const uint64_t upload_bytes = copied_bytes + image_bytes + submission_block_bytes;
+    const uint64_t upload_bytes = copied_bytes + image_bytes + graph_block_bytes;
     std::vector<std::byte> storage(upload_bytes + PTO2_ALIGN_SIZE, std::byte{0});
     char *upload_base = reinterpret_cast<char *>(
         (reinterpret_cast<uintptr_t>(storage.data()) + PTO2_ALIGN_SIZE - 1) &
@@ -748,7 +747,9 @@ int32_t run_host_orchestration(
 
     // Before the shared-memory mirror is compacted: this writes each outer task's
     // graph_context into it, and compaction is what carries those slots.
-    stage_graph_submissions(staged_submissions, upload_base + copied_bytes + image_bytes, arena_dev + off_submissions);
+    stage_graph_block(
+        staged_definitions, staged_submissions, upload_base + copied_bytes + image_bytes, arena_dev + off_graph
+    );
 
     // The orchestrator has finished, so its pointers into the host-only tail have
     // no further reader on either side — and this header is about to be copied, so
@@ -769,8 +770,8 @@ int32_t run_host_orchestration(
         char attrs[96];
         snprintf(
             attrs, sizeof(attrs),
-            "nt=%" PRIu64 " bytes=%" PRIu64 " copied=%" PRIu64 " sm=%" PRIu64 " subs=%" PRIu64 " pstride=%" PRIu64, nt,
-            upload_bytes, copied_bytes, image_bytes, submission_block_bytes, payload_stride
+            "nt=%" PRIu64 " bytes=%" PRIu64 " copied=%" PRIu64 " sm=%" PRIu64 " graph=%" PRIu64 " pstride=%" PRIu64, nt,
+            upload_bytes, copied_bytes, image_bytes, graph_block_bytes, payload_stride
         );
         record_bind_phase(HostPhaseKind::BindArenaH2d, t_h2d_ns, attrs, upload_bytes);
     }
@@ -884,11 +885,18 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         reinterpret_cast<OrchestrationPrewarmFunc>(prewarm_sym)();
         // Safe to unlink now: the handle keeps the .so mapped regardless of path.
         unlink(so_path.c_str());
-        auto *eps = new HostOrchEntryPoints{};
+        auto eps = std::make_shared<HostOrchEntryPoints>();
+        eps->graph_state = make_graph_host_state();
+        if (eps->graph_state == nullptr) {
+            LOG_ERROR("host-orch: failed to allocate callable Graph state");
+            dlclose(handle);
+            return -1;
+        }
         eps->entry = reinterpret_cast<OrchestrationEntryFunc>(entry);
         eps->bind = reinterpret_cast<OrchestrationBindFunc>(bind_sym);
         out->host_dlopen_handle = handle;
-        out->host_orch_func_ptr = eps;
+        out->host_orch_func_ptr = eps.get();
+        out->host_orch_owner = std::move(eps);
         LOG_INFO("host-orch: loaded orchestration entry '%s' on host", orch_func_name);
     }
     LOG_INFO("Orchestration SO: %zu bytes staged", orch_so_size);

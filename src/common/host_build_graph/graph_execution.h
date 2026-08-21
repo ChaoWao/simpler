@@ -51,6 +51,21 @@ struct GraphTensor {
     uint8_t reserved[3];
 };
 
+// Per-invocation half of one Graph boundary tensor. Shape, strides, dtype,
+// buffer size and layout flags are fixed by the Definition's boundary
+// signature, so sending them again in every outer shell wastes both main-thread
+// packing work and H2D bytes. These are exactly the fields allowed to vary
+// between submissions of the same Definition.
+struct GraphInvocationTensor {
+    uint64_t buffer_addr;
+    uint64_t owner_task_id;
+    uint64_t start_offset;
+    uint64_t extent_elem;
+    int32_t version;
+    uint8_t address_space;
+    uint8_t reserved[3];
+};
+
 // Everything from GraphTensorSourceRef through GraphSubmission is copied
 // across the host-device boundary. Keep it pointer-free, fixed-width and
 // position-independent: every reference is an offset from its owning header.
@@ -122,6 +137,49 @@ struct GraphBoundarySignature {
     uint8_t is_contiguous;
     uint8_t reserved;
 };
+
+inline GraphInvocationTensor graph_invocation_tensor_pack(const ChipTensor &tensor) {
+    GraphInvocationTensor packed{};
+    packed.buffer_addr = tensor.buffer.addr;
+    packed.owner_task_id = tensor.owner_task_id.raw;
+    packed.start_offset = tensor.start_offset;
+    packed.extent_elem = tensor.extent_elem_cache;
+    packed.version = tensor.version;
+    packed.address_space = static_cast<uint8_t>(tensor.address_space);
+    return packed;
+}
+
+inline GraphInvocationTensor graph_invocation_tensor_pack(const GraphTensor &tensor) {
+    GraphInvocationTensor packed{};
+    packed.buffer_addr = tensor.buffer_addr;
+    packed.owner_task_id = tensor.owner_task_id;
+    packed.start_offset = tensor.start_offset;
+    packed.extent_elem = tensor.extent_elem;
+    packed.version = tensor.version;
+    packed.address_space = tensor.address_space;
+    return packed;
+}
+
+inline GraphTensor
+graph_invocation_tensor_unpack(const GraphInvocationTensor &invocation, const GraphBoundarySignature &signature) {
+    GraphTensor tensor{};
+    tensor.buffer_addr = invocation.buffer_addr;
+    tensor.buffer_size = signature.buffer_size;
+    tensor.owner_task_id = invocation.owner_task_id;
+    tensor.start_offset = invocation.start_offset;
+    tensor.extent_elem = invocation.extent_elem;
+    tensor.version = invocation.version;
+    for (uint32_t i = 0; i < MAX_TENSOR_DIMS; ++i) {
+        tensor.shapes[i] = signature.shapes[i];
+        tensor.strides[i] = signature.strides[i];
+    }
+    tensor.ndims = signature.ndims;
+    tensor.dtype = signature.dtype;
+    tensor.manual_dep = signature.manual_dep;
+    tensor.is_contiguous = signature.is_contiguous;
+    tensor.address_space = invocation.address_space;
+    return tensor;
+}
 
 // Header prefixing each device-resident Definition object. The definition
 // buffer uploaded by the host is [GraphDefinitionHeader][GraphDefinition image];
@@ -211,6 +269,9 @@ static_assert(std::is_trivially_copyable_v<GraphTensorSourceRef>);
 static_assert(std::is_standard_layout_v<GraphTensorSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphTensor>);
 static_assert(std::is_standard_layout_v<GraphTensor>);
+static_assert(std::is_trivially_copyable_v<GraphInvocationTensor>);
+static_assert(std::is_standard_layout_v<GraphInvocationTensor>);
+static_assert(sizeof(GraphInvocationTensor) == 40);
 static_assert(std::is_trivially_copyable_v<GraphScalarSourceRef>);
 static_assert(std::is_standard_layout_v<GraphScalarSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphNodeDefinition>);
@@ -310,13 +371,14 @@ inline bool graph_submission_wire_size_valid(const GraphSubmission &submission, 
     return available_bytes >= sizeof(GraphSubmission) && submission.total_bytes == available_bytes;
 }
 
-inline const GraphTensor *graph_submission_tensors(const GraphSubmission &submission) {
-    if (submission.tensors_offset == 0 || submission.tensors_offset % alignof(GraphTensor) != 0 ||
+inline const GraphInvocationTensor *graph_submission_tensors(const GraphSubmission &submission) {
+    if (submission.tensors_offset == 0 || submission.tensors_offset % alignof(GraphInvocationTensor) != 0 ||
         submission.tensors_offset > submission.total_bytes ||
-        submission.tensor_count > (submission.total_bytes - submission.tensors_offset) / sizeof(GraphTensor)) {
+        submission.tensor_count >
+            (submission.total_bytes - submission.tensors_offset) / sizeof(GraphInvocationTensor)) {
         return nullptr;
     }
-    return reinterpret_cast<const GraphTensor *>(
+    return reinterpret_cast<const GraphInvocationTensor *>(
         reinterpret_cast<const uint8_t *>(&submission) + submission.tensors_offset
     );
 }
@@ -387,7 +449,8 @@ struct GraphExecution {
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
-    const GraphTensor *boundary_tensors{nullptr};
+    const GraphInvocationTensor *boundary_tensors{nullptr};
+    const GraphBoundarySignature *boundary_signatures{nullptr};
     uint32_t boundary_tensor_count{0};
     const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};

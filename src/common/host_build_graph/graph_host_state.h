@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -34,6 +35,11 @@ struct GraphHostUpload {
     size_t bytes;
 };
 
+struct GraphHostUploadBatch {
+    std::byte *data;
+    size_t bytes;
+};
+
 // The run's distinct Definition images (already deduplicated by the host-side
 // Definition cache), for upload as shared device objects ahead of submissions.
 struct GraphHostDefinition {
@@ -43,10 +49,20 @@ struct GraphHostDefinition {
 };
 
 struct GraphHostDefinitionList {
-    std::vector<GraphHostDefinition> entries;
+    std::array<GraphHostDefinition, GRAPH_MAX_DEFINITIONS> entries{};
+    size_t count{0};
+
+    size_t size() const { return count; }
+    const GraphHostDefinition &operator[](size_t index) const { return entries[index]; }
+    const GraphHostDefinition *begin() const { return entries.data(); }
+    const GraphHostDefinition *end() const { return entries.data() + count; }
 };
 
 GraphHostStatePtr make_graph_host_state();
+// Start another orchestration pass against a callable-owned state. Completed
+// Definitions remain reusable; per-run submission images are discarded.
+bool graph_host_begin_run(GraphHostState &state);
 size_t graph_host_upload_count(const GraphHostState &state);
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
+GraphHostUploadBatch graph_host_upload_batch(GraphHostState &state);
 GraphHostDefinitionList graph_host_definitions(GraphHostState &state);

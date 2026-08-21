@@ -51,6 +51,19 @@ GraphTensor make_test_tensor(uint64_t address) {
     return tensor;
 }
 
+GraphBoundarySignature make_test_boundary_signature(const GraphTensor &tensor) {
+    GraphBoundarySignature signature{};
+    signature.buffer_size = tensor.buffer_size;
+    std::copy(std::begin(tensor.shapes), std::end(tensor.shapes), std::begin(signature.shapes));
+    std::copy(std::begin(tensor.strides), std::end(tensor.strides), std::begin(signature.strides));
+    signature.ndims = tensor.ndims;
+    signature.dtype = tensor.dtype;
+    signature.tag = static_cast<uint8_t>(TensorArgType::INPUT);
+    signature.manual_dep = tensor.manual_dep;
+    signature.is_contiguous = tensor.is_contiguous;
+    return signature;
+}
+
 std::vector<std::byte>
 make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_scalar_count = 1) {
     std::vector<std::byte> image(sizeof(GraphDefinition));
@@ -89,6 +102,7 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     scalar_sources[0].source = static_cast<uint8_t>(GraphScalarSource::BOUNDARY);
     scalar_sources[0].source_index = boundary_scalar_count - 1;
     scalar_sources[1].source = static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE);
+    std::vector<GraphBoundarySignature> boundary_signatures{make_test_boundary_signature(tensors[0])};
 
     GraphDefinition definition{};
     definition.full_key = graph_key;
@@ -111,6 +125,7 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     definition.off_tensor_sources = append_section(image, tensor_sources);
     definition.off_scalars = append_section(image, scalars);
     definition.off_scalar_sources = append_section(image, scalar_sources);
+    definition.off_boundary_signatures = append_section(image, boundary_signatures);
     // Widest node here declares one tensor, so the storage strides well below the
     // type; the fixture exercises the compacted stride rather than the identity case.
     const size_t node_stride = graph_node_stride(1);
@@ -131,11 +146,12 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
 std::vector<std::byte> make_test_submission(
     uint64_t graph_key, uint64_t boundary_address, uint64_t boundary_scalar, uint32_t boundary_scalar_count = 1
 ) {
-    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
-    const size_t scalars_offset = PTO2_ALIGN_UP(tensors_offset + sizeof(GraphTensor), alignof(uint64_t));
+    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphInvocationTensor));
+    const size_t scalars_offset = PTO2_ALIGN_UP(tensors_offset + sizeof(GraphInvocationTensor), alignof(uint64_t));
     std::vector<std::byte> image(scalars_offset + boundary_scalar_count * sizeof(uint64_t));
     const GraphTensor boundary = make_test_tensor(boundary_address);
-    std::memcpy(image.data() + tensors_offset, &boundary, sizeof(boundary));
+    const GraphInvocationTensor invocation = graph_invocation_tensor_pack(boundary);
+    std::memcpy(image.data() + tensors_offset, &invocation, sizeof(invocation));
     std::memcpy(
         image.data() + scalars_offset + (boundary_scalar_count - 1) * sizeof(uint64_t), &boundary_scalar,
         sizeof(boundary_scalar)
@@ -379,7 +395,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     execution->retired_nodes.store(2, std::memory_order_release);
     submission.local_execution = 0;
     outer_task.task_id = PTO2TaskId::make(1, 8);
-    auto *boundary = reinterpret_cast<GraphTensor *>(submission_image.data() + submission.tensors_offset);
+    auto *boundary = reinterpret_cast<GraphInvocationTensor *>(submission_image.data() + submission.tensors_offset);
     boundary->buffer_addr = reinterpret_cast<uint64_t>(second_boundary.data());
     auto *boundary_scalar = reinterpret_cast<uint64_t *>(submission_image.data() + submission.scalars_offset);
     *boundary_scalar = 99;
@@ -441,7 +457,7 @@ TEST(GraphExecutionReplay, LocalizesBoundaryScalarPoolWiderThanTaskPayload) {
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task = &outer_task;
+    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = &submission;
 
     GraphExecution *execution = graph_execution_localize(outer_slot);
@@ -471,7 +487,7 @@ TEST(GraphExecutionReplay, RejectsBoundaryScalarPoolBeyondContract) {
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task = &outer_task;
+    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = &submission;
 
     EXPECT_EQ(graph_execution_localize(outer_slot), nullptr);

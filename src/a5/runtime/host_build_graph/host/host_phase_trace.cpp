@@ -44,7 +44,7 @@ namespace {
 // measured path.
 constexpr size_t kBindAttrsCapacity = 96;
 
-// One producer's counters and in-flight claim, on its own cache lines.
+// One producer's counters and pass-lifetime lease, on its own cache lines.
 //
 // The producers of a pass are independent -- each records its own Definition and
 // counts only its own operations -- so nothing here is shared, and the per-record
@@ -67,10 +67,9 @@ struct KindCounter {
 };
 
 struct alignas(64) ProducerLane {
-    // Records accepted by `active` but not yet finished with the counters and the
-    // pool. begin/end clear `active` and then drain the sum of these to zero, so a
-    // record can never be reported by a pass it does not belong to.
-    std::atomic<int32_t> in_flight{0};
+    // Producers admitted by `active` and not yet finished with the counters and
+    // pool. begin/end clear `active` and drain these leases before reusing a lane.
+    std::atomic<int32_t> leased{0};
     std::array<KindCounter, kHostPhaseKindCount> counters{};
 };
 
@@ -102,58 +101,31 @@ TraceState &state() {
     return s;
 }
 
-// This thread's lane for the current pass, or nullptr when every lane is taken.
-//
-// `generation` is what makes a cached lane safe to reuse: it is process-unique per
-// pass, so a lane claimed under one pass is never mistaken for a claim under
-// another. Returns the generation it claimed under, because the caller must
-// re-check it once admitted -- see host_phase_record.
-ProducerLane *producer_lane(TraceState &s, uint32_t &claimed_generation) {
-    static thread_local ProducerLane *lane = nullptr;
-    static thread_local uint32_t lane_generation = 0;
-    const uint32_t generation = s.generation.load(std::memory_order_acquire);
-    if (lane == nullptr || lane_generation != generation) {
-        const uint32_t index = s.next_lane.fetch_add(1, std::memory_order_relaxed);
-        lane = index < kProducerLanes ? &s.lanes[index] : nullptr;
-        lane_generation = generation;
-    }
-    claimed_generation = generation;
-    return lane;
-}
-
-// Publish-then-check against the trace lifecycle's clear-then-drain. Claiming a
-// slot before reading `active` is what makes the pair race-free: a record that
-// got in before the pass closed is waited for, and one that arrives after sees
-// `active` false and withdraws. The claim is on this producer's own line, so it
-// costs nothing to the others.
-class RecordAdmission {
-public:
-    RecordAdmission(TraceState &s, ProducerLane &lane) :
-        lane_(lane) {
-        lane_.in_flight.fetch_add(1, std::memory_order_acq_rel);
-        admitted_ = s.active.load(std::memory_order_acquire);
-        if (!admitted_) lane_.in_flight.fetch_sub(1, std::memory_order_acq_rel);
-    }
-    ~RecordAdmission() {
-        if (admitted_) lane_.in_flight.fetch_sub(1, std::memory_order_acq_rel);
-    }
-
-    RecordAdmission(const RecordAdmission &) = delete;
-    RecordAdmission &operator=(const RecordAdmission &) = delete;
-
-    explicit operator bool() const { return admitted_; }
-
-private:
-    ProducerLane &lane_;
-    bool admitted_{false};
+struct ProducerCursor {
+    TraceState *owner{nullptr};
+    ProducerLane *lane{nullptr};
+    uint32_t generation{0};
+    uint32_t depth{0};
+    bool denied{false};
 };
 
-// Called with `active` already false, so no new record can be admitted. Only the
-// recording worker can still be inside one, and commit joins it before a pass
-// ends, so in practice this returns without spinning.
-void drain_in_flight_records(TraceState &s) {
+ProducerCursor &producer_cursor() {
+    static thread_local ProducerCursor cursor;
+    return cursor;
+}
+
+void release_producer(ProducerCursor &cursor) {
+    ProducerLane *lane = cursor.lane;
+    cursor = {};
+    if (lane != nullptr) lane->leased.fetch_sub(1, std::memory_order_release);
+}
+
+// Called with `active` already false, so no new producer can be admitted. A
+// Graph commit normally joins every worker first; the drain also makes early
+// error exits safe without charging two atomic RMWs to every record.
+void drain_producers(TraceState &s) {
     for (ProducerLane &lane : s.lanes) {
-        while (lane.in_flight.load(std::memory_order_acquire) != 0) {}
+        while (lane.leased.load(std::memory_order_acquire) != 0) {}
     }
 }
 
@@ -190,9 +162,8 @@ void record_counter(ProducerLane &lane, uint64_t start_ns, uint64_t end_ns, uint
 }
 
 void append_record(TraceState &s, uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64_t payload, uint32_t index) {
-    // No lock: the pool claims a slot per record with one atomic increment, so
-    // concurrent recording threads do not serialize here. `pool` is republished
-    // only by begin/end, which bracket every record via the admission drain.
+    // No lock: a producer privately advances the buffer it claimed for this pass.
+    // `pool` is republished only after every producer lease is drained.
     HostPhaseRecordPool *pool = s.pool.load(std::memory_order_acquire);
     if (pool == nullptr) return;
     host_phase_pool_append(
@@ -237,68 +208,76 @@ bool host_phase_records_enabled() {
     return enabled;
 }
 
+void host_phase_producer_begin() {
+    TraceState &s = state();
+    ProducerCursor &cursor = producer_cursor();
+    if (cursor.depth != 0) {
+        ++cursor.depth;
+        return;
+    }
+    if (!s.active.load(std::memory_order_acquire)) return;
+
+    const uint32_t generation = s.generation.load(std::memory_order_acquire);
+    const uint32_t index = s.next_lane.fetch_add(1, std::memory_order_relaxed);
+    ProducerLane *lane = index < kProducerLanes ? &s.lanes[index] : nullptr;
+    if (lane == nullptr) {
+        cursor = ProducerCursor{&s, nullptr, generation, 1, true};
+        return;
+    }
+
+    // Publish the lease before re-checking the pass boundary. trace_end clears
+    // active before draining, so it either observes this lease or this producer
+    // observes the closed/replaced pass and withdraws.
+    lane->leased.fetch_add(1, std::memory_order_acq_rel);
+    if (!s.active.load(std::memory_order_acquire) || s.generation.load(std::memory_order_acquire) != generation) {
+        lane->leased.fetch_sub(1, std::memory_order_release);
+        return;
+    }
+    cursor = ProducerCursor{&s, lane, generation, 1, false};
+}
+
+void host_phase_producer_end() {
+    ProducerCursor &cursor = producer_cursor();
+    if (cursor.depth == 0) return;
+    if (--cursor.depth == 0) release_producer(cursor);
+}
+
 // Strong definitions overriding the orchestrator core's weak fallbacks, which
 // exist so builds without this translation unit still link.
 __attribute__((visibility("hidden"))) uint64_t host_phase_now_ns() {
-    if (!state().active.load(std::memory_order_acquire)) {
-        return 0;
-    }
+    const ProducerCursor &cursor = producer_cursor();
+    if (cursor.depth == 0 || cursor.owner != &state()) return 0;
     return static_cast<uint64_t>(simpler::log::monotonic_now_ns());
 }
 
 __attribute__((visibility("hidden"))) void
 host_phase_record(uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64_t payload, uint32_t index) {
     TraceState &s = state();
-    if (!s.active.load(std::memory_order_acquire) || kind >= kHostPhaseKindCount || end_ns < start_ns) {
+    if (start_ns == 0 || kind >= kHostPhaseKindCount || end_ns < start_ns) {
         return;
     }
-    // ORCH_PHASE_END calls this on every submit-level operation, so the load
-    // above stays the whole cost when tracing is off. Admission then re-checks
-    // under the in-flight claim, which is what actually closes the boundary.
-    uint32_t claimed_generation = 0;
-    ProducerLane *lane = producer_lane(s, claimed_generation);
-    if (lane == nullptr) {
+    ProducerCursor &cursor = producer_cursor();
+    if (cursor.depth == 0 || cursor.owner != &s || cursor.denied || cursor.lane == nullptr) {
         s.lane_denied.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    RecordAdmission admission(s, *lane);
-    if (!admission) {
-        return;
-    }
-    // A pass can have closed and a new one opened between claiming the lane and
-    // being admitted here, and the new pass resets the lane hand-out -- so a lane
-    // claimed for the old pass may already belong to another producer, and writing
-    // its plain-integer counters would be a race. A stale claim withdraws instead.
-    if (s.generation.load(std::memory_order_acquire) != claimed_generation) {
-        return;
-    }
-    record_counter(*lane, start_ns, end_ns, kind, payload);
+    record_counter(*cursor.lane, start_ns, end_ns, kind, payload);
     append_record(s, start_ns, end_ns, kind, payload, index);
 }
 
 void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload) {
     TraceState &s = state();
-    if (!s.active.load(std::memory_order_acquire) || !is_bind_kind(kind)) {
-        return;
-    }
-    uint32_t claimed_generation = 0;
-    ProducerLane *lane = producer_lane(s, claimed_generation);
-    if (lane == nullptr) {
+    if (start_ns == 0 || !is_bind_kind(kind)) return;
+    ProducerCursor &cursor = producer_cursor();
+    if (cursor.depth == 0 || cursor.owner != &s || cursor.denied || cursor.lane == nullptr) {
         s.lane_denied.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    RecordAdmission admission(s, *lane);
-    if (!admission) {
-        return;
-    }
-    if (s.generation.load(std::memory_order_acquire) != claimed_generation) {
         return;
     }
     const uint64_t end_ns = static_cast<uint64_t>(simpler::log::monotonic_now_ns());
     if (attrs != nullptr) {
         snprintf(s.bind_attrs[kind].data(), kBindAttrsCapacity, "%s", attrs);
     }
-    record_counter(*lane, start_ns, end_ns, kind, payload);
+    record_counter(*cursor.lane, start_ns, end_ns, kind, payload);
     append_record(s, start_ns, end_ns, kind, payload, 0);
 }
 
@@ -306,7 +285,8 @@ void host_phase_trace_begin(const void *host_api) {
     TraceState &s = state();
     std::lock_guard<std::mutex> lock(s.lifecycle_mutex);
     s.active.store(false, std::memory_order_release);
-    drain_in_flight_records(s);
+    release_producer(producer_cursor());
+    drain_producers(s);
     s.api = static_cast<const HostApi *>(host_api);
     HostPhaseRecordPool *pool =
         s.api != nullptr ?
@@ -329,6 +309,7 @@ void host_phase_trace_begin(const void *host_api) {
     s.next_lane.store(0, std::memory_order_relaxed);
     s.generation.fetch_add(1, std::memory_order_release);
     s.active.store(s.pool != nullptr || host_phase_breakdown_enabled(), std::memory_order_release);
+    host_phase_producer_begin();
 }
 
 void host_phase_trace_note_submitted(uint64_t submitted_tasks) {
@@ -342,11 +323,10 @@ void host_phase_trace_end() {
         return;
     }
     s.active.store(false, std::memory_order_release);
-    // Every record already past the `active` check finishes its counter and pool
-    // work before the totals below are read and the pool is handed back, so no
-    // lock is needed here either: the drain, not a mutex, is what makes the pool
-    // quiescent.
-    drain_in_flight_records(s);
+    release_producer(producer_cursor());
+    // Every admitted producer finishes its counter and pool work before totals
+    // are read and the pool is handed back.
+    drain_producers(s);
     // Read the pool's own tally before handing it back, and drop the pointer
     // after: the pool belongs to the runner from finish() onward, and the pass is
     // over either way, so nothing here may outlive it. Clearing `active` also

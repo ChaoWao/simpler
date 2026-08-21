@@ -260,6 +260,8 @@ class GxxToolchain(Toolchain):
 
     def get_compile_flags(self, **kwargs) -> list[str]:
         flags = ["-shared", "-fPIC", "-O3", "-g", "-std=c++17"]
+        if not self._prefer_g15:
+            flags.append("-DNDEBUG")
         # -fno-gnu-unique: prevent STB_GNU_UNIQUE binding so dlclose actually
         # unloads the SO.  GCC-only; clang does not produce STB_GNU_UNIQUE.
         if self._gcc:

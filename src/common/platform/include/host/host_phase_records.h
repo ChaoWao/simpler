@@ -212,8 +212,8 @@ private:
  *
  * A written record is visible to a reader only after that producer stops, so a
  * reader must not read a pass before its producers are done.
- * `host_phase_trace_end()` guarantees that: it clears `active` and drains the
- * in-flight count to zero before `finish()`.
+ * `host_phase_trace_end()` guarantees that: it clears `active` and drains every
+ * producer's pass-lifetime lease before `finish()`.
  *
  * @param start_ns,end_ns  host monotonic nanoseconds
  * @param payload          task id for kinds that submit a task, else a detail count

@@ -875,7 +875,8 @@ int DeviceRunnerBase::record_device_orch_callable(
 
 int DeviceRunnerBase::record_host_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
-    void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    void *host_orch_func_ptr, std::shared_ptr<void> host_orch_owner, std::vector<std::pair<int, uint64_t>> kernel_addrs,
+    std::vector<ArgDirection> signature
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -901,6 +902,7 @@ int DeviceRunnerBase::record_host_orch_callable(
     state.aicore_image_hash = aicore_image_hash;
     state.host_dlopen_handle = host_dlopen_handle;
     state.host_orch_func_ptr = host_orch_func_ptr;
+    state.host_orch_owner = std::move(host_orch_owner);
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
@@ -921,6 +923,7 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 
     if (state.host_dlopen_handle != nullptr) {
         // hbg path: no device-side orch SO handle, just dlclose the host handle.
+        state.host_orch_owner.reset();
         dlclose(state.host_dlopen_handle);
         return 0;
     }
@@ -1408,6 +1411,7 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     // pytest sessions.
     for (auto &kv : callables_) {
         if (kv.second.host_dlopen_handle != nullptr) {
+            kv.second.host_orch_owner.reset();
             dlclose(kv.second.host_dlopen_handle);
         }
     }

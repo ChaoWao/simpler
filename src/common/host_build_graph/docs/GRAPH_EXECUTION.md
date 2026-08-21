@@ -132,11 +132,14 @@ with the unmodified boundary value.
   dependency, exactly as on the ordinary path, so the caller still declares one
   on the operand's producer.
 
-Structural or alias mismatch logs a warning and executes the Graph function
-normally for that invocation. It never reuses heap offsets recorded for a
-different shape. Debug builds also assert at these unsupported boundaries so
-development catches a violated fixed-shape contract immediately; the ordinary
-path remains the defensive release-build behavior.
+The first occurrence of each Graph key in a new orchestration run validates its
+structural and alias contract. A mismatch logs a warning and executes the Graph
+function normally; debug builds also assert. Later occurrences of that key in
+the same run use the already-validated key and an atomic Definition state, so
+they neither rescan the boundary nor contend with recorder publication. Fixed
+shape and alias metadata are therefore a per-key API contract within one run;
+the device exact-validates every reconstructed submission before materializing
+it.
 
 ## Qwen decoder-layer example
 
@@ -199,9 +202,9 @@ void decode_three_layers(
 
 All three layers submit one Graph task each. The first starts background
 recording, while layers two and three immediately submit outer task shells for
-the same in-flight identity. The first following non-Graph operation (or
-orchestration completion) joins recording and finalizes all three shells with
-the new Definition. Each invocation patches the current layer's
+the same in-flight identity. Orchestration completion joins recording and
+finalizes all three shells with the new Definition; intervening non-Graph
+operations are not barriers. Each invocation patches the current layer's
 `token_position`; it is a dynamic boundary scalar refreshed on every submission
 and is not part of the Graph key.
 
@@ -210,10 +213,17 @@ and is not part of the Graph key.
 Recording uses host-only C++ state:
 
 - `std::vector` for nodes, tensors, scalars, fanins, and pending uploads;
-- `std::unordered_map` for the per-run Definition cache;
+- `std::unordered_map` for the registered callable's Definition cache;
 - `std::unordered_map` for the recordings in flight, keyed by Graph identity and
   holding each entry by `std::unique_ptr`, guarded by a mutex and completion
   condition while the recording threads publish their Definitions.
+
+Callable registration preallocates empty recording storage for the first eight
+distinct keys. This reserves vectors, tensor-arena blocks and Definition image
+capacity only; it neither executes a Graph body nor creates a cached Definition.
+After a cold recording publishes its Definition, that temporary storage remains
+owned by the callable instead of being freed under the publication mutex on the
+`host_orch` critical path.
 
 The cache stores at most 16 Definitions and allocates each entry to its actual
 serialized size. Published and in-flight entries count against the same limit,
@@ -253,6 +263,10 @@ a workload that cuts a forward pass into up to eight Definitions without creatin
 threads or allocating boundary storage between shell submissions. A ninth or later
 concurrent miss grows one worker per additional job, up to the 16-Definition
 limit, so the prewarm does not turn into an eight-recording concurrency cap.
+Between two commits, one worker claims at most one distinct-key recording. A
+short Definition therefore cannot re-enter the shared queue and take a later
+key while a prewarmed worker remains parked; the pool sizes against all jobs in
+the current batch rather than only the jobs that happen to still be active.
 Growth happens inside the submission that needs it, so it lands on the submitting
 thread: a workload whose Definition count exceeds the prewarmed count pays a
 `pthread_create` (measured 32-74 us each) in the middle of its submission burst.
@@ -336,24 +350,30 @@ device execution pool requires this hash, the Graph key, and the node count to
 all match before reusing a resident Definition. A new run may record different
 metadata under the same function identity, so key-only reuse is not safe.
 
-All references are 32-bit offsets from the Definition base. Cross-boundary
-Tensors use the fixed-width `GraphTensor` wire POD rather than the
-64-byte-aligned C++ `ChipTensor` object. The upload is therefore one contiguous
-copy with no raw Host pointers and no relocation pass.
+All references are 32-bit offsets from the Definition base. Definition tensor
+templates use the fixed-width `GraphTensor` wire POD rather than the
+64-byte-aligned C++ `ChipTensor` object. Per-occurrence submissions carry only a
+40-byte `GraphInvocationTensor`: address, owner, offset/extent, version and
+address space. The device reconstructs its full boundary tensor from that
+dynamic half plus the Definition's fixed boundary signature. This avoids
+resending shape, stride, dtype and layout metadata on every shell while keeping
+the image pointer-free and exact-validated.
 
 Before materialization, the Scheduler recomputes the Definition content hash
 and validates section ranges, topology indices, node heap offsets, the outer
 heap extent, ChipTensor metadata, and ChipTensor-source bounds. Invalid wire data is
 rejected before an offset participates in pointer arithmetic.
 
-There is no cache schema version. The cache is per run and starts empty, so a
-persistent-format version would currently have no effect.
+There is no cache schema version. The cache is process-local, is owned by one
+registered callable, and is destroyed before that callable's orchestration SO
+is unloaded. It is not a persistent on-disk format.
 
 ## Cache hit and memory
 
 For a cache hit, the Host Orchestrator:
 
-1. validates the fixed boundary contract;
+1. validates the fixed boundary contract on the key's first occurrence in this
+   run; later occurrences use the hash-keyed fast entry;
 2. reserves one task-window slot;
 3. reserves one heap block large enough for every internal intermediate, plus
    the Definition's `execution_storage_bytes` for the execution the device
@@ -380,12 +400,13 @@ bytes it starts from are whatever that heap region last held.
 ## Scheduler flow
 
 Host orchestration builds the complete task image before device execution. At
-the end of orchestration, the Host stages each Graph POD image into the runtime
-arena's device region alongside the compacted shared-memory image, copies that
-one bind image to the device, and then launches the resident Scheduler. Nothing
-is patched on the way: a slot state names its payload and descriptor by a delta
-from its own address, so the bytes the Host wrote are the bytes the device
-schedules.
+the end of orchestration, the Host stages each distinct Definition object and
+each Graph POD submission into a Graph block in the runtime arena, alongside
+the compacted shared-memory image. Each submission's `definition_addr` is
+patched to the corresponding object in that same block. The Host then copies
+the complete bind image to the device and launches the resident Scheduler. A
+slot state names its payload and descriptor by a delta from its own address, so
+no other task-image relocation is needed.
 
 All AICPU threads classify disjoint slices of the completed task window behind
 one startup barrier. A Graph task enters preparation and external-fanin

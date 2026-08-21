@@ -372,8 +372,8 @@ public:
      */
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
-        void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs,
-        std::vector<ArgDirection> signature
+        void *host_orch_func_ptr, std::shared_ptr<void> host_orch_owner,
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
     );
 
     /**
@@ -1037,6 +1037,7 @@ protected:
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
+        std::shared_ptr<void> host_orch_owner;
     };
     std::unordered_map<int32_t, CallableState> callables_;
     // Opaque provider handle from dma_workspace_provision(), owned for the

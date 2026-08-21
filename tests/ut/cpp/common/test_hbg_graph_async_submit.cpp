@@ -202,6 +202,41 @@ TEST(HbgGraphAsyncSubmit, PrewarmedRecorderPoolGrowsPastThePrewarmedCount) {
         << "a concurrent miss past the prewarmed count must grow the pool instead of queueing";
 }
 
+TEST(HbgGraphAsyncSubmit, CompletedRecorderDoesNotClaimAnotherKeyInTheSameBatch) {
+    GraphAsyncRecordingState pool;
+    ASSERT_TRUE(pool.prewarm());
+    GraphTaskArgs empty_args;
+    std::mutex mutex;
+    std::condition_variable cv;
+    int completed = 0;
+    std::thread::id first_worker;
+    std::thread::id second_worker;
+
+    ASSERT_TRUE(pool.start(empty_args, [&](GraphTaskArgs &) {
+        std::lock_guard<std::mutex> lock(mutex);
+        first_worker = std::this_thread::get_id();
+        completed++;
+        cv.notify_all();
+    }));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, kHandshakeTimeout, [&]() {
+            return completed == 1;
+        }));
+    }
+    ASSERT_TRUE(pool.start(empty_args, [&](GraphTaskArgs &) {
+        std::lock_guard<std::mutex> lock(mutex);
+        second_worker = std::this_thread::get_id();
+        completed++;
+        cv.notify_all();
+    }));
+    pool.wait();
+
+    EXPECT_EQ(completed, 2);
+    EXPECT_NE(first_worker, second_worker)
+        << "a fast recording must leave the next key for another prewarmed worker until commit";
+}
+
 TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit) {
     FakeRuntime fake{};
     fake.ops = &kFakeOps;

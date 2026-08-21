@@ -123,14 +123,98 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphSubmissionsReserveHeapOnlyAtCommi
     const auto *second_base = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_base);
     const auto *second_end = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_end);
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
-    ASSERT_EQ(definitions.entries.size(), 1u);
-    ASSERT_EQ(definitions.entries[0].full_key, first_submission->graph_key);
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    ASSERT_EQ(definitions.size(), 1u);
+    ASSERT_EQ(definitions[0].full_key, first_submission->graph_key);
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions[0].data);
     const uint64_t expected_extent =
         PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
     EXPECT_EQ(static_cast<uint64_t>(first_end - first_base), expected_extent);
     EXPECT_EQ(static_cast<uint64_t>(second_end - second_base), expected_extent);
     EXPECT_TRUE(first_end <= second_base || second_end <= first_base) << "two shells must not share heap bytes";
+}
+
+TEST_F(HbgGraphSubmitFailureTest, ANewRunRetainsDefinitionsAndDropsOldSubmissions) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult first = orch.graph_begin(0x1716, boundary_args, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_TRUE(orch.graph_prepare(first.recording_handle, boundary_args));
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+    ASSERT_FALSE(orch.fatal);
+    ASSERT_EQ(graph_host_upload_count(*graph_state), 1u);
+    ASSERT_EQ(graph_host_definitions(*graph_state).size(), 1u);
+    const std::optional<GraphHostUpload> first_upload = graph_host_upload(*graph_state, 0);
+    const GraphHostUploadBatch first_batch = graph_host_upload_batch(*graph_state);
+    ASSERT_TRUE(first_upload.has_value());
+    ASSERT_NE(first_batch.data, nullptr);
+    EXPECT_EQ(first_upload->data, first_batch.data);
+    EXPECT_EQ(first_upload->bytes, first_batch.bytes);
+
+    ASSERT_TRUE(graph_host_begin_run(*graph_state));
+    EXPECT_EQ(graph_host_upload_count(*graph_state), 0u);
+    EXPECT_EQ(graph_host_definitions(*graph_state).size(), 1u);
+    EXPECT_EQ(graph_host_upload_batch(*graph_state).bytes, 0u);
+
+    const GraphScopeResult replay = orch.graph_begin(0x1716, boundary_args, 0x1736);
+    EXPECT_FALSE(replay.recording);
+    EXPECT_FALSE(replay.execute_block);
+    EXPECT_TRUE(replay.task_id.is_valid());
+    EXPECT_EQ(graph_host_upload_count(*graph_state), 1u);
+    EXPECT_EQ(graph_host_upload_batch(*graph_state).bytes, first_batch.bytes);
+}
+
+TEST_F(HbgGraphSubmitFailureTest, BoundaryAliasPartitionIsCheckedOnTheFirstSubmissionOfEachRun) {
+    std::array<uint32_t, 16> first_storage{};
+    std::array<uint32_t, 16> second_storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(first_storage.size())};
+    ChipTensor first = make_tensor_external(first_storage.data(), shape, 1);
+    ChipTensor second = make_tensor_external(second_storage.data(), shape, 1);
+
+    GraphTaskArgs recorded_args;
+    recorded_args.add_input(first);
+    recorded_args.add_input(first);
+    GraphTaskArgs same_partition_args;
+    same_partition_args.add_input(second);
+    same_partition_args.add_input(second);
+    GraphTaskArgs different_partition_args;
+    different_partition_args.add_input(first);
+    different_partition_args.add_input(second);
+
+    orch.begin_scope();
+    const GraphScopeResult recording = orch.graph_begin(0x171b, recorded_args, 0x1736);
+    ASSERT_TRUE(recording.recording);
+    const GraphScopeResult inflight_match = orch.graph_begin(0x171b, same_partition_args, 0x1736);
+    EXPECT_FALSE(inflight_match.execute_block);
+    EXPECT_TRUE(inflight_match.task_id.is_valid());
+    ASSERT_TRUE(orch.graph_prepare(recording.recording_handle, recorded_args));
+    CoreTaskArgs node_args;
+    node_args.add_input(first);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+    ASSERT_FALSE(orch.fatal);
+
+    ASSERT_TRUE(graph_host_begin_run(*graph_state));
+    // The first occurrence of a key in a new run revalidates the fixed boundary
+    // contract. Later same-key submissions use the hash-keyed fast path and do
+    // not serialize with the recording mutex.
+    EXPECT_ANY_THROW((void)orch.graph_begin(0x171b, different_partition_args, 0x1736));
+    const GraphScopeResult cached_match = orch.graph_begin(0x171b, same_partition_args, 0x1736);
+    EXPECT_FALSE(cached_match.execute_block);
+    EXPECT_TRUE(cached_match.task_id.is_valid());
 }
 
 // The one combination the other two tests miss: real orchestrator state driven
@@ -233,8 +317,8 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     ASSERT_EQ(graph_host_upload_count(*graph_state), 3u);
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
-    ASSERT_EQ(definitions.entries.size(), 1u);
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    ASSERT_EQ(definitions.size(), 1u);
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions[0].data);
     const uint64_t expected_extent =
         PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
 
@@ -526,6 +610,60 @@ TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessNodeIsNotRecorded) 
     ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
 
     EXPECT_TRUE(orch.graph_end()) << "a dropped predicate must not make the body unrecordable";
+    orch.graph_commit();
+    EXPECT_FALSE(orch.fatal);
+}
+
+TEST_F(HbgGraphSubmitFailureTest, RepeatedReplayEquivalentPredicatesShareOneDefinitionSlot) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1, DataType::INT32);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x2004, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
+
+    std::array<ChipTensor, 3> predicate_operands{boundary, boundary, boundary};
+    // Both are the same boundary view at replay. Their recorded versions differ,
+    // but materialize replaces that invocation field before resolving either
+    // predicate, so storing two Definition slots would preserve no information.
+    predicate_operands[0].version = boundary.version + 1;
+    predicate_operands[1].version = boundary.version + 2;
+    predicate_operands[2].version = boundary.version + 3;
+
+    MixedKernels mixed{};
+    mixed.aiv0_kernel_id = 0;
+    for (int i = 0; i < 3; ++i) {
+        CoreTaskArgs node_args;
+        node_args.add_input(boundary);
+        TensorCreateInfo recorded_output(shape, 1, DataType::INT32);
+        node_args.add_output(recorded_output);
+        CoreTaskPredicate predicate;
+        predicate.operand.tensor = &predicate_operands[static_cast<size_t>(i)];
+        predicate.operand.ndims = 1;
+        predicate.operand.indices[0] = i == 1 ? 1 : 0;
+        predicate.op = PredicateOp::GT;
+        predicate.target = 0;
+        node_args.set_predicate(predicate);
+        ASSERT_TRUE(orch.submit_task(mixed, node_args).task_id().is_valid());
+    }
+
+    ASSERT_TRUE(orch.graph_end());
+    const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
+    ASSERT_EQ(definitions.size(), 1u);
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions[0].data);
+    ASSERT_EQ(definition->task_count, 3u);
+    EXPECT_EQ(definition->predicate_count, 2u);
+    const auto *nodes = reinterpret_cast<const GraphNodeDefinition *>(
+        static_cast<const std::byte *>(definitions[0].data) + definition->off_nodes
+    );
+    EXPECT_EQ(nodes[0].predicate_slot, 1u);
+    EXPECT_EQ(nodes[1].predicate_slot, 2u);
+    EXPECT_EQ(nodes[2].predicate_slot, 1u);
+
     orch.graph_commit();
     EXPECT_FALSE(orch.fatal);
 }

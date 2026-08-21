@@ -199,6 +199,8 @@ static uint32_t g_orch_submit_idx = 0;
 // plain integer because this file is also compiled for the AICPU, where the
 // platform's host headers are absent.
 __attribute__((weak, visibility("hidden"))) void host_phase_record(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t) {}
+__attribute__((weak, visibility("hidden"))) void host_phase_producer_begin() {}
+__attribute__((weak, visibility("hidden"))) void host_phase_producer_end() {}
 
 // Host monotonic clock shared with the `[STRACE]` span tree, so a record nests
 // under chip.run.bind.host_orch without any clock conversion. The host build
@@ -321,6 +323,67 @@ struct GraphRecordedPredicate {
     PredicateOp op{PredicateOp::NONE};
 };
 
+// Predicate groups commonly reuse one operand for many nodes. Its source is a
+// property of the tensor, not of the element/target, so classify it once rather
+// than rescan every Graph boundary for each node in the group.
+struct GraphPredicateOperandCache {
+    ChipTensor operand;
+    GraphRecordedTensorSourceRef source;
+    bool valid{false};
+};
+
+struct GraphRecordedTensors {
+    ChipTensor *data{nullptr};
+    size_t count{0};
+
+    size_t size() const { return count; }
+    ChipTensor *begin() const { return data; }
+    ChipTensor *end() const { return count == 0 ? data : data + count; }
+    ChipTensor &operator[](size_t index) const { return data[index]; }
+};
+
+class GraphRecordedTensorArena {
+public:
+    bool reserve_initial() {
+        if (!blocks_.empty()) return true;
+        std::unique_ptr<ChipTensor[]> storage{new (std::nothrow) ChipTensor[kInitialBlockTensors]};
+        if (storage == nullptr) return false;
+        try {
+            blocks_.push_back(Block{std::move(storage), kInitialBlockTensors, 0});
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }
+
+    ChipTensor *allocate(size_t count) {
+        if (count == 0) return nullptr;
+        if (blocks_.empty() || count > blocks_.back().capacity - blocks_.back().used) {
+            const size_t capacity = std::max(kInitialBlockTensors, count);
+            std::unique_ptr<ChipTensor[]> storage{new (std::nothrow) ChipTensor[capacity]};
+            if (storage == nullptr) return nullptr;
+            try {
+                blocks_.push_back(Block{std::move(storage), capacity, 0});
+            } catch (...) {
+                return nullptr;
+            }
+        }
+        Block &block = blocks_.back();
+        ChipTensor *result = block.storage.get() + block.used;
+        block.used += count;
+        return result;
+    }
+
+private:
+    static constexpr size_t kInitialBlockTensors = 2048;
+    struct Block {
+        std::unique_ptr<ChipTensor[]> storage;
+        size_t capacity;
+        size_t used;
+    };
+    std::vector<Block> blocks_;
+};
+
 struct GraphRecordedNode {
     std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids{};
     ActiveMask active_mask{};
@@ -333,7 +396,7 @@ struct GraphRecordedNode {
     // this one stays per node: its heap buffer has to outlive every later node's
     // recording. The arrays whose addresses are never borrowed live flat on the
     // recording instead — see GraphRecording.
-    std::vector<ChipTensor> tensors;
+    GraphRecordedTensors tensors;
     // Ranges into the recording's flat arrays. tensor_sources has one entry per
     // tensor, so tensors.size() is its count.
     uint32_t tensor_source_offset{0};
@@ -369,6 +432,15 @@ struct GraphRecording {
     bool unsupported{false};
     std::vector<ChipTensor> boundary_tensors;
     std::vector<TensorArgType> boundary_types;
+    // First index carrying each boundary tensor's exact (address, size) pair.
+    // Computing this once keeps later same-key submits on an O(N) exact
+    // contract check instead of rediscovering both alias partitions in O(N^2).
+    std::vector<uint16_t> boundary_alias_reps;
+    // Every node needs a contiguous tensor array because TaskOutputTensors
+    // borrows its outputs until the recording ends. A private monotonic arena
+    // preserves that ownership contract while replacing one general-heap
+    // allocation per node with a handful of worker-local bump-allocator chunks.
+    GraphRecordedTensorArena tensor_storage;
     std::vector<GraphRecordedNode> nodes;
     // Flat per-node arrays, indexed by the ranges on GraphRecordedNode. Held
     // here rather than on each node so recording a graph pays a handful of
@@ -381,6 +453,7 @@ struct GraphRecording {
     // Indexed by GraphRecordedNode::predicate_index; only predicated nodes
     // contribute an entry.
     std::vector<GraphRecordedPredicate> predicates;
+    GraphPredicateOperandCache predicate_operand_cache;
     // Hazard state for the recorded body, owned per recording because several
     // graphs record at once, each on its own thread.
     //
@@ -411,11 +484,35 @@ struct GraphRecording {
 
 struct GraphPendingUpload {
     PTO2TaskSlotState *outer_slot{nullptr};
-    std::vector<std::byte> image;
+    size_t image_offset{0};
+    size_t image_bytes{0};
     bool deferred_heap{false};
 };
 
 enum class GraphRecordingStatus : uint8_t { RECORDING = 0, READY = 1, FAILED = 2 };
+
+constexpr size_t GRAPH_INITIAL_SUBMISSION_COUNT = 128;
+constexpr size_t GRAPH_INITIAL_SUBMISSION_BYTES = 512U << 10;
+constexpr size_t GRAPH_INITIAL_RECORDED_NODES = 320;
+constexpr size_t GRAPH_PREDICATE_INTERN_WINDOW = 64;
+constexpr size_t GRAPH_INITIAL_RECORDED_TENSORS = 4096;
+constexpr size_t GRAPH_INITIAL_RECORDED_SCALARS = 2048;
+constexpr size_t GRAPH_INITIAL_RECORDED_FANINS = 2048;
+constexpr size_t GRAPH_INITIAL_DEFINITION_BYTES = 256U << 10;
+constexpr size_t GRAPH_PREWARM_DEFINITIONS = 8;
+
+// Main-thread lookup for the common repeated-key path. A run validates a key's
+// fixed boundary contract once, then later submissions need only this immutable
+// key plus the atomically published recording state. This keeps the recording
+// mutex off the path that is meant to overlap with recorder publication.
+struct GraphFastEntry {
+    uint64_t full_key{0};
+    uint32_t boundary_count{0};
+    uint32_t boundary_scalar_count{0};
+    uint64_t validated_run_epoch{0};
+    std::atomic<GraphRecordingStatus> recording_status{GraphRecordingStatus::FAILED};
+    std::atomic<const std::vector<std::byte> *> definition{nullptr};
+};
 
 // One Definition being recorded. Entries are keyed by Graph key and held by
 // unique_ptr, so a rehash of the owning map never moves one: the recording
@@ -429,9 +526,14 @@ struct GraphInflightRecording {
     // main-thread burst of same-key submissions starve the thread before it can
     // bind its private recording state. Every other access holds the mutex.
     std::atomic<GraphRecordingStatus> recording_status{GraphRecordingStatus::RECORDING};
+    GraphFastEntry *fast_entry{nullptr};
+    std::vector<std::byte> definition_scratch;
 
     GraphRecordingStatus status() const { return recording_status.load(std::memory_order_acquire); }
-    void set_status(GraphRecordingStatus next) { recording_status.store(next, std::memory_order_release); }
+    void set_status(GraphRecordingStatus next) {
+        recording_status.store(next, std::memory_order_release);
+        if (fast_entry != nullptr) fast_entry->recording_status.store(next, std::memory_order_release);
+    }
 };
 
 struct GraphHostState {
@@ -439,16 +541,31 @@ struct GraphHostState {
     // Recordings in flight, at most one per Graph key. Several record at once,
     // each on its own thread; graph_commit drains and finalizes all of them.
     std::unordered_map<uint64_t, std::unique_ptr<GraphInflightRecording>> inflight;
+    // Completed cold recordings retain their worker-local arenas until the
+    // callable is destroyed. Releasing several large recording trees while
+    // holding recording_mutex serialized allocator work in graph_commit.
+    std::vector<std::unique_ptr<GraphInflightRecording>> retired_recordings;
     std::vector<GraphPendingUpload> pending_uploads;
+    // All per-occurrence submission images share one callable-owned allocation.
+    // begin_run clears its size but retains capacity, so steady-state replay
+    // performs no per-Graph host allocation and is already laid out as the H2D
+    // batch consumed by runtime_maker.
+    std::vector<std::byte> pending_image_storage;
+    size_t pending_image_bytes{0};
     std::mutex recording_mutex;
     std::condition_variable recording_cv;
     // Mirrors inflight.size() so orchestration completion answers the common
     // "nothing is recording" case without taking recording_mutex.
     std::atomic<size_t> inflight_count{0};
+    std::array<GraphFastEntry, GRAPH_MAX_DEFINITIONS> fast_entries{};
+    size_t fast_entry_count{0};
+    uint64_t run_epoch{0};
+    std::array<std::unique_ptr<GraphInflightRecording>, GRAPH_MAX_DEFINITIONS> prewarmed_recordings{};
+    size_t next_prewarmed_recording{0};
 
     // Definitions this run can still admit: published plus in flight, against
     // the per-worker cache limit.
-    size_t claimed_definitions() const { return definitions.size() + inflight.size(); }
+    size_t claimed_definitions() const { return fast_entry_count; }
     bool any_recording() const {
         for (const auto &entry : inflight) {
             if (entry.second->status() == GraphRecordingStatus::RECORDING) return true;
@@ -493,6 +610,25 @@ bool graph_tensor_exact(const ChipTensor &lhs, const ChipTensor &rhs) {
     }
     return std::equal(std::begin(lhs.shapes), std::begin(lhs.shapes) + lhs.ndims, std::begin(rhs.shapes)) &&
            std::equal(std::begin(lhs.strides), std::begin(lhs.strides) + lhs.ndims, std::begin(rhs.strides));
+}
+
+bool graph_predicate_replay_equivalent(
+    const GraphRecordedPredicate &recorded, const GraphRecordedTensorSourceRef &source, uint64_t operand_start_offset,
+    uint64_t elem_offset, int64_t target, uint8_t elem_size, PredicateOp op
+) {
+    if (recorded.source.source != source.source || recorded.source.source_index != source.source_index ||
+        recorded.source.packed_offset != source.packed_offset || recorded.elem_offset != elem_offset ||
+        recorded.target != target || recorded.elem_size != elem_size || recorded.op != op) {
+        return false;
+    }
+    // A boundary tensor's invocation fields replace the recorded template at
+    // materialize time. For an internal tensor, rebind replaces its base but
+    // preserves the view's element start, which therefore remains part of the
+    // address identity. OWN_OUTPUT predicates are rejected before this point.
+    if (recorded.source.source == GraphRecordedTensorSource::INTERNAL) {
+        return recorded.operand.start_offset == operand_start_offset;
+    }
+    return recorded.source.source != GraphRecordedTensorSource::OWN_OUTPUT;
 }
 
 bool graph_tensor_from_boundary(
@@ -623,6 +759,76 @@ GraphBoundarySignature graph_boundary_signature(const ChipTensor &tensor, Tensor
     return signature;
 }
 
+class GraphBoundaryAliasTable {
+public:
+    static constexpr size_t kCapacity = static_cast<size_t>(GRAPH_MAX_TENSOR_ARGS) * 2;
+    static_assert(kCapacity != 0 && (kCapacity & (kCapacity - 1)) == 0);
+
+    void begin() {
+        ++generation_;
+        if (generation_ == 0) {
+            for (Slot &slot : slots_)
+                slot.generation = 0;
+            generation_ = 1;
+        }
+    }
+
+    bool representative(const ChipTensor &tensor, uint16_t index, uint16_t *representative) {
+        if (representative == nullptr) return false;
+        const uint64_t address = tensor.buffer.addr;
+        const uint64_t size = tensor.buffer.size;
+        size_t slot_index = hash_pair(address, size) & (kCapacity - 1);
+        for (size_t probe = 0; probe < kCapacity; ++probe) {
+            Slot &slot = slots_[slot_index];
+            if (slot.generation != generation_) {
+                slot = Slot{address, size, index, generation_};
+                *representative = index;
+                return true;
+            }
+            if (slot.address == address && slot.size == size) {
+                *representative = slot.representative;
+                return true;
+            }
+            slot_index = (slot_index + 1) & (kCapacity - 1);
+        }
+        return false;
+    }
+
+private:
+    struct Slot {
+        uint64_t address{0};
+        uint64_t size{0};
+        uint16_t representative{0};
+        uint32_t generation{0};
+    };
+
+    static uint64_t hash_pair(uint64_t address, uint64_t size) {
+        uint64_t value = address ^ (size + 0x9e3779b97f4a7c15ULL + (address << 6) + (address >> 2));
+        value ^= value >> 33;
+        value *= 0xff51afd7ed558ccdULL;
+        value ^= value >> 33;
+        return value;
+    }
+
+    uint32_t generation_{0};
+    std::array<Slot, kCapacity> slots_{};
+};
+
+bool graph_boundary_alias_representatives(const GraphTaskArgs &args, uint16_t *representatives) {
+    if (representatives == nullptr || args.tensor_count() < 0 ||
+        args.tensor_count() > static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS)) {
+        return false;
+    }
+    static thread_local GraphBoundaryAliasTable aliases;
+    aliases.begin();
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        if (!aliases.representative(args.tensor(i).ref(), static_cast<uint16_t>(i), &representatives[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 template <typename T>
 uint32_t graph_append_section(std::vector<std::byte> *image, const std::vector<T> &values) {
     if (values.empty()) return 0;
@@ -675,6 +881,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     if (image == nullptr || recording.unsupported || recording.nodes.empty() ||
         recording.nodes.size() > GRAPH_MAX_NODES || recording.boundary_tensors.size() > UINT16_MAX ||
         recording.boundary_tensors.size() != recording.boundary_types.size() || recording.boundary_args == nullptr ||
+        recording.predicates.size() > UINT16_MAX ||
         std::any_of(recording.boundary_tensors.begin(), recording.boundary_tensors.end(), [](const ChipTensor &tensor) {
             return tensor.ndims > MAX_TENSOR_DIMS;
         })) {
@@ -701,14 +908,26 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     std::vector<GraphTensorSourceRef> tensor_sources;
     std::vector<uint64_t> scalars;
     std::vector<GraphScalarSourceRef> scalar_sources;
-    std::vector<GraphPredicate> predicates;
-    predicates.reserve(recording.predicates.size());
+    std::vector<GraphPredicate> predicates(recording.predicates.size());
     fanin_indices.reserve(total_fanins);
     roots.reserve(recording.nodes.size());
     tensors.reserve(total_tensors);
     tensor_sources.reserve(total_tensors);
     scalars.reserve(total_scalars);
     scalar_sources.reserve(total_scalars);
+
+    for (size_t i = 0; i < recording.predicates.size(); ++i) {
+        const GraphRecordedPredicate &recorded = recording.predicates[i];
+        std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(recorded.source);
+        if (!packed_source.has_value() || recorded.operand.ndims > MAX_TENSOR_DIMS) return false;
+        GraphPredicate &packed = predicates[i];
+        packed.operand = graph_tensor_pack(recorded.operand);
+        packed.operand_source = *packed_source;
+        packed.elem_offset = recorded.elem_offset;
+        packed.target = recorded.target;
+        packed.elem_size = recorded.elem_size;
+        packed.op = static_cast<uint8_t>(recorded.op);
+    }
 
     uint64_t required_heap = 0;
     uint32_t edge_count = 0;
@@ -755,22 +974,8 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         node.dump_metadata = source.dump_metadata;
         node.predicate_slot = 0;
         if (source.predicate_index >= 0) {
-            if (static_cast<size_t>(source.predicate_index) >= recording.predicates.size() ||
-                predicates.size() >= static_cast<size_t>(UINT16_MAX)) {
-                return false;
-            }
-            const GraphRecordedPredicate &recorded = recording.predicates[source.predicate_index];
-            std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(recorded.source);
-            if (!packed_source.has_value() || recorded.operand.ndims > MAX_TENSOR_DIMS) return false;
-            GraphPredicate packed{};
-            packed.operand = graph_tensor_pack(recorded.operand);
-            packed.operand_source = *packed_source;
-            packed.elem_offset = recorded.elem_offset;
-            packed.target = recorded.target;
-            packed.elem_size = recorded.elem_size;
-            packed.op = static_cast<uint8_t>(recorded.op);
-            node.predicate_slot = static_cast<uint16_t>(predicates.size() + 1);
-            predicates.push_back(packed);
+            if (static_cast<size_t>(source.predicate_index) >= recording.predicates.size()) return false;
+            node.predicate_slot = static_cast<uint16_t>(source.predicate_index + 1);
         }
         for (const ChipTensor &tensor : source.tensors)
             tensors.push_back(graph_tensor_pack(tensor));
@@ -812,18 +1017,11 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
 
     std::vector<GraphBoundarySignature> signatures;
     signatures.reserve(recording.boundary_tensors.size());
+    if (recording.boundary_alias_reps.size() != recording.boundary_tensors.size()) return false;
     for (size_t i = 0; i < recording.boundary_tensors.size(); ++i) {
-        uint16_t alias_rep = static_cast<uint16_t>(i);
-        for (size_t j = 0; j < i; ++j) {
-            if (recording.boundary_tensors[j].buffer.addr == recording.boundary_tensors[i].buffer.addr &&
-                recording.boundary_tensors[j].buffer.size == recording.boundary_tensors[i].buffer.size) {
-                alias_rep = static_cast<uint16_t>(j);
-                break;
-            }
-        }
-        signatures.push_back(
-            graph_boundary_signature(recording.boundary_tensors[i], recording.boundary_types[i], alias_rep)
-        );
+        signatures.push_back(graph_boundary_signature(
+            recording.boundary_tensors[i], recording.boundary_types[i], recording.boundary_alias_reps[i]
+        ));
     }
 
     image->assign(sizeof(GraphDefinition), std::byte{0});
@@ -908,6 +1106,232 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     return true;
 }
 
+// Cold misses used to build thirteen temporary section vectors and then copy
+// all of them into the Definition image. The recording already contains every
+// exact count, so lay out the final image first and pack directly into it. The
+// only remaining scratch allocation is the per-node fanout cursor array.
+bool graph_build_definition_direct(const GraphRecording &recording, std::vector<std::byte> *image) {
+    const size_t node_count = recording.nodes.size();
+    if (image == nullptr || recording.unsupported || node_count == 0 || node_count > GRAPH_MAX_NODES ||
+        recording.boundary_tensors.empty() || recording.boundary_tensors.size() > UINT16_MAX ||
+        recording.boundary_tensors.size() != recording.boundary_types.size() ||
+        recording.boundary_tensors.size() != recording.boundary_alias_reps.size() ||
+        recording.boundary_args == nullptr || recording.predicates.size() > UINT16_MAX) {
+        return false;
+    }
+
+    size_t total_tensors = 0;
+    const size_t total_scalars = recording.scalars.size();
+    const size_t total_fanins = recording.internal_fanins.size();
+    size_t root_count = 0;
+    int32_t widest_node_tensor_count = 0;
+    uint64_t required_heap = 0;
+    std::vector<uint32_t> fanout_cursors(node_count, 0);
+    for (size_t i = 0; i < node_count; ++i) {
+        const GraphRecordedNode &source = recording.nodes[i];
+        if (source.total_output_size > static_cast<size_t>(INT32_MAX) ||
+            source.tensors.size() > static_cast<size_t>(INT32_MAX) ||
+            source.scalar_count > static_cast<uint32_t>(INT32_MAX) || source.fanin_count > UINT16_MAX ||
+            source.tensor_source_offset > recording.tensor_sources.size() ||
+            source.tensors.size() > recording.tensor_sources.size() - source.tensor_source_offset ||
+            source.scalar_offset > recording.scalars.size() ||
+            source.scalar_count > recording.scalars.size() - source.scalar_offset ||
+            source.scalar_offset > recording.scalar_sources.size() ||
+            source.scalar_count > recording.scalar_sources.size() - source.scalar_offset ||
+            source.fanin_offset > recording.internal_fanins.size() ||
+            source.fanin_count > recording.internal_fanins.size() - source.fanin_offset ||
+            total_tensors > UINT32_MAX - source.tensors.size() ||
+            std::any_of(source.tensors.begin(), source.tensors.end(), [](const ChipTensor &tensor) {
+                return tensor.ndims > MAX_TENSOR_DIMS;
+            })) {
+            return false;
+        }
+        total_tensors += source.tensors.size();
+        widest_node_tensor_count = std::max(widest_node_tensor_count, static_cast<int32_t>(source.tensors.size()));
+        if (source.fanin_count == 0) ++root_count;
+        for (uint32_t f = 0; f < source.fanin_count; ++f) {
+            const size_t producer = recording.internal_fanins[source.fanin_offset + f];
+            if (producer >= i || fanout_cursors[producer] == UINT32_MAX) return false;
+            ++fanout_cursors[producer];
+        }
+        const uint64_t output_bytes = PTO2_ALIGN_UP(source.total_output_size, PTO2_ALIGN_SIZE);
+        if (required_heap > UINT64_MAX - output_bytes) return false;
+        required_heap += output_bytes;
+    }
+    if (total_tensors > UINT32_MAX || total_scalars > UINT32_MAX || total_fanins > UINT32_MAX ||
+        root_count > UINT32_MAX) {
+        return false;
+    }
+    for (const ChipTensor &tensor : recording.boundary_tensors) {
+        if (tensor.ndims > MAX_TENSOR_DIMS) return false;
+    }
+
+    GraphDefinition definition{};
+    definition.full_key = recording.full_key;
+    definition.required_heap = required_heap;
+    definition.task_count = static_cast<uint32_t>(node_count);
+    definition.edge_count = static_cast<uint32_t>(total_fanins);
+    definition.root_count = static_cast<uint32_t>(root_count);
+    definition.boundary_count = static_cast<uint32_t>(recording.boundary_tensors.size());
+    definition.boundary_scalar_count = static_cast<uint32_t>(recording.boundary_scalar_count);
+    definition.tensor_arg_count = static_cast<uint32_t>(total_tensors);
+    definition.scalar_arg_count = static_cast<uint32_t>(total_scalars);
+    definition.predicate_count = static_cast<uint32_t>(recording.predicates.size());
+    const size_t node_stride = graph_node_stride(widest_node_tensor_count);
+    size_t execution_storage_bytes = 0;
+    if (node_stride > UINT32_MAX ||
+        !graph_execution_storage_bytes(static_cast<int32_t>(node_count), node_stride, &execution_storage_bytes) ||
+        execution_storage_bytes > UINT32_MAX) {
+        return false;
+    }
+    definition.node_stride = static_cast<uint32_t>(node_stride);
+    definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
+
+    size_t cursor = sizeof(GraphDefinition);
+    auto layout = [&cursor](size_t count, size_t element_bytes, size_t alignment, uint32_t *offset) {
+        *offset = 0;
+        if (count == 0) return true;
+        if (alignment == 0 || (alignment & (alignment - 1)) != 0 || cursor > SIZE_MAX - (alignment - 1) ||
+            count > SIZE_MAX / element_bytes) {
+            return false;
+        }
+        const size_t aligned = (cursor + alignment - 1) & ~(alignment - 1);
+        const size_t bytes = count * element_bytes;
+        if (aligned > UINT32_MAX || bytes > UINT32_MAX - aligned) return false;
+        *offset = static_cast<uint32_t>(aligned);
+        cursor = aligned + bytes;
+        return true;
+    };
+#define GRAPH_LAYOUT_FIELD(field, type, count) layout((count), sizeof(type), alignof(type), &definition.field)
+    if (!GRAPH_LAYOUT_FIELD(off_fanout_offsets, uint32_t, node_count + 1) ||
+        !GRAPH_LAYOUT_FIELD(off_fanout_indices, uint16_t, total_fanins) ||
+        !GRAPH_LAYOUT_FIELD(off_fanin_offsets, uint32_t, node_count + 1) ||
+        !GRAPH_LAYOUT_FIELD(off_fanin_indices, uint16_t, total_fanins) ||
+        !GRAPH_LAYOUT_FIELD(off_root_indices, uint16_t, root_count) ||
+        !GRAPH_LAYOUT_FIELD(off_node_offsets, uint64_t, node_count) ||
+        !GRAPH_LAYOUT_FIELD(off_nodes, GraphNodeDefinition, node_count) ||
+        !GRAPH_LAYOUT_FIELD(off_tensors, GraphTensor, total_tensors) ||
+        !GRAPH_LAYOUT_FIELD(off_tensor_sources, GraphTensorSourceRef, total_tensors) ||
+        !GRAPH_LAYOUT_FIELD(off_scalars, uint64_t, total_scalars) ||
+        !GRAPH_LAYOUT_FIELD(off_scalar_sources, GraphScalarSourceRef, total_scalars) ||
+        !GRAPH_LAYOUT_FIELD(off_boundary_signatures, GraphBoundarySignature, recording.boundary_tensors.size()) ||
+        !GRAPH_LAYOUT_FIELD(off_predicates, GraphPredicate, recording.predicates.size())) {
+#undef GRAPH_LAYOUT_FIELD
+        return false;
+    }
+#undef GRAPH_LAYOUT_FIELD
+    if (cursor > UINT32_MAX) return false;
+    image->assign(cursor, std::byte{0});
+    definition.total_bytes = static_cast<uint32_t>(cursor);
+
+    auto section = [&image](uint32_t offset) -> std::byte * {
+        return offset == 0 ? nullptr : image->data() + offset;
+    };
+    auto *fanout_offsets = reinterpret_cast<uint32_t *>(section(definition.off_fanout_offsets));
+    auto *fanout_indices = reinterpret_cast<uint16_t *>(section(definition.off_fanout_indices));
+    auto *fanin_offsets = reinterpret_cast<uint32_t *>(section(definition.off_fanin_offsets));
+    auto *fanin_indices = reinterpret_cast<uint16_t *>(section(definition.off_fanin_indices));
+    auto *roots = reinterpret_cast<uint16_t *>(section(definition.off_root_indices));
+    auto *node_offsets = reinterpret_cast<uint64_t *>(section(definition.off_node_offsets));
+    auto *nodes = reinterpret_cast<GraphNodeDefinition *>(section(definition.off_nodes));
+    auto *tensors = reinterpret_cast<GraphTensor *>(section(definition.off_tensors));
+    auto *tensor_sources = reinterpret_cast<GraphTensorSourceRef *>(section(definition.off_tensor_sources));
+    auto *scalars = reinterpret_cast<uint64_t *>(section(definition.off_scalars));
+    auto *scalar_sources = reinterpret_cast<GraphScalarSourceRef *>(section(definition.off_scalar_sources));
+    auto *signatures = reinterpret_cast<GraphBoundarySignature *>(section(definition.off_boundary_signatures));
+    auto *predicates = reinterpret_cast<GraphPredicate *>(section(definition.off_predicates));
+
+    uint32_t tensor_cursor = 0;
+    uint32_t scalar_cursor = 0;
+    uint32_t fanin_cursor = 0;
+    uint32_t root_cursor = 0;
+    uint64_t heap_cursor = 0;
+    fanin_offsets[0] = 0;
+    for (size_t i = 0; i < node_count; ++i) {
+        const GraphRecordedNode &source = recording.nodes[i];
+        node_offsets[i] = heap_cursor;
+        heap_cursor += PTO2_ALIGN_UP(source.total_output_size, PTO2_ALIGN_SIZE);
+        if (source.fanin_count == 0) roots[root_cursor++] = static_cast<uint16_t>(i);
+        for (uint32_t f = 0; f < source.fanin_count; ++f) {
+            fanin_indices[fanin_cursor++] = static_cast<uint16_t>(recording.internal_fanins[source.fanin_offset + f]);
+        }
+        fanin_offsets[i + 1] = fanin_cursor;
+
+        GraphNodeDefinition &node = nodes[i];
+        std::copy(source.kernel_ids.begin(), source.kernel_ids.end(), std::begin(node.kernel_id));
+        node.active_mask = source.active_mask.raw();
+        node.task_attrs = source.task_attrs.raw();
+        node.logical_block_num = source.logical_block_num;
+        node.total_required_subtasks = source.total_required_subtasks;
+        node.tensor_count = static_cast<int32_t>(source.tensors.size());
+        node.scalar_count = static_cast<int32_t>(source.scalar_count);
+        node.total_output_size = static_cast<int32_t>(source.total_output_size);
+        node.tensor_offset = tensor_cursor;
+        node.scalar_offset = scalar_cursor;
+        node.dump_metadata = source.dump_metadata;
+        if (source.predicate_index >= 0) {
+            if (static_cast<size_t>(source.predicate_index) >= recording.predicates.size()) return false;
+            const GraphRecordedPredicate &recorded = recording.predicates[source.predicate_index];
+            std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(recorded.source);
+            if (!packed_source.has_value() || recorded.operand.ndims > MAX_TENSOR_DIMS) return false;
+            GraphPredicate &packed = predicates[source.predicate_index];
+            packed.operand = graph_tensor_pack(recorded.operand);
+            packed.operand_source = *packed_source;
+            packed.elem_offset = recorded.elem_offset;
+            packed.target = recorded.target;
+            packed.elem_size = recorded.elem_size;
+            packed.op = static_cast<uint8_t>(recorded.op);
+            node.predicate_slot = static_cast<uint16_t>(source.predicate_index + 1);
+        }
+        for (size_t t = 0; t < source.tensors.size(); ++t) {
+            tensors[tensor_cursor] = graph_tensor_pack(source.tensors[t]);
+            std::optional<GraphTensorSourceRef> packed_source =
+                graph_pack_tensor_source(recording.tensor_sources[source.tensor_source_offset + t]);
+            if (!packed_source.has_value()) return false;
+            tensor_sources[tensor_cursor++] = *packed_source;
+        }
+        for (size_t s = 0; s < source.scalar_count; ++s) {
+            std::optional<GraphScalarSourceRef> packed_source =
+                graph_pack_scalar_source(recording.scalar_sources[source.scalar_offset + s]);
+            if (!packed_source.has_value() ||
+                (packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) &&
+                 packed_source->source_index >= recording.boundary_args->scalar_count())) {
+                return false;
+            }
+            scalar_sources[scalar_cursor] = *packed_source;
+            scalars[scalar_cursor++] = packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) ?
+                                           0 :
+                                           recording.scalars[source.scalar_offset + s];
+        }
+    }
+
+    fanout_offsets[0] = 0;
+    for (size_t i = 0; i < node_count; ++i) {
+        fanout_offsets[i + 1] = fanout_offsets[i] + fanout_cursors[i];
+        fanout_cursors[i] = fanout_offsets[i];
+    }
+    for (size_t consumer = 0; consumer < node_count; ++consumer) {
+        const GraphRecordedNode &node = recording.nodes[consumer];
+        for (uint32_t f = 0; f < node.fanin_count; ++f) {
+            const size_t producer = recording.internal_fanins[node.fanin_offset + f];
+            fanout_indices[fanout_cursors[producer]++] = static_cast<uint16_t>(consumer);
+        }
+    }
+    for (size_t i = 0; i < recording.boundary_tensors.size(); ++i) {
+        signatures[i] = graph_boundary_signature(
+            recording.boundary_tensors[i], recording.boundary_types[i], recording.boundary_alias_reps[i]
+        );
+    }
+    if (tensor_cursor != total_tensors || scalar_cursor != total_scalars || fanin_cursor != total_fanins ||
+        root_cursor != root_count || heap_cursor != required_heap) {
+        return false;
+    }
+    std::memcpy(image->data(), &definition, sizeof(definition));
+    definition.content_hash = graph_hash_bytes(1469598103934665603ULL, image->data(), image->size());
+    std::memcpy(image->data(), &definition, sizeof(definition));
+    return true;
+}
+
 const GraphDefinition *graph_definition(const std::vector<std::byte> &image) {
     if (image.size() < sizeof(GraphDefinition)) return nullptr;
     const auto *definition = reinterpret_cast<const GraphDefinition *>(image.data());
@@ -916,26 +1340,79 @@ const GraphDefinition *graph_definition(const std::vector<std::byte> &image) {
 
 }  // namespace
 
-GraphHostStatePtr make_graph_host_state() { return GraphHostStatePtr{new (std::nothrow) GraphHostState{}}; }
+GraphHostStatePtr make_graph_host_state() {
+    GraphHostStatePtr state{new (std::nothrow) GraphHostState{}};
+    if (state == nullptr) return {};
+    try {
+        state->definitions.reserve(GRAPH_MAX_DEFINITIONS);
+        state->inflight.reserve(GRAPH_MAX_DEFINITIONS);
+        state->retired_recordings.reserve(GRAPH_MAX_DEFINITIONS);
+        state->pending_uploads.reserve(GRAPH_INITIAL_SUBMISSION_COUNT);
+        state->pending_image_storage.resize(GRAPH_INITIAL_SUBMISSION_BYTES);
+        for (size_t i = 0; i < state->prewarmed_recordings.size(); ++i) {
+            auto &slot = state->prewarmed_recordings[i];
+            slot = std::make_unique<GraphInflightRecording>();
+            slot->recording = std::make_unique<GraphRecording>();
+            if (i >= GRAPH_PREWARM_DEFINITIONS) continue;
+            GraphRecording &recording = *slot->recording;
+            recording.boundary_tensors.reserve(GRAPH_MAX_TENSOR_ARGS);
+            recording.boundary_types.reserve(GRAPH_MAX_TENSOR_ARGS);
+            recording.boundary_alias_reps.reserve(GRAPH_MAX_TENSOR_ARGS);
+            recording.nodes.reserve(GRAPH_INITIAL_RECORDED_NODES);
+            recording.tensor_sources.reserve(GRAPH_INITIAL_RECORDED_TENSORS);
+            recording.scalars.reserve(GRAPH_INITIAL_RECORDED_SCALARS);
+            recording.scalar_sources.reserve(GRAPH_INITIAL_RECORDED_SCALARS);
+            recording.internal_fanins.reserve(GRAPH_INITIAL_RECORDED_FANINS);
+            recording.output_ranges.reserve(GRAPH_INITIAL_RECORDED_NODES);
+            recording.predicates.reserve(GRAPH_INITIAL_RECORDED_NODES);
+            if (!recording.tensor_storage.reserve_initial()) return {};
+            slot->definition_scratch.reserve(GRAPH_INITIAL_DEFINITION_BYTES);
+        }
+    } catch (...) {
+        return {};
+    }
+    return state;
+}
 
 void GraphHostStateDeleter::operator()(GraphHostState *state) const noexcept { delete state; }
+
+bool graph_host_begin_run(GraphHostState &state) {
+    std::lock_guard<std::mutex> lock(state.recording_mutex);
+    if (!state.inflight.empty() || state.inflight_count.load(std::memory_order_acquire) != 0) return false;
+    state.pending_uploads.clear();
+    state.pending_image_bytes = 0;
+    if (++state.run_epoch == 0) {
+        state.run_epoch = 1;
+        for (size_t i = 0; i < state.fast_entry_count; ++i)
+            state.fast_entries[i].validated_run_epoch = 0;
+    }
+    return true;
+}
 
 size_t graph_host_upload_count(const GraphHostState &state) { return state.pending_uploads.size(); }
 
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index) {
     if (index >= state.pending_uploads.size()) return std::nullopt;
     GraphPendingUpload &upload = state.pending_uploads[index];
-    if (upload.outer_slot == nullptr || upload.image.empty()) return std::nullopt;
-    return GraphHostUpload{upload.outer_slot, upload.image.data(), upload.image.size()};
+    if (upload.outer_slot == nullptr || upload.image_bytes == 0 || upload.image_offset > state.pending_image_bytes ||
+        upload.image_bytes > state.pending_image_bytes - upload.image_offset) {
+        return std::nullopt;
+    }
+    return GraphHostUpload{
+        upload.outer_slot, state.pending_image_storage.data() + upload.image_offset, upload.image_bytes
+    };
+}
+
+GraphHostUploadBatch graph_host_upload_batch(GraphHostState &state) {
+    return GraphHostUploadBatch{state.pending_image_storage.data(), state.pending_image_bytes};
 }
 
 GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
     GraphHostDefinitionList list;
-    list.entries.reserve(state.definitions.size());
     for (auto &[key, image] : state.definitions) {
         const GraphDefinition *header = graph_definition(image);
-        if (header != nullptr && header->total_bytes == image.size()) {
-            list.entries.push_back(GraphHostDefinition{key, image.data(), image.size()});
+        if (header != nullptr && header->total_bytes == image.size() && list.count < list.entries.size()) {
+            list.entries[list.count++] = GraphHostDefinition{key, image.data(), image.size()};
         }
     }
     return list;
@@ -1506,6 +1983,9 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
     );
     if (signatures == nullptr) return false;
 
+    std::array<uint16_t, GRAPH_MAX_TENSOR_ARGS> alias_reps{};
+    if (!graph_boundary_alias_representatives(args, alias_reps.data())) return false;
+
     bool alias_mismatch = false;
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
         const ChipTensor &tensor = args.tensor(i).ref();
@@ -1531,15 +2011,7 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
             );
             return false;
         }
-        uint16_t alias_rep = static_cast<uint16_t>(i);
-        for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &other = args.tensor(j).ref();
-            if (other.buffer.addr == tensor.buffer.addr && other.buffer.size == tensor.buffer.size) {
-                alias_rep = static_cast<uint16_t>(j);
-                break;
-            }
-        }
-        alias_mismatch |= alias_rep != signature.alias_rep;
+        alias_mismatch |= alias_reps[static_cast<size_t>(i)] != signature.alias_rep;
     }
     if (alias_mismatch) {
         debug_assert(!alias_mismatch && "Changing the Graph boundary alias partition is not supported");
@@ -1552,9 +2024,12 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
 bool graph_recording_boundary_matches(const GraphRecording &recording, const GraphTaskArgs &args) {
     if (args.scalar_count() != recording.boundary_scalar_count || args.explicit_dep_count() != 0 ||
         args.tensor_count() != static_cast<int32_t>(recording.boundary_tensors.size()) ||
-        recording.boundary_tensors.size() != recording.boundary_types.size()) {
+        recording.boundary_tensors.size() != recording.boundary_types.size() ||
+        recording.boundary_tensors.size() != recording.boundary_alias_reps.size()) {
         return false;
     }
+    std::array<uint16_t, GRAPH_MAX_TENSOR_ARGS> actual_alias_reps{};
+    if (!graph_boundary_alias_representatives(args, actual_alias_reps.data())) return false;
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
         const ChipTensor &expected = recording.boundary_tensors[static_cast<size_t>(i)];
         const ChipTensor &actual = args.tensor(i).ref();
@@ -1570,24 +2045,9 @@ bool graph_recording_boundary_matches(const GraphRecording &recording, const Gra
             )) {
             return false;
         }
-        uint16_t expected_alias = static_cast<uint16_t>(i);
-        uint16_t actual_alias = static_cast<uint16_t>(i);
-        for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &expected_other = recording.boundary_tensors[static_cast<size_t>(j)];
-            if (expected_other.buffer.addr == expected.buffer.addr &&
-                expected_other.buffer.size == expected.buffer.size) {
-                expected_alias = static_cast<uint16_t>(j);
-                break;
-            }
+        if (actual_alias_reps[static_cast<size_t>(i)] != recording.boundary_alias_reps[static_cast<size_t>(i)]) {
+            return false;
         }
-        for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &actual_other = args.tensor(j).ref();
-            if (actual_other.buffer.addr == actual.buffer.addr && actual_other.buffer.size == actual.buffer.size) {
-                actual_alias = static_cast<uint16_t>(j);
-                break;
-            }
-        }
-        if (actual_alias != expected_alias) return false;
     }
     return true;
 }
@@ -1609,11 +2069,14 @@ void graph_reset_outer_payload(PTO2TaskPayload &payload) {
 }
 
 bool graph_prepare_submission_image(
-    uint64_t full_key, const GraphTaskArgs &args, std::vector<std::byte> *submission_image
+    uint64_t full_key, const GraphTaskArgs &args, std::vector<std::byte> *storage, size_t *storage_bytes,
+    size_t *image_offset, size_t *image_bytes
 ) {
-    if (submission_image == nullptr) return false;
-    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
-    const size_t tensor_bytes = static_cast<size_t>(args.tensor_count()) * sizeof(GraphTensor);
+    if (storage == nullptr || storage_bytes == nullptr || image_offset == nullptr || image_bytes == nullptr) {
+        return false;
+    }
+    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphInvocationTensor));
+    const size_t tensor_bytes = static_cast<size_t>(args.tensor_count()) * sizeof(GraphInvocationTensor);
     if (tensors_offset > UINT32_MAX || tensors_offset > UINT32_MAX - tensor_bytes) {
         return false;
     }
@@ -1625,25 +2088,32 @@ bool graph_prepare_submission_image(
         total_bytes > UINT32_MAX) {
         return false;
     }
-    submission_image->assign(total_bytes, std::byte{0});
-    auto *tensors = reinterpret_cast<GraphTensor *>(submission_image->data() + tensors_offset);
+    constexpr size_t kImageAlignment = alignof(GraphSubmission);
+    if (*storage_bytes > SIZE_MAX - (kImageAlignment - 1)) return false;
+    const size_t offset = (*storage_bytes + kImageAlignment - 1) & ~(kImageAlignment - 1);
+    if (total_bytes > SIZE_MAX - offset) return false;
+    if (offset + total_bytes > storage->size()) storage->resize(offset + total_bytes);
+    std::byte *image = storage->data() + offset;
+    auto *tensors = reinterpret_cast<GraphInvocationTensor *>(image + tensors_offset);
     for (int32_t i = 0; i < args.tensor_count(); ++i)
-        tensors[i] = graph_tensor_pack(args.tensor(i).ref());
+        tensors[i] = graph_invocation_tensor_pack(args.tensor(i).ref());
     if (args.scalar_count() != 0) {
         std::memcpy(
-            submission_image->data() + scalars_offset, args.scalar_data(),
-            static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t)
+            image + scalars_offset, args.scalar_data(), static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t)
         );
     }
 
     GraphSubmission submission{};
     submission.graph_key = full_key;
-    submission.total_bytes = static_cast<uint32_t>(submission_image->size());
+    submission.total_bytes = static_cast<uint32_t>(total_bytes);
     submission.tensors_offset = static_cast<uint32_t>(tensors_offset);
     submission.tensor_count = static_cast<uint32_t>(args.tensor_count());
     submission.scalars_offset = static_cast<uint32_t>(scalars_offset);
     submission.scalar_count = static_cast<uint32_t>(args.scalar_count());
-    std::memcpy(submission_image->data(), &submission, sizeof(submission));
+    std::memcpy(image, &submission, sizeof(submission));
+    *storage_bytes = offset + total_bytes;
+    *image_offset = offset;
+    *image_bytes = total_bytes;
     return true;
 }
 
@@ -1660,8 +2130,14 @@ bool graph_submit_outer(
     }
 
     GraphPendingUpload pending;
-    if (!graph_prepare_submission_image(full_key, args, &pending.image)) return false;
-    reinterpret_cast<GraphSubmission *>(pending.image.data())->definition_hash = definition_hash;
+    if (!graph_prepare_submission_image(
+            full_key, args, &state->pending_image_storage, &state->pending_image_bytes, &pending.image_offset,
+            &pending.image_bytes
+        )) {
+        return false;
+    }
+    reinterpret_cast<GraphSubmission *>(state->pending_image_storage.data() + pending.image_offset)->definition_hash =
+        definition_hash;
     pending.deferred_heap = defer_heap;
 
     DepInputs boundary_inputs{
@@ -1741,7 +2217,7 @@ bool graph_submit_outer(
     payload.fanin_count = fanin_builder.count;
 
     pending.outer_slot = &slot;
-    state->pending_uploads.push_back(std::move(pending));
+    state->pending_uploads.push_back(pending);
     if (submitted_id != nullptr) *submitted_id = task_id;
 #if SIMPLER_DFX
     orch->tasks_submitted++;
@@ -1751,10 +2227,10 @@ bool graph_submit_outer(
 
 bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
-    const GraphTaskArgs &args, PTO2TaskId *submitted_id
+    const GraphTaskArgs &args, PTO2TaskId *submitted_id, bool boundary_checked = false
 ) {
     const GraphDefinition *definition = graph_definition(definition_image);
-    if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
+    if (definition == nullptr || (!boundary_checked && !graph_boundary_matches(*definition, args)) ||
         definition->execution_storage_bytes == 0 ||
         definition->required_heap > UINT64_MAX - definition->execution_storage_bytes) {
         return false;
@@ -1777,8 +2253,12 @@ bool graph_submit_pending_definition(
 bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
     for (GraphPendingUpload &pending : state->pending_uploads) {
         if (!pending.deferred_heap) continue;
-        if (pending.image.size() < sizeof(GraphSubmission)) return false;
-        auto *submission = reinterpret_cast<GraphSubmission *>(pending.image.data());
+        if (pending.image_bytes < sizeof(GraphSubmission) || pending.image_offset > state->pending_image_bytes ||
+            pending.image_bytes > state->pending_image_bytes - pending.image_offset) {
+            return false;
+        }
+        auto *submission =
+            reinterpret_cast<GraphSubmission *>(state->pending_image_storage.data() + pending.image_offset);
         auto definition_it = state->definitions.find(submission->graph_key);
         const GraphDefinition *definition =
             definition_it == state->definitions.end() ? nullptr : graph_definition(definition_it->second);
@@ -1786,7 +2266,7 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
             definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
             pending.outer_slot == nullptr || pending.outer_slot->task == nullptr ||
             pending.outer_slot->task_kind != TaskKind::GRAPH ||
-            !graph_submission_wire_size_valid(*submission, pending.image.size())) {
+            !graph_submission_wire_size_valid(*submission, pending.image_bytes)) {
             if (failed_key != nullptr) *failed_key = submission->graph_key;
             return false;
         }
@@ -1880,7 +2360,12 @@ TaskOutputTensors graph_record_submit_node(
     // the caller's ChipTensor; outputs materialize from the create-info onto the
     // scratch buffer and carry this node's owner id.
     const int32_t tensor_count = args.tensor_count();
-    node.tensors.resize(static_cast<size_t>(tensor_count));
+    node.tensors.count = static_cast<size_t>(tensor_count);
+    node.tensors.data = recording.tensor_storage.allocate(node.tensors.count);
+    if (tensor_count != 0 && node.tensors.data == nullptr) {
+        recording.unsupported = true;
+        return result;
+    }
     for (int32_t i = 0; i < tensor_count; ++i) {
         ChipTensor &slot_tensor = node.tensors[static_cast<size_t>(i)];
         if (args.tag(i) != TensorArgType::OUTPUT) {
@@ -1945,9 +2430,6 @@ TaskOutputTensors graph_record_submit_node(
     // disagree.
     if (node.task_attrs.has_predicate()) {
         const CoreTaskPredicate &pred = args.predicate();
-        GraphRecordedPredicate recorded;
-        recorded.op = pred.op;
-        recorded.target = pred.target;
         const ChipTensor *operand = pred.operand.tensor;
         // OWN_OUTPUT would read the node's own output before the node runs, so it
         // names no value the predicate could be evaluating. An index vector that
@@ -1956,18 +2438,56 @@ TaskOutputTensors graph_record_submit_node(
         // Scheduler fatal rather than a named unsupported construct.
         const uint64_t flat_offset =
             operand == nullptr ? 0 : operand->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
-        if (operand == nullptr || operand->ndims > MAX_TENSOR_DIMS || pred.operand.ndims > operand->ndims ||
-            flat_offset < operand->start_offset || flat_offset - operand->start_offset >= operand->extent_elem_cache ||
-            !graph_classify_tensor(recording, node, static_cast<int32_t>(node_index), *operand, &recorded.source) ||
-            recorded.source.source == GraphRecordedTensorSource::OWN_OUTPUT) {
+        const bool operand_valid = operand != nullptr && operand->ndims <= MAX_TENSOR_DIMS &&
+                                   pred.operand.ndims <= operand->ndims && flat_offset >= operand->start_offset &&
+                                   flat_offset - operand->start_offset < operand->extent_elem_cache;
+        GraphRecordedTensorSourceRef source;
+        bool source_classified = false;
+        if (operand_valid && recording.predicate_operand_cache.valid &&
+            graph_tensor_exact(*operand, recording.predicate_operand_cache.operand)) {
+            source = recording.predicate_operand_cache.source;
+            source_classified = true;
+        } else if (operand_valid &&
+                   graph_classify_tensor(recording, node, static_cast<int32_t>(node_index), *operand, &source)) {
+            // OWN_OUTPUT is relative to the node being recorded; the same
+            // address becomes INTERNAL for a later node, so never cache it.
+            if (source.source != GraphRecordedTensorSource::OWN_OUTPUT) {
+                recording.predicate_operand_cache.operand.copy(*operand);
+                recording.predicate_operand_cache.source = source;
+                recording.predicate_operand_cache.valid = true;
+            }
+            source_classified = true;
+        }
+        if (!operand_valid || !source_classified || source.source == GraphRecordedTensorSource::OWN_OUTPUT) {
             recording.unsupported = true;
         } else {
-            recorded.operand.copy(*operand);
-            recorded.elem_offset = flat_offset - operand->start_offset;
-            recorded.elem_size = static_cast<uint8_t>(get_element_size(operand->dtype));
+            const uint64_t elem_offset = flat_offset - operand->start_offset;
+            const uint8_t elem_size = static_cast<uint8_t>(get_element_size(operand->dtype));
+            const uint64_t operand_start_offset = operand->start_offset;
+            const size_t predicate_begin = recording.predicates.size() > GRAPH_PREDICATE_INTERN_WINDOW ?
+                                               recording.predicates.size() - GRAPH_PREDICATE_INTERN_WINDOW :
+                                               0;
+            for (size_t i = recording.predicates.size(); i > predicate_begin; --i) {
+                if (graph_predicate_replay_equivalent(
+                        recording.predicates[i - 1], source, operand_start_offset, elem_offset, pred.target, elem_size,
+                        pred.op
+                    )) {
+                    node.predicate_index = static_cast<int32_t>(i - 1);
+                    break;
+                }
+            }
+            if (node.predicate_index < 0) {
+                GraphRecordedPredicate recorded;
+                recorded.operand.copy(*operand);
+                recorded.source = source;
+                recorded.elem_offset = elem_offset;
+                recorded.target = pred.target;
+                recorded.elem_size = elem_size;
+                recorded.op = pred.op;
+                node.predicate_index = static_cast<int32_t>(recording.predicates.size());
+                recording.predicates.push_back(recorded);
+            }
         }
-        node.predicate_index = static_cast<int32_t>(recording.predicates.size());
-        recording.predicates.push_back(recorded);
     }
 
     node.fanin_offset = static_cast<uint32_t>(recording.internal_fanins.size());
@@ -2057,7 +2577,7 @@ TaskOutputTensors graph_record_submit_node(
         always_assert(recording.output_ranges.empty() || recording.output_ranges.back().end <= begin);
         recording.output_ranges.push_back({begin, end, static_cast<uint32_t>(node_index)});
     }
-    recording.nodes.push_back(std::move(node));
+    recording.nodes.push_back(node);
     ORCH_PHASE_END(HostOrchPhase::RecordNode, task_id.raw);
     return result;
 }
@@ -2081,6 +2601,48 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     }
 
     const uint64_t full_key = graph_full_key(callable_hash, graph_key);
+
+    // One orchestration SO invokes graph_begin serially on its main thread.
+    // Recorder threads only publish `definition` and `recording_status`, so the
+    // fixed table itself needs no mutex. The first occurrence of a key in each
+    // run still performs the exact boundary/alias check; repeated occurrences
+    // are identified solely by the already-validated hash key.
+    for (size_t i = 0; i < state->fast_entry_count; ++i) {
+        GraphFastEntry &fast = state->fast_entries[i];
+        if (fast.full_key != full_key) continue;
+        if (fast.boundary_count != static_cast<uint32_t>(args.tensor_count()) ||
+            fast.boundary_scalar_count != static_cast<uint32_t>(args.scalar_count())) {
+            return result;
+        }
+        const GraphRecordingStatus status = fast.recording_status.load(std::memory_order_acquire);
+        const std::vector<std::byte> *definition = fast.definition.load(std::memory_order_acquire);
+        if (fast.validated_run_epoch != state->run_epoch) {
+            if (status != GraphRecordingStatus::READY || definition == nullptr) return result;
+            const GraphDefinition *header = graph_definition(*definition);
+            if (header == nullptr || !graph_boundary_matches(*header, args)) return result;
+            fast.validated_run_epoch = state->run_epoch;
+        }
+        PTO2TaskId submitted = PTO2TaskId::invalid();
+        ORCH_PHASE_START();
+        const bool submitted_ok = status == GraphRecordingStatus::READY && definition != nullptr ?
+                                      graph_submit_definition(orch, state, *definition, args, &submitted, true) :
+                                  status == GraphRecordingStatus::RECORDING ?
+                                      graph_submit_pending_definition(orch, state, full_key, args, &submitted) :
+                                      false;
+        if (submitted_ok) {
+            result.execute_block = false;
+            result.task_id = submitted;
+            ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
+#if SIMPLER_DFX
+            g_orch_submit_idx++;
+#if SIMPLER_ORCH_PROFILING
+            g_orch_submit_count++;
+#endif
+#endif
+        }
+        return result;
+    }
+
     std::unique_lock<std::mutex> lock(state->recording_mutex);
 
     // A published Definition is immutable, so the cache lookup comes first and
@@ -2088,9 +2650,11 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     // would make an already-built Definition wait for an unrelated one.
     auto definition_it = state->definitions.find(full_key);
     if (definition_it != state->definitions.end()) {
+        const std::vector<std::byte> *definition = &definition_it->second;
+        lock.unlock();
         PTO2TaskId submitted = PTO2TaskId::invalid();
         ORCH_PHASE_START();
-        if (graph_submit_definition(orch, state, definition_it->second, args, &submitted)) {
+        if (graph_submit_definition(orch, state, *definition, args, &submitted)) {
             result.execute_block = false;
             result.task_id = submitted;
             ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
@@ -2114,6 +2678,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
             !graph_recording_boundary_matches(*entry.recording, args)) {
             return result;
         }
+        lock.unlock();
         PTO2TaskId submitted = PTO2TaskId::invalid();
         ORCH_PHASE_START();
         if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
@@ -2142,7 +2707,10 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
         return result;
     }
 
-    auto recording = std::make_unique<GraphRecording>();
+    if (state->next_prewarmed_recording >= state->prewarmed_recordings.size()) return result;
+    auto entry = std::move(state->prewarmed_recordings[state->next_prewarmed_recording++]);
+    if (entry == nullptr || entry->recording == nullptr) return result;
+    GraphRecording *recording = entry->recording.get();
     recording->full_key = full_key;
     recording->start_local_task_id = orch->ring.task_allocator.active_count();
     if (!graph_recording_init_tensor_map(*recording)) {
@@ -2152,16 +2720,25 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     recording->boundary_scalar_count = args.scalar_count();
     recording->boundary_tensors.reserve(static_cast<size_t>(args.tensor_count()));
     recording->boundary_types.reserve(static_cast<size_t>(args.tensor_count()));
+    recording->boundary_alias_reps.resize(static_cast<size_t>(args.tensor_count()));
+    if (!graph_boundary_alias_representatives(args, recording->boundary_alias_reps.data())) return result;
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
         recording->boundary_tensors.push_back(args.tensor(i).ref());
         recording->boundary_types.push_back(args.tag(i));
     }
-    auto entry = std::make_unique<GraphInflightRecording>();
     entry->full_key = full_key;
-    entry->recording = std::move(recording);
     GraphInflightRecording *entry_ptr = entry.get();
     state->inflight.emplace(full_key, std::move(entry));
+    GraphFastEntry &fast = state->fast_entries[state->fast_entry_count++];
+    fast.full_key = full_key;
+    fast.boundary_count = static_cast<uint32_t>(args.tensor_count());
+    fast.boundary_scalar_count = static_cast<uint32_t>(args.scalar_count());
+    fast.validated_run_epoch = state->run_epoch;
+    fast.definition.store(nullptr, std::memory_order_relaxed);
+    fast.recording_status.store(GraphRecordingStatus::RECORDING, std::memory_order_release);
+    entry_ptr->fast_entry = &fast;
     state->inflight_count.store(state->inflight.size(), std::memory_order_release);
+    lock.unlock();
 
     PTO2TaskId submitted = PTO2TaskId::invalid();
     ORCH_PHASE_START();
@@ -2178,8 +2755,12 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 #endif
 #endif
     } else {
-        state->inflight.erase(full_key);
+        lock.lock();
+        auto failed = state->inflight.find(full_key);
+        if (failed != state->inflight.end() && failed->second.get() == entry_ptr) state->inflight.erase(failed);
         state->inflight_count.store(state->inflight.size(), std::memory_order_release);
+        always_assert(state->fast_entry_count != 0 && &state->fast_entries[state->fast_entry_count - 1] == &fast);
+        --state->fast_entry_count;
     }
     return result;
 }
@@ -2209,15 +2790,28 @@ bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTas
         graph_recording_boundary_matches(*entry->recording, args) &&
         "the recording thread's boundary copy must match the boundary graph_begin recorded"
     );
+    try {
+        entry->recording->nodes.reserve(GRAPH_INITIAL_RECORDED_NODES);
+        entry->recording->tensor_sources.reserve(GRAPH_INITIAL_RECORDED_TENSORS);
+        entry->recording->scalars.reserve(GRAPH_INITIAL_RECORDED_SCALARS);
+        entry->recording->scalar_sources.reserve(GRAPH_INITIAL_RECORDED_SCALARS);
+        entry->recording->internal_fanins.reserve(GRAPH_INITIAL_RECORDED_FANINS);
+        entry->recording->output_ranges.reserve(GRAPH_INITIAL_RECORDED_NODES);
+    } catch (...) {
+        entry->recording->unsupported = true;
+        return false;
+    }
     args.anchor_scalar_sources();
     entry->recording->boundary_args = &args;
     g_active_graph_entry = entry;
     g_active_graph_recording = entry->recording.get();
     g_active_graph_owner = state;
+    host_phase_producer_begin();
     return true;
 }
 
 void PTO2OrchestratorState::graph_abort(void *recording_handle) {
+    host_phase_producer_end();
     GraphHostState *state = graph_state_from(this);
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
     if (state == nullptr || entry == nullptr) return;
@@ -2240,9 +2834,15 @@ bool PTO2OrchestratorState::graph_end() {
     GraphInflightRecording *entry = g_active_graph_entry;
     if (state == nullptr || recording == nullptr || entry == nullptr) return false;
 
-    std::vector<std::byte> definition;
+    std::vector<std::byte> &definition = entry->definition_scratch;
+    definition.clear();
     ORCH_PHASE_START();
-    const bool built = graph_build_definition(*recording, &definition);
+    const bool built = graph_build_definition_direct(*recording, &definition);
+#ifndef NDEBUG
+    std::vector<std::byte> reference_definition;
+    const bool reference_built = graph_build_definition(*recording, &reference_definition);
+    debug_assert(reference_built == built && (!built || reference_definition == definition));
+#endif
     if (built) {
         ORCH_PHASE_END(HostOrchPhase::BuildDefinition, recording->nodes.size());
     }
@@ -2263,16 +2863,25 @@ bool PTO2OrchestratorState::graph_end() {
         if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
             entry->set_status(GraphRecordingStatus::FAILED);
         } else {
-            state->definitions.emplace(header->full_key, std::move(definition));
-            entry->set_status(GraphRecordingStatus::READY);
+            auto [definition_it, inserted] = state->definitions.emplace(header->full_key, std::move(definition));
+            if (!inserted) {
+                entry->set_status(GraphRecordingStatus::FAILED);
+            } else if (entry->fast_entry != nullptr) {
+                entry->fast_entry->definition.store(&definition_it->second, std::memory_order_release);
+            }
+            if (!inserted) {
+                ready = false;
+            } else {
+                entry->set_status(GraphRecordingStatus::READY);
+            }
         }
         ready = entry->status() == GraphRecordingStatus::READY;
-        entry->recording.reset();
     }
     g_active_graph_entry = nullptr;
     g_active_graph_recording = nullptr;
     g_active_graph_owner = nullptr;
     state->recording_cv.notify_all();
+    host_phase_producer_end();
     return ready;
 }
 
@@ -2306,6 +2915,10 @@ void PTO2OrchestratorState::graph_commit() {
         failed = true;
     }
     if (!failed && !graph_finalize_pending_submissions(this, state, &failed_key)) failed = true;
+    for (auto &[key, entry] : drained) {
+        (void)key;
+        state->retired_recordings.push_back(std::move(entry));
+    }
     if (failed) {
         report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "failed to finalize asynchronous Graph key=%#llx",

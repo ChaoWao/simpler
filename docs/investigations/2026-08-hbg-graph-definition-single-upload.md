@@ -130,5 +130,118 @@ records why it, and not batching, is the one that moves the 12 ms.
 - The first-cut device verify gate returned "busy-looking" nulls to peer
   submissions and surfaced as `sched_error_code=5 INVALID_ARGS`; the fix is
   the spin-wait on `verify_state` (dispatch-path legal: spin, no sleep).
-- `graph record` (245–687 µs) remains per-run and untouched — the per-run
-  Definition cache discard is a separate, still-open item (KNOWN_ISSUES).
+- `graph record` (245–687 µs in the original experiment) remains a cold-miss
+  cost. The current cache belongs to the registered callable, but every fresh
+  process used for cold benchmarking still starts with no Definitions.
+
+## Amendment 2026-08-20 — concurrent cold recording and compact shells
+
+The follow-up overlaps distinct-key recording and removes repeated static tensor
+metadata from the cold path:
+
+- callable registration reserves empty host recording state for the first eight
+  keys; it creates neither a Definition nor a device cache entry;
+- one cold orchestration may build several Definitions concurrently. Every
+  distinct Definition and per-occurrence submission is staged into the run's
+  Graph block, and each submission is patched to the Definition in that block;
+- each submission uses a 40-byte `GraphInvocationTensor` for dynamic boundary
+  state. Static shape, stride, dtype and layout metadata stay in the retained
+  Definition and are reconstructed and exact-validated on device;
+- the Graph submission images themselves already share one callable-owned host
+  allocation, and fixed-capacity metadata arrays remove temporary map/vector
+  allocation from the measured upload window;
+- a fixed 16-entry main-thread key table validates each Graph boundary once per
+  run, then lets repeated same-key shells read recorder/Definition publication
+  atomically without the recording mutex or another boundary scan;
+- the pre-sized submission byte store uses a separate used cursor, so appending
+  a shell overwrites its exact image instead of value-initializing the reserved
+  capacity again;
+- each recording owns a block arena for copied `ChipTensor` arguments, avoiding
+  one general-heap allocation per recorded node while preserving stable tensor
+  addresses for borrowed outputs;
+- callable registration reserves empty recording/Definition-image storage for
+  the first eight keys. A cold worker packs sections directly into its final
+  image allocation rather than assembling thirteen temporary vectors, and the
+  finished recording arena is retired with the callable instead of being freed
+  under the publication mutex;
+- a recording worker claims only one distinct key in each orchestration batch,
+  so a short recording cannot consume a second job while another prewarmed
+  worker remains parked; each job is assigned to that worker's private slot
+  and condition variable, avoiding a pool-wide wakeup between consecutive
+  cold Graph submissions;
+- non-sanitizer host runtime and orchestration builds define `NDEBUG`. Sanitizer
+  and C++ unit-test builds retain the reference Definition builder and its
+  byte-for-byte comparison, while production cold misses execute only the
+  direct builder;
+- a cache-only pass reuses the callable-owned host Definition cache, but stages
+  the referenced Definitions at their addresses in the new run's bind image;
+- main's one-bind-image path (#1947) restacks the four live shared-memory ranges,
+  the device-read arena prefix and the Graph submission block into one host
+  image. One `arena_h2d` transfers that image; there is no separate `sm_h2d`.
+
+After integration with #1947, a cold run's copy model is one bind-image H2D:
+`[copied arena][compact SM][Definition objects][Graph shells]`. The original
+branch's separate page-locked Definition/submission pack is therefore
+superseded; retaining another allocation and upload path would only duplicate
+the main implementation. DSV4 results below are from fresh processes whose
+callable Definition cache starts empty; cache-hit rounds are not a substitute
+for those measurements.
+
+Before #1947 landed, rebasing onto `upstream/main` at `2f3376ab`, rebuilding
+every runtime and reinstalling the editable wheel produced the following
+fresh-process DSV4 `DecodeFwdEP2TP2` sample. It is retained as historical
+evidence for the recording overlap, not as the current-main upload baseline:
+
+| Rank | `host_orch` | `graph_upload` | `sm_h2d` | `arena_h2d` | Sum |
+| ---- | ----------- | -------------- | -------- | ----------- | --- |
+| 0 | 866 µs | 107 µs | 99 µs | 35 µs | **1,106 µs** |
+| 1 | 1,007 µs | 103 µs | 94 µs | 39 µs | **1,243 µs** |
+| Mean | 936 µs | 105 µs | 96 µs | 37 µs | **1,174 µs** |
+
+The per-event timeline shows that 83 and 82 of the 86 main-thread Graph
+submissions overlap worker recording. The last Graph submission also precedes
+the last Definition publication by 149 and 124 µs respectively; the remaining
+tail is the required final publication barrier before the packed upload, not an
+intermediate submit-side wait.
+
+Startup and externally contended runs are kept as controls rather than folded
+into this table. In the same final-rebase session a contended pass measured
+2.64/0.98 ms in `host_orch`, with the extra time concentrated in recorder
+scheduling. It still recorded seven distinct workers and the same cold-miss
+event counts, so it diagnoses host contention rather than a serial-path
+fallback.
+
+## Amendment 2026-08-21 — current main and the one-bind Graph block
+
+The branch was then rebased onto `upstream/main` at `a5c6093d`. That base
+includes #1939's producer-lifetime dependency fix and #1947's one-bind-image
+layout. The DSV4 cold workload now records 1,679 nodes and eight Definitions,
+instead of the earlier 1,388 nodes and seven Definitions, so its `host_orch`
+number is not directly comparable with the pre-rebase table above.
+
+The first post-rebase sample still uploaded all eight Definition objects
+separately before copying the bind image. Folding those objects into the Graph
+block reduced the copy-bearing stages as follows; each row is one rank from a
+fresh-process hardware pass:
+
+| Rank | Before `graph_upload + arena_h2d` | One bind image | Delta |
+| ---- | --------------------------------- | -------------- | ----- |
+| 0 | 1,066.261 us | 264.793 us | -75.2% |
+| 1 | 1,112.880 us | 311.813 us | -72.0% |
+
+The final sample's complete host preparation breakdown is:
+
+| Rank | `host_orch` | `graph_upload` | `sm_h2d` | `arena_h2d` | Sum |
+| ---- | ----------- | -------------- | -------- | ----------- | --- |
+| 0 | 2,041.889 us | 3.841 us | 0 | 260.952 us | **2,306.682 us** |
+| 1 | 2,617.405 us | 5.760 us | 0 | 306.053 us | **2,929.218 us** |
+| Mean | 2,329.647 us | 4.801 us | 0 | 283.503 us | **2,617.950 us** |
+
+Both ranks submitted 86 shells on the main thread, recorded 1,679 nodes,
+built eight Definitions on eight distinct worker threads, and dropped no trace
+records. On one rank the last shell preceded the final Definition by 788 us; on
+the other it followed it by 9 us. The only remaining tail after the last
+Definition was 20--46 us, which is the final publication/packing barrier rather
+than the earlier erroneous submit-side wait. The visible run-to-run
+`host_orch` variation is concentrated in worker scheduling gaps; task-submit
+exposed 320 CPUs to the job, so it is not an accidental one-CPU affinity limit.

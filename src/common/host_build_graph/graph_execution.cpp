@@ -221,6 +221,15 @@ GraphDefinition *graph_definition_object_verified(GraphDefinitionHeader &header)
 // which bounds a producer reference to a node that is already constructed.
 // Returns false when the ref addresses no valid source — the Definition is then
 // invalid, since every ref is written by the recorder from a classified source.
+bool graph_execution_boundary_tensor(const GraphExecution &execution, uint16_t index, GraphTensor *tensor) {
+    if (tensor == nullptr || index >= execution.boundary_tensor_count || execution.boundary_tensors == nullptr ||
+        execution.boundary_signatures == nullptr) {
+        return false;
+    }
+    *tensor = graph_invocation_tensor_unpack(execution.boundary_tensors[index], execution.boundary_signatures[index]);
+    return graph_tensor_wire_valid(*tensor);
+}
+
 bool graph_rebind_tensor(
     const GraphExecution &execution, const GraphNodeDefinition *nodes, const uint64_t *node_offsets,
     const GraphTensor &tensor_template, const GraphTensorSourceRef &ref, int32_t node_index, GraphTensor *rebound_out
@@ -228,11 +237,12 @@ bool graph_rebind_tensor(
     GraphTensor rebound = tensor_template;
     if (!graph_tensor_wire_valid(rebound)) return false;
     if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT)) {
-        if (ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) return false;
-        rebound = execution.boundary_tensors[ref.source_index];
+        if (ref.packed_offset != 0 || !graph_execution_boundary_tensor(execution, ref.source_index, &rebound)) {
+            return false;
+        }
     } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW)) {
-        if (ref.source_index >= execution.boundary_tensor_count) return false;
-        const GraphTensor &boundary = execution.boundary_tensors[ref.source_index];
+        GraphTensor boundary;
+        if (!graph_execution_boundary_tensor(execution, ref.source_index, &boundary)) return false;
         if (ref.packed_offset > UINT64_MAX - boundary.start_offset) return false;
         rebound.buffer_addr = boundary.buffer_addr;
         rebound.buffer_size = boundary.buffer_size;
@@ -327,20 +337,16 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(static_cast<uintptr_t>(submission->definition_addr));
     if (definition_header->magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
-    const GraphTensor *boundary_tensors = graph_submission_tensors(*submission);
+    const GraphInvocationTensor *boundary_tensors = graph_submission_tensors(*submission);
     const uint64_t *boundary_scalars = graph_submission_scalars(*submission);
     const size_t boundary_tensor_end = static_cast<size_t>(submission->tensors_offset) +
-                                       static_cast<size_t>(submission->tensor_count) * sizeof(GraphTensor);
+                                       static_cast<size_t>(submission->tensor_count) * sizeof(GraphInvocationTensor);
     if (boundary_tensors == nullptr || outer_slot.task == nullptr || outer_slot.task->packed_buffer_base == nullptr ||
         outer_slot.task->packed_buffer_end == nullptr ||
         (submission->scalar_count != 0 && boundary_scalars == nullptr) ||
         (submission->scalar_count != 0 && submission->scalars_offset < boundary_tensor_end)) {
         return nullptr;
     }
-    for (uint32_t i = 0; i < submission->tensor_count; ++i) {
-        if (!graph_tensor_wire_valid(boundary_tensors[i])) return nullptr;
-    }
-
     uint64_t expected = 0;
     if (!__atomic_compare_exchange_n(
             &submission->local_execution, &expected, GRAPH_EXECUTION_INITIALIZING, false, __ATOMIC_ACQ_REL,
@@ -358,6 +364,20 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
         submission->scalar_count != definition->boundary_scalar_count) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
         return nullptr;
+    }
+    const GraphBoundarySignature *boundary_signatures = graph_definition_array<GraphBoundarySignature>(
+        *definition, definition->off_boundary_signatures, definition->boundary_count
+    );
+    if (boundary_signatures == nullptr) {
+        __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
+        return nullptr;
+    }
+    for (uint32_t i = 0; i < submission->tensor_count; ++i) {
+        const GraphTensor tensor = graph_invocation_tensor_unpack(boundary_tensors[i], boundary_signatures[i]);
+        if (!graph_tensor_wire_valid(tensor)) {
+            __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
+            return nullptr;
+        }
     }
     const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
     const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_end);
@@ -391,6 +411,7 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
         return nullptr;
     }
     execution->boundary_tensors = boundary_tensors;
+    execution->boundary_signatures = boundary_signatures;
     execution->boundary_tensor_count = submission->tensor_count;
     execution->boundary_scalars = boundary_scalars;
     execution->boundary_scalar_count = submission->scalar_count;

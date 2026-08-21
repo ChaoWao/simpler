@@ -35,12 +35,12 @@
 #include <condition_variable>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <tuple>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 // Type headers needed by orchestration
 #include "common.h"              // framework_bind_runtime / framework_current_runtime
@@ -196,10 +196,10 @@ public:
     bool prewarm() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_) return false;
-        while (workers_.size() < kPrewarmedWorkerCount) {
+        while (worker_count_ < kPrewarmedWorkerCount) {
             if (!create_worker_locked()) break;
         }
-        const size_t target = workers_.size();
+        const size_t target = worker_count_;
         cv_.wait(lock, [&]() {
             return ready_workers_ >= target || stopping_;
         });
@@ -228,25 +228,37 @@ public:
             free_owned_args_[free_owned_args_count_++] = owned_args_index;
             return false;
         }
-        PendingJob &pending = jobs_[job_tail_];
-        pending.function = std::move(next);
-        pending.owned_args_index = owned_args_index;
-        job_tail_ = (job_tail_ + 1) % kJobCapacity;
-        job_count_++;
-        const size_t desired_workers = std::min(kMaxWorkerCount, job_count_ + active_jobs_);
-        while (workers_.size() < desired_workers) {
+        if (!batch_active_) {
+            batch_active_ = true;
+            jobs_in_batch_ = 0;
+            if (++batch_epoch_ == 0) ++batch_epoch_;
+        }
+        const size_t desired_workers = std::min(kMaxWorkerCount, jobs_in_batch_ + 1);
+        while (worker_count_ < desired_workers) {
             if (!create_worker_locked()) break;
         }
-        if (workers_.empty()) {
-            job_tail_ = (job_tail_ + kJobCapacity - 1) % kJobCapacity;
-            PendingJob &rollback = jobs_[job_tail_];
-            rollback.function = {};
-            job_count_--;
-            free_owned_args_[free_owned_args_count_++] = rollback.owned_args_index;
+        size_t worker_index = kMaxWorkerCount;
+        for (size_t i = 0; i < worker_count_; ++i) {
+            WorkerSlot &worker = *workers_[i];
+            if (!worker.pending && !worker.active && worker.claimed_epoch != batch_epoch_) {
+                worker_index = i;
+                break;
+            }
+        }
+        if (worker_count_ < desired_workers || worker_index == kMaxWorkerCount) {
+            if (jobs_in_batch_ == 0) batch_active_ = false;
+            free_owned_args_[free_owned_args_count_++] = owned_args_index;
             return false;
         }
+        WorkerSlot &worker = *workers_[worker_index];
+        worker.job.function = std::move(next);
+        worker.job.owned_args_index = owned_args_index;
+        worker.pending = true;
+        worker.claimed_epoch = batch_epoch_;
+        job_count_++;
+        jobs_in_batch_++;
         lock.unlock();
-        cv_.notify_one();
+        worker.cv.notify_one();
         // graph_begin() has already installed the keyed in-flight entry and
         // submitted the zero-heap outer shell. Enqueuing the private job is
         // therefore the last dependency of the caller; graph_prepare() and all
@@ -265,6 +277,8 @@ public:
         cv_.wait(lock, [&]() {
             return job_count_ == 0 && active_jobs_ == 0;
         });
+        batch_active_ = false;
+        jobs_in_batch_ = 0;
     }
 
 private:
@@ -277,26 +291,40 @@ private:
         size_t owned_args_index{0};
     };
 
+    struct WorkerSlot {
+        std::condition_variable cv;
+        std::thread thread;
+        PendingJob job;
+        uint64_t claimed_epoch{0};
+        bool pending{false};
+        bool active{false};
+    };
+
     bool is_worker_thread_locked(std::thread::id id) const {
-        for (const std::thread &worker : workers_) {
-            if (worker.get_id() == id) return true;
+        for (size_t i = 0; i < worker_count_; ++i) {
+            if (workers_[i]->thread.get_id() == id) return true;
         }
         return false;
     }
 
     bool create_worker_locked() {
-        if (stopping_ || workers_.size() >= kMaxWorkerCount) return false;
+        if (stopping_ || worker_count_ >= kMaxWorkerCount) return false;
+        const size_t worker_index = worker_count_;
         try {
-            workers_.emplace_back([this]() {
-                run();
+            workers_[worker_index] = std::make_unique<WorkerSlot>();
+            workers_[worker_index]->thread = std::thread([this, worker_index]() {
+                run(worker_index);
             });
+            worker_count_++;
             return true;
         } catch (...) {
+            workers_[worker_index].reset();
             return false;
         }
     }
 
-    void run() {
+    void run(size_t worker_index) {
+        WorkerSlot &worker = *workers_[worker_index];
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ready_workers_++;
@@ -306,14 +334,14 @@ private:
             PendingJob current;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&]() {
-                    return job_count_ != 0 || stopping_;
+                worker.cv.wait(lock, [&]() {
+                    return worker.pending || stopping_;
                 });
-                if (stopping_ && job_count_ == 0) return;
-                PendingJob &pending = jobs_[job_head_];
-                current.function = std::move(pending.function);
-                current.owned_args_index = pending.owned_args_index;
-                job_head_ = (job_head_ + 1) % kJobCapacity;
+                if (stopping_ && !worker.pending) return;
+                current.function = std::move(worker.job.function);
+                current.owned_args_index = worker.job.owned_args_index;
+                worker.pending = false;
+                worker.active = true;
                 job_count_--;
                 active_jobs_++;
             }
@@ -323,6 +351,7 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 free_owned_args_[free_owned_args_count_++] = current.owned_args_index;
                 active_jobs_--;
+                worker.active = false;
             }
             cv_.notify_all();
         }
@@ -334,24 +363,28 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
         }
-        cv_.notify_all();
-        for (std::thread &worker : workers_) {
+        for (size_t i = 0; i < worker_count_; ++i) {
+            workers_[i]->cv.notify_one();
+        }
+        for (size_t i = 0; i < worker_count_; ++i) {
+            std::thread &worker = workers_[i]->thread;
             if (worker.joinable()) worker.join();
         }
     }
 
-    std::vector<std::thread> workers_;
+    std::array<std::unique_ptr<WorkerSlot>, kMaxWorkerCount> workers_;
     std::mutex mutex_;
     std::condition_variable cv_;
     std::array<GraphOwnedArgs, kJobCapacity> owned_args_;
     std::array<size_t, kJobCapacity> free_owned_args_{};
-    std::array<PendingJob, kJobCapacity> jobs_;
     size_t free_owned_args_count_{kJobCapacity};
-    size_t job_head_{0};
-    size_t job_tail_{0};
     size_t job_count_{0};
+    size_t jobs_in_batch_{0};
+    size_t worker_count_{0};
     size_t ready_workers_{0};
     size_t active_jobs_{0};
+    uint64_t batch_epoch_{0};
+    bool batch_active_{false};
     bool stopping_{false};
 };
 

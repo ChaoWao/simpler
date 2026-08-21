@@ -490,7 +490,8 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         if (artifacts.host_dlopen_handle != nullptr) {
             rc = runner->record_host_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.host_dlopen_handle,
-                artifacts.host_orch_func_ptr, std::move(kernel_addrs), std::move(artifacts.signature)
+                artifacts.host_orch_func_ptr, std::move(artifacts.host_orch_owner), std::move(kernel_addrs),
+                std::move(artifacts.signature)
             );
             if (rc != 0) return rc;
             host_dlopen_guard.dismiss();

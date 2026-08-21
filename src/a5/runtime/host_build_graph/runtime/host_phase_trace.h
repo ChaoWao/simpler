@@ -63,6 +63,18 @@ bool host_phase_breakdown_enabled();
 bool host_phase_records_enabled();
 
 /**
+ * Hold one trace-lifetime lease for the calling producer.
+ *
+ * The main submitting thread holds a lease for the whole bind pass. A Graph
+ * recording worker holds one from graph_prepare through graph_end/graph_abort.
+ * Calls may nest when a recording falls back to the submitting thread.
+ */
+void host_phase_producer_begin();
+
+/** Release one nesting level of the calling producer's trace lease. */
+void host_phase_producer_end();
+
+/**
  * Host monotonic nanoseconds, or 0 when this pass records nothing — which is
  * what keeps the orchestrator's per-operation hooks down to two calls returning
  * a constant.

@@ -80,6 +80,9 @@ class TestGxxToolchainCmakeArgs:
         assert "-DCMAKE_C_FLAGS=-pthread -B /data/envs/lyf/compiler_compat" in args
         assert "-DCMAKE_CXX_FLAGS=-pthread -B /data/envs/lyf/compiler_compat" in args
 
+    def test_direct_host_builds_disable_debug_assertions(self, toolchain):
+        assert "-DNDEBUG" in toolchain.get_compile_flags()
+
 
 class TestGxxToolchainPreferG15Pins:
     """Under a sanitizer, prefer_g15 ABI-pins the host compiler to g++-15 so its
@@ -103,6 +106,9 @@ class TestGxxToolchainPreferG15Pins:
         args = toolchain.get_cmake_args()
         assert "-DCMAKE_C_COMPILER=gcc-15" in args
         assert "-DCMAKE_CXX_COMPILER=g++-15" in args
+
+    def test_sanitizer_host_builds_keep_debug_assertions(self, toolchain):
+        assert "-DNDEBUG" not in toolchain.get_compile_flags()
 
     def test_conda_flags_preserved_but_compiler_pinned(self, toolchain, monkeypatch):
         # Conda's injected -B compiler_compat flags must survive, but the
