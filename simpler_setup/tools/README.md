@@ -14,6 +14,7 @@ no repo checkout required.
 - **[sched_overhead_analysis](#sched_overhead_analysis)** — scheduler overhead / Tail OH breakdown
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
 - **[strace_timing](#strace_timing)** — per-stage `chip.run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
+- **[hbg_bind_phases](#hbg_bind_phases)** — `host_build_graph` `bind`-stage phases from `bind phase=` log markers → per-phase min/median/max plus the control-plane total
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
 
@@ -380,6 +381,39 @@ view.
 The swimlane is the only view that renders `ext.` spans: every table and
 `--trace-out` keys on `(pid, inv)`, which no external producer has. See
 [docs/dfx/host-trace.md](../../docs/dfx/host-trace.md) for that contract.
+
+---
+
+## hbg_bind_phases
+
+Per-phase statistics for `host_build_graph`'s **`bind` stage** from the
+`bind phase=` markers a run emits under `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` at
+`LOG_TIMING`. One line per segment per bind pass; see
+[docs/dfx/hbg-bind-phases.md](../../docs/dfx/hbg-bind-phases.md) for
+what the segments are, the invocation that produces them, and how to compare two
+runs.
+
+```bash
+# min / median / max per phase over the warm passes, plus the control-plane total
+python -m simpler_setup.tools.hbg_bind_phases path/to/log --rounds 6
+```
+
+Passing `--rounds` is what lets it infer the rank count, so it drops one cold
+warm-up pass **per rank** rather than one in total; `--ranks` sets that directly
+and `--keep-first` keeps the cold passes. A run whose every pass is a rank's
+warm-up — `--rounds 1` — is refused rather than reported, since the one number it
+could print is the cold one. Three grouping rules are encoded rather than left to
+the caller, because each silently produces a wrong number: `arena_h2d` closes a
+pass (the segments are not contiguous in time, so timestamp order does not group
+them), the control-plane total is summed **within** a pass before any minimum is
+taken, and the first pass of each rank is warm-up.
+
+A run whose control plane is missing a phase entirely — a change can retire one —
+is still totalled, over the phases it has, with the absent ones named. A phase
+missing from only *some* passes is a truncated log instead, and those passes are
+excluded with a warning. If the log's first line is a `[stamp]` line naming the
+command and commit, it is echoed above the table; without one, the conditions
+behind the numbers have to be established by hand.
 
 ---
 
