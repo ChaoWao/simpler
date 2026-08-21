@@ -187,17 +187,26 @@ constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
  * Host phase-record pool geometry (host_build_graph's bind path and host
  * orchestrator).
  *
- * Same rotating-pool shape as the sched/orch pools above, sized for its own
- * producer rather than theirs: a scheduler thread emits tens of thousands of
- * records per run, while one host orchestration pass emits a few hundred (a
- * 40-layer decode: 12 bind segments + ~325 submit-level operations). Inheriting
- * PLATFORM_PHASE_RECORDS_PER_THREAD here would allocate 4 MB to hold 11 KB and
- * leave the rotation path unreachable, so per-buffer capacity is 1024 records
- * (32 KB) and the pool holds 5 of them — the floor that lets
- * PLATFORM_PROF_SLOT_COUNT spares fill the free_queue with one buffer active.
+ * Sized for its own producers rather than the sched/orch pools': a scheduler
+ * thread emits tens of thousands of records per run, while one host orchestration
+ * pass emits a few hundred per producer (a 40-layer decode: 12 bind segments +
+ * ~325 submit-level operations). Inheriting PLATFORM_PHASE_RECORDS_PER_THREAD
+ * here would allocate 4 MB to hold 11 KB.
+ *
+ * A pass has one producer per thread that records: the submitting thread plus one
+ * per concurrently-recorded Graph Definition. Each claims whole buffers and fills
+ * them alone, so `PLATFORM_HOST_PHASE_BUFFERS` must exceed the producer count or
+ * a producer is denied a buffer and its records are dropped. The recorder pool
+ * caps itself at GRAPH_MAX_DEFINITIONS (16) threads, so 17 producers is the
+ * ceiling; the buffer count is above that so a producer whose first buffer fills
+ * can chain another.
+ *
+ * Per-buffer capacity is what a producer holds before chaining, not what a pass
+ * needs: the widest observed single producer is a 1-Definition workload's lone
+ * recorder at ~1900 records, which chains four 512-record buffers.
  */
-constexpr int PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER = 1024;
-constexpr int PLATFORM_HOST_PHASE_BUFFERS = PLATFORM_PROF_SLOT_COUNT + 1;
+constexpr int PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER = 512;
+constexpr int PLATFORM_HOST_PHASE_BUFFERS = 24;
 
 /**
  * Per-core ChipSwimlaneAicoreTaskBuffer pre-allocation count.
