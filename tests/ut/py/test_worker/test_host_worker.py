@@ -220,7 +220,7 @@ def _dummy_l2_domain(domain_id: int):
         generation=1,
         domain_rank=0,
         rank_count=1,
-        descriptor=object(),
+        descriptor=cast(Any, object()),
         local_window_base=0,
         mapping_size=8,
         requested_window_size=8,
@@ -230,7 +230,7 @@ def _dummy_l2_domain(domain_id: int):
 class _RecordingImportRegistry:
     def __init__(self) -> None:
         self.close_calls = 0
-        self.error: BaseException | None = None
+        self.error: Optional[BaseException] = None
 
     def close(self) -> None:
         self.close_calls += 1
@@ -309,7 +309,7 @@ def test_sweep_l2_global_domains_attempts_every_domain_and_lists_failures_by_id(
         }
     )
     with pytest.raises(RuntimeError, match="domain cleanup failed") as exc_info:
-        worker_mod._sweep_l2_global_domains(SimpleNamespace(_impl=impl), store)
+        worker_mod._sweep_l2_global_domains(cast(Any, SimpleNamespace(_impl=impl)), store)
     assert impl.released == [3, 5, 7]
     assert store.domains == {}
     message = str(exc_info.value)
@@ -334,6 +334,7 @@ def test_teardown_chip_process_resources_continues_and_aggregates_in_order():
         RegionPartAllocationSpec,
         RegionPartKind,
     )
+
     registry = _RecordingImportRegistry()
     registry.error = RuntimeError("import close failed")
     impl = _RecordingDomainImpl()
@@ -363,8 +364,8 @@ def test_teardown_chip_process_resources_continues_and_aggregates_in_order():
 
     with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
         worker_mod._teardown_chip_process_resources(
-            registry,
-            SimpleNamespace(_impl=impl),
+            cast(Any, registry),
+            cast(Any, SimpleNamespace(_impl=impl)),
             domains,
             store,
         )
@@ -394,6 +395,7 @@ def test_teardown_chip_process_resources_lists_every_retained_resource():
         RegionPartAllocationSpec,
         RegionPartKind,
     )
+
     factory = _TeardownShellFactory()
     store = ProviderRegionStore(
         RegionAllocationContext(
@@ -424,8 +426,8 @@ def test_teardown_chip_process_resources_lists_every_retained_resource():
     ]
     with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
         worker_mod._teardown_chip_process_resources(
-            _RecordingImportRegistry(),
-            SimpleNamespace(_impl=_RecordingDomainImpl()),
+            cast(Any, _RecordingImportRegistry()),
+            cast(Any, SimpleNamespace(_impl=_RecordingDomainImpl())),
             worker_mod._L2GlobalDomainStore(),
             store,
         )
@@ -451,6 +453,7 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
         RegionEnvironmentKind,
         RegionPartAllocationSpec,
     )
+
     registry = _RecordingImportRegistry()
     impl = _RecordingDomainImpl()
     domains = worker_mod._L2GlobalDomainStore()
@@ -469,8 +472,8 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
         )
     )
     worker_mod._teardown_chip_process_resources(
-        registry,
-        SimpleNamespace(_impl=impl),
+        cast(Any, registry),
+        cast(Any, SimpleNamespace(_impl=impl)),
         domains,
         store,
     )

@@ -1248,8 +1248,7 @@ def test_record_data_plane_failure_duplicate_match_is_invariant_error(region_wor
 
 def _endpoint_error(resource_id: int) -> RuntimeError:
     return RuntimeError(
-        f"L3-L2 endpoint error op=payload_write kind=5 region={int(resource_id)} "
-        "msg=issued local operation failed"
+        f"L3-L2 endpoint error op=payload_write kind=5 region={int(resource_id)} msg=issued local operation failed"
     )
 
 
@@ -1476,8 +1475,8 @@ class _StoreControlMailbox:
         self,
         store,
         *,
-        fail_before_allocate: BaseException | None = None,
-        fail_after_allocate: BaseException | None = None,
+        fail_before_allocate: Optional[BaseException] = None,
+        fail_after_allocate: Optional[BaseException] = None,
         reply_mode: str = "handler",
     ) -> None:
         self.store = store
@@ -1554,12 +1553,12 @@ def _live_control_worker(mailbox, monkeypatch, device_ids=(8, 9)):
     return worker
 
 
-def _assert_poisoned(worker, *, cause: BaseException | None = None) -> RuntimeError:
+def _assert_poisoned(worker, *, cause: Optional[BaseException] = None) -> RuntimeError:
     with pytest.raises(RuntimeError, match="no further work is admitted") as poison_info:
         worker._require_no_ordered_cleanup_failure("test")
     if cause is not None:
         chain: list[BaseException] = []
-        current: BaseException | None = poison_info.value
+        current: Optional[BaseException] = poison_info.value
         while current is not None and current not in chain:
             chain.append(current)
             current = current.__cause__

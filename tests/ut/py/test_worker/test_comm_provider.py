@@ -1049,6 +1049,7 @@ def test_posix_token_does_not_use_shared_memory_prepend_attr():
 
 def test_posix_unlink_and_tracker_use_the_same_single_leading_slash(monkeypatch):
     from multiprocessing import resource_tracker
+
     from simpler.comm_provider import _unlink_posix_shm_token
 
     unlinks: list[str] = []
@@ -1072,6 +1073,7 @@ def test_posix_unlink_and_tracker_use_the_same_single_leading_slash(monkeypatch)
 
 def test_posix_repeated_unlink_treats_enoent_as_done(monkeypatch):
     from multiprocessing import resource_tracker
+
     from simpler.comm_provider import _unlink_posix_shm_token
 
     class _FakePosix:
@@ -1092,6 +1094,7 @@ def test_posix_repeated_unlink_treats_enoent_as_done(monkeypatch):
 
 def test_posix_unregister_failure_warns_without_changing_result(monkeypatch, caplog):
     from multiprocessing import resource_tracker
+
     from simpler.comm_provider import _unlink_posix_shm_token
 
     class _FakePosix:

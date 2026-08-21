@@ -45,6 +45,15 @@ from .comm_provider import (
     validate_independent_local_views,
 )
 
+
+class _ControlShm(Protocol):
+    name: str
+
+    def close(self) -> None: ...
+
+    def unlink(self) -> None: ...
+
+
 PROVIDER_REGION_CTRL_MAGIC = 0x50524354
 PROVIDER_REGION_CTRL_ABI_MAJOR = 1
 PROVIDER_REGION_CTRL_ABI_MINOR = 0
@@ -396,7 +405,7 @@ def _zero_reply(view: memoryview) -> None:
     view[:] = b"\x00" * view.nbytes
 
 
-def _discard_control_shm(shm: SharedMemory) -> None:
+def _discard_control_shm(shm: _ControlShm) -> None:
     name = getattr(shm, "name", "<unnamed>")
     logger = logging.getLogger("simpler")
     try:

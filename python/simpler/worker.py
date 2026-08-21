@@ -2659,9 +2659,7 @@ def _teardown_chip_process_resources(
         errors.append(exc)
     if not errors:
         return
-    aggregated = RuntimeError(
-        "chip process resource teardown failed: " + "; ".join(str(item) for item in errors)
-    )
+    aggregated = RuntimeError("chip process resource teardown failed: " + "; ".join(str(item) for item in errors))
     aggregated.__cause__ = errors[0]
     raise aggregated
 
@@ -8222,8 +8220,7 @@ class Worker:
             )
             return True
         self._record_unreclaimable(
-            f"region instance: issued local operation failed for resource {region_id}; "
-            "no further work is admitted",
+            f"region instance: issued local operation failed for resource {region_id}; no further work is admitted",
             exc,
         )
         return True
