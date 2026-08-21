@@ -9,7 +9,7 @@ host register: materialize + dlopen orchestration SO
         ↓
 host run/bind: stage external tensors, execute orchestration to completion
         ↓
-host: relocate the prebuilt graph image and copy it to device memory
+host: copy the prebuilt graph image to device memory
         ↓
 device: attach the image, classify tasks, dispatch with AICPU schedulers
         ↓
@@ -49,9 +49,8 @@ For each run, the host:
 2. reserves one backing arena for runtime/shared-memory subregions;
 3. binds the runtime to the orchestration DSO;
 4. calls the orchestration entry synchronously;
-5. finalizes task counts and the graph image;
-6. rewrites per-slot task/payload pointers to device addresses; and
-7. copies the shared-memory image and arena to the device.
+5. finalizes task counts and the graph image; and
+6. copies the shared-memory image and the arena's copied zone to the device.
 
 An orchestration fatal stops this sequence and is propagated through
 `orch_error_code`.
@@ -78,8 +77,9 @@ The shared image uses three per-slot structures:
 | `PTO2TaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
 
 The host/device boundary is POD and position-independent. Fanins are integer
-producer IDs, not pointers. The only per-slot pointers are rebound to their final
-device addresses before H2D.
+producer IDs, not pointers, and a slot state names its payload and descriptor by a
+delta from its own address — so the image needs no fixup on either side of the
+copy.
 
 ### 3.1 What Ships: the Arena's Three Zones
 
@@ -97,16 +97,25 @@ Three rules decide every byte of the runtime arena:
 They partition the arena into three contiguous zones, and `runtime_reserve_layout`
 reserves them in this order:
 
-| Zone | Regions | Copied | Written by |
-| ---- | ------- | ------ | ---------- |
-| host-only | orchestrator block: `fanin_seen_epoch` / `scope_tasks` / TensorMap, ~8.5 MB | never | host, during graph construction |
-| copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | host |
-| device-only | `sm_handle`, `PTO2SchedulerState` and its thirteen queue slot arrays, the completion mailbox | never | AICPU at boot |
+| Zone | Regions | Copied | Allocated on device | Written by |
+| ---- | ------- | ------ | ------------------- | ---------- |
+| copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | yes | host |
+| device-only | `sm_handle`, the completion mailbox, `PTO2SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
+| host-only | orchestrator block: `fanin_seen_epoch` / `scope_tasks` / TensorMap, ~9.3 MB | never | **no** | host, during graph construction |
 
-Putting the copied zone **between** the two zones that are never copied is what
-makes `bind` a single contiguous `copy_to_device`. Both bounds are layout fields,
-so no consumer infers a boundary from which region happens to be reserved first —
-`bind_callable_to_runtime_impl` asserts only that they are ordered and in range.
+The copied zone leads, so `bind` is a single contiguous `copy_to_device` starting
+at the arena base. Both bounds are layout fields, so no consumer infers a boundary
+from which region happens to be reserved first — `bind_callable_to_runtime_impl`
+asserts only that they are ordered and in range.
+
+**Why the host-only zone comes last.** No device code dereferences a pointer into
+the orchestrator block — hbg has no device-side orchestrator, and the one
+orchestrator field the scheduler reads, `inline_completed_tasks`, is a scalar in
+the runtime header. Putting the block at the tail lets `setup_static_arena` request
+only `layout.device_bytes`, the copied + device-only prefix, so those ~9.3 MB are
+never reserved on the device at all. `runtime_wire_host_only_pointers` is therefore
+host-only, and `runtime_clear_host_only_pointers` drops those pointers before the
+copied zone is uploaded so no host address crosses the boundary.
 
 **Why the scheduler state is device-written.** `PTO2SchedulerState` holds no
 per-run content: `sm_header` and the ring pointer derive from a pooled SM base,

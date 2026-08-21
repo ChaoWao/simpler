@@ -240,12 +240,12 @@ appear.
 
 ### What is recorded
 
-Seventeen kinds, all on the host monotonic clock the `[STRACE]` host spans use,
+Sixteen kinds, all on the host monotonic clock the `[STRACE]` host spans use,
 so records and spans read against each other with no alignment step.
 
 | Group | Kinds |
 | ----- | ----- |
-| Bind segments (partition the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `relocate`, `sm_h2d`, `arena_h2d`, `host_view_close` |
+| Bind segments (partition the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `sm_h2d`, `arena_h2d`, `host_view_close` |
 | Orchestrator operations (inside `host_orch`) | `submit_task`, `alloc_tensors`, `record_node`, `graph_submit`, `build_definition` |
 
 Three of the orchestrator kinds end with a task submitted — `submit_task`,

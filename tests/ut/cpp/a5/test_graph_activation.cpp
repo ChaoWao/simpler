@@ -66,7 +66,7 @@ protected:
         node.slot.task_kind = TaskKind::KERNEL;
         node.slot.total_required_subtasks = 1;
         node.slot.logical_block_num = 1;
-        node.slot.payload = &node.payload;
+        node.slot.payload.set(&node.payload);
     }
 };
 
@@ -138,7 +138,7 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
         node[0].slot.task_kind = TaskKind::GRAPH_NODE;
         node[0].slot.graph_node_index = 0;
         node[0].slot.total_required_subtasks = 1;
-        node[0].slot.payload = &node[0].payload;
+        node[0].slot.payload.set(&node[0].payload);
 
         GraphExecution exec{};
         exec.definition = &definition;
