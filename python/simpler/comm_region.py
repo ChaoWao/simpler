@@ -470,7 +470,7 @@ class RegionInstance:
             self._state = RegionInstanceState.CLOSED
             self._worker._region_instance_registry._settle(self)
             return
-        self._worker._require_region_control_context("region_instance.close")
+        self._worker._require_region_control_before_submit("region_instance.close")
         self._worker._region_instance_registry.close(self)
 
     def _materialize(self, spec: RegionAllocationSpec) -> None:

@@ -10656,16 +10656,20 @@ class Worker:
     def _require_region_control_context(self, api: str) -> None:
         frame = _callback_frame_for(self)
         if frame is not None:
-            if frame.has_submitted_task:
-                raise RuntimeError(
-                    f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run"
-                )
             self._require_no_ordered_cleanup_failure(api)
             return
         if id(self) in _held_control_reservations():
             self._require_no_ordered_cleanup_failure(api)
             return
         raise RuntimeError(f"Worker.{api}: RegionInstance access requires an active orchestration/control context")
+
+    def _require_region_control_before_submit(self, api: str) -> None:
+        # close/release travels the mailbox; a ready-queue task already in the
+        # same run has no defined order against that command.
+        self._require_region_control_context(api)
+        frame = _callback_frame_for(self)
+        if frame is not None and frame.has_submitted_task:
+            raise RuntimeError(f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run")
 
     def _control_admission(self, api: str):
         """The direct-control ordering policy for a Worker-level command.

@@ -773,6 +773,43 @@ def test_callback_region_run_cleanup_then_later_close_is_idempotent(region_worke
     ]
 
 
+def test_callback_region_data_plane_after_submit_uses_mapped_view(region_worker, monkeypatch):
+    worker, _calls, _leases = region_worker()
+    routed: list[str] = []
+
+    def payload_write(self, offset, host_buffer, nbytes=None):
+        routed.append("payload_write")
+
+    def payload_read(self, offset, host_buffer, nbytes=None):
+        routed.append("payload_read")
+
+    def counter(self, offset):
+        routed.append("counter")
+        return "counter"
+
+    monkeypatch.setattr(PayloadPart, "write", payload_write)
+    monkeypatch.setattr(PayloadPart, "read", payload_read)
+    monkeypatch.setattr(CounterPart, "counter", counter)
+
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        with _callback_run(19, worker):
+            instance = _materialize_default_region(worker)
+            frame = _callback_frame_for(worker)
+            assert frame is not None
+            frame.has_submitted_task = True
+            instance.payload_write(0, "src")
+            instance.payload_read(0, "dst")
+            assert instance.counter(0) == "counter"
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                instance.close()
+    finally:
+        worker._building_run_resources = None
+
+    assert routed == ["payload_write", "payload_read", "counter"]
+
+
 def test_materialize_tracks_before_allocate_and_create_failure_is_not_live(region_worker):
     worker, calls, _leases = region_worker(allocate_error=RuntimeError("create failed"))
 
