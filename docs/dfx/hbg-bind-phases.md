@@ -1,14 +1,22 @@
-# Measuring the `host_build_graph` bind path
+# The `host_build_graph` bind phases
 
 `host_build_graph` builds the whole task graph on the host before the device
-executes anything, so its **bind path** — argument staging, orchestration, the
-Graph Definition, and every H2D copy — is a first-class cost. This page is the
-recipe for measuring it on the two decode networks that exercise it, and for the
-traps that make a measurement wrong rather than merely noisy.
+executes anything, so the host-side **`bind` stage** — argument staging,
+orchestration, the Graph Definition, and every H2D copy — is a first-class cost.
+`bind` is the `chip.run.bind` `[STRACE]` span both runtimes emit; only this one
+subdivides it into **phases**, one `bind phase=<p>` line each. This page is what
+those phases are, how to measure them on the two decode networks that exercise
+them, and the traps that make a measurement wrong rather than merely noisy.
 
 For the marker grammar and the tool's other views, see
 [host-trace.md](host-trace.md). For what the runtime records inside `host_orch`,
 see [host_build_graph's profiling levels](../../src/a2a3/runtime/host_build_graph/docs/profiling_levels.md).
+
+**A new lesson about measuring these phases belongs on this page.** The
+[`hbg-bind-phases`](../../.claude/skills/hbg-bind-phases/SKILL.md) skill holds the
+invocation and nothing else — it is loaded into context on every use — and
+[`hbg_bind_phases`](../../simpler_setup/tools/hbg_bind_phases.py) gets a comment
+only once the lesson is an invariant its code depends on.
 
 ## What the segments are
 
@@ -55,15 +63,23 @@ device lock for the whole job (see
 | -------- | ---------------- | ------------------------ |
 | Path | `examples/a2a3/host_build_graph/qwen3_14b_decode/` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/` |
 | Devices | 1 | 2 (EP2/TP2) |
+| Level | 2 | 3 |
 | Host tasks | 47 | 1131 |
 | Graph replays | 40, of a 277-node Definition | 20, of a 743-node Definition |
 | Graph boundary | 26 tensors | 118 tensors, 31 scalars |
 | First-run compile | seconds | **minutes** (369 kernel sources + an 11.6k-line orchestration) |
 | Marked | `manual` | `manual`, `skip_golden` |
 
-Both are `level=3`, which matters for how their output is captured (below).
+The level decides how a case's output is captured, which is what the recipe below
+has to work around.
 
 ## Recipe A — stable numbers, many rounds
+
+The ready-made invocation for either case lives in the
+[`hbg-bind-phases`](../../.claude/skills/hbg-bind-phases/SKILL.md) skill;
+`python -m simpler_setup.tools.hbg_bind_phases <log> --rounds N` turns its log into
+per-phase statistics. This section is what the switches mean and why the traps
+below exist.
 
 Six rounds is the working minimum: this box is shared, and a single pass has been
 seen to land 3.5× off its own minimum. Which statistic to read depends on the
@@ -72,39 +88,30 @@ sums** — the quietest pass is the closest this box gets to the machine's own c
 For "did a change move it", see [Comparing two branches](#comparing-two-branches)
 below; the answer there is not a minimum.
 
-```bash
-export SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1
-export SIMPLER_LOG_LEVEL=TIMING
-export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+Four switches and one flag make the measurement, and each is load-bearing:
 
-# qwen — the module runner prints the child's log to stdout for a 1-device case
-task-submit --device auto --device-num 1 --timeout 2400 --max-time 2400 --run \
-  "python examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py \
-     -p a2a3 -d \$TASK_DEVICE --manual include --rounds 6" | tee qwen.log
-```
+| Switch | Why |
+| ------ | --- |
+| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` | emits the `bind phase=` lines at all |
+| `SIMPLER_LOG_LEVEL=TIMING` | the level they are emitted at |
+| `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | otherwise `torch_npu` grabs a device on import, which a host-only measurement does not want — and nothing in the log records whether it was set |
+| `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
+| `--skip-golden` | with the device skipped the outputs a golden check compares are never produced, so a checking case such as qwen otherwise fails at validation with the whole measurement already complete in the log |
 
-**dsv4 needs the L3 child command run directly.** A case whose
-`device_count > 1` is dispatched by the module runner as one subprocess per
-class, and `run_jobs` captures that subprocess's stdout and prints it only on
-failure — so a passing run yields a log with **no** `bind phase=` lines at all.
-Build the same command the runner would (`scene_test.py`'s L3 phase) and run it
-yourself:
+**`SIMPLER_SKIP_DEVICE_RUN` is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still
+skips; `unset` it. It is a temporary handle from the dsv4 bring-up and is deleted
+once that case's device execution works.
 
-```bash
-task-submit --device auto --device-num 2 --timeout 3600 --max-time 3600 --run \
-  "python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
-     -p a2a3 --manual only --rounds 6 -d \$TASK_DEVICE \
-     --case TestDeepseekV4FlashDecodeHostBuildGraph:: --runtime host_build_graph --level 3" | tee dsv4.log
-```
+**A multi-device case must be invoked as its own L3 child command**
+(`--runtime host_build_graph --level 3`). A case whose `device_count > 1` is
+otherwise dispatched by the module runner as one subprocess per class, and
+`run_jobs` captures that subprocess's stdout and prints it only on failure — so a
+passing run yields a log with **no** `bind phase=` lines at all. qwen is
+`level=2` and needs no child command.
 
 A 2-rank case emits one pass per rank per round, so six rounds is twelve passes.
-
-To measure the host path without device execution, set
-`SIMPLER_SKIP_DEVICE_RUN=1`, which returns at `simpler_launch_run`. It is a
-temporary handle from the dsv4 bring-up and is deleted once that case's device
-execution works. One property is load-bearing while it exists:
-
-- **It is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still skips. `unset` it.
+Pass `--rounds` to the parser so it infers the rank count and drops one cold pass
+*per rank* rather than one in total.
 
 A skipped run still writes `host_phase_records.jsonl`, so Recipe B works without
 touching the device. Every phase in that artifact is produced on the host during
@@ -113,8 +120,12 @@ gates it is Recipe B's three conditions, none of which is the device.
 
 ### Reading the segments out
 
+The parser does this grouping; read it out by hand only to check something it does
+not report. The log lands in `outputs/hbg_bind_stats_<sha>.log` unless `-o` names
+it:
+
 ```bash
-grep -oE 'bind phase=[a-z_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' qwen.log
+grep -oE 'bind phase=[a-z_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_bind_stats_<sha>.log
 ```
 
 Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
@@ -125,13 +136,14 @@ segments **within each pass** and take the minimum of those sums. Never sum
 minima taken across passes; that total belongs to no pass and can point the wrong
 way (see below).
 
-The first pass is warm-up on both cases and belongs in neither statistic; drop it
+The first pass of each rank is warm-up and belongs in neither statistic; drop it
 explicitly rather than letting a minimum quietly exclude it.
 
-Device wall clock for the same rounds comes from the `[STRACE]` markers:
+Device wall clock for the same rounds comes from the `[STRACE]` markers, on a run
+that did not skip the device:
 
 ```bash
-grep -oE 'device_wall ts=0 dur=[0-9]+' qwen.log | \
+grep -oE 'device_wall ts=0 dur=[0-9]+' <log> | \
   awk -F'dur=' '{printf "%.2f\n", $2/1e6}' | sort -n
 ```
 
@@ -140,29 +152,51 @@ grep -oE 'device_wall ts=0 dur=[0-9]+' qwen.log | \
 A branch comparison is a different measurement from a single reading, and two of
 its failure modes have already produced wrong answers on this box.
 
+**Both arms must be the same ruler, and the log is the only witness you get.** A
+baseline missing `TORCH_DEVICE_BACKEND_AUTOLOAD=0` produced a wrong number once:
+it alone paid for `torch_npu` grabbing a device on import, and the difference was
+attributed to the branch. Nothing in this repo reads that variable — it is
+`torch_npu`'s own — so no log line records whether it was set. The recipe
+therefore echoes the command it is about to run, verbatim, as the log's first
+line, and `hbg_bind_phases` prints that line above the table:
+
+```bash
+diff <(head -1 base.log) <(head -1 measure.log)   # must differ only in the commit
+```
+
+An arm with no `[stamp]` line cannot take part in a comparison.
+
 **Interleave the conditions; never run one after the other.** `base` then
 `measure` attributes every drift in host load to the branch, and the drift is
 larger than most effects worth measuring. Alternate instead —
-`base, measure, base, measure` — and require a per-pass delta that agrees in sign
-across the passes. A pass that disagrees is the signal that the run was
-contended, not that the effect is small: on one dsv4 pass `graph_upload` came out
-+0.46 ms against −0.20 ms on the other three, and the same pass carried a bind
-whose `sm_h2d` was 5.93 ms against a 0.6 ms norm.
+`base, measure, base, measure` — which gives one minimum-of-sums per arm per
+repetition, and require the delta between them to **agree in sign across the
+repetitions**. A repetition that disagrees says the run was contended, not that
+the effect is small: on one dsv4 pass `graph_upload` came out +0.46 ms against
+−0.20 ms on the other three, and the same pass carried a bind whose `sm_h2d` was
+5.93 ms against a 0.6 ms norm.
 
-**A min of sums is not a sum of mins, and they can disagree in sign.** Each
-segment's minimum comes from whichever pass was quietest *for that segment*, so
-summing the per-segment minima produces a total no pass achieved. On one dsv4
-comparison the sum-of-minima moved −0.30 ms while the minimum-of-sums moved
-+0.16 ms, from the same log. Decide which question is being asked and use one
-statistic throughout: minimum-of-sums for "what is the best this branch does",
-per-pass medians for "did this branch change anything".
+**One statistic decides: the minimum of the per-pass sums.** Sum the five
+control-plane segments *within* each pass, take the minimum across the warm
+passes, and compare those. A min of sums is not a sum of mins and the two can
+disagree in sign — each segment's minimum comes from whichever pass was quietest
+*for that segment*, so summing per-segment minima produces a total no pass
+achieved. On one dsv4 comparison the sum-of-minima moved −0.30 ms while the
+minimum-of-sums moved +0.16 ms, from the same log. `hbg_phase_stats` reports the
+minimum-of-sums as its `total` row; never assemble a total by hand from the
+per-phase `min` column.
+
+The median and the max in that table are **not** a second decision rule. Read
+them for one thing only: a change that lowers the minimum while widening the
+range has made the cost less predictable, which is a cost of its own and worth
+reporting alongside the minimum.
 
 **Judge a segment the diff does not touch.** `host_orch`'s own scatter on dsv4
 spans 2.6–4.9 ms across passes of an unmodified `main` — wider than most changes
-being tested — so a ±0.5 ms difference there is not resolvable by pass medians
-however many rounds are run. When a segment matters and its scatter swamps it,
-instrument the mechanism instead: a sub-counter around the suspected work answers
-in one pass what a duration comparison cannot answer in ten.
+being tested — so a ±0.5 ms difference there is not resolvable by comparing
+durations however many rounds are run. When a segment matters and its scatter
+swamps it, instrument the mechanism instead: a sub-counter around the suspected
+work answers in one pass what a duration comparison cannot answer in ten.
 
 ## Recipe B — one round with a swimlane
 
@@ -171,7 +205,8 @@ The summed `bind phase=` lines cannot be placed on a timeline inside
 per-producer record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
 one record per orchestrator operation, each with its own interval.
 
-Three conditions must all hold, and each one silently produces an empty result:
+Three conditions must all hold, and the first two produce an empty result
+silently:
 
 1. **`SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1`**, which is what arms the pool.
    `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` does not: it gates the summed
@@ -180,7 +215,10 @@ Three conditions must all hold, and each one silently produces an empty result:
    `CallConfig.output_prefix` non-empty. `--enable-scope-stats` is the cheapest
    for an L3 case; `--enable-chip-swimlane` raises `NotImplementedError` for
    `level=3` (per-chip-process filename collision).
-3. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag.
+3. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag —
+   this one does warn, `<flag> disabled: --rounds > 1` per flag
+   ([`simpler_setup/scene_test.py`](../../simpler_setup/scene_test.py)), but the
+   warning sits in a log whose run otherwise passed.
 
 The device run may be skipped or may fail; neither costs you the artifact. Every
 phase recorded is host work done during bind, so both `SIMPLER_SKIP_DEVICE_RUN`
@@ -189,17 +227,12 @@ execution does not complete still yield its prepare timing — and it is why a
 swimlane for a case that hangs on device is cheaper to take with the variable set
 than to take by waiting out the stall.
 
+The skill's timeline mode is this recipe; it finishes with
+
 ```bash
-export SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1
-export SIMPLER_LOG_LEVEL=TIMING TORCH_DEVICE_BACKEND_AUTOLOAD=0
-
-task-submit --device auto --device-num 1 --timeout 2400 --max-time 2400 --run \
-  "python examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py \
-     -p a2a3 -d \$TASK_DEVICE --manual include --rounds 1 --enable-scope-stats" | tee qwen_detail.log
-
-python -m simpler_setup.tools.strace_timing qwen_detail.log \
+python -m simpler_setup.tools.strace_timing <log> \
     --host-phase-records outputs/<case>_<ts>/host_phase_records.jsonl \
-    --swimlane qwen_host_swimlane.json
+    --swimlane host_swimlane.json
 ```
 
 Load the JSON in [Perfetto](https://ui.perfetto.dev) or `chrome://tracing`. Each
@@ -237,12 +270,14 @@ signal than any duration on a shared box.
 | ---- | ------- | ---------- |
 | dsv4 run through the module runner's L3 phase | log has zero `bind phase=` lines, test passes | run the L3 child command directly (Recipe A) |
 | `SIMPLER_SKIP_DEVICE_RUN=0` | run still skips the device, "PASSED" means nothing ran | `unset` the variable |
-| `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts | one round for artifacts, many rounds for numbers |
+| `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts, plus a `disabled: --rounds > 1` warning | one round for artifacts, many rounds for numbers |
 | Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
+| Comparing a log with no `[stamp]` first line | the parser says so above the table | re-run it through the recipe; conditions cannot be recovered from memory |
 | Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the five segments; `arena_h2d` is not adjacent |
+| Summing per-segment minima by hand | a total no pass achieved; can invert the sign | read the tool's `total` row — the minimum of the per-pass sums |
+| `--rounds 1` for numbers | the tool refuses: every pass is a rank's warm-up | six rounds; `--keep-first` only to look at the cold pass deliberately |
 | Single pass, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
-| `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the conditions and require the sign to agree per pass |
-| Summing per-segment minima | a total no pass achieved; can invert the sign | one statistic throughout — see "Comparing two branches" |
+| `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the arms and require the sign to agree per repetition |
 | Stale build | mass collection errors, or a `launch_aicpu_num (0)` failure | `pip install --no-build-isolation -e .` after every `HEAD` move |
 
 ## Reference numbers
