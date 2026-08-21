@@ -51,7 +51,8 @@ GraphTensor make_test_tensor(uint64_t address) {
     return tensor;
 }
 
-std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundary_address) {
+std::vector<std::byte>
+make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_scalar_count = 1) {
     std::vector<std::byte> image(sizeof(GraphDefinition));
 
     std::vector<uint32_t> fanin_offsets{0, 0, 1};
@@ -86,6 +87,7 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     std::vector<uint64_t> scalars{0, 18};
     std::vector<GraphScalarSourceRef> scalar_sources(2);
     scalar_sources[0].source = static_cast<uint8_t>(GraphScalarSource::BOUNDARY);
+    scalar_sources[0].source_index = boundary_scalar_count - 1;
     scalar_sources[1].source = static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE);
 
     GraphDefinition definition{};
@@ -95,7 +97,7 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     definition.edge_count = 1;
     definition.root_count = 1;
     definition.boundary_count = 1;
-    definition.boundary_scalar_count = 1;
+    definition.boundary_scalar_count = boundary_scalar_count;
     definition.tensor_arg_count = 2;
     definition.scalar_arg_count = 2;
     definition.off_fanin_offsets = append_section(image, fanin_offsets);
@@ -120,13 +122,20 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     return image;
 }
 
-std::vector<std::byte> make_test_submission(uint64_t graph_key, uint64_t boundary_address, uint64_t boundary_scalar) {
+// The pool holds boundary_scalar_count entries; boundary_scalar lands in the
+// last one, where make_test_definition's BOUNDARY ref reads it.
+std::vector<std::byte> make_test_submission(
+    uint64_t graph_key, uint64_t boundary_address, uint64_t boundary_scalar, uint32_t boundary_scalar_count = 1
+) {
     const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
     const size_t scalars_offset = PTO2_ALIGN_UP(tensors_offset + sizeof(GraphTensor), alignof(uint64_t));
-    std::vector<std::byte> image(scalars_offset + sizeof(uint64_t));
+    std::vector<std::byte> image(scalars_offset + boundary_scalar_count * sizeof(uint64_t));
     const GraphTensor boundary = make_test_tensor(boundary_address);
     std::memcpy(image.data() + tensors_offset, &boundary, sizeof(boundary));
-    std::memcpy(image.data() + scalars_offset, &boundary_scalar, sizeof(boundary_scalar));
+    std::memcpy(
+        image.data() + scalars_offset + (boundary_scalar_count - 1) * sizeof(uint64_t), &boundary_scalar,
+        sizeof(boundary_scalar)
+    );
 
     GraphSubmission submission{};
     submission.graph_key = graph_key;
@@ -134,7 +143,7 @@ std::vector<std::byte> make_test_submission(uint64_t graph_key, uint64_t boundar
     submission.tensors_offset = static_cast<uint32_t>(tensors_offset);
     submission.tensor_count = 1;
     submission.scalars_offset = static_cast<uint32_t>(scalars_offset);
-    submission.scalar_count = 1;
+    submission.scalar_count = boundary_scalar_count;
     std::memcpy(image.data(), &submission, sizeof(submission));
     return image;
 }
@@ -374,6 +383,68 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
+}
+
+// The boundary scalar pool is bounded by the Graph boundary contract
+// (GRAPH_MAX_SCALAR_ARGS), not by a single task payload's MAX_SCALAR_ARGS —
+// a node stages at most MAX_SCALAR_ARGS entries from it, but the pool itself
+// may be wider.
+TEST(GraphExecutionReplay, LocalizesBoundaryScalarPoolWiderThanTaskPayload) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
+    constexpr uint32_t POOL = MAX_SCALAR_ARGS + 3;
+    static_assert(POOL <= GRAPH_MAX_SCALAR_ARGS);
+    std::array<uint8_t, 64> boundary{};
+
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), POOL);
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition);
+    std::vector<std::byte> submission_image =
+        make_test_submission(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 21, POOL);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
+
+    PTO2TaskDescriptor outer_task{};
+    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
+    PTO2TaskSlotState outer_slot{};
+    outer_slot.task_kind = TaskKind::GRAPH;
+    outer_slot.task = &outer_task;
+    outer_slot.graph_context = &submission;
+
+    GraphExecution *execution = graph_execution_localize(outer_slot);
+    ASSERT_NE(execution, nullptr);
+    EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
+    EXPECT_EQ(execution->node_storage[0].payload.scalars[0], 21U);
+}
+
+TEST(GraphExecutionReplay, RejectsBoundaryScalarPoolBeyondContract) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
+    constexpr uint32_t POOL = GRAPH_MAX_SCALAR_ARGS + 1;
+    std::array<uint8_t, 64> boundary{};
+
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), POOL);
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition);
+    std::vector<std::byte> submission_image =
+        make_test_submission(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 21, POOL);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
+
+    PTO2TaskDescriptor outer_task{};
+    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
+    PTO2TaskSlotState outer_slot{};
+    outer_slot.task_kind = TaskKind::GRAPH;
+    outer_slot.task = &outer_task;
+    outer_slot.graph_context = &submission;
+
+    EXPECT_EQ(graph_execution_localize(outer_slot), nullptr);
 }
 
 TEST(GraphDefinitionObject, RejectsDefinitionBeyondRetainedBytes) {
