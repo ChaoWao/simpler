@@ -398,6 +398,14 @@ struct StagedSubmission {
     uint64_t offset;
 };
 
+// What the Definition pass copied to the device: the distinct objects, and their
+// bytes. The submission block is in neither — it is laid out here but travels in the
+// single arena H2D, which reports it as that segment's `subs=`.
+struct DefinitionUploads {
+    size_t count;
+    uint64_t bytes;
+};
+
 // Validate every pending submission, bind it to its uploaded Definition, and lay
 // the block out. No device call and no device address: the block lands in the
 // runtime arena's tail, whose base is not known until that region is grown to fit
@@ -408,9 +416,9 @@ struct StagedSubmission {
 // cache line would false-share on that word throughout.
 bool plan_graph_submissions(
     const HostApi *api, GraphHostState &graph_state, std::vector<StagedSubmission> *staged, uint64_t *block_bytes,
-    uint64_t &uploaded_bytes
+    DefinitionUploads *uploads
 ) {
-    uploaded_bytes = 0;
+    *uploads = DefinitionUploads{};
     const size_t count = graph_host_upload_count(graph_state);
     // Pass 1: upload each distinct Definition once as a shared device object
     // ([GraphDefinitionHeader][Definition image]) keyed by content identity.
@@ -452,7 +460,8 @@ bool plan_graph_submissions(
             return false;
         }
         definition_objects.emplace(definition->content_hash, UploadedDefinition{object, definition});
-        uploaded_bytes += object_bytes;
+        uploads->count++;
+        uploads->bytes += object_bytes;
     }
 
     // Pass 2: validate every submission and lay the block out.
@@ -494,7 +503,6 @@ bool plan_graph_submissions(
         staged->push_back({upload->data, upload->outer_slot, upload->bytes, *block_bytes});
         *block_bytes += PTO2_ALIGN_UP(static_cast<uint64_t>(upload->bytes), PTO2_ALIGN_SIZE);
     }
-    uploaded_bytes += *block_bytes;
     return true;
 }
 
@@ -652,16 +660,23 @@ int32_t run_host_orchestration(
     // out the submission block. The block itself is staged below, into the arena's
     // second device tail, so nothing here allocates or copies it.
     const int64_t t_graph_ns = bind_now_ns();
-    uint64_t graph_bytes = 0;
+    DefinitionUploads definition_uploads{};
     std::vector<StagedSubmission> staged_submissions;
     uint64_t submission_block_bytes = 0;
-    if (!plan_graph_submissions(api, *graph_state, &staged_submissions, &submission_block_bytes, graph_bytes)) {
+    if (!plan_graph_submissions(api, *graph_state, &staged_submissions, &submission_block_bytes, &definition_uploads)) {
         return -1;
     }
     {
+        // `bytes` is what this segment copied: the Definition objects alone. The
+        // submission block is laid out here but copied by the arena H2D, which
+        // reports the same bytes as its own `subs=`. `defs` and `submissions` differ
+        // by the replay count — one Definition serves every submission with its key.
         char attrs[96];
-        snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(*graph_state), graph_bytes);
-        record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, graph_bytes);
+        snprintf(
+            attrs, sizeof(attrs), "defs=%zu bytes=%" PRIu64 " submissions=%zu", definition_uploads.count,
+            definition_uploads.bytes, graph_host_upload_count(*graph_state)
+        );
+        record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, definition_uploads.bytes);
     }
 
     // total_tasks sizes the bounded per-segment H2D copies below; a value outside
