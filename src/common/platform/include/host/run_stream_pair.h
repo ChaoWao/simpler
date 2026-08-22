@@ -78,7 +78,7 @@ public:
             // A run that has not retired still owns the pair: a device-complete
             // poll is not a finalized run, and replacing the stream under it
             // would strand a live submission.
-            if (owner_ != nullptr) return -1;
+            if (owner_ != nullptr) return PTO_RUNTIME_ERR_INTERNAL;
             if (!stale_) {
                 submitted_ = false;
                 complete_ = false;
@@ -108,9 +108,9 @@ public:
 
     /** Make the pair visible to non-blocking poll and record its submitter. */
     int mark_submitted(const void *owner) {
-        if (owner == nullptr) return -1;
+        if (owner == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (aicpu_ == nullptr || aicore_ == nullptr) return -1;
+        if (aicpu_ == nullptr || aicore_ == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
         owner_ = owner;
         submitted_ = true;
         complete_ = false;

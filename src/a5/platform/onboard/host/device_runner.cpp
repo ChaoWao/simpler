@@ -82,7 +82,7 @@ DeviceRunner::~DeviceRunner() { finalize(); }
 int DeviceRunner::ensure_acl_ready(int device_id) {
     if (device_id < 0) {
         LOG_ERROR("ensure_acl_ready: invalid device_id %d", device_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // aclInit is process-wide; CANN returns 100002 if it has already been
@@ -151,7 +151,7 @@ int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &ou
     void *device_result = mem_alloc_.alloc(sizeof(AicpuTopologyQueryResult));
     if (device_result == nullptr) {
         LOG_ERROR("AICPU topology query result allocation failed");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto result_cleanup = RAIIScopeGuard([&]() {
         mem_alloc_.free(device_result);
@@ -187,7 +187,7 @@ int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &ou
             "device-side AICPU OCCUPY query failed: rc=%d mask=0x%llx", result.occupy_rc,
             static_cast<unsigned long long>(result.occupy)
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     aicpu_device_occupancy_.occupy = result.occupy;
     aicpu_device_occupancy_.pf_occupy = result.pf_occupy;
@@ -211,7 +211,8 @@ int DeviceRunner::query_aicpu_topology(pto::a5::AicpuTopology &out) {
     if (rc != 0) return rc;
 
     pto::a5::AicpuTopology topology;
-    if (!pto::a5::probe_aicpu_topology(static_cast<uint32_t>(device_id_), occupancy, topology)) return -1;
+    if (!pto::a5::probe_aicpu_topology(static_cast<uint32_t>(device_id_), occupancy, topology))
+        return PTO_RUNTIME_ERR_INTERNAL;
 
     aicpu_topology_ = std::move(topology);
     aicpu_topology_cached_ = true;
@@ -230,7 +231,7 @@ int DeviceRunner::prepare_execution(
     Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
     std::unique_ptr<PreparedExecution> *prepared
 ) {
-    if (prepared == nullptr || *prepared != nullptr) return -1;
+    if (prepared == nullptr || *prepared != nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
     execution->resources_owned = true;
     auto prepare_rollback = RAIIScopeGuard([this, &execution]() {
@@ -254,9 +255,9 @@ int DeviceRunner::prepare_execution(
             "A soft reset does not clear the poison on a5; finalize() will force-reset "
             "the card so the next Worker on it inits clean."
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
-    if (validate_launch_aicpu_num(requested_aicpu_num) != 0) return -1;
+    if (validate_launch_aicpu_num(requested_aicpu_num) != 0) return PTO_RUNTIME_ERR_INTERNAL;
     int active_aicpu_num = automatic_aicpu_num ? PLATFORM_DEFAULT_AICPU_THREAD_NUM : requested_aicpu_num;
     runtime.set_aicpu_thread_num(active_aicpu_num);
 
@@ -270,7 +271,7 @@ int DeviceRunner::prepare_execution(
 
     if (block_dim < 1) {
         LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     int num_aicore = block_dim * cores_per_blockdim_;
 
@@ -305,7 +306,7 @@ int DeviceRunner::prepare_execution(
         runtime.set_aicpu_allowed_cpu_count(0);
         if (query_aicpu_topology(topology) != 0) {
             LOG_ERROR("AICPU topology probe failed; affinity gate will not launch");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         pto::a5::AicpuLaunchPlan launch_plan;
         std::string plan_error;
@@ -316,7 +317,7 @@ int DeviceRunner::prepare_execution(
                 pto::a5::aicpu_scenario_name(topology.scenario_type),
                 static_cast<unsigned long long>(topology.device_occupancy.occupy), plan_error.c_str()
             );
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         const auto &allowed = launch_plan.allowed_cpus;
         active_aicpu_num = launch_plan.effective_active_count;
@@ -325,7 +326,7 @@ int DeviceRunner::prepare_execution(
             const size_t cap = runtime.aicpu_allowed_cpus_capacity();
             if (allowed.size() > cap) {
                 LOG_ERROR("AICPU selection returned %zu > cap %zu", allowed.size(), cap);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             int32_t *allowed_cpus = runtime.get_aicpu_allowed_cpus();
             for (size_t i = 0; i < allowed.size(); ++i)
@@ -446,7 +447,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
 
     LaunchTransactionResult transaction = exact_launch_transaction(
         prepared->identity, std::move(permit),
-        [&]() {
+        [&]() -> int {
             // Arming precedes any execution-visible submission, so its failures —
             // including a thread-spawn or allocation throw — are reported as an rc
             // and leave the run safely rollback-able.
@@ -494,7 +495,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                     workers[i].aicore_done = 0;
             } catch (...) {
                 LOG_ERROR("launch_execution: arming failed before any stream submission");
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
 
             run_poll_slot_.store(prepared->pipeline_slot, std::memory_order_relaxed);
@@ -508,7 +509,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
             }
             return launch_rc;
         },
-        [&]() {
+        [&]() -> int {
             LOG_INFO("=== launch_aicpu_kernel %s ===", host::KernelNames::RunName);
             // launch_count = popcount(OCCUPY) from the topology probe — one thread
             // per user-schedulable cpu_id. The filter gate barriers exactly this
@@ -562,7 +563,7 @@ int DeviceRunner::poll_execution(const ActiveExecution &active) {
 }
 
 int DeviceRunner::drain_execution(ActiveExecution &active) {
-    if (active.prepared == nullptr) return -1;
+    if (active.prepared == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     PreparedExecution &prepared = *active.prepared;
     const uint32_t pipeline_slot = prepared.pipeline_slot;
     if (!prepared.resources_owned || run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
@@ -570,7 +571,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
             "drain_execution slot mismatch: requested=%u active=%u owns=%d", pipeline_slot,
             run_poll_slot_.load(std::memory_order_relaxed), static_cast<int>(prepared.resources_owned)
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto drain_cleanup = RAIIScopeGuard([this, &prepared]() {
         cleanup_execution(prepared, /*launched=*/true);
@@ -746,7 +747,7 @@ private:
 int DeviceRunner::force_reset_device() {
     clear_aicpu_topology_cache();
     if (device_id_ < 0) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     // aclrtResetDeviceForce is an ACL API; bring ACL up for the whole sequence,
     // released on scope exit so a repeated poison-then-reset cycle in a
@@ -754,7 +755,7 @@ int DeviceRunner::force_reset_device() {
     AclInitGuard acl_guard;
     if (!acl_guard.ok()) {
         LOG_ERROR("force_reset_device: ACL init failed; cannot reset device %d", device_id_);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         // Reset phase. Bind the device, best-effort drain (the op-timeout
@@ -766,7 +767,7 @@ int DeviceRunner::force_reset_device() {
         DeviceBindGuard bind_guard(device_id_);
         if (!bind_guard.bound()) {
             LOG_ERROR("force_reset_device: could not bind device %d; reset skipped", device_id_);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         (void)aclrtSynchronizeDeviceWithTimeout(timeout_config_.stream_sync_timeout_ms);
         aclError rc = aclrtResetDeviceForce(device_id_);
@@ -787,7 +788,7 @@ int DeviceRunner::force_reset_device() {
     DeviceBindGuard probe_bind(device_id_);
     if (!probe_bind.bound()) {
         LOG_ERROR("force_reset_device: post-reset DeviceBindGuard failed for device %d", device_id_);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     aclrtStream probe_stream = nullptr;
     aclError stream_rc = aclrtCreateStream(&probe_stream);

@@ -1260,14 +1260,22 @@ def pytest_runtest_makereport(item, call):
 #   507018 ACL_ERROR_RT_AICPU_EXCEPTION
 #   507046 ACL_ERROR_RT_STREAM_SYNC_TIMEOUT
 #   507899 sticky-error rtMalloc / rtStreamCreate on the poisoned context
-#       -1 a5 DeviceRunner fail-fast sentinel ("marked unusable; refusing to run")
+#    -1000 PTO_RUNTIME_ERR_INTERNAL — the host-side generic failure, which the a5
+#          DeviceRunner fail-fast ("marked unusable; refusing to run") reports and
+#          which also catches a poisoned card whose CANN code an intermediate
+#          layer flattened. It is the whole host band's floor, so it is the one
+#          entry here that is deliberately wider than a single mechanism.
 # The names above are CANN's own (acl/error_codes/rt_error_codes.h); what each one
 # means and how to chase it is in docs/troubleshooting/device-error-codes.md, and the
-# host log now prints that meaning next to the code.
+# host log now prints that meaning next to the code. -1000 and below is the
+# host-side band (PTO_RUNTIME_ERR_* in src/common/worker/pto_runtime_c_api.h);
+# -1..-999 are device-latched codes and must NOT be listed here — a latched
+# SCOPE_DEADLOCK (-1) is an orchestration bug, not a poisoned device, and
+# treating it as poison is exactly the spurious rebuild this filter avoids.
 # Worker surfaces these as "run/run_prepared/prepare_callable/simpler_init
 # failed with code <N>" — never as an AssertionError, so golden mismatches are
 # already excluded.
-_DEVICE_POISON_CODES = frozenset({207001, 507000, 507015, 507018, 507046, 507899, -1})
+_DEVICE_POISON_CODES = frozenset({207001, 507000, 507015, 507018, 507046, 507899, -1000})
 _DEVICE_ERROR_CODE_RE = re.compile(r"\b(?:run|run_prepared|prepare_callable|simpler_init) failed with code (-?\d+)\b")
 _DEVICE_QUARANTINE_MARKERS = (
     "device is quarantined after a prior Worker could not confirm reset",

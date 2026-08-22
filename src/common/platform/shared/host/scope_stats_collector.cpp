@@ -40,6 +40,7 @@
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "host/profiling_copy.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 ScopeStatsCollector::~ScopeStatsCollector() { stop(); }
 
@@ -56,11 +57,11 @@ int ScopeStatsCollector::init(
             "ScopeStatsCollector::init: invalid arguments (num_threads=%d, valid range: 1-%d)", num_threads,
             PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (initialized_) {
         LOG_ERROR("ScopeStatsCollector already initialized");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -93,7 +94,7 @@ int ScopeStatsCollector::init(
     void *shm_dev_local = alloc_paired_buffer(shm_size, &shm_host_local);
     if (shm_dev_local == nullptr) {
         LOG_ERROR("ScopeStatsCollector: failed to allocate scope_stats shared memory (%zu bytes)", shm_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::memset(shm_host_local, 0, shm_size);
@@ -109,7 +110,7 @@ int ScopeStatsCollector::init(
         void *dev_ptr = alloc_paired_buffer(buf_size, &host_ptr);
         if (dev_ptr == nullptr) {
             LOG_ERROR("ScopeStatsCollector: failed to allocate ScopeStatsBuffer b=%d", b);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         if (b < PLATFORM_SCOPE_STATS_SLOT_COUNT) {
@@ -265,7 +266,7 @@ int ScopeStatsCollector::write_jsonl(const std::string &output_dir) {
     std::FILE *fp = std::fopen(path.c_str(), "w");
     if (fp == nullptr) {
         LOG_ERROR("scope_stats: failed to open %s", path.c_str());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     const ScopeStatsDataHeader *hdr = scope_stats_header();

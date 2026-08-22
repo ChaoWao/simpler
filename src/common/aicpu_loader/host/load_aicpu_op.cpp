@@ -30,6 +30,7 @@
 #include "common/unified_log.h"
 #include "runtime/rt.h"
 #include "utils/elf_build_id.h"
+#include "pto_runtime_c_api.h"
 
 namespace host {
 
@@ -94,11 +95,11 @@ int LoadAicpuOp::BootstrapDispatcher(
 ) {
     if (dispatcher_so_data == nullptr || dispatcher_so_len == 0) {
         LOG_ERROR("BootstrapDispatcher: empty dispatcher SO bytes");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (inner_so_data == nullptr || inner_so_len == 0) {
         LOG_ERROR("BootstrapDispatcher: empty inner SO bytes");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     device_id_ = device_id;
     inner_fp_ = FingerprintBytes(inner_so_data, inner_so_len);
@@ -301,7 +302,7 @@ bool LoadAicpuOp::GenerateAicpuOpJson(const std::string &json_path, const std::s
 int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
     if (inner_fp_ == 0) {
         LOG_ERROR("LoadAicpuOp::Init: BootstrapDispatcher must be called first");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Base entries are exported by every runtime; the runtime reports any extra
@@ -319,7 +320,7 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
 
     if (!GenerateAicpuOpJson(json_file_path_, inner_so_basename_)) {
         json_file_path_.clear();
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // RAII cleanups: any non-zero return path below unwinds via these guards.
@@ -395,7 +396,7 @@ int LoadAicpuOp::AicpuKernelLaunch(
 ) {
     if (args == nullptr || args_size == 0) {
         LOG_ERROR("AicpuKernelLaunch: invalid arguments (args is null or args_size is 0)");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     rtCpuKernelArgs_t cpu_args = {};
     cpu_args.baseArgs.args = args;
@@ -420,7 +421,7 @@ int LoadAicpuOp::LaunchBuiltInOp(
     auto it = func_handles_.find(func_name);
     if (it == func_handles_.end()) {
         LOG_ERROR("Function not found: %s", func_name.c_str());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     return AicpuKernelLaunch(it->second, stream, args, args_size, aicpu_num);
 }

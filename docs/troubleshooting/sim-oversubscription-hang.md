@@ -35,6 +35,15 @@ Two distinct signatures, both only on sim and only under load:
    RuntimeError: chip_process dev=N: simpler_run failed with code -1
    ```
 
+   The `-1` here comes from the **AICPU executor**, which still uses `-1` as its
+   own generic failure — it is the one producer that sits outside the
+   `PTO_RUNTIME_ERR_*` band, so this signature is not covered by the
+   "`-1000` and below" rule for host-runtime failures in
+   [device-error-codes.md](device-error-codes.md). Nor is it the latched
+   `SCOPE_DEADLOCK` that page assigns to `-1`: the giveaway is that no
+   `orch_error_code=` / `error detail:` pair accompanies it. A failure raised by
+   the host runtime would report `-1000` or below.
+
 Both appear intermittently in `st-sim-*` on `ubuntu-latest` (≈4 vCPU) and are
 easy to trip on any box running concurrent sim tests.
 

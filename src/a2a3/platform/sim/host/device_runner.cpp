@@ -129,13 +129,13 @@ int DeviceRunner::ensure_binaries_loaded() {
                 "/tmp/aicpu_sim_XXXXXX", aicpu_so_binary_.data(), aicpu_so_binary_.size(), &aicpu_so_path_
             )) {
             LOG_ERROR("Failed to create temp file for AICPU SO");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         aicpu_so_handle_ = dlopen(aicpu_so_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (aicpu_so_handle_ == nullptr) {
             LOG_ERROR("dlopen failed for AICPU SO: %s", dlerror());
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         auto load_sym = [this](const char *name, void **out) -> bool {
@@ -153,9 +153,11 @@ int DeviceRunner::ensure_binaries_loaded() {
             *out = sym;
         };
 
-        if (!load_sym("aicpu_execute", reinterpret_cast<void **>(&aicpu_execute_func_))) return -1;
+        if (!load_sym("aicpu_execute", reinterpret_cast<void **>(&aicpu_execute_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         load_optional_sym("simpler_aicpu_register_callable", reinterpret_cast<void **>(&aicpu_register_callable_func_));
-        if (!load_sym("set_platform_regs", reinterpret_cast<void **>(&set_platform_regs_func_))) return -1;
+        if (!load_sym("set_platform_regs", reinterpret_cast<void **>(&set_platform_regs_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         load_optional_sym("set_orch_device_id", reinterpret_cast<void **>(&set_orch_device_id_func_));
         load_optional_sym("set_scheduler_timeout_ms", reinterpret_cast<void **>(&set_scheduler_timeout_ms_func_));
         if (set_scheduler_timeout_ms_func_ != nullptr) {
@@ -170,40 +172,48 @@ int DeviceRunner::ensure_binaries_loaded() {
                 (sched_status.scheduler_env_set && sched_status.scheduler_valid) ? sched_cfg.scheduler_timeout_ms : 0
             );
         }
-        if (!load_sym("set_platform_dump_base", reinterpret_cast<void **>(&set_platform_dump_base_func_))) return -1;
-        if (!load_sym("set_platform_phase_base", reinterpret_cast<void **>(&set_platform_phase_base_func_))) return -1;
-        if (!load_sym("set_dump_args_enabled", reinterpret_cast<void **>(&set_dump_args_enabled_func_))) return -1;
+        if (!load_sym("set_platform_dump_base", reinterpret_cast<void **>(&set_platform_dump_base_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_platform_phase_base", reinterpret_cast<void **>(&set_platform_phase_base_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_dump_args_enabled", reinterpret_cast<void **>(&set_dump_args_enabled_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym(
                 "set_platform_chip_swimlane_base", reinterpret_cast<void **>(&set_platform_chip_swimlane_base_func_)
             ))
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym(
                 "set_platform_chip_swimlane_aicore_rotation_table",
                 reinterpret_cast<void **>(&set_platform_chip_swimlane_aicore_rotation_table_func_)
             ))
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_chip_swimlane_enabled", reinterpret_cast<void **>(&set_chip_swimlane_enabled_func_)))
-            return -1;
-        if (!load_sym("set_platform_pmu_base", reinterpret_cast<void **>(&set_platform_pmu_base_func_))) return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_platform_pmu_base", reinterpret_cast<void **>(&set_platform_pmu_base_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_platform_pmu_reg_addrs", reinterpret_cast<void **>(&set_platform_pmu_reg_addrs_func_)))
-            return -1;
-        if (!load_sym("set_pmu_enabled", reinterpret_cast<void **>(&set_pmu_enabled_func_))) return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_pmu_enabled", reinterpret_cast<void **>(&set_pmu_enabled_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_platform_dep_gen_base", reinterpret_cast<void **>(&set_platform_dep_gen_base_func_)))
-            return -1;
-        if (!load_sym("set_dep_gen_enabled", reinterpret_cast<void **>(&set_dep_gen_enabled_func_))) return -1;
-        if (!load_sym("set_scope_stats_enabled", reinterpret_cast<void **>(&set_scope_stats_enabled_func_))) return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_dep_gen_enabled", reinterpret_cast<void **>(&set_dep_gen_enabled_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
+        if (!load_sym("set_scope_stats_enabled", reinterpret_cast<void **>(&set_scope_stats_enabled_func_)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_platform_scope_stats_base", reinterpret_cast<void **>(&set_platform_scope_stats_base_func_)))
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
 
         // The AICPU sim SO owns its level flags because it is RTLD_LOCAL.
         // Forward the process-wide HostLogger threshold explicitly.
         using SetLogLevelFunc = void (*)(int);
         SetLogLevelFunc set_log_level_func = nullptr;
-        if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return -1;
+        if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return PTO_RUNTIME_ERR_INTERNAL;
         set_log_level_func(HostLogger::get_instance().level());
         using SetHostLogStateFunc = void (*)(SimplerHostLogState *);
         SetHostLogStateFunc set_host_log_state_func = nullptr;
-        if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func))) return -1;
+        if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func)))
+            return PTO_RUNTIME_ERR_INTERNAL;
         set_host_log_state_func(HostLogger::get_instance().state());
 
         aicpu_so_loaded_ = true;
@@ -227,13 +237,13 @@ int DeviceRunner::ensure_binaries_loaded() {
                 "/tmp/aicore_sim_XXXXXX", aicore_kernel_binary_.data(), aicore_kernel_binary_.size(), &aicore_so_path_
             )) {
             LOG_ERROR("Failed to create temp file for AICore SO");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         aicore_so_handle_ = dlopen(aicore_so_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (aicore_so_handle_ == nullptr) {
             LOG_ERROR("dlopen failed for AICore SO: %s", dlerror());
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         const char *bind_log_error = nullptr;
@@ -246,7 +256,7 @@ int DeviceRunner::ensure_binaries_loaded() {
             );
             dlclose(aicore_so_handle_);
             aicore_so_handle_ = nullptr;
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         aicore_execute_func_ =
@@ -255,7 +265,7 @@ int DeviceRunner::ensure_binaries_loaded() {
             );
         if (aicore_execute_func_ == nullptr) {
             LOG_ERROR("dlsym failed for aicore_execute_wrapper: %s", dlerror());
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         LOG_INFO("DeviceRunner(sim): Loaded aicore_execute_wrapper from %s", aicore_so_path_.c_str());
 
@@ -277,7 +287,7 @@ int DeviceRunner::ensure_binaries_loaded() {
 int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
     if (aicpu_register_callable_func_ == nullptr || set_orch_device_id_func_ == nullptr) {
         LOG_ERROR("Register-callable functions not loaded. Call ensure_binaries_loaded first.");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     set_orch_device_id_func_(device_id_);
     // The descriptor was assembled from CallableState by the base
@@ -299,10 +309,10 @@ int DeviceRunner::prepare_execution(
     Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
     std::unique_ptr<PreparedExecution> *prepared
 ) {
-    if (prepared == nullptr || *prepared != nullptr) return -1;
+    if (prepared == nullptr || *prepared != nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     if (active_run_ != nullptr) {
         LOG_ERROR("prepare_execution called while another simulated run still owns execution state");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
     active_run_ = std::make_unique<ActiveRun>();
@@ -324,7 +334,7 @@ int DeviceRunner::prepare_execution(
     runtime.set_aicpu_thread_num(launch_aicpu_num);
     if (block_dim < 1) {
         LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int rc = ensure_device_initialized();
@@ -438,7 +448,7 @@ int DeviceRunner::prepare_execution(
     active_run_->reg_blocks = mem_alloc_.alloc(total_reg_size);
     if (active_run_->reg_blocks == nullptr) {
         LOG_ERROR("Failed to allocate simulated register memory (%zu bytes)", total_reg_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     std::memset(active_run_->reg_blocks, 0, total_reg_size);
 
@@ -446,7 +456,7 @@ int DeviceRunner::prepare_execution(
     uint64_t *regs_array = reinterpret_cast<uint64_t *>(mem_alloc_.alloc(regs_array_size));
     if (regs_array == nullptr) {
         LOG_ERROR("Failed to allocate register address array");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (int i = 0; i < num_aicore; i++) {
         regs_array[i] =
@@ -462,7 +472,7 @@ int DeviceRunner::prepare_execution(
     active_run_->pmu_reg_blocks = mem_alloc_.alloc(total_pmu_reg_size);
     if (active_run_->pmu_reg_blocks == nullptr) {
         LOG_ERROR("Failed to allocate simulated PMU register memory (%zu bytes)", total_pmu_reg_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     std::memset(active_run_->pmu_reg_blocks, 0, total_pmu_reg_size);
 
@@ -470,7 +480,7 @@ int DeviceRunner::prepare_execution(
     uint64_t *pmu_regs_array = reinterpret_cast<uint64_t *>(mem_alloc_.alloc(pmu_regs_array_size));
     if (pmu_regs_array == nullptr) {
         LOG_ERROR("Failed to allocate PMU register address array");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (int i = 0; i < num_aicore; i++) {
         pmu_regs_array[i] =
@@ -488,7 +498,7 @@ int DeviceRunner::prepare_execution(
         set_platform_chip_swimlane_aicore_rotation_table_func_ == nullptr ||
         set_chip_swimlane_enabled_func_ == nullptr) {
         LOG_ERROR("Executor functions not loaded. Call ensure_binaries_loaded first.");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
@@ -519,7 +529,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
 
     LaunchTransactionResult result = exact_launch_transaction(
         prepared->identity, std::move(permit),
-        [&]() {
+        [&]() -> int {
             // Arming precedes any simulated-core thread, so its failures — including
             // a thread-spawn or allocation throw — are reported as an rc and leave
             // the run safely rollback-able.
@@ -559,7 +569,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
             } catch (...) {
                 LOG_ERROR("launch_execution: arming failed before any simulated core started");
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
 
             LOG_INFO("Launching %d AICore thread(s)", num_aicore);
@@ -576,7 +586,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
             }
             return 0;
         },
-        [&]() {
+        [&]() -> int {
             LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
             for (int i = 0; i < over_launch; i++) {
                 run->aicpu_threads.push_back(create_thread([this, run, launch_aicpu_num, over_launch, sim_t0]() {
@@ -614,7 +624,7 @@ int DeviceRunner::poll_execution(const ActiveExecution &) { return run_completio
 int DeviceRunner::drain_execution(ActiveExecution &) {
     if (active_run_ == nullptr) {
         LOG_ERROR("drain_execution called without a launched simulated run");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto run_cleanup = RAIIScopeGuard([this]() {
         cleanup_active_run();

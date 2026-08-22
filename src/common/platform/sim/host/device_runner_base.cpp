@@ -126,7 +126,7 @@ uint64_t SimDeviceRunnerBase::retained_temp_addr(uint32_t slot_id) const {
 int SimDeviceRunnerBase::setup_static_arena(
     uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
 ) {
-    if (arena_bank >= arena_banks_.size()) return -1;
+    if (arena_bank >= arena_banks_.size()) return PTO_RUNTIME_ERR_INTERNAL;
     ArenaBank &bank = this->arena_bank(arena_bank);
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
@@ -156,7 +156,7 @@ int SimDeviceRunnerBase::setup_static_arena(
         arena.reserve(requested_size, DeviceArena::kDefaultBaseAlign);
         if (arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
             arena.release();
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         cached_size = requested_size;
         return 0;
@@ -181,7 +181,7 @@ int SimDeviceRunnerBase::setup_static_arena(
         prebuilt_runtime_arena_cache_sm_base_ = nullptr;
         prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
         prebuilt_runtime_arena_cache_image_.clear();
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (arena_changed) {
         prebuilt_runtime_arena_cache_valid_ = false;
@@ -273,14 +273,14 @@ std::thread SimDeviceRunnerBase::create_thread(std::function<void()> fn) {
 int SimDeviceRunnerBase::attach_current_thread(int device_id) {
     if (device_id < 0) {
         LOG_ERROR("Invalid device_id: %d", device_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (device_id_ != -1 && device_id_ != device_id) {
         LOG_ERROR(
             "DeviceRunner already initialized on device %d; finalize before switching to device %d", device_id_,
             device_id
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Per-thread bind so sim hooks (TPUSH/TPOP, identity helpers) route through
@@ -306,7 +306,7 @@ int SimDeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig
             "launch_aicpu_num (%d) must be 0 (auto) or in range [2, %d]", config.aicpu_thread_num,
             PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     // A run always takes the whole simulated device; orchestration sizes its
     // cohorts from rt_available_cluster_count() rather than a per-call width.
@@ -316,7 +316,7 @@ int SimDeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig
     int num_aicore = block_dim * cores_per_blockdim_;
     if (num_aicore > RUNTIME_MAX_WORKER) {
         LOG_ERROR("num_aicore (%d) exceeds RUNTIME_MAX_WORKER (%d)", num_aicore, RUNTIME_MAX_WORKER);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     block_dim_ = block_dim;
@@ -432,12 +432,12 @@ int SimDeviceRunnerBase::stamp_orch_so(Runtime &runtime, int32_t cid) {
     // callable_id so the AICPU dispatches the right orch_so_table_ slot.
     if (cid < 0) {
         LOG_ERROR("stamp_orch_so: invalid callable_id=%d", cid);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto it = callables_.find(cid);
     if (it == callables_.end()) {
         LOG_ERROR("stamp_orch_so: callable_id=%d not registered", cid);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime.set_active_callable_id(cid);
     return 0;
@@ -447,7 +447,7 @@ int SimDeviceRunnerBase::prepare_orch_so(Runtime &runtime) {
     const int32_t cid = runtime.get_active_callable_id();
     if (cid < 0) {
         LOG_ERROR("prepare_orch_so: no active callable_id; prepared-callable flow required");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     return stamp_orch_so(runtime, cid);
 }
@@ -456,7 +456,7 @@ int SimDeviceRunnerBase::commit_device_register(int32_t cid) {
     auto it = callables_.find(cid);
     if (it == callables_.end()) {
         LOG_ERROR("commit_device_register: callable_id=%d not registered", cid);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (it->second.host_dlopen_handle != nullptr) {
         return 0;
@@ -473,7 +473,7 @@ int SimDeviceRunnerBase::launch_device_register(int32_t callable_id) {
     auto it = callables_.find(callable_id);
     if (it == callables_.end()) {
         LOG_ERROR("launch_device_register: callable_id=%d not registered", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (it->second.host_dlopen_handle != nullptr) {
         return 0;
@@ -519,19 +519,19 @@ int SimDeviceRunnerBase::record_device_orch_callable(
         LOG_ERROR(
             "record_device_orch_callable: callable_id=%d out of range [0, %d)", callable_id, MAX_REGISTERED_CALLABLE_IDS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (orch_so_data == nullptr || orch_so_size == 0) {
         LOG_ERROR("record_device_orch_callable: empty orch SO for callable_id=%d", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (chip_buffer_hash == 0 || chip_dev == 0) {
         LOG_ERROR("record_device_orch_callable: missing chip buffer for callable_id=%d", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (callables_.count(callable_id) != 0) {
         LOG_ERROR("record_device_orch_callable: callable_id=%d already registered", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     const uint64_t hash = simpler::common::utils::elf_build_id_64(orch_so_data, orch_so_size);
@@ -561,19 +561,19 @@ int SimDeviceRunnerBase::record_host_orch_callable(
         LOG_ERROR(
             "record_host_orch_callable: callable_id=%d out of range [0, %d)", callable_id, MAX_REGISTERED_CALLABLE_IDS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr) {
         LOG_ERROR("record_host_orch_callable: null handle/fn for callable_id=%d", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (chip_buffer_hash == 0) {
         LOG_ERROR("record_host_orch_callable: missing chip buffer for callable_id=%d", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (callables_.count(callable_id) != 0) {
         LOG_ERROR("record_host_orch_callable: callable_id=%d already registered", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     CallableState state;
@@ -626,13 +626,13 @@ int SimDeviceRunnerBase::bind_callable_to_runtime(
     auto it = callables_.find(callable_id);
     if (it == callables_.end()) {
         LOG_ERROR("bind_callable_to_runtime: callable_id=%d not registered", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     const auto &state = it->second;
     for (const auto &kv : state.kernel_addrs) {
         if (kv.first < 0 || kv.first >= RUNTIME_MAX_FUNC_ID) {
             LOG_ERROR("bind_callable_to_runtime: func_id=%d out of range", kv.first);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         runtime.replay_function_bin_addr(kv.first, kv.second);
     }

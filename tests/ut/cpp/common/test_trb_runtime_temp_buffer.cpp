@@ -34,6 +34,7 @@
 #include "pto_shared_memory.h"
 #include "runtime.h"
 #include "task_args.h"
+#include "worker/pto_runtime_c_api.h"
 
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
@@ -439,7 +440,7 @@ TEST_F(TrbRuntimeTempBufferTest, GrowAllocationFailureFailsBindWithoutLeak) {
     ChipStorageTaskArgs args = make_args(input, output);
     ArgDirection signature[2] = {ArgDirection::IN, ArgDirection::OUT};
 
-    EXPECT_EQ(bind_runtime(runtime, api_, args, signature, 2), -1);
+    EXPECT_EQ(bind_runtime(runtime, api_, args, signature, 2), PTO_RUNTIME_ERR_INTERNAL);
     EXPECT_EQ(fake_.retained_addr, nullptr);
     EXPECT_EQ(fake_.retained_size, 0u);
     EXPECT_TRUE(fake_.live_mallocs.empty());
@@ -455,7 +456,7 @@ TEST_F(TrbRuntimeTempBufferTest, FailedCopyOnTemporaryPathDoesNotFreeRetainedBuf
     args.add_tensor(make_tensor(input));
     ArgDirection signature[1] = {ArgDirection::IN};
 
-    EXPECT_EQ(bind_runtime(runtime, api_, args, signature, 1), -1);
+    EXPECT_EQ(bind_runtime(runtime, api_, args, signature, 1), PTO_RUNTIME_ERR_INTERNAL);
     // Retained buffer was allocated once for the grow and is NOT freed on the
     // error path (it lives on the slot for the next run); the slice lease is a
     // no-op, so no device_free happens here.

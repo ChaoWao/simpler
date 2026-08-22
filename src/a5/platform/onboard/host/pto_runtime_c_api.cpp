@@ -33,11 +33,11 @@ DeviceContextHandle create_device_context(void) {
 }
 
 int ensure_acl_ready_ctx(DeviceContextHandle ctx, int device_id) {
-    if (ctx == NULL) return -1;
+    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<DeviceRunner *>(ctx)->ensure_acl_ready(device_id);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -57,11 +57,11 @@ void *create_comm_stream_ctx(DeviceContextHandle ctx) {
 }
 
 int destroy_comm_stream_ctx(DeviceContextHandle ctx, void *stream) {
-    if (ctx == NULL) return -1;
+    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<DeviceRunner *>(ctx)->destroy_comm_stream(stream);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 

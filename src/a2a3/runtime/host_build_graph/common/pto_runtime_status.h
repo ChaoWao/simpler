@@ -12,13 +12,18 @@
 /**
  * PTO2 Runtime Status Helpers
  *
- * Shared error-code contract used inside the tensormap_and_ringbuffer runtime.
+ * Shared error-code contract used inside the host_build_graph runtime.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_
+#pragma once
 
 #include <stdint.h>
+
+// A latched code reaches the host as its own value negated, so the two families
+// below land in -1..-99 and -100..-PTO_RUNTIME_LATCHED_CODE_MAX there. That
+// ceiling lives in src/common/worker/pto_runtime_c_api.h, and the host-side C
+// API band begins below its negation — so the latched range is bounded, not
+// open-ended downwards.
 
 // Orchestrator errors (1-99): detected in orchestrator thread
 #define PTO2_ERROR_NONE 0  // Explicitly means "no error"; it is not an "unknown/unspecified" error code.
@@ -50,5 +55,3 @@ static inline int32_t runtime_status_from_error_codes(int32_t orch_error_code, i
     }
     return 0;
 }
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_

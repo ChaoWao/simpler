@@ -40,6 +40,7 @@
 
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 // =============================================================================
 // ArgsDumpCollector
@@ -94,14 +95,14 @@ int ArgsDumpCollector::initialize(
 ) {
     if (shm_host_ != nullptr) {
         LOG_ERROR("ArgsDumpCollector already initialized");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (num_dump_threads <= 0 || num_dump_threads > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(
             "ArgsDumpCollector::initialize: invalid num_dump_threads=%d (valid range: 1-%d)", num_dump_threads,
             PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -142,7 +143,7 @@ int ArgsDumpCollector::initialize(
     void *shm_dev_local = alloc_paired_buffer(shm_size, &shm_host_local);
     if (shm_dev_local == nullptr) {
         LOG_ERROR("Failed to allocate dump shared memory (%zu bytes)", shm_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Initialize header on host shadow
@@ -165,7 +166,7 @@ int ArgsDumpCollector::initialize(
         ai.dev_ptr = alloc_paired_buffer(arena_size, &ai.host_ptr);
         if (ai.dev_ptr == nullptr) {
             LOG_ERROR("Failed to allocate dump arena for thread %d (%lu bytes)", t, arena_size);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         DumpBufferState *state = get_dump_buffer_state(shm_host_local, t);
@@ -191,7 +192,7 @@ int ArgsDumpCollector::initialize(
             void *dev_ptr = alloc_paired_buffer(sizeof(DumpMetaBuffer), &host_ptr);
             if (dev_ptr == nullptr) {
                 LOG_ERROR("Failed to allocate dump meta buffer %d for thread %d", b, t);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             // alloc_paired_buffer already registered dev→host via the manager.
 
