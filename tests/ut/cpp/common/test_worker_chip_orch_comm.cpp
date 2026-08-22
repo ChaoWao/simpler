@@ -10,14 +10,12 @@
  */
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 #include <gtest/gtest.h>
 
 #include "common/worker_chip_orch_comm.h"
-#include "host/worker_chip_orch_region_access.h"
 
 namespace {
 
@@ -66,6 +64,14 @@ TEST(WorkerChipOrchCommTest, DescriptorRejectsBadMajorVersion) {
     WorkerChipOrchRegionDesc desc = valid_desc();
     desc.magic_version =
         worker_chip_orch_comm_pack_magic_version(WORKER_CHIP_ORCH_COMM_MAGIC, WORKER_CHIP_ORCH_COMM_ABI_MAJOR + 1, 0);
+
+    WorkerChipOrchCommValidationError error = worker_chip_orch_comm_validate_desc(desc);
+    EXPECT_EQ(error, WorkerChipOrchCommValidationError::BAD_MAGIC_VERSION);
+}
+
+TEST(WorkerChipOrchCommTest, DescriptorRejectsAbiMajor2) {
+    WorkerChipOrchRegionDesc desc = valid_desc();
+    desc.magic_version = worker_chip_orch_comm_pack_magic_version(WORKER_CHIP_ORCH_COMM_MAGIC, 2, 0);
 
     WorkerChipOrchCommValidationError error = worker_chip_orch_comm_validate_desc(desc);
     EXPECT_EQ(error, WorkerChipOrchCommValidationError::BAD_MAGIC_VERSION);
@@ -196,6 +202,32 @@ TEST(WorkerChipOrchCommTest, CompileTimeAlignmentRequiresPowerOfTwoAbiAlignment)
     EXPECT_FALSE(worker_chip_orch_comm_is_aligned_runtime(24, 3));
 }
 
+TEST(WorkerChipOrchCommTest, NeutralHelpersMatchCompatibilityDelegation) {
+    EXPECT_EQ(worker_chip_orch_comm_add_overflows(7, 9), region_add_overflows(7, 9));
+    EXPECT_EQ(worker_chip_orch_comm_add_overflows(UINT64_MAX - 1, 2), region_add_overflows(UINT64_MAX - 1, 2));
+    EXPECT_EQ(
+        worker_chip_orch_comm_ranges_overlap(0, 64, 32, 64),
+        region_spans_overlap(RegionPartLocalSpan{0, 64}, RegionPartLocalSpan{32, 64})
+    );
+    EXPECT_EQ(
+        worker_chip_orch_comm_ranges_overlap(0, 64, 256, 64),
+        region_spans_overlap(RegionPartLocalSpan{0, 64}, RegionPartLocalSpan{256, 64})
+    );
+
+    RegionNotifyOp notify{};
+    ASSERT_TRUE(worker_chip_orch_comm_as_region_notify_op(WorkerChipOrchNotifyOp::Set, notify));
+    EXPECT_TRUE(region_valid_notify_op(notify));
+    EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Set));
+    EXPECT_FALSE(worker_chip_orch_comm_as_region_notify_op(static_cast<WorkerChipOrchNotifyOp>(2), notify));
+
+    RegionWaitCmp cmp{};
+    ASSERT_TRUE(worker_chip_orch_comm_as_region_wait_cmp(WorkerChipOrchWaitCmp::GE, cmp));
+    EXPECT_EQ(
+        worker_chip_orch_comm_compare_counter(5, 5, WorkerChipOrchWaitCmp::GE), region_compare_counter(5, 5, cmp)
+    );
+    EXPECT_FALSE(worker_chip_orch_comm_as_region_wait_cmp(static_cast<WorkerChipOrchWaitCmp>(6), cmp));
+}
+
 TEST(WorkerChipOrchCommTest, NotifyOpAndWaitCmpValidationRejectUnknownValues) {
     EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Set));
     EXPECT_TRUE(worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp::Add));
@@ -222,26 +254,6 @@ TEST(WorkerChipOrchCommTest, DescriptorAndSignalResultAreFixedSizePodTypes) {
     static_assert(std::is_trivially_copyable<WorkerChipOrchRegionDesc>::value, "descriptor must be fixed-size");
     static_assert(std::is_standard_layout<WorkerChipOrchSignalTestResult>::value, "test result must be POD-like");
     static_assert(std::is_trivially_copyable<WorkerChipOrchSignalTestResult>::value, "test result must be fixed-size");
-}
-
-TEST(WorkerChipOrchCommTest, LifecycleCreateWireStructsHaveFixedLayout) {
-    static_assert(std::is_standard_layout<WorkerChipRegionCreateRequest>::value, "create request must be POD-like");
-    static_assert(
-        std::is_trivially_copyable<WorkerChipRegionCreateRequest>::value, "create request must be fixed-size"
-    );
-    static_assert(std::is_standard_layout<WorkerChipRegionCreateReply>::value, "create reply must be POD-like");
-    static_assert(std::is_trivially_copyable<WorkerChipRegionCreateReply>::value, "create reply must be fixed-size");
-
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateRequest, magic_version), 0u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateRequest, payload_bytes), sizeof(uint64_t) * 2);
-    EXPECT_EQ(sizeof(WorkerChipRegionCreateRequest), 32u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, desc), 0u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, access_profile), sizeof(uint64_t) * 6);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, device_id), sizeof(uint64_t) * 6 + sizeof(uint32_t) * 2);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, backing_shm), sizeof(uint64_t) * 6 + sizeof(uint32_t) * 2 + 4u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, mapping_bytes), 96u);
-    EXPECT_EQ(offsetof(WorkerChipRegionCreateReply, shareable_handle), 104u);
-    EXPECT_EQ(sizeof(WorkerChipRegionCreateReply), 112u);
 }
 
 }  // namespace

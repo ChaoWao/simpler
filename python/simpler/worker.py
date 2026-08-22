@@ -93,14 +93,11 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     RUNTIME_ENV_RING_COUNT,
     WorkerType,
     _emit_host_span,
-    _l3_child_onboard_region_close,
-    _l3_child_onboard_region_create,
     _mailbox_load_i32,
     _mailbox_store_i32,
     _read_control_copy_request,
     _set_host_span_level_prefix,
     _worker_host_mapped_region_ack_cleanup_error,
-    _worker_host_mapped_region_close,
     _worker_host_mapped_region_import_onboard,
     _worker_host_mapped_region_import_sim,
     _worker_host_mapped_region_peek_cleanup_error,
@@ -165,7 +162,33 @@ from .comm_endpoints import (
     at,
     parse_endpoint_path,
 )
-from .comm_region import MaterializationContext, RegionInstance, materialize_region_instance
+from .comm_provider import (
+    DeviceAllocationTarget,
+    PosixShmImport,
+    ProviderRegionStore,
+    ProviderReleaseResult,
+    ProviderReleaseStatus,
+    RegionAllocationContext,
+    RegionAllocationSpec,
+    RegionEnvironmentKind,
+    RegionPartExportDescriptor,
+    RegionPartKind,
+    VmmShareableHandleImport,
+)
+from .comm_provider_control import (
+    handle_ctrl_region_allocate,
+    handle_ctrl_region_release,
+)
+from .comm_region import (
+    MaterializationContext,
+    MaterializationError,
+    RegionInstance,
+    RegionInstanceRegistry,
+    RegionInstanceState,
+    materialize_region_instance,
+    project_region_allocation_spec,
+    validate_single_owner_region_shape,
+)
 from .global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
@@ -238,22 +261,8 @@ from .task_interface import (
     _Worker,
 )
 from .worker_chip_orch_comm import (
-    _CTRL_SHM_TOKEN_BYTES,
-    _REGION_CREATE_REPLY,
-    _REGION_CREATE_REPLY_BYTES,
-    _REGION_CREATE_REQUEST,
-    _REGION_CREATE_REQUEST_BYTES,
-    _REGION_LAYOUT_ALIGNMENT,
-    _REGION_MAGIC_VERSION,
     WorkerChipOrchRegion,
-    WorkerChipRegionAccessProfile,
-    WorkerChipRegionCreateRequest,
-    WorkerHostRegionMapping,
-    _align_up,
-    _checked_add_u64,
-    decode_region_create_reply,
-    peek_region_create_reply_region_id,
-    validate_region_create_reply,
+    worker_chip_orch_region_desc_from_local_views,
 )
 from .worker_level import WorkerLevel
 from .worker_level import span_prefix as _span_prefix
@@ -548,8 +557,8 @@ _CTRL_OP_NAMES = {
 }
 
 
-_CTRL_WORKER_CHIP_REGION_CREATE = 16
-_CTRL_WORKER_CHIP_REGION_RELEASE = 17
+_CTRL_REGION_ALLOCATE = 16
+_CTRL_REGION_RELEASE = 17
 _CTRL_COMMITTED_DEVICE_MEMORY = 18
 # L4-to-local-L3 envelope for the Global CommDomain control protocol. The
 # enclosed command uses remote_l3_protocol.ControlName; values 18-23 belong to
@@ -2344,26 +2353,6 @@ def _handle_ctrl_comm_init(cw: ChipWorker, buf: memoryview) -> None:
 
 
 @dataclass
-class _HostWorkerChipRegion:
-    region_id: int
-    payload_bytes: int
-    counter_offset: int
-    counter_bytes: int
-    total_bytes: int
-    shm: SharedMemory | None = None
-    dev_ptr: int = 0
-    onboard_handle: int = 0
-
-
-@dataclass
-class _HostWorkerChipRegionStore:
-    """Per-chip-child registry of live L3-L2 direct regions (loop-local state)."""
-
-    regions: dict[int, _HostWorkerChipRegion] = field(default_factory=dict)
-    next_region_id: int = 1
-
-
-@dataclass
 class _L2GlobalDomain:
     domain_id: int
     generation: int
@@ -2382,165 +2371,36 @@ class _L2GlobalDomainStore:
     domains: dict[int, _L2GlobalDomain] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class _HostWorkerChipRegionReplyMeta:
-    payload_base: int
-    backing_name: bytes
-    access_profile: WorkerChipRegionAccessProfile
-    mapping_bytes: int
-    shareable_handle: int
-
-
-def _release_host_worker_chip_region(region: _HostWorkerChipRegion) -> None:
-    if region.shm is not None:
-        region.shm.close()
-        region.shm.unlink()
-        return
-    if region.onboard_handle:
-        _l3_child_onboard_region_close(region.onboard_handle)
-
-
-def _create_sim_worker_chip_region(
-    request: WorkerChipRegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
-) -> tuple[_HostWorkerChipRegion, _HostWorkerChipRegionReplyMeta]:
-    shm = SharedMemory(create=True, size=total_bytes)
-    region = _HostWorkerChipRegion(
-        region_id=region_id,
-        payload_bytes=request.payload_bytes,
-        counter_offset=counter_offset,
-        counter_bytes=request.counter_bytes,
-        total_bytes=total_bytes,
-        shm=shm,
-    )
-    region_buf = cast(memoryview, shm.buf)
-    region_buf[counter_offset : counter_offset + request.counter_bytes] = b"\x00" * request.counter_bytes
-    exported = ctypes.c_char.from_buffer(region_buf)
-    try:
-        payload_base = ctypes.addressof(exported)
-    finally:
-        del exported
-        del region_buf
-    backing_name = shm.name.encode("utf-8")
-    if len(backing_name) >= _CTRL_SHM_TOKEN_BYTES:
-        raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE backing shm token is too long")
-    meta = _HostWorkerChipRegionReplyMeta(
-        payload_base=payload_base,
-        backing_name=backing_name,
-        access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
-        mapping_bytes=total_bytes,
-        shareable_handle=0,
-    )
-    return region, meta
-
-
-def _create_onboard_worker_chip_region(
-    cw: ChipWorker, request: WorkerChipRegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
-) -> tuple[_HostWorkerChipRegion, _HostWorkerChipRegionReplyMeta]:
-    export = _l3_child_onboard_region_create(total_bytes)
-    dev_ptr = int(export.device_addr)
-    region = _HostWorkerChipRegion(
-        region_id=region_id,
-        payload_bytes=request.payload_bytes,
-        counter_offset=counter_offset,
-        counter_bytes=request.counter_bytes,
-        total_bytes=total_bytes,
-        dev_ptr=dev_ptr,
-        onboard_handle=int(export.registry_handle),
-    )
-    zeros = ctypes.create_string_buffer(request.counter_bytes)
-    cw.copy_to(dev_ptr + counter_offset, ctypes.addressof(zeros), request.counter_bytes)
-    meta = _HostWorkerChipRegionReplyMeta(
-        payload_base=dev_ptr,
-        backing_name=b"",
-        access_profile=WorkerChipRegionAccessProfile.ONBOARD_VMM,
-        mapping_bytes=int(export.mapping_bytes),
-        shareable_handle=int(export.shareable_handle),
-    )
-    return region, meta
-
-
-def _handle_ctrl_worker_chip_region_create(
-    cw: ChipWorker, buf: memoryview, chip_platform: str, store: _HostWorkerChipRegionStore
-) -> None:
+def _handle_ctrl_region_allocate(buf: memoryview, store: ProviderRegionStore) -> None:
     request_shm_name = _read_shm_name(buf, _OFF_ARGS)
     reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
     req_shm = SharedMemory(name=request_shm_name)
     reply_shm = SharedMemory(name=reply_shm_name)
     req_buf = cast(memoryview, req_shm.buf)
     reply_buf = cast(memoryview, reply_shm.buf)
-    region: _HostWorkerChipRegion | None = None
     try:
-        fields = _REGION_CREATE_REQUEST.unpack_from(req_buf, 0)
-        request = WorkerChipRegionCreateRequest(
-            magic_version=int(fields[0]),
-            request_bytes=int(fields[1]),
-            payload_bytes=int(fields[2]),
-            counter_bytes=int(fields[3]),
-        )
-        # Reject ABI mismatches loudly. The reply carries this child's own
-        # magic (not the request echo) so the L3 side can detect version skew.
-        if request.magic_version != _REGION_MAGIC_VERSION:
-            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE magic_version mismatch")
-        if request.request_bytes != _REGION_CREATE_REQUEST_BYTES:
-            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE request_bytes mismatch")
-        if request.payload_bytes <= 0:
-            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE payload_bytes must be positive")
-        if request.counter_bytes <= 0 or request.counter_bytes % 4 != 0:
-            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE counter_bytes must be positive and a multiple of 4")
-        counter_offset = _align_up(request.payload_bytes, _REGION_LAYOUT_ALIGNMENT)
-        total_bytes = _checked_add_u64(counter_offset, request.counter_bytes)
-
-        region_id = store.next_region_id
-        store.next_region_id += 1
-        if str(chip_platform).endswith("sim"):
-            region, meta = _create_sim_worker_chip_region(request, region_id, counter_offset, total_bytes)
-        else:
-            region, meta = _create_onboard_worker_chip_region(cw, request, region_id, counter_offset, total_bytes)
-        _REGION_CREATE_REPLY.pack_into(
-            reply_buf,
-            0,
-            _REGION_MAGIC_VERSION,
-            region_id,
-            meta.payload_base,
-            request.payload_bytes,
-            meta.payload_base + counter_offset,
-            request.counter_bytes,
-            int(meta.access_profile),
-            0,
-            int(getattr(cw, "device_id", -1)),
-            meta.backing_name + b"\x00" * (_CTRL_SHM_TOKEN_BYTES - len(meta.backing_name)),
-            meta.mapping_bytes,
-            meta.shareable_handle,
-        )
-        store.regions[region_id] = region
-        region = None
+        handle_ctrl_region_allocate(req_buf, reply_buf, store)
     finally:
-        if region is not None:
-            try:
-                _release_host_worker_chip_region(region)
-            except (BufferError, FileNotFoundError, OSError, RuntimeError):
-                pass
         del req_buf
         del reply_buf
         req_shm.close()
         reply_shm.close()
 
 
-def _handle_ctrl_worker_chip_region_release(buf: memoryview, store: _HostWorkerChipRegionStore) -> None:
-    region_id = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-    region = store.regions.pop(int(region_id), None)
-    if region is None:
-        return
-    _release_host_worker_chip_region(region)
-
-
-def _sweep_host_worker_chip_regions(store: _HostWorkerChipRegionStore) -> None:
-    for region_id in list(store.regions):
-        region = store.regions.pop(region_id)
-        try:
-            _release_host_worker_chip_region(region)
-        except (BufferError, FileNotFoundError, OSError, RuntimeError):
-            pass
+def _handle_ctrl_region_release(buf: memoryview, store: ProviderRegionStore) -> None:
+    request_shm_name = _read_shm_name(buf, _OFF_ARGS)
+    reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
+    req_shm = SharedMemory(name=request_shm_name)
+    reply_shm = SharedMemory(name=reply_shm_name)
+    req_buf = cast(memoryview, req_shm.buf)
+    reply_buf = cast(memoryview, reply_shm.buf)
+    try:
+        handle_ctrl_region_release(req_buf, reply_buf, store)
+    finally:
+        del req_buf
+        del reply_buf
+        req_shm.close()
+        reply_shm.close()
 
 
 def _open_global_domain_payload(buf: memoryview) -> tuple[SharedMemory, memoryview, int]:
@@ -2752,12 +2612,65 @@ def _handle_ctrl_global_domain_copy(
 
 
 def _sweep_l2_global_domains(cw: ChipWorker, store: _L2GlobalDomainStore) -> None:
-    for domain_id in list(store.domains):
+    failures: list[tuple[int, BaseException]] = []
+    first: BaseException | None = None
+    for domain_id in sorted(store.domains):
         store.domains.pop(domain_id, None)
         try:
             cw._impl.comm_global_domain_release(int(domain_id))
-        except Exception:  # noqa: BLE001
-            pass
+        except BaseException as exc:  # noqa: BLE001
+            if first is None:
+                first = exc
+            failures.append((int(domain_id), exc))
+    if not failures:
+        return
+    error = RuntimeError(
+        "domain cleanup failed: " + "; ".join(f"domain {domain_id}: {exc}" for domain_id, exc in failures)
+    )
+    error.__cause__ = first
+    raise error
+
+
+def _provider_sweep_debt_errors(results: tuple[ProviderReleaseResult, ...]) -> list[BaseException]:
+    errors: list[BaseException] = []
+    for result in results:
+        if result.status is not ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+            continue
+        if result.failures:
+            detail = ", ".join(
+                f"{failure.part.name} {failure.backend_operation.name} {failure.typed_cause.name}"
+                for failure in result.failures
+            )
+        else:
+            detail = "CLEANUP_INCOMPLETE"
+        errors.append(RuntimeError(f"provider resource {result.provider_resource_id}: {detail}"))
+    return errors
+
+
+def _teardown_chip_process_resources(
+    import_registry: ImportRegistry,
+    cw: ChipWorker,
+    global_domain_store: _L2GlobalDomainStore,
+    provider_region_store: ProviderRegionStore,
+) -> None:
+    errors: list[BaseException] = []
+    try:
+        import_registry.close()
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    try:
+        _sweep_l2_global_domains(cw, global_domain_store)
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    try:
+        errors.extend(_provider_sweep_debt_errors(provider_region_store.sweep()))
+    except BaseException as exc:  # noqa: BLE001
+        errors.append(exc)
+    if not errors:
+        return
+    aggregated = RuntimeError("chip process resource teardown failed: " + "; ".join(str(item) for item in errors))
+    aggregated.__cause__ = errors[0]
+    raise aggregated
 
 
 def _handle_ctrl_release_domain(cw: ChipWorker, buf: memoryview) -> None:
@@ -2835,7 +2748,13 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     DEVICE_MALLOC/VMM_WINDOW backings this chip may materialize.
     """
     prepared = prepared if prepared is not None else set()
-    worker_chip_region_store = _HostWorkerChipRegionStore()
+    environment = RegionEnvironmentKind.SIM if str(chip_platform).endswith("sim") else RegionEnvironmentKind.ONBOARD
+    provider_region_store = ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=environment,
+            target=DeviceAllocationTarget(int(device_id)),
+        )
+    )
     import_registry = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=owner_instance_id))
     global_domain_store = _L2GlobalDomainStore()
 
@@ -2996,10 +2915,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_release_domain(cw, buf)
             elif sub_cmd == _CTRL_COMM_INIT:
                 _handle_ctrl_comm_init(cw, buf)
-            elif sub_cmd == _CTRL_WORKER_CHIP_REGION_CREATE:
-                _handle_ctrl_worker_chip_region_create(cw, buf, chip_platform, worker_chip_region_store)
-            elif sub_cmd == _CTRL_WORKER_CHIP_REGION_RELEASE:
-                _handle_ctrl_worker_chip_region_release(buf, worker_chip_region_store)
+            elif sub_cmd == _CTRL_REGION_ALLOCATE:
+                _handle_ctrl_region_allocate(buf, provider_region_store)
+            elif sub_cmd == _CTRL_REGION_RELEASE:
+                _handle_ctrl_region_release(buf, provider_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
             elif sub_cmd == _CTRL_IMPORT_RELEASE:
@@ -3291,9 +3210,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         else:
             _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
-        import_registry.close()
-        _sweep_l2_global_domains(cw, global_domain_store)
-        _sweep_host_worker_chip_regions(worker_chip_region_store)
+        _teardown_chip_process_resources(import_registry, cw, global_domain_store, provider_region_store)
 
 
 def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins, identity tables, log config, prewarm sizing) must cross the fork as explicit COW args; the child cannot read parent state after os.fork
@@ -3862,7 +3779,6 @@ class _RunResources:
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
     live_global_domains: dict[str, GlobalCommDomainHandle] = field(default_factory=dict)
     pending_release_global_domains: list[GlobalCommDomainHandle] = field(default_factory=list)
-    worker_chip_regions: list[Any] = field(default_factory=list)
     worker_chip_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
     # Every Buffer identity a NEXT_LEVEL dispatch (submit_next_level / _group) sent as a Tensor
     # arg during this run. release_buffer() checks this set across every not-yet-settled run before
@@ -4622,7 +4538,7 @@ class Worker:
         self._endpoint_registry_epoch: int = 0
         self._region_access_service: RegionAccessService | None = None
 
-        self._live_worker_chip_regions: list[Any] = []
+        self._region_instance_registry = RegionInstanceRegistry()
         self._worker_chip_orch_comm_host_buffers: dict[int, int] = {}
 
         # Live-provenance of child (kind4, device) pointers, keyed on the exact
@@ -6465,6 +6381,29 @@ class Worker:
                 MaterializationContext(worker=self, registry=registry, plan=plan, layout=layout_summary)
             )
 
+    def _admitted_worker_chip_region_context(
+        self, worker_id: int, payload_bytes: int, counter_bytes: int
+    ) -> MaterializationContext:
+        worker_id = int(worker_id)
+        root_path = _format_worker_path(int(self.level))
+        provider_path = _format_worker_path(2, parent_path=root_path, index=worker_id)
+        provider = at(provider_path, DEVICE_AICPU)
+        layout = RegionLayoutSpec(payload_bytes=int(payload_bytes), counter_bytes=int(counter_bytes))
+        members = (at(root_path, HOST_CPU), provider)
+        topology = SingleOwner(provider=provider)
+        registry = self._get_endpoint_registry()
+        resolved = registry.resolve_region_spec(members, topology)
+        plan = BackendResolver(registry, self._get_region_access_service()).plan(resolved, layout)
+        ctx = MaterializationContext(worker=self, registry=registry, plan=plan, layout=layout)
+        validate_single_owner_region_shape(ctx)
+        return ctx
+
+    def _project_admitted_worker_chip_region_spec(
+        self, worker_id: int, payload_bytes: int, counter_bytes: int
+    ) -> RegionAllocationSpec:
+        ctx = self._admitted_worker_chip_region_context(int(worker_id), int(payload_bytes), int(counter_bytes))
+        return project_region_allocation_spec(ctx.plan, ctx.layout)
+
     def _register_into_snapshot_or_wait(self, reg: _CallableRegistration) -> CallableHandle | None:
         """Linearize a level>=3 register against the startup epoch.
 
@@ -8280,13 +8219,20 @@ class Worker:
         region_id = int(match.group(1))
         if region_id == 0:
             return False
-        poisoned = False
-        regions = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
-        for region in regions:
-            if int(region.region_id) == region_id:
-                region._poison()
-                poisoned = True
-        return poisoned
+        try:
+            self._region_instance_registry.record_data_plane_failure(resources, region_id, exc)
+        except MaterializationError as routing:
+            self._record_unreclaimable(
+                f"region instance: data-plane failure routing failed for resource {region_id}; "
+                "no further work is admitted",
+                routing,
+            )
+            return True
+        self._record_unreclaimable(
+            f"region instance: issued local operation failed for resource {region_id}; no further work is admitted",
+            exc,
+        )
+        return True
 
     def _register_worker_chip_orch_comm_host_buffer(self, handle) -> None:
         if not isinstance(handle, Buffer):
@@ -8377,281 +8323,85 @@ class Worker:
         with self._hierarchical_start_cv:
             return self._consume_worker_host_mapped_cleanup_error_locked(api)
 
-    def _create_worker_chip_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):  # noqa: PLR0912
+    def _import_provider_part(self, export: RegionPartExportDescriptor):
+        capability = export.import_capability
+        if isinstance(capability, PosixShmImport):
+            return _worker_host_mapped_region_import_sim(capability.shm_name, int(export.mapping_bytes), self._owner_id)
+        if isinstance(capability, VmmShareableHandleImport):
+            return _worker_host_mapped_region_import_onboard(
+                int(capability.device_id),
+                int(capability.shareable_handle),
+                int(export.mapping_bytes),
+                self._owner_id,
+            )
+        raise RuntimeError("create_worker_chip_region: unsupported import capability")
+
+    def _provider_import_capability_type(self) -> type:
+        platform = str(self._config.get("platform", ""))
+        return PosixShmImport if platform.endswith("sim") else VmmShareableHandleImport
+
+    def _provider_import_device_id(self, worker_id: int) -> int:
+        device_ids = self._config.get("device_ids", [])
+        return int(device_ids[int(worker_id)])
+
+    def _import_region_part_lease(self, worker_id: int, resource_id: int, export: RegionPartExportDescriptor):
+        return self._import_provider_part(export)
+
+    def _create_worker_chip_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):
         if payload_bytes <= 0:
             raise ValueError("create_worker_chip_region: payload_bytes must be positive")
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_worker_chip_region: counter_bytes must be positive and a multiple of 4")
         self._validate_worker_chip_id(int(worker_id))
-        prior_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error("create_worker_chip_region")
-        if prior_native_cleanup_error is not None:
-            raise prior_native_cleanup_error
         resources = self._building_run_resources
-        req_shm = SharedMemory(create=True, size=_REGION_CREATE_REQUEST_BYTES)
-        reply_shm = SharedMemory(create=True, size=_REGION_CREATE_REPLY_BYTES)
-        req_buf = cast(memoryview, req_shm.buf)
-        reply_buf = cast(memoryview, reply_shm.buf)
-        region_id = 0
-        native_mapping_handle = None
-        worker_host_mapping = None
+        instance: RegionInstance | None = None
         region = None
-        dispatched = False
         required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
         try:
-            WorkerChipRegionCreateRequest(
-                magic_version=_REGION_MAGIC_VERSION,
-                request_bytes=_REGION_CREATE_REQUEST_BYTES,
-                payload_bytes=int(payload_bytes),
-                counter_bytes=int(counter_bytes),
-            ).encode_into(req_buf)
-            worker = self._worker
-            assert worker is not None
-            # From here the chip may have created a region. The create releases
-            # the GIL, so an interrupt can land after the child committed and
-            # before the id is read back — the rollback below cannot assume
-            # "no id" means "nothing exists".
-            dispatched = True
-            worker.control_worker_chip_region_create(int(worker_id), req_shm.name, reply_shm.name)
-            # Peek before decode: decode rejects malformed replies, but the
-            # child has already created the region and the rollback below
-            # still needs the id.
-            region_id = peek_region_create_reply_region_id(reply_buf)
-            reply = decode_region_create_reply(reply_buf)
-            platform = str(self._config.get("platform", ""))
-            expected_access_profile = (
-                WorkerChipRegionAccessProfile.SIM_POSIX_SHM
-                if platform.endswith("sim")
-                else WorkerChipRegionAccessProfile.ONBOARD_VMM
+            ctx = self._admitted_worker_chip_region_context(int(worker_id), int(payload_bytes), int(counter_bytes))
+            instance = materialize_region_instance(ctx)
+            payload_view = instance.local_view(RegionPartKind.PAYLOAD)
+            counter_view = instance.local_view(RegionPartKind.COUNTER)
+            if payload_view is None or counter_view is None:
+                raise RuntimeError("create_worker_chip_region: materialized instance is missing local views")
+            desc = worker_chip_orch_region_desc_from_local_views(
+                instance.provider_resource_id, payload_view, counter_view
             )
-            counter_offset, total_bytes = validate_region_create_reply(reply, expected_access_profile)
-            if platform.endswith("sim"):
-                native_mapping_handle = _worker_host_mapped_region_import_sim(
-                    reply.backing_shm, int(reply.mapping_bytes), self._owner_id
-                )
-            else:
-                native_mapping_handle = _worker_host_mapped_region_import_onboard(
-                    int(reply.device_id),
-                    int(reply.shareable_handle),
-                    int(reply.mapping_bytes),
-                    self._owner_id,
-                )
-            worker_host_mapping = WorkerHostRegionMapping(
-                worker_id=int(worker_id),
-                region_id=region_id,
-                access_profile=reply.access_profile,
-                total_bytes=total_bytes,
-                payload_offset=0,
-                payload_bytes=int(reply.desc.payload_bytes),
-                counter_offset=counter_offset,
-                counter_bytes=int(reply.desc.counter_bytes),
-                handle=native_mapping_handle,
-            )
-            native_mapping_handle = None
-            region = WorkerChipOrchRegion(self, int(worker_id), reply.desc, worker_host_mapping)
-            self._live_worker_chip_regions.append(region)
+            region = WorkerChipOrchRegion(self, instance, desc)
             if resources is not None:
-                resources.worker_chip_regions.append(region)
-                # Region teardown is mailbox control on its owning chip.
                 resources.requires_ordered_cleanup = True
             return region
-        except BaseException as exc:
-            mapping_cleanup_error: BaseException | None = None
-            if region is not None:
+        except BaseException:
+            if resources is not None:
+                resources.requires_ordered_cleanup = required_ordered_cleanup_before
+            if instance is not None and instance._state is RegionInstanceState.LIVE and not instance._close_attempted:
                 try:
-                    self._live_worker_chip_regions.remove(region)
-                except ValueError:
-                    pass
-                if resources is not None:
-                    try:
-                        resources.worker_chip_regions.remove(region)
-                    except ValueError:
-                        pass
-                    resources.requires_ordered_cleanup = required_ordered_cleanup_before
-                region._expire()
-            if worker_host_mapping is not None:
-                try:
-                    worker_host_mapping.close()
-                except BaseException as mapping_exc:  # noqa: BLE001
-                    mapping_cleanup_error = mapping_exc
-            elif native_mapping_handle is not None:
-                try:
-                    _worker_host_mapped_region_close(int(native_mapping_handle))
-                except BaseException as mapping_exc:  # noqa: BLE001
-                    mapping_cleanup_error = mapping_exc
-            if not region_id:
-                # The failure may have landed after the child created its
-                # region. The reply shm is parent-owned and zero-filled and the
-                # child writes the id as part of committing, so a nonzero id
-                # here is the child saying the region exists.
-                with contextlib.suppress(BaseException):
-                    region_id = peek_region_create_reply_region_id(reply_buf)
-            if not region_id and dispatched and not isinstance(exc, Exception):
-                # An asynchronous unwind through the create. The child may still
-                # be finishing a region, and the id it would write lands in a
-                # reply this frame is about to unlink — leaving something on the
-                # chip that nothing here can name. An ordinary failure is not
-                # this case: the child releases its own region before reporting
-                # one, so a zero id there really does mean nothing exists.
-                self._record_unreclaimable(
-                    f"create_worker_chip_region: interrupted on worker {int(worker_id)} before the region id was "
-                    "read back; a region may be live on the chip and no further work is admitted",
-                    exc,
-                )
-            if region_id:
-                try:
-                    assert self._worker is not None
-                    self._worker.control_worker_chip_region_release(int(worker_id), int(region_id))
-                except BaseException as release_exc:  # noqa: BLE001
-                    # The chip created the region and this call could not give
-                    # it back. Nothing else knows the id — it was never tracked
-                    # — so no later cleanup can reclaim it, and a rollback that
-                    # swallows this reports an ordinary failure over a region
-                    # that stays allocated for the worker's life. That is the
-                    # unreclaimed-device-state condition, recorded here directly
-                    # because there is no handle for a fence to fail on.
+                    self._region_instance_registry.close(instance)
+                except BaseException as close_exc:  # noqa: BLE001
                     raise self._record_unreclaimable(
-                        f"create_worker_chip_region: rollback could not release region {region_id} on worker "
-                        f"{int(worker_id)}; it is leaked and no further work is admitted",
-                        release_exc,
+                        f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
+                        f"{int(instance.provider_resource_id)} on worker {int(worker_id)}; "
+                        "it is leaked and no further work is admitted",
+                        close_exc,
                     )
             deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error(
                 "create_worker_chip_region rollback"
             )
             if deferred_native_cleanup_error is not None:
-                deferred_exc = deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error
-                if mapping_cleanup_error is not None:
-                    combined_exc = RuntimeError(
-                        f"{mapping_cleanup_error}; deferred native cleanup also failed: {deferred_exc}"
-                    )
-                    combined_exc.__cause__ = mapping_cleanup_error
-                    mapping_cleanup_error = combined_exc
-                else:
-                    mapping_cleanup_error = deferred_exc
-            if mapping_cleanup_error is not None:
+                region_id = int(instance.provider_resource_id) if instance is not None else 0
                 raise self._record_unreclaimable(
                     f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
                     f"{region_id} on worker {int(worker_id)}; it is leaked and no further work is admitted",
-                    mapping_cleanup_error,
+                    deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error,
                 )
-            raise exc
-        finally:
-            del req_buf
-            del reply_buf
-            for shm in (req_shm, reply_shm):
-                try:
-                    shm.close()
-                    shm.unlink()
-                except (BufferError, FileNotFoundError, OSError):
-                    pass
+            raise
 
-    def _close_worker_chip_region(
-        self,
-        region,
-        resources: _RunResources | None = None,
-        *,
-        poison_on_error: bool = False,
-    ) -> None:
-        region_errors: list[BaseException] = []
-        release_error: BaseException | None = None
-
-        def primary_region_error() -> BaseException:
-            primary = region_errors[0]
-            tail = primary
-            seen = {id(tail)}
-            while tail.__cause__ is not None and id(tail.__cause__) not in seen:
-                tail = tail.__cause__
-                seen.add(id(tail))
-            for extra in region_errors[1:]:
-                tail.__cause__ = extra
-                tail = extra
-            return primary
-
-        expired = bool(region.expired)
-        if not expired:
-            try:
-                region._close_worker_host_mapping()
-            except BaseException as exc:  # noqa: BLE001
-                region_errors.append(exc)
-            try:
-                if self._worker is not None and not region._chip_release_committed:
-                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-                    region._chip_release_committed = True
-                    region.free()
-            except BaseException as exc:  # noqa: BLE001
-                release_error = exc
-                region_errors.append(exc)
-        # A region remains tracked while chip ownership may still be live, so
-        # whole-tree close can replay it and instance cleanup can poison future
-        # admission. Once the chip release is committed or the native handle is
-        # already expired, cleanup may retire every tracking list that owns it.
-        if region_errors and resources is None and not poison_on_error:
-            raise primary_region_error()
-        if poison_on_error and region_errors and release_error is not None:
-            primary = primary_region_error()
-            self._record_unreclaimable(
-                f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
-                "fully reclaimed; no further work is admitted",
-                primary,
-            )
-            raise primary
-        try:
-            if not expired:
-                region._expire()
-        except BaseException as exc:  # noqa: BLE001
-            region_errors.append(exc)
-        try:
-            self._retire_worker_chip_region_tracking(region, resources)
-        except BaseException as exc:  # noqa: BLE001
-            region_errors.append(exc)
-        if region_errors:
-            primary = primary_region_error()
-            if poison_on_error:
-                self._record_unreclaimable(
-                    f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
-                    "fully reclaimed; no further work is admitted",
-                    primary,
-                )
-            raise primary
-
-    def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
-        tracking_lists = [self._live_worker_chip_regions]
-        if resources is not None and resources.worker_chip_regions is not self._live_worker_chip_regions:
-            tracking_lists.insert(0, resources.worker_chip_regions)
-        errors: list[BaseException] = []
-
-        for owned_regions in tracking_lists:
-            try:
-                owned_regions[:] = [owned for owned in owned_regions if owned is not region]
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
-
-    def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
-        # A region stays tracked until both ownership debts commit. This makes a
-        # failed close replayable by the cleanup journal instead of publishing a
-        # false success after dropping the only reference to the region.
-        tracked = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
-        if not tracked:
-            return
-        regions = list(tracked)
-        errors: list[BaseException] = []
-        for region in regions:
-            try:
-                self._close_worker_chip_region(region, resources)
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
+    def _sweep_region_instances(self) -> None:
+        self._region_instance_registry.sweep()
 
     def _close_worker_chip_orch_comm(self) -> None:
-        for region in self._live_worker_chip_regions:
-            try:
-                region._close_worker_host_mapping()
-            except RuntimeError:
-                pass
-        self._live_worker_chip_regions.clear()
         self._worker_chip_orch_comm_host_buffers.clear()
+        self._region_instance_registry.sweep()
 
     # ------------------------------------------------------------------
     # Dynamic CommDomain allocation (driven by Orchestrator.allocate_domain;
@@ -10918,16 +10668,20 @@ class Worker:
     def _require_region_control_context(self, api: str) -> None:
         frame = _callback_frame_for(self)
         if frame is not None:
-            if frame.has_submitted_task:
-                raise RuntimeError(
-                    f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run"
-                )
             self._require_no_ordered_cleanup_failure(api)
             return
         if id(self) in _held_control_reservations():
             self._require_no_ordered_cleanup_failure(api)
             return
         raise RuntimeError(f"Worker.{api}: RegionInstance access requires an active orchestration/control context")
+
+    def _require_region_control_before_submit(self, api: str) -> None:
+        # close/release travels the mailbox; a ready-queue task already in the
+        # same run has no defined order against that command.
+        self._require_region_control_context(api)
+        frame = _callback_frame_for(self)
+        if frame is not None and frame.has_submitted_task:
+            raise RuntimeError(f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run")
 
     def _control_admission(self, api: str):
         """The direct-control ordering policy for a Worker-level command.
@@ -11188,7 +10942,7 @@ class Worker:
                     ("endpoint_poison", _poison_endpoint),
                     ("remote_slot_refs", lambda: self._release_active_remote_slot_refs(resources)),
                     ("remote_frees", self._flush_pending_remote_frees),
-                    ("worker_chip_regions", lambda: self._cleanup_worker_chip_regions(resources)),
+                    ("region_instances", lambda: self._region_instance_registry.cleanup_run(resources)),
                     ("worker_chip_host_buffers", resources.worker_chip_orch_comm_host_buffers.clear),
                     (
                         "pending_global_domains",
@@ -11349,7 +11103,7 @@ class Worker:
             or bool(self._sub_pids or self._chip_pids or self._next_level_pids)
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
             or any(group.process is not None or group.ready_dir is not None for group in self._mpi_l3_groups)
-            or bool(self._live_worker_chip_regions)
+            or bool(self._region_instance_registry._instances)
             or bool(self._live_domains)
             or bool(self._live_global_domains or self._failed_global_domain_releases)
             or bool(self._global_node_domains)
@@ -11373,8 +11127,9 @@ class Worker:
         n_mpi = sum(1 for group in self._mpi_l3_groups if group.process is not None or group.ready_dir is not None)
         if n_mpi:
             parts.append(f"{n_mpi} mpirun group(s)")
-        if self._live_worker_chip_regions:
-            parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
+        n_instances = len(self._region_instance_registry._instances)
+        if n_instances:
+            parts.append(f"{n_instances} region instance(s)")
         if self._live_domains:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
         if self._live_global_domains or self._failed_global_domain_releases:
@@ -11855,7 +11610,7 @@ class Worker:
         # entries. Any survivor fences the transport teardown below.
         pre_transport_keys: set[tuple[str, str]] = set()
         for kind, identity, cleanup in (
-            ("region", "all Worker-Chip regions", self._cleanup_worker_chip_regions),
+            ("region", "all region instances", self._sweep_region_instances),
             ("domain", "all Global CommDomains", self._release_all_live_global_domains),
             ("domain", "Global CommDomain nodes", self._release_all_global_domain_nodes),
             ("domain", "all CommDomains", self._release_all_live_domains),

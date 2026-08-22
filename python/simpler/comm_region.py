@@ -22,6 +22,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _region_counter_notify,
     _region_counter_test,
     _region_counter_wait,
+    _worker_host_mapped_region_close,
 )
 
 from .buffer import AddressSpace, Buffer
@@ -42,6 +43,19 @@ from .comm_endpoints import (
     UnsupportedRegionPlan,
     parse_endpoint_path,
 )
+from .comm_provider import (
+    PosixShmImport,
+    ProviderReleaseStatus,
+    RegionAllocationError,
+    RegionAllocationResult,
+    RegionAllocationSpec,
+    RegionPartAllocationSpec,
+    RegionPartKind,
+    RegionPartLocalView,
+    VmmShareableHandleImport,
+    validate_independent_local_views,
+)
+from .comm_provider_control import ProviderAllocateClient, ProviderReleaseClient
 
 _GENERATION_COUNTER = itertools.count(1)
 _MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
@@ -127,23 +141,23 @@ class _PinnedBuffer:
 
 class HostVmmCopyAccess:
     def __init__(self, handle: Any) -> None:
-        self._handle = int(handle)
+        self._handle = handle
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> HostVmmCopyAccess:
-        return cls(getattr(mapping, "handle"))
+        return cls(getattr(mapping, "handle", mapping))
 
     @property
-    def handle(self) -> int:
+    def handle(self) -> Any:
         return self._handle
 
     def write_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
         span.validate_range(offset, nbytes, "region byte write")
-        _host_vmm_copy_to(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+        _host_vmm_copy_to(int(self._handle), int(span.offset) + int(offset), int(host_ptr), int(nbytes))
 
     def read_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
         span.validate_range(offset, nbytes, "region byte read")
-        _host_vmm_copy_from(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+        _host_vmm_copy_from(int(self._handle), int(span.offset) + int(offset), int(host_ptr), int(nbytes))
 
 
 class PayloadPart:
@@ -246,24 +260,10 @@ class RegionCounter:
 
 
 class RegionInstanceState(str, Enum):
-    PLANNED = "PLANNED"
-    OWNER_CREATED = "OWNER_CREATED"
-    CONSUMER_ATTACHED = "CONSUMER_ATTACHED"
     LIVE = "LIVE"
-    ROLLING_BACK = "ROLLING_BACK"
-    ROLLED_BACK = "ROLLED_BACK"
-    ROLLBACK_FAILED = "ROLLBACK_FAILED"
     CLOSING = "CLOSING"
     CLOSED = "CLOSED"
     CLOSE_FAILED = "CLOSE_FAILED"
-
-
-_TERMINAL_FAILURE_STATES = frozenset(
-    (
-        RegionInstanceState.ROLLBACK_FAILED,
-        RegionInstanceState.CLOSE_FAILED,
-    )
-)
 
 
 class RefusalReason(str, Enum):
@@ -302,6 +302,85 @@ class SingleOwnerRegionShape:
     worker_id: int
 
 
+class RegionInstanceRegistry:
+    """Strong reachability for consumer instances. Not an ID-addressed data path."""
+
+    def __init__(self) -> None:
+        self._instances: dict[int, RegionInstance] = {}
+        self._run_scopes: dict[int, Any] = {}
+
+    def track(self, instance: RegionInstance, run_scope: Any) -> None:
+        key = id(instance)
+        if key in self._instances:
+            raise MaterializationError("region instance is already tracked")
+        self._instances[key] = instance
+        self._run_scopes[key] = run_scope
+
+    def close(self, instance: RegionInstance) -> None:
+        try:
+            instance._close_owned(poison_on_error=True)
+        finally:
+            self._settle(instance)
+
+    def cleanup_run(self, run_scope: Any) -> None:
+        errors: list[BaseException] = []
+        for instance in self._iter_run(run_scope):
+            if instance._close_attempted or instance._state in (
+                RegionInstanceState.CLOSED,
+                RegionInstanceState.CLOSE_FAILED,
+            ):
+                self._settle(instance)
+                continue
+            try:
+                self.close(instance)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def sweep(self) -> None:
+        errors: list[BaseException] = []
+        for instance in tuple(self._instances.values()):
+            if not instance._close_attempted and instance._state not in (
+                RegionInstanceState.CLOSED,
+                RegionInstanceState.CLOSE_FAILED,
+            ):
+                try:
+                    instance._close_owned(poison_on_error=True)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+            self._retire(id(instance))
+        if errors:
+            raise errors[0]
+
+    def record_data_plane_failure(self, run_scope: Any, resource_id: int, error: BaseException) -> None:
+        resource_id = int(resource_id)
+        matches = [
+            instance for instance in self._iter_run(run_scope) if int(instance.provider_resource_id) == resource_id
+        ]
+        if not matches:
+            raise MaterializationError(f"no region instance for resource {resource_id}")
+        if len(matches) > 1:
+            raise MaterializationError(f"duplicate region instances for resource {resource_id}")
+        instance = matches[0]
+        if instance._data_plane_error is None:
+            instance._data_plane_error = error
+
+    def _iter_run(self, run_scope: Any) -> tuple[RegionInstance, ...]:
+        return tuple(instance for key, instance in self._instances.items() if self._run_scopes[key] is run_scope)
+
+    def _settle(self, instance: RegionInstance) -> None:
+        if id(instance) not in self._instances:
+            return
+        if instance._retains_cleanup_only_reachability():
+            return
+        self._retire(id(instance))
+
+    def _retire(self, key: int) -> None:
+        self._instances.pop(key, None)
+        self._run_scopes.pop(key, None)
+
+
 class RegionInstance:
     def __init__(self, ctx: MaterializationContext, shape: SingleOwnerRegionShape) -> None:
         self.plan = ctx.plan
@@ -317,126 +396,271 @@ class RegionInstance:
         )
         self._worker = ctx.worker
         self._cleanup_resources = getattr(ctx.worker, "_building_run_resources", None)
-        self._region = None
+        self._payload_mapping: Any | None = None
+        self._counter_mapping: Any | None = None
         self._payload_part: PayloadPart | None = None
         self._counter_part: CounterPart | None = None
-        self._state = RegionInstanceState.PLANNED
+        self._payload_local_view: RegionPartLocalView | None = None
+        self._counter_local_view: RegionPartLocalView | None = None
+        self._provider_resource_id = 0
+        self._release_client: ProviderReleaseClient | None = None
+        self._allocate_client: ProviderAllocateClient | None = None
+        self._state: RegionInstanceState | None = None
         self._cleanup_error: BaseException | None = None
+        self._close_attempted = False
+        self._ever_live = False
+        self._provider_release_committed = False
+        self._data_plane_error: BaseException | None = None
 
     @property
     def state(self) -> RegionInstanceState:
+        if self._state is None:
+            raise MaterializationError("region instance is not published")
         return self._state
+
+    @property
+    def provider_resource_id(self) -> int:
+        return int(self._provider_resource_id)
+
+    @property
+    def data_plane_error(self) -> BaseException | None:
+        return self._data_plane_error
+
+    def local_view(self, part: RegionPartKind) -> RegionPartLocalView | None:
+        if self._state is not RegionInstanceState.LIVE:
+            return None
+        selected = RegionPartKind(part)
+        if selected is RegionPartKind.PAYLOAD:
+            return self._payload_local_view
+        if selected is RegionPartKind.COUNTER:
+            return self._counter_local_view
+        raise ValueError("region part must be PAYLOAD or COUNTER")
 
     @classmethod
     def planned(cls, ctx: MaterializationContext, shape: SingleOwnerRegionShape) -> RegionInstance:
         return cls(ctx, shape)
 
-    def _adopt_worker_chip_region(self, region: Any) -> None:
-        self._region = region
-        mapping = getattr(region, "_worker_host_mapping", None)
-        if mapping is None:
-            return
-        plan = self.plan
-        if not isinstance(plan, BackendPlan):
-            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
-        payload_access = _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, mapping)
-        counter_access = _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, mapping)
-        self._payload_part = PayloadPart(
-            RegionPartSpan(offset=int(mapping.payload_offset), nbytes=int(mapping.payload_bytes)), payload_access
-        )
-        self._counter_part = CounterPart(
-            RegionPartSpan(offset=int(mapping.counter_offset), nbytes=int(mapping.counter_bytes)), counter_access
-        )
-
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.payload_write")
         payload_part = self._payload_part
-        if payload_part is None:
-            region = self._region
-            assert region is not None
-            region.payload_write(offset, host_buffer, nbytes)
-            return
+        assert payload_part is not None
         payload_part.write(offset, host_buffer, nbytes)
 
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.payload_read")
         payload_part = self._payload_part
-        if payload_part is None:
-            region = self._region
-            assert region is not None
-            region.payload_read(offset, host_buffer, nbytes)
-            return
+        assert payload_part is not None
         payload_part.read(offset, host_buffer, nbytes)
 
     def counter(self, offset: int):
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.counter")
         counter_part = self._counter_part
-        if counter_part is None:
-            region = self._region
-            assert region is not None
-            return region.counter(offset)
+        assert counter_part is not None
         return counter_part.counter(offset)
 
     def close(self) -> None:
         if self._state is RegionInstanceState.CLOSED:
             return
-        if self._state in _TERMINAL_FAILURE_STATES and self._cleanup_error is not None:
+        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
             raise self._cleanup_error
-        if self._state is RegionInstanceState.ROLLED_BACK:
+        if self._state is None and self._provider_resource_id == 0 and self._payload_mapping is None:
+            self._state = RegionInstanceState.CLOSED
+            self._worker._region_instance_registry._settle(self)
             return
-        if self._state is RegionInstanceState.PLANNED:
+        self._worker._require_region_control_before_submit("region_instance.close")
+        self._worker._region_instance_registry.close(self)
+
+    def _materialize(self, spec: RegionAllocationSpec) -> None:
+        plan = self.plan
+        if not isinstance(plan, BackendPlan):
+            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
+        prior = self._worker._consume_worker_host_mapped_cleanup_error("region_instance.materialize")
+        if prior is not None:
+            raise prior
+        native = self._worker._worker
+        if native is None:
+            raise RuntimeError("region instance materialize requires Worker.init()")
+        self._allocate_client = ProviderAllocateClient(native, self.worker_id)
+        try:
+            result, payload_view, counter_view = self._allocate_client.allocate(spec)
+        except RegionAllocationError as exc:
+            self._provider_resource_id = int(exc.provisional_resource_id)
+            if exc.cleanup_debt_remaining:
+                error = self._worker._record_unreclaimable(
+                    f"region instance: allocation left cleanup debt for resource "
+                    f"{exc.provisional_resource_id} on worker {self.worker_id}; no further work is admitted",
+                    exc,
+                )
+                self._fail_terminal(error)
+                raise error
+            self._state = RegionInstanceState.CLOSED
+            raise
+        except BaseException:
+            committed = int(self._allocate_client.committed_resource_id)
+            if committed:
+                self._provider_resource_id = committed
+                self._release_client = ProviderReleaseClient(native, self.worker_id)
+            raise
+        self._provider_resource_id = int(result.provider_resource_id)
+        self._release_client = ProviderReleaseClient(native, self.worker_id)
+        try:
+            validate_committed_region_allocation(
+                plan,
+                spec,
+                result,
+                payload_view,
+                counter_view,
+                expected_capability_type=self._worker._provider_import_capability_type(),
+                expected_device_id=self._worker._provider_import_device_id(self.worker_id),
+            )
+            payload_lease = self._worker._import_region_part_lease(
+                self.worker_id, self._provider_resource_id, result.export_descriptor.payload
+            )
+            self._payload_mapping = payload_lease
+            counter_lease = self._worker._import_region_part_lease(
+                self.worker_id, self._provider_resource_id, result.export_descriptor.counter
+            )
+            self._counter_mapping = counter_lease
+            self._payload_part = PayloadPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
+                _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, payload_lease),
+            )
+            self._counter_part = CounterPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
+                _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, counter_lease),
+            )
+            self._payload_local_view = payload_view
+            self._counter_local_view = counter_view
+        except BaseException as exc:
+            self._abort_materialization(exc)
+            raise
+        self._ever_live = True
+        self._state = RegionInstanceState.LIVE
+
+    def _abort_materialization(self, cause: BaseException) -> None:
+        if isinstance(cause, RegionAllocationError):
+            poison = bool(cause.cleanup_debt_remaining)
+        else:
+            client = self._allocate_client
+            poison = bool(client is not None and client.dispatch_started)
+        close_error: BaseException | None = None
+        try:
+            self._close_owned(poison_on_error=False)
+        except BaseException as exc:  # noqa: BLE001
+            close_error = exc
+        if not poison:
+            if close_error is None and self._state is not RegionInstanceState.CLOSE_FAILED:
+                self._state = RegionInstanceState.CLOSED
+            elif close_error is not None:
+                self._cleanup_error = close_error
+                self._state = RegionInstanceState.CLOSE_FAILED
+            return
+        if close_error is not None and close_error.__cause__ is None:
+            close_error.__cause__ = cause
+        self._cleanup_error = self._worker._record_unreclaimable(
+            f"region instance: committed allocation could not be published on worker {self.worker_id}; "
+            "no further work is admitted",
+            close_error or cause,
+        )
+        self._state = RegionInstanceState.CLOSE_FAILED
+
+    def _close_mapping_leases(self) -> list[BaseException]:
+        errors: list[BaseException] = []
+        for lease in (self._payload_mapping, self._counter_mapping):
+            if lease is None:
+                continue
+            try:
+                closer = getattr(lease, "close", None)
+                if closer is not None:
+                    closer()
+                else:
+                    _worker_host_mapped_region_close(int(lease))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        return errors
+
+    def _release_provider_resource(self) -> BaseException | None:
+        if self._release_client is None or int(self._provider_resource_id) == 0:
+            return None
+        try:
+            result = self._release_client.release(int(self._provider_resource_id))
+        except BaseException as exc:  # noqa: BLE001
+            return exc
+        if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
+            self._provider_release_committed = True
+            return None
+        if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+            return RuntimeError(
+                f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
+            )
+        if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
+            return RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
+        return None
+
+    def _close_owned(self, *, poison_on_error: bool) -> None:
+        if self._state is RegionInstanceState.CLOSED:
+            return
+        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
+            raise self._cleanup_error
+        if self._close_attempted:
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
+            return
+        self._close_attempted = True
+        if self._state is RegionInstanceState.LIVE:
+            self._state = RegionInstanceState.CLOSING
+        errors = self._close_mapping_leases()
+        release_error = self._release_provider_resource()
+        if release_error is not None:
+            errors.append(release_error)
+        if not errors:
             self._state = RegionInstanceState.CLOSED
             return
-        if self._region is None:
-            self._state = RegionInstanceState.CLOSED
-            return
-        self._worker._require_region_control_context("region_instance.close")
-        self._state = RegionInstanceState.CLOSING
-        try:
-            self._worker._close_worker_chip_region(
-                self._region,
-                self._cleanup_resources,
-                poison_on_error=True,
+        self._cleanup_error = errors[0]
+        self._state = RegionInstanceState.CLOSE_FAILED
+        if poison_on_error:
+            self._worker._record_unreclaimable(
+                f"region instance: resource {self._provider_resource_id} on worker {self.worker_id} "
+                "could not be fully reclaimed; no further work is admitted",
+                self._cleanup_error,
             )
-        except BaseException as exc:
-            self._cleanup_error = exc
-            self._state = RegionInstanceState.CLOSE_FAILED
-            raise
-        self._state = RegionInstanceState.CLOSED
+        raise self._cleanup_error
 
-    def rollback(self) -> None:
-        if self._state in (RegionInstanceState.CLOSED, RegionInstanceState.ROLLED_BACK):
-            return
-        if self._state in _TERMINAL_FAILURE_STATES and self._cleanup_error is not None:
-            raise self._cleanup_error
-        if self._region is None:
-            self._state = RegionInstanceState.ROLLED_BACK
-            return
-        self._worker._require_region_control_context("region_instance.rollback")
-        self._state = RegionInstanceState.ROLLING_BACK
-        try:
-            self._worker._close_worker_chip_region(
-                self._region,
-                self._cleanup_resources,
-                poison_on_error=True,
-            )
-        except BaseException as exc:
-            self._cleanup_error = exc
-            self._state = RegionInstanceState.ROLLBACK_FAILED
-            raise
-        self._state = RegionInstanceState.ROLLED_BACK
+    def _fail_terminal(self, error: BaseException) -> None:
+        self._cleanup_error = error
+        self._state = RegionInstanceState.CLOSE_FAILED
 
-    def _rollback_after_failed_materialization(self) -> None:
-        self.rollback()
+    def _retains_cleanup_only_reachability(self) -> bool:
+        if self._state is RegionInstanceState.CLOSED:
+            return False
+        if self._state is RegionInstanceState.CLOSE_FAILED:
+            return not (self._ever_live and self._provider_release_committed)
+        return True
 
     def _ensure_live(self) -> None:
         if self._state is not RegionInstanceState.LIVE:
-            raise MaterializationError(f"region instance is not live: {self._state.value}")
-        if self._region is None:
-            raise MaterializationError("region instance has no adopted worker-chip region")
+            label = "unpublished" if self._state is None else self._state.value
+            raise MaterializationError(f"region instance is not live: {label}")
+
+
+def project_region_allocation_spec(plan: object, layout: object) -> RegionAllocationSpec:
+    if not isinstance(plan, BackendPlan):
+        raise TypeError("project_region_allocation_spec requires a BackendPlan")
+    if not isinstance(layout, RegionLayoutSpec):
+        raise TypeError("project_region_allocation_spec requires a RegionLayoutSpec")
+    return RegionAllocationSpec(
+        payload=RegionPartAllocationSpec(
+            planned_backing_kind=plan.payload.backend_kind,
+            logical_bytes=int(layout.payload_bytes),
+        ),
+        counter=RegionPartAllocationSpec(
+            planned_backing_kind=plan.counter.backend_kind,
+            logical_bytes=int(layout.counter_bytes),
+        ),
+    )
 
 
 def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwnerRegionShape:  # noqa: PLR0912
@@ -508,20 +732,79 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
 
 def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
     shape = validate_single_owner_region_shape(ctx)
+    spec = project_region_allocation_spec(ctx.plan, ctx.layout)
     instance = RegionInstance.planned(ctx, shape)
+    resources = getattr(ctx.worker, "_building_run_resources", None)
+    ctx.worker._region_instance_registry.track(instance, resources)
+    if resources is not None:
+        resources.requires_ordered_cleanup = True
     try:
-        instance._state = RegionInstanceState.OWNER_CREATED
-        region = ctx.worker._create_worker_chip_region(
-            shape.worker_id,
-            int(ctx.layout.payload_bytes),
-            int(ctx.layout.counter_bytes),
-        )
-        instance._adopt_worker_chip_region(region)
-        instance._state = RegionInstanceState.LIVE
+        instance._materialize(spec)
         return instance
-    except BaseException:
-        instance._rollback_after_failed_materialization()
+    except BaseException as exc:
+        if instance._state is None:
+            instance._abort_materialization(exc)
+        ctx.worker._region_instance_registry._settle(instance)
         raise
+
+
+def validate_committed_region_allocation(  # noqa: PLR0912
+    plan: BackendPlan,
+    spec: RegionAllocationSpec,
+    result: RegionAllocationResult,
+    payload_view: RegionPartLocalView,
+    counter_view: RegionPartLocalView,
+    *,
+    expected_capability_type: type,
+    expected_device_id: int | None,
+) -> None:
+    payload_export = result.export_descriptor.payload
+    counter_export = result.export_descriptor.counter
+    if payload_export.planned_backing_kind is not plan.payload.backend_kind:
+        raise RuntimeError("committed PAYLOAD planned backing does not match the admitted plan")
+    if counter_export.planned_backing_kind is not plan.counter.backend_kind:
+        raise RuntimeError("committed COUNTER planned backing does not match the admitted plan")
+    if payload_export.planned_backing_kind is not spec.payload.planned_backing_kind:
+        raise RuntimeError("committed PAYLOAD planned backing does not match the admitted spec")
+    if counter_export.planned_backing_kind is not spec.counter.planned_backing_kind:
+        raise RuntimeError("committed COUNTER planned backing does not match the admitted spec")
+    if int(payload_export.logical_bytes) != int(spec.payload.logical_bytes):
+        raise RuntimeError("committed PAYLOAD logical_bytes do not match the admitted spec")
+    if int(counter_export.logical_bytes) != int(spec.counter.logical_bytes):
+        raise RuntimeError("committed COUNTER logical_bytes do not match the admitted spec")
+    if not isinstance(payload_export.import_capability, expected_capability_type) or not isinstance(
+        counter_export.import_capability, expected_capability_type
+    ):
+        raise RuntimeError("committed import capability does not match the current execution environment")
+    if expected_capability_type is VmmShareableHandleImport:
+        payload_cap = payload_export.import_capability
+        counter_cap = counter_export.import_capability
+        assert isinstance(payload_cap, VmmShareableHandleImport)
+        assert isinstance(counter_cap, VmmShareableHandleImport)
+        if int(payload_cap.shareable_handle) == int(counter_cap.shareable_handle):
+            raise RuntimeError("committed VMM shareable handles must be distinct")
+        if expected_device_id is not None and (
+            int(payload_cap.device_id) != int(expected_device_id)
+            or int(counter_cap.device_id) != int(expected_device_id)
+        ):
+            raise RuntimeError("committed VMM device_id is outside this worker's device namespace")
+    elif expected_capability_type is PosixShmImport:
+        payload_cap = payload_export.import_capability
+        counter_cap = counter_export.import_capability
+        assert isinstance(payload_cap, PosixShmImport)
+        assert isinstance(counter_cap, PosixShmImport)
+        if payload_cap.shm_name == counter_cap.shm_name:
+            raise RuntimeError("committed POSIX shm tokens must be distinct")
+    if payload_view.part is not RegionPartKind.PAYLOAD or counter_view.part is not RegionPartKind.COUNTER:
+        raise RuntimeError("committed local views must be PAYLOAD then COUNTER")
+    if int(payload_view.logical_bytes) != int(spec.payload.logical_bytes):
+        raise RuntimeError("committed PAYLOAD local view bytes do not match the admitted spec")
+    if int(counter_view.logical_bytes) != int(spec.counter.logical_bytes):
+        raise RuntimeError("committed COUNTER local view bytes do not match the admitted spec")
+    try:
+        validate_independent_local_views(payload_view, counter_view)
+    except ValueError as exc:
+        raise RuntimeError(str(exc) or "committed local views are not independent") from exc
 
 
 def _record_for(ctx: MaterializationContext, endpoint: Any) -> EndpointRecord:

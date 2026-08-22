@@ -49,6 +49,9 @@ TEST(WorkerChipOrchEndpointTest, DecodesDescriptorScalarsAndCounterRange) {
     ASSERT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::NONE) << endpoint.error().message;
     EXPECT_EQ(endpoint.descriptor().counter_base, desc.counter_base);
     EXPECT_EQ(endpoint.descriptor().counter_bytes, desc.counter_bytes);
+    EXPECT_EQ(endpoint.view().payload_span().base, desc.payload_base);
+    EXPECT_EQ(endpoint.view().counter_span().base, desc.counter_base);
+    EXPECT_FALSE(endpoint.view().failed());
 
     uint64_t counter_addr = 0;
     ASSERT_TRUE(endpoint.counter_addr(8, counter_addr)) << endpoint.error().message;
@@ -190,6 +193,11 @@ TEST(WorkerChipOrchEndpointTest, SignalWaitTimeoutCarriesStructuredMetadata) {
     EXPECT_EQ(endpoint.error().counter_operand, 1);
     EXPECT_EQ(endpoint.error().observed_counter, 0);
     EXPECT_EQ(observed, 0);
+    EXPECT_FALSE(endpoint.view().failed());
+
+    WorkerChipOrchPayloadView view{};
+    EXPECT_FALSE(endpoint.payload_read(0, sizeof(uint32_t), view));
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::SIGNAL_TIMEOUT);
 }
 
 TEST(WorkerChipOrchEndpointTest, SignalWaitDoesNotTreatGreaterObservedValueAsProtocolError) {
@@ -214,7 +222,131 @@ TEST(WorkerChipOrchEndpointTest, RejectsBadDescriptorScalars) {
 
     EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::BAD_DESCRIPTOR);
     EXPECT_EQ(endpoint.error().op, WorkerChipEndpointOp::INIT);
-    EXPECT_STRNE(endpoint.error().message, "");
+    EXPECT_STREQ(endpoint.error().message, "invalid compatibility descriptor");
+}
+
+TEST(WorkerChipOrchEndpointTest, RejectsInvalidIndependentSpansWithFixedMessage) {
+    RegionStorage storage{};
+    WorkerChipOrchRegionDesc desc = make_desc(&storage);
+    desc.payload_bytes = 0;
+
+    WorkerChipOrchEndpoint endpoint(desc);
+
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::BAD_DESCRIPTOR);
+    EXPECT_STREQ(endpoint.error().message, "invalid independent local spans");
+}
+
+TEST(WorkerChipOrchEndpointTest, UnknownNotifyAndWaitStaySignalProtocolWithoutEnteringView) {
+    RegionStorage storage{};
+    WorkerChipOrchEndpoint endpoint(make_desc(&storage));
+    uint64_t counter_addr = 0;
+    ASSERT_TRUE(endpoint.counter_addr(0, counter_addr)) << endpoint.error().message;
+
+    EXPECT_FALSE(endpoint.signal_notify(counter_addr, 1, static_cast<WorkerChipOrchNotifyOp>(99)));
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL);
+    EXPECT_FALSE(endpoint.view().failed());
+
+    WorkerChipOrchEndpoint second(make_desc(&storage));
+    WorkerChipOrchSignalTestResult result{};
+    EXPECT_FALSE(second.signal_test(counter_addr, 1, static_cast<WorkerChipOrchWaitCmp>(99), result));
+    EXPECT_EQ(second.error().kind, WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL);
+    EXPECT_FALSE(second.view().failed());
+}
+
+struct FailingCopyOps : LocalMemoryOps {
+    bool copy_bytes(void *, const void *, size_t) const { return false; }
+};
+
+struct FailingInvalidateOps : LocalMemoryOps {
+    bool invalidate(const void *, size_t) const { return false; }
+};
+
+struct FailingLoadOps : LocalMemoryOps {
+    bool load_i32(uint64_t, int32_t &) const { return false; }
+};
+
+TEST(WorkerChipOrchEndpointTest, IssuedPayloadFailuresMapToLocalOperation) {
+    RegionStorage storage{};
+    WorkerChipOrchEndpointImpl<FailingInvalidateOps> reader(make_desc(&storage));
+    WorkerChipOrchPayloadView view{};
+    EXPECT_FALSE(reader.payload_read(0, 4, view));
+    EXPECT_EQ(reader.error().kind, WorkerChipEndpointErrorKind::LOCAL_OPERATION);
+
+    WorkerChipOrchEndpointImpl<FailingCopyOps> writer(make_desc(&storage));
+    const uint32_t marker = 1;
+    EXPECT_FALSE(writer.payload_write(0, &marker, sizeof(marker)));
+    EXPECT_EQ(writer.error().kind, WorkerChipEndpointErrorKind::LOCAL_OPERATION);
+}
+
+TEST(WorkerChipOrchEndpointTest, IssuedCounterFailuresMapToLocalOperation) {
+    RegionStorage storage{};
+    uint64_t counter_addr = 0;
+    {
+        WorkerChipOrchEndpoint probe(make_desc(&storage));
+        ASSERT_TRUE(probe.counter_addr(0, counter_addr)) << probe.error().message;
+    }
+
+    WorkerChipOrchEndpointImpl<FailingLoadOps> notify_ep(make_desc(&storage));
+    EXPECT_FALSE(notify_ep.signal_notify(counter_addr, 1, WorkerChipOrchNotifyOp::Add));
+    EXPECT_EQ(notify_ep.error().kind, WorkerChipEndpointErrorKind::LOCAL_OPERATION);
+
+    WorkerChipOrchEndpointImpl<FailingLoadOps> test_ep(make_desc(&storage));
+    WorkerChipOrchSignalTestResult result{};
+    EXPECT_FALSE(test_ep.signal_test(counter_addr, 1, WorkerChipOrchWaitCmp::EQ, result));
+    EXPECT_EQ(test_ep.error().kind, WorkerChipEndpointErrorKind::LOCAL_OPERATION);
+
+    WorkerChipOrchEndpointImpl<FailingLoadOps> wait_ep(make_desc(&storage));
+    int32_t observed = 0;
+    EXPECT_FALSE(wait_ep.signal_wait(counter_addr, 1, WorkerChipOrchWaitCmp::EQ, 1, observed));
+    EXPECT_EQ(wait_ep.error().kind, WorkerChipEndpointErrorKind::LOCAL_OPERATION);
+}
+
+TEST(WorkerChipOrchEndpointTest, EnumConversionCoversSetAddAndAllComparisons) {
+    RegionNotifyOp notify{};
+    ASSERT_TRUE(worker_chip_notify_op_to_region(WorkerChipOrchNotifyOp::Set, notify));
+    EXPECT_EQ(notify, RegionNotifyOp::Set);
+    ASSERT_TRUE(worker_chip_notify_op_to_region(WorkerChipOrchNotifyOp::Add, notify));
+    EXPECT_EQ(notify, RegionNotifyOp::Add);
+    EXPECT_FALSE(worker_chip_notify_op_to_region(static_cast<WorkerChipOrchNotifyOp>(3), notify));
+
+    RegionWaitCmp cmp{};
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::EQ, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::EQ);
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::NE, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::NE);
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::GT, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::GT);
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::GE, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::GE);
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::LT, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::LT);
+    ASSERT_TRUE(worker_chip_wait_cmp_to_region(WorkerChipOrchWaitCmp::LE, cmp));
+    EXPECT_EQ(cmp, RegionWaitCmp::LE);
+    EXPECT_FALSE(worker_chip_wait_cmp_to_region(static_cast<WorkerChipOrchWaitCmp>(9), cmp));
+    EXPECT_EQ(
+        worker_chip_map_view_error_kind(RegionViewErrorKind::ISSUED_FAILURE),
+        WorkerChipEndpointErrorKind::LOCAL_OPERATION
+    );
+    EXPECT_EQ(
+        worker_chip_map_view_error_kind(RegionViewErrorKind::INVALID_ENUM), WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL
+    );
+}
+
+TEST(WorkerChipOrchEndpointTest, RejectsAbiMajor2AndOldContiguousMagic) {
+    RegionStorage storage{};
+    WorkerChipOrchRegionDesc desc = make_desc(&storage);
+    desc.magic_version = worker_chip_orch_comm_pack_magic_version(WORKER_CHIP_ORCH_COMM_MAGIC, 2, 0);
+    std::array<uint64_t, WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT> scalars{
+        desc.magic_version, desc.region_id,    desc.payload_base,
+        desc.payload_bytes, desc.counter_base, desc.counter_bytes,
+    };
+
+    WorkerChipOrchEndpoint endpoint(scalars.data(), scalars.size());
+
+    EXPECT_EQ(endpoint.error().kind, WorkerChipEndpointErrorKind::BAD_DESCRIPTOR);
+    EXPECT_EQ(endpoint.error().op, WorkerChipEndpointOp::INIT);
+    EXPECT_TRUE(endpoint.view().failed());
+    EXPECT_STREQ(endpoint.error().message, "invalid compatibility descriptor");
 }
 
 }  // namespace

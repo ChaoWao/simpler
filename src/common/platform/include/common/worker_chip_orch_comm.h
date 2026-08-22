@@ -15,8 +15,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "common/region_instance_semantics.h"
+
 static constexpr uint32_t WORKER_CHIP_ORCH_COMM_MAGIC = 0x4C334C32u;  // "WorkerChip"
-static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MAJOR = 2;
+static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MAJOR = 3;
 static constexpr uint16_t WORKER_CHIP_ORCH_COMM_ABI_MINOR = 0;
 static constexpr size_t WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT = 6;
 static constexpr uint64_t WORKER_CHIP_ORCH_COMM_COUNTER_BYTES = sizeof(int32_t);
@@ -97,14 +99,7 @@ static inline uint16_t worker_chip_orch_comm_abi_minor(uint64_t magic_version) {
     return static_cast<uint16_t>(magic_version & 0xFFFFu);
 }
 
-static inline bool worker_chip_orch_comm_add_overflows(uint64_t a, uint64_t b) {
-#if defined(__clang__) || defined(__GNUC__)
-    uint64_t result = 0;
-    return __builtin_add_overflow(a, b, &result);
-#else
-    return a > UINT64_MAX - b;
-#endif
-}
+static inline bool worker_chip_orch_comm_add_overflows(uint64_t a, uint64_t b) { return region_add_overflows(a, b); }
 
 static inline uint64_t worker_chip_orch_comm_add_sat(uint64_t a, uint64_t b) {
 #if defined(__clang__) || defined(__GNUC__)
@@ -135,14 +130,9 @@ static inline bool worker_chip_orch_comm_range_contains(uint64_t base, uint64_t 
 static inline bool worker_chip_orch_comm_ranges_overlap(
     uint64_t first_base, uint64_t first_size, uint64_t second_base, uint64_t second_size
 ) {
-    if (first_size == 0 || second_size == 0 || worker_chip_orch_comm_add_overflows(first_base, first_size) ||
-        worker_chip_orch_comm_add_overflows(second_base, second_size)) {
-        return false;
-    }
-    if (first_base < second_base) {
-        return second_base - first_base < first_size;
-    }
-    return first_base - second_base < second_size;
+    return region_spans_overlap(
+        RegionPartLocalSpan{first_base, first_size}, RegionPartLocalSpan{second_base, second_size}
+    );
 }
 
 static inline WorkerChipOrchCommValidationError
@@ -150,8 +140,7 @@ worker_chip_orch_comm_validate_payload_bounds(uint64_t offset, uint64_t nbytes, 
     if (nbytes == 0 || payload_bytes == 0) {
         return WorkerChipOrchCommValidationError::BAD_PAYLOAD_RANGE;
     }
-    if (worker_chip_orch_comm_add_overflows(offset, nbytes) ||
-        worker_chip_orch_comm_add_sat(offset, nbytes) > payload_bytes) {
+    if (!region_validate_payload_range(offset, nbytes, payload_bytes)) {
         return WorkerChipOrchCommValidationError::OUT_OF_BOUNDS;
     }
     return WorkerChipOrchCommValidationError::OK;
@@ -159,15 +148,9 @@ worker_chip_orch_comm_validate_payload_bounds(uint64_t offset, uint64_t nbytes, 
 
 static inline WorkerChipOrchCommValidationError
 worker_chip_orch_comm_validate_counter_range(const WorkerChipOrchRegionDesc &desc) {
-    if (desc.counter_bytes == 0 ||
-        !worker_chip_orch_comm_is_aligned<WORKER_CHIP_ORCH_COMM_COUNTER_BASE_ALIGNMENT>(desc.counter_base) ||
-        (desc.counter_bytes % WORKER_CHIP_ORCH_COMM_COUNTER_BYTES) != 0 ||
-        worker_chip_orch_comm_add_overflows(desc.counter_base, desc.counter_bytes)) {
-        return WorkerChipOrchCommValidationError::BAD_COUNTER_RANGE;
-    }
-    if (worker_chip_orch_comm_ranges_overlap(
-            desc.payload_base, desc.payload_bytes, desc.counter_base, desc.counter_bytes
-        )) {
+    RegionPartLocalSpan payload{desc.payload_base, desc.payload_bytes};
+    RegionPartLocalSpan counter{desc.counter_base, desc.counter_bytes};
+    if (!region_validate_counter_span(counter) || region_spans_overlap(payload, counter)) {
         return WorkerChipOrchCommValidationError::BAD_COUNTER_RANGE;
     }
     return WorkerChipOrchCommValidationError::OK;
@@ -235,50 +218,70 @@ static inline bool worker_chip_orch_comm_decode_desc(
     return error == WorkerChipOrchCommValidationError::OK;
 }
 
+static inline bool worker_chip_orch_comm_as_region_notify_op(WorkerChipOrchNotifyOp op, RegionNotifyOp &out) {
+    switch (op) {
+    case WorkerChipOrchNotifyOp::Set:
+        out = RegionNotifyOp::Set;
+        return true;
+    case WorkerChipOrchNotifyOp::Add:
+        out = RegionNotifyOp::Add;
+        return true;
+    }
+    return false;
+}
+
+static inline bool worker_chip_orch_comm_as_region_wait_cmp(WorkerChipOrchWaitCmp cmp, RegionWaitCmp &out) {
+    switch (cmp) {
+    case WorkerChipOrchWaitCmp::EQ:
+        out = RegionWaitCmp::EQ;
+        return true;
+    case WorkerChipOrchWaitCmp::NE:
+        out = RegionWaitCmp::NE;
+        return true;
+    case WorkerChipOrchWaitCmp::GT:
+        out = RegionWaitCmp::GT;
+        return true;
+    case WorkerChipOrchWaitCmp::GE:
+        out = RegionWaitCmp::GE;
+        return true;
+    case WorkerChipOrchWaitCmp::LT:
+        out = RegionWaitCmp::LT;
+        return true;
+    case WorkerChipOrchWaitCmp::LE:
+        out = RegionWaitCmp::LE;
+        return true;
+    }
+    return false;
+}
+
 static inline bool worker_chip_orch_comm_valid_notify_op(WorkerChipOrchNotifyOp op) {
-    return op == WorkerChipOrchNotifyOp::Set || op == WorkerChipOrchNotifyOp::Add;
+    RegionNotifyOp converted{};
+    return worker_chip_orch_comm_as_region_notify_op(op, converted) && region_valid_notify_op(converted);
 }
 
 static inline bool worker_chip_orch_comm_valid_wait_cmp(WorkerChipOrchWaitCmp cmp) {
-    return cmp == WorkerChipOrchWaitCmp::EQ || cmp == WorkerChipOrchWaitCmp::NE || cmp == WorkerChipOrchWaitCmp::GT ||
-           cmp == WorkerChipOrchWaitCmp::GE || cmp == WorkerChipOrchWaitCmp::LT || cmp == WorkerChipOrchWaitCmp::LE;
+    RegionWaitCmp converted{};
+    return worker_chip_orch_comm_as_region_wait_cmp(cmp, converted) && region_valid_wait_cmp(converted);
 }
 
 static inline bool
 worker_chip_orch_comm_compare_counter(int32_t observed, int32_t cmp_value, WorkerChipOrchWaitCmp cmp) {
-    switch (cmp) {
-    case WorkerChipOrchWaitCmp::EQ:
-        return observed == cmp_value;
-    case WorkerChipOrchWaitCmp::NE:
-        return observed != cmp_value;
-    case WorkerChipOrchWaitCmp::GT:
-        return observed > cmp_value;
-    case WorkerChipOrchWaitCmp::GE:
-        return observed >= cmp_value;
-    case WorkerChipOrchWaitCmp::LT:
-        return observed < cmp_value;
-    case WorkerChipOrchWaitCmp::LE:
-        return observed <= cmp_value;
-    default:
+    RegionWaitCmp converted{};
+    if (!worker_chip_orch_comm_as_region_wait_cmp(cmp, converted)) {
         return false;
     }
+    return region_compare_counter(observed, cmp_value, converted);
 }
 
 static inline WorkerChipOrchCommValidationError
 worker_chip_orch_comm_validate_counter_addr(const WorkerChipOrchRegionDesc &desc, uint64_t counter_addr) {
-    // Address validity is 4-byte; wrapper protocols must keep different
-    // counter writers off the same cache line.
     if (!worker_chip_orch_comm_is_aligned<WORKER_CHIP_ORCH_COMM_COUNTER_BYTES>(counter_addr)) {
         return WorkerChipOrchCommValidationError::BAD_COUNTER_RANGE;
     }
     if (worker_chip_orch_comm_validate_counter_range(desc) != WorkerChipOrchCommValidationError::OK) {
         return WorkerChipOrchCommValidationError::BAD_COUNTER_RANGE;
     }
-    if (desc.counter_bytes < WORKER_CHIP_ORCH_COMM_COUNTER_BYTES) {
-        return WorkerChipOrchCommValidationError::BAD_COUNTER_RANGE;
-    }
-    uint64_t max_counter_addr = desc.counter_base + desc.counter_bytes - WORKER_CHIP_ORCH_COMM_COUNTER_BYTES;
-    if (counter_addr < desc.counter_base || counter_addr > max_counter_addr) {
+    if (!region_counter_addr_in_span(RegionPartLocalSpan{desc.counter_base, desc.counter_bytes}, counter_addr)) {
         return WorkerChipOrchCommValidationError::OUT_OF_BOUNDS;
     }
     return WorkerChipOrchCommValidationError::OK;
