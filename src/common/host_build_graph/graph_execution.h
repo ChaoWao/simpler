@@ -346,11 +346,10 @@ enum class GraphMaterializeResult : uint8_t {
 struct alignas(64) GraphNodeStorage {
     PTO2TaskDescriptor task;
     PTO2TaskSlotState slot;
-    // Last on purpose, and it must stay last: the payload's own tensor array is its
-    // final field, so a node reads only a prefix of this struct, and the execution
-    // storage can be strided by the widest node in the graph instead of by the type.
-    // The slot reaches it by a delta from the slot's own address, so the order is
-    // free.
+    // The payload carries its argument regions as deltas into pools past the node
+    // array, so its size is the same for every node and the slot names it by a delta
+    // from the slot's own address. Field order here therefore constrains nothing, and
+    // node_at strides the storage by this type.
     PTO2TaskPayload payload;
 };
 

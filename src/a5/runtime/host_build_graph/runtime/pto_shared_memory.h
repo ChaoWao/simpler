@@ -145,11 +145,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
         return task_descriptors[get_slot_by_task_id(local_id)];
     }
 
-    // No get_payload_by_slot / get_payload_by_task_id here on purpose: the shipped
-    // image strides its payload array by the widest task in the bind, not by
-    // sizeof(PTO2TaskPayload), so indexing it as an array of the type would land
-    // between payloads. A payload is reached through its slot state's `payload`,
-    // which the image's restack rebinds to the real address.
+    // No get_payload_by_slot / get_payload_by_task_id here: a payload is reached
+    // through its slot state's `payload` delta, which the image's restack rebinds to
+    // the real address.
 
     PTO2TaskSlotState &get_slot_state_by_slot(int32_t slot) { return slot_states[slot]; }
 

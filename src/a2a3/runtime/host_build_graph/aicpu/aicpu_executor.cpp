@@ -295,13 +295,19 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // All of it precedes runtime_init_ready_, which is what releases
                 // the peer threads into the dispatch loop, so neither a push nor a
                 // completion message sees an uninitialized region.
+                //
+                // Both regions sit in the device-only zone, so their bytes are
+                // whatever the pooled arena last held, and each one's empty state is
+                // whatever its own initializer writes — a ready queue's is a
+                // sequence ramp (slot i holds i), the mailbox's is zeroed cursors
+                // and publication gates. Zeroing the region is a substitute for
+                // neither call.
                 rt->scheduler->seed_queue_slots();
                 rt->aicore_mailbox->init_empty();
             }
         }
 
         if (boot_ok) {
-            memset(rt->aicore_mailbox, 0, sizeof(*rt->aicore_mailbox));
             runtime_finalize_after_wire(rt, sched_ctx_.aic_count(), sched_ctx_.aiv_count());
             runtime->set_slot_states_ptr(nullptr);
 

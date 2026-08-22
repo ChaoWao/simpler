@@ -28,10 +28,8 @@ line per segment per pass at `LOG_TIMING`:
 | `args` | staging the caller's host tensors and mapping them for host access |
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
 | `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
-| `graph_upload` | the Definition objects and the replay boundary images |
-| `relocate` | pointer relocation inside the shared-memory image |
-| `sm_h2d` | the task descriptors and payloads, host → device |
-| `arena_h2d` | the runtime arena's copied zone |
+| `graph_upload` | uploading the Definition objects, and laying out the replay boundary images the `arena_h2d` copy carries |
+| `arena_h2d` | the one H2D of the pass: the arena's copied zone, the shared-memory image and the Graph submission block |
 | `host_view_close` | unmapping the host views taken in `args` |
 
 The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
@@ -40,9 +38,18 @@ can start". It is what the < 1 ms target applies to. `args` and
 `host_view_close` are excluded — they scale with the caller's tensor bytes, not
 with the graph.
 
+**Two of those five are retired kinds a current run does not emit.** `relocate`
+and `sm_h2d` date from when the shared-memory image was relocated and copied on
+its own; it now travels inside the single `arena_h2d` copy as that segment's
+`sm=`. `hbg_bind_phases` keeps both in its control-plane set so a log that
+predates the change still totals correctly, and names them under its `total` row
+as absent from every pass. The table above is what a current run emits: ten
+segments, three of them control plane.
+
 **The control plane is a sum of costs, not an interval.** `arena_h2d` runs
 *after* `host_view_close`, hundreds of milliseconds later, so the segments do not
-form one contiguous window. Sum the five; do not subtract two timestamps.
+form one contiguous window. Sum the ones the pass has; do not subtract two
+timestamps.
 
 ## Prerequisites
 
@@ -125,16 +132,32 @@ not report. The log lands in `outputs/hbg_bind_stats_<sha>.log` unless `-o` name
 it:
 
 ```bash
-grep -oE 'bind phase=[a-z_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_bind_stats_<sha>.log
+grep -oE 'bind phase=[a-z0-9_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_bind_stats_<sha>.log
 ```
 
+The character class has to admit digits. `[a-z_]+` matches no segment whose name
+carries one, so it silently drops every `arena_h2d` line — the pass-closing
+segment, the only H2D left, and the one that itemizes the whole upload. On a
+two-pass log that is 18 lines where 20 exist, with nothing to say a segment went
+missing.
+
 Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
-own attributes — `tasks=` and `heap_used=` on `host_orch`, `bytes=` on every H2D
-segment, `count=` on `graph_upload`. Group the lines into passes — `arena_h2d` is
-the last segment of a pass, so it closes one — then sum the five control-plane
-segments **within each pass** and take the minimum of those sums. Never sum
+own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=` and
+`submissions=` on `graph_upload`, and `arena_h2d`'s itemized upload. Group the
+lines into passes — `arena_h2d` is the last segment of a pass, so it closes one —
+then sum the control-plane segments **within each pass** and take the minimum of
+those sums. Never sum
 minima taken across passes; that total belongs to no pass and can point the wrong
 way (see below).
+
+**A segment's `bytes=` is what that segment itself copied, so no copy is counted
+twice.** `graph_upload` counts the Definition objects it uploads and nothing
+else; `arena_h2d`'s `bytes=` is its single copy, exactly partitioned by the
+`copied=`, `sm=` and `subs=` beside it. The Graph submission block is that
+`subs=` — `graph_upload` lays the block out but copies none of it, so it is
+absent from that segment's `bytes=`. (`shared_mem`'s `bytes=` is the image the
+arena grew to hold, which `arena_h2d` then ships as `sm=`; that is the one figure
+two segments both report, and neither is a copy count of the other.)
 
 The first pass of each rank is warm-up and belongs in neither statistic; drop it
 explicitly rather than letting a minimum quietly exclude it.
@@ -176,7 +199,7 @@ the effect is small: on one dsv4 pass `graph_upload` came out +0.46 ms against
 −0.20 ms on the other three, and the same pass carried a bind whose `sm_h2d` was
 5.93 ms against a 0.6 ms norm.
 
-**One statistic decides: the minimum of the per-pass sums.** Sum the five
+**One statistic decides: the minimum of the per-pass sums.** Sum the
 control-plane segments *within* each pass, take the minimum across the warm
 passes, and compare those. A min of sums is not a sum of mins and the two can
 disagree in sign — each segment's minimum comes from whichever pass was quietest
@@ -273,7 +296,7 @@ signal than any duration on a shared box.
 | `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts, plus a `disabled: --rounds > 1` warning | one round for artifacts, many rounds for numbers |
 | Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
 | Comparing a log with no `[stamp]` first line | the parser says so above the table | re-run it through the recipe; conditions cannot be recovered from memory |
-| Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the five segments; `arena_h2d` is not adjacent |
+| Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the segments; `arena_h2d` is not adjacent |
 | Summing per-segment minima by hand | a total no pass achieved; can invert the sign | read the tool's `total` row — the minimum of the per-pass sums |
 | `--rounds 1` for numbers | the tool refuses: every pass is a rank's warm-up | six rounds; `--keep-first` only to look at the cold pass deliberately |
 | Single pass, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
@@ -300,13 +323,20 @@ meant to outlive it.
 | ----------- | ---------------- | ----------------- |
 | control plane | 1.11–1.53 ms | 3.63–6.81 ms |
 | `host_orch` | 0.44–0.75 ms (47 tasks) | 2.60–4.91 ms (1131 tasks) |
-| `graph_upload` | 0.56–0.96 ms / 40 uploads, 232,320 B | 0.39–1.14 ms / 20 uploads, 671,144 B |
-| `sm_h2d` | 0.067–0.068 ms / 233,799 B | 0.54–0.98 ms / 5,620,195 B |
-| `arena_h2d` | 0.035–0.039 ms / 632 B | 0.03–0.10 ms / 632 B |
+| `graph_upload` | 0.56–0.96 ms / 40 submissions, 232,320 B † | 0.39–1.14 ms / 20 submissions, 671,144 B † |
+| `sm_h2d` † | 0.067–0.068 ms / 233,799 B | 0.54–0.98 ms / 5,620,195 B |
+| `arena_h2d` † | 0.035–0.039 ms / 632 B | 0.03–0.10 ms / 632 B |
 | `heap_used` | 127,673,344 | 2,038,508,544 |
 | device wall | 39.3 ms | does not complete yet (`sched_error_code=5 INVALID_ARGS`) |
 | `args` (excluded) | 1.37 s / 40.9 GB, 19 of 20 staged | 1.48 s / 45.8 GB, 77 of 92 staged |
 | `host_view_close` (excluded) | 0.25 s / 40.9 GB | 0.28 s / 45.8 GB |
+
+† The three upload rows are the markers as they read at that commit, before the
+upload was restructured: `graph_upload`'s `bytes=` then also counted the Graph
+submission block, `sm_h2d` was still a copy of its own, and `arena_h2d` was the
+copied zone alone. A run today emits no `sm_h2d`, counts only the Definition
+objects in `graph_upload`, and ships all three regions in `arena_h2d` — so the
+same case reports different figures for the same work.
 
 Three of these deserve reading together. `host_orch` is the whole story on dsv4 —
 839 `submit_task`, 743 `record_node` and 272 `alloc_tensors` per bind against qwen's
