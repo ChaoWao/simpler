@@ -438,6 +438,26 @@ public:
         return false;
     }
 
+    bool cancel_progress(RunId run_id, const std::string &reason) override {
+        ProgressCall call(*this);
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto &[dispatch_id, outstanding] : outstanding_) {
+            (void)dispatch_id;
+            if (!outstanding.dispatch.prepare_only || outstanding.run_id != run_id) continue;
+            cancelled_runs_.insert(run_id);
+            WorkerEndpointProgress progress;
+            progress.kind = WorkerProgressKind::COMPLETED;
+            progress.dispatch = outstanding.dispatch;
+            progress.completion = WorkerCompletion{
+                outstanding.dispatch.task_slot, outstanding.dispatch.group_index, EndpointOutcome::TASK_FAILURE, reason
+            };
+            events_.push_back(std::move(progress));
+            cv_.notify_all();
+            return true;
+        }
+        return false;
+    }
+
     void request_progress_stop() noexcept override {
         ProgressCall call(*this);
         std::lock_guard<std::mutex> lk(mu_);
@@ -476,6 +496,13 @@ public:
         std::unique_lock<std::mutex> lk(mu_);
         return cv_.wait_for(lk, timeout, [this, run_id] {
             return activated_runs_.count(run_id) != 0;
+        });
+    }
+
+    bool wait_cancelled(RunId run_id, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [this, run_id] {
+            return cancelled_runs_.count(run_id) != 0;
         });
     }
 
@@ -562,6 +589,17 @@ public:
         cv_.notify_all();
     }
 
+    void emit_failure(const WorkerDispatch &dispatch, const std::string &message) {
+        std::lock_guard<std::mutex> lk(mu_);
+        WorkerEndpointProgress progress;
+        progress.kind = WorkerProgressKind::COMPLETED;
+        progress.dispatch = dispatch;
+        progress.completion =
+            WorkerCompletion{dispatch.task_slot, dispatch.group_index, EndpointOutcome::TASK_FAILURE, message};
+        events_.push_back(std::move(progress));
+        cv_.notify_all();
+    }
+
     int max_concurrent_progress_calls() const { return max_concurrent_calls_.load(std::memory_order_acquire); }
     bool progress_owner_changed() const {
         std::lock_guard<std::mutex> lk(owner_mu_);
@@ -629,6 +667,7 @@ private:
     std::unordered_map<uint64_t, Outstanding> outstanding_;
     std::deque<WorkerEndpointProgress> events_;
     std::set<RunId> activated_runs_;
+    std::set<RunId> cancelled_runs_;
     bool stop_requested_{false};
     bool stop_terminalized_{false};
     size_t stop_request_count_{0};
@@ -1162,6 +1201,8 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
     );
 
     worker.dispatch(WorkerDispatch{active_slot, 0});
+    EXPECT_FALSE(worker.can_stage(/*pipeline_slot_id=*/0));
+    EXPECT_TRUE(worker.can_stage(/*pipeline_slot_id=*/1));
     worker.dispatch_prepared(WorkerDispatch{staged_slot, 0});
     EXPECT_TRUE(endpoint_ptr->wait_submitted(2));
     std::vector<WorkerDispatch> submitted = endpoint_ptr->submitted();
@@ -1533,6 +1574,58 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
     EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit)));
     EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate)));
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, PreparedLocalMailboxDispatchCanBeCancelledBeforeActivation) {
+    alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    constexpr RunId run_id = 23;
+    TaskSlot task_slot = make_progress_slot(allocator, run_id, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/2);
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/43, /*prepare_only=*/true};
+    endpoint.submit_progress(&allocator, dispatch);
+
+    char *frame = test_task_frame(mailbox, 0);
+    EXPECT_EQ(test_frame_state(frame), MailboxState::PREPARE_READY);
+    const int32_t validated_only = static_cast<int32_t>(MailboxPreparationDisposition::VALIDATED_ONLY);
+    std::memcpy(frame + MAILBOX_OFF_PREPARATION_DISPOSITION, &validated_only, sizeof(validated_only));
+    set_test_frame_state(frame, MailboxState::FRAME_STAGED);
+
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    ASSERT_EQ(progress.kind, WorkerProgressKind::FRAME_STAGED);
+    ASSERT_TRUE(endpoint.cancel_progress(run_id, "peer preparation failed"));
+    EXPECT_EQ(test_frame_state(frame), MailboxState::ABANDON);
+    EXPECT_STREQ(frame + MAILBOX_OFF_ERROR_MSG, "peer preparation failed");
+
+    // The Python child acknowledges ABANDON by abandoning the native staged
+    // run and publishing TASK_FAILED; the parent then completes the dispatch
+    // through the ordinary terminal-progress path.
+    set_test_frame_state(frame, MailboxState::TASK_FAILED);
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::TASK_FAILURE);
+    EXPECT_NE(progress.completion.error_message.find("peer preparation failed"), std::string::npos);
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, NativePreparedBarrierUsesDedicatedMailboxState) {
+    alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/24, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/2);
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/44, /*prepare_only=*/true};
+    dispatch.require_native_prepare = true;
+    endpoint.submit_progress(&allocator, dispatch);
+
+    EXPECT_EQ(test_frame_state(test_task_frame(mailbox, 0)), MailboxState::NATIVE_PREPARE_READY);
     allocator.shutdown();
 }
 
@@ -2108,6 +2201,64 @@ TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleInde
     );
 }
 
+TEST_F(ProgressSchedulerFixture, GroupWaitsForEveryPreparedMemberBeforeActivation) {
+    RunId run = orchestrator.begin_run();
+    SubmitResult group = orchestrator.submit_next_level_group(
+        C(10), {single_tensor_args(0x9100, TensorArgType::OUTPUT), single_tensor_args(0xA100, TensorArgType::OUTPUT)},
+        config, {0, 1}
+    );
+    orchestrator.close_run_submission(run);
+
+    ASSERT_TRUE(endpoint0->wait_submitted(1));
+    ASSERT_TRUE(endpoint1->wait_submitted(1));
+    WorkerDispatch first = endpoint0->submitted().front();
+    WorkerDispatch second = endpoint1->submitted().front();
+    EXPECT_TRUE(first.prepare_only);
+    EXPECT_TRUE(second.prepare_only);
+    EXPECT_TRUE(first.require_native_prepare);
+    EXPECT_TRUE(second.require_native_prepare);
+    EXPECT_EQ(first.task_slot, group.task_slot);
+    EXPECT_EQ(second.task_slot, group.task_slot);
+
+    endpoint0->emit(WorkerProgressKind::FRAME_STAGED, first);
+    EXPECT_FALSE(endpoint0->wait_activated(run, std::chrono::milliseconds(20)));
+    EXPECT_FALSE(endpoint1->wait_activated(run, std::chrono::milliseconds(20)));
+
+    endpoint1->emit(WorkerProgressKind::FRAME_STAGED, second);
+    EXPECT_TRUE(endpoint0->wait_activated(run));
+    EXPECT_TRUE(endpoint1->wait_activated(run));
+
+    endpoint0->emit(WorkerProgressKind::ACCEPTED, first);
+    endpoint1->emit(WorkerProgressKind::ACCEPTED, second);
+    endpoint0->emit(WorkerProgressKind::COMPLETED, first);
+    endpoint1->emit(WorkerProgressKind::COMPLETED, second);
+    EXPECT_TRUE(orchestrator.wait_run_for(run, 3.0));
+    if (orchestrator.run_done(run)) orchestrator.release_run(run);
+}
+
+TEST_F(ProgressSchedulerFixture, GroupPrepareFailureCancelsStagedPeersWithoutActivation) {
+    RunId run = orchestrator.begin_run();
+    (void)orchestrator.submit_next_level_group(
+        C(11), {single_tensor_args(0x9200, TensorArgType::OUTPUT), single_tensor_args(0xA200, TensorArgType::OUTPUT)},
+        config, {0, 1}
+    );
+    orchestrator.close_run_submission(run);
+
+    ASSERT_TRUE(endpoint0->wait_submitted(1));
+    ASSERT_TRUE(endpoint1->wait_submitted(1));
+    WorkerDispatch first = endpoint0->submitted().front();
+    WorkerDispatch second = endpoint1->submitted().front();
+    endpoint1->emit(WorkerProgressKind::FRAME_STAGED, second);
+    endpoint0->emit_failure(first, "injected group prepare failure");
+
+    EXPECT_TRUE(endpoint1->wait_cancelled(run));
+    EXPECT_FALSE(endpoint0->wait_activated(run, std::chrono::milliseconds(20)));
+    EXPECT_FALSE(endpoint1->wait_activated(run, std::chrono::milliseconds(20)));
+    EXPECT_THROW((void)orchestrator.wait_run_for(run, 3.0), std::runtime_error);
+    EXPECT_TRUE(orchestrator.run_failed(run));
+    if (orchestrator.run_done(run)) orchestrator.release_run(run);
+}
+
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
     RunId first_run = orchestrator.begin_run();
     SubmitResult first =
@@ -2277,48 +2428,6 @@ TEST_F(CapacityOneProgressSchedulerFixture, PublicationFailureCompletesTheClaime
     if (orchestrator.run_done(second_run)) orchestrator.release_run(second_run);
 }
 
-TEST_F(ProgressSchedulerFixture, PreparedSuccessorGroupRemainsQueuedUntilPromotion) {
-    RunId first_run = orchestrator.begin_run();
-    orchestrator.submit_next_level(C(3), single_tensor_args(0x3000, TensorArgType::OUTPUT), config, 0);
-    orchestrator.close_run_submission(first_run);
-    RunId second_run = orchestrator.begin_run();
-    orchestrator.submit_next_level_group(
-        C(4), {single_tensor_args(0x4000, TensorArgType::OUTPUT), single_tensor_args(0x5000, TensorArgType::OUTPUT)},
-        config, {0, 1}
-    );
-    orchestrator.close_run_submission(second_run);
-
-    EXPECT_TRUE(endpoint0->wait_submitted(1));
-    EXPECT_TRUE(ready_next.singles_empty(second_run));
-    EXPECT_FALSE(ready_next.groups_empty(second_run));
-    EXPECT_FALSE(manager.has_staged_run(second_run));
-    EXPECT_TRUE(endpoint1->submitted().empty());
-    std::vector<WorkerDispatch> first_submissions = endpoint0->submitted();
-    ASSERT_EQ(first_submissions.size(), 1u);
-
-    endpoint0->emit(WorkerProgressKind::ACCEPTED, first_submissions[0]);
-    endpoint0->emit(WorkerProgressKind::COMPLETED, first_submissions[0]);
-    EXPECT_TRUE(endpoint0->wait_submitted(2));
-    EXPECT_TRUE(endpoint1->wait_submitted(1));
-    std::vector<WorkerDispatch> worker0_submissions = endpoint0->submitted();
-    std::vector<WorkerDispatch> worker1_submissions = endpoint1->submitted();
-    ASSERT_EQ(worker0_submissions.size(), 2u);
-    ASSERT_EQ(worker1_submissions.size(), 1u);
-    EXPECT_FALSE(worker0_submissions[1].prepare_only);
-    EXPECT_FALSE(worker1_submissions[0].prepare_only);
-    EXPECT_EQ(orchestrator.active_run_id(), second_run);
-    EXPECT_EQ(orchestrator.preparable_run_id(), INVALID_RUN_ID);
-
-    endpoint0->emit(WorkerProgressKind::ACCEPTED, worker0_submissions[1]);
-    endpoint1->emit(WorkerProgressKind::ACCEPTED, worker1_submissions[0]);
-    endpoint0->emit(WorkerProgressKind::COMPLETED, worker0_submissions[1]);
-    endpoint1->emit(WorkerProgressKind::COMPLETED, worker1_submissions[0]);
-    EXPECT_TRUE(orchestrator.wait_run_for(first_run, 3.0));
-    EXPECT_TRUE(orchestrator.wait_run_for(second_run, 3.0));
-    if (orchestrator.run_done(first_run)) orchestrator.release_run(first_run);
-    if (orchestrator.run_done(second_run)) orchestrator.release_run(second_run);
-}
-
 TEST_F(ProgressSchedulerFixture, PreparedSuccessorSingleCannotBypassItsReadyGroup) {
     RunId first_run = orchestrator.begin_run();
     SubmitResult first =
@@ -2350,8 +2459,13 @@ TEST_F(ProgressSchedulerFixture, PreparedSuccessorSingleCannotBypassItsReadyGrou
     ASSERT_EQ(worker1_submissions.size(), 1u);
     EXPECT_EQ(worker0_submissions[1].task_slot, group.task_slot);
     EXPECT_EQ(worker1_submissions[0].task_slot, group.task_slot);
-    EXPECT_FALSE(worker0_submissions[1].prepare_only);
-    EXPECT_FALSE(worker1_submissions[0].prepare_only);
+    EXPECT_TRUE(worker0_submissions[1].prepare_only);
+    EXPECT_TRUE(worker1_submissions[0].prepare_only);
+
+    endpoint0->emit(WorkerProgressKind::FRAME_STAGED, worker0_submissions[1]);
+    endpoint1->emit(WorkerProgressKind::FRAME_STAGED, worker1_submissions[0]);
+    EXPECT_TRUE(endpoint0->wait_activated(second_run));
+    EXPECT_TRUE(endpoint1->wait_activated(second_run));
 
     endpoint0->emit(WorkerProgressKind::ACCEPTED, worker0_submissions[1]);
     endpoint1->emit(WorkerProgressKind::ACCEPTED, worker1_submissions[0]);

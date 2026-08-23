@@ -109,7 +109,7 @@ runner.set_executors(aicpu_binary, aicore_binary);   // once, at init time
 std::unique_ptr<DeviceRunnerBase::PreparedExecution> prepared;
 runner.prepare_execution(runtime, config, pipeline_slot, identity, &prepared);
 auto launched = runner.launch_execution(std::move(prepared), std::move(permit));
-runner.drain_execution(*launched.active);            // child progress path owns progress
+runner.drain_execution(*launched.active);            // resident lane lifecycle owner waits/finalizes
 runner.finalize();
 ```
 

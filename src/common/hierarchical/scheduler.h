@@ -173,6 +173,9 @@ private:
     // resets it before the thread exists. Any reader added off sched_thread_
     // needs a lock the two paths do not currently share.
     std::optional<ReservationStallEpisode> reservation_stall_episode_;
+    // Full-rank local groups are staged behind one all-member native-prepare
+    // barrier and activated together. Groups do not cross the whole-run FIFO.
+    std::unordered_set<TaskSlot> pending_group_barriers_;
 
     void run();
     void on_task_complete(const WorkerCompletion &completion);
@@ -180,6 +183,7 @@ private:
 
     void try_consume(TaskSlot slot);
     void dispatch_ready();
+    void progress_group_barriers();
     void dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared);
     void dispatch_preparable_next_level_singles();
     NextLevelGroupDispatchResult dispatch_next_level_group(const std::optional<RunId> &run_snapshot);

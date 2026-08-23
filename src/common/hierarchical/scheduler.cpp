@@ -113,6 +113,7 @@ void Scheduler::start(const Config &cfg) {
         ++wake_generation_;
     }
     dispatch_round_count_.store(0, std::memory_order_relaxed);
+    pending_group_barriers_.clear();
     reservation_stall_episode_.reset();
     stop_requested_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
@@ -276,6 +277,7 @@ void Scheduler::run() {
         std::lock_guard<std::mutex> loop_lk(loop_mu_);
 
         cfg_.manager->progress();
+        progress_group_barriers();
 
         // Phase 1: drain completions
         while (true) {
@@ -432,7 +434,12 @@ void Scheduler::dispatch_ready() {
         RunId active_run = cfg_.active_run_cb();
         if (active_run == INVALID_RUN_ID) return;
         run_snapshot = active_run;
-        cfg_.manager->activate_prepared_run(active_run);
+        const bool group_barrier_pending =
+            std::any_of(pending_group_barriers_.begin(), pending_group_barriers_.end(), [&](TaskSlot slot) {
+                const TaskSlotState *state = cfg_.ring->slot_state(slot);
+                return state != nullptr && state->run_id == active_run;
+            });
+        if (!group_barrier_pending) cfg_.manager->activate_prepared_run(active_run);
     }
 
     dispatch_preparable_next_level_singles();
@@ -441,14 +448,88 @@ void Scheduler::dispatch_ready() {
     // whole-run FIFO head, even if a completion advances the head mid-pass.
     bool group_arrived_between_phases = false;
     do {
-        const NextLevelGroupDispatchResult group_result = dispatch_next_level_group(run_snapshot);
+        NextLevelGroupDispatchResult group_result = dispatch_next_level_group(run_snapshot);
         update_reservation_stall(group_result);
         if (cfg_.after_group_phase_cb) cfg_.after_group_phase_cb();
+        // A prepared group owns every target until the all-member barrier has
+        // activated it. The workers' active lanes are still empty during this
+        // interval, so reserve them explicitly; otherwise a following single
+        // from the same run can occupy an active lane and split the barrier.
+        for (TaskSlot pending_slot : pending_group_barriers_) {
+            const TaskSlotState *pending = cfg_.ring->slot_state(pending_slot);
+            if (pending == nullptr) continue;
+            for (int32_t i = 0; i < pending->group_size(); ++i) {
+                group_result.reserved_worker_ids.insert(pending->target_worker_id(i));
+            }
+        }
         group_arrived_between_phases = dispatch_next_level_singles(
-            group_result.reserved_worker_ids, run_snapshot, group_result.blocked_group_slot == INVALID_SLOT
+            group_result.reserved_worker_ids, run_snapshot,
+            group_result.blocked_group_slot == INVALID_SLOT && pending_group_barriers_.empty()
         );
     } while (group_arrived_between_phases);
     dispatch_sub_ready(run_snapshot);
+}
+
+void Scheduler::progress_group_barriers() {
+    const RunId active_run = cfg_.active_run_cb ? cfg_.active_run_cb() : INVALID_RUN_ID;
+    for (auto it = pending_group_barriers_.begin(); it != pending_group_barriers_.end();) {
+        const TaskSlot slot = *it;
+        TaskSlotState &state = *cfg_.ring->slot_state(slot);
+        if (state.state.load(std::memory_order_acquire) != TaskState::RUNNING || !state.is_group()) {
+            it = pending_group_barriers_.erase(it);
+            continue;
+        }
+
+        bool failed = false;
+        std::string failure_message;
+        {
+            std::lock_guard<std::mutex> lk(state.group_mu);
+            failed = state.group_failed;
+            failure_message = state.group_first_failure_message;
+        }
+
+        const int32_t group_size = state.group_size();
+        std::vector<WorkerThread *> workers;
+        workers.reserve(static_cast<size_t>(group_size));
+        // Activation is legal only for the current whole-run FIFO head and
+        // after every target endpoint has retired its predecessor active lane.
+        bool all_ready = !failed && (active_run == INVALID_RUN_ID || state.run_id == active_run);
+        for (int32_t i = 0; i < group_size; ++i) {
+            WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, state.target_worker_id(i));
+            if (worker == nullptr) {
+                failed = true;
+                all_ready = false;
+                failure_message = "group barrier lost a target worker before activation";
+                break;
+            }
+            workers.push_back(worker);
+            if (!worker->prepared_ready(state.run_id) || !worker->idle()) all_ready = false;
+        }
+
+        if (failed) {
+            if (failure_message.empty()) failure_message = "group member failed before the activation barrier";
+            for (WorkerThread *worker : workers)
+                (void)worker->cancel_prepared(state.run_id, failure_message);
+            it = pending_group_barriers_.erase(it);
+            continue;
+        }
+        if (!all_ready) {
+            ++it;
+            continue;
+        }
+        // Every target owns a fully prepared frame before any activation is
+        // requested. activate_prepared only moves endpoint-lane metadata; the
+        // following manager progress pass publishes all ACTIVATE stores.
+        for (WorkerThread *worker : workers) {
+            if (!worker->activate_prepared(state.run_id)) {
+                // Readiness was checked for every member above and the
+                // Scheduler is the sole lane owner, so this is an invariant
+                // failure rather than a recoverable capacity race.
+                throw std::runtime_error("group barrier lost a prepared member during activation");
+            }
+        }
+        it = pending_group_barriers_.erase(it);
+    }
 }
 
 bool claim_for_dispatch(TaskSlotState &s) {
@@ -482,12 +563,16 @@ void Scheduler::dispatch_preparable_next_level_singles() {
         WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
         if (worker == nullptr || !worker->can_stage()) continue;
         TaskSlot slot;
-        if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, slot)) continue;
+        if (!cfg_.ready_next_level_queues->try_front_single(worker_id, run_id, slot)) continue;
+        TaskSlotState &state = *cfg_.ring->slot_state(slot);
+        if (!worker->can_stage(state.pipeline_lease.slot_id)) continue;
+        TaskSlot popped = INVALID_SLOT;
+        if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, popped)) continue;
+        if (popped != slot) throw std::runtime_error("prepared single queue head changed during dispatch");
         if (!cfg_.ready_next_level_queues->groups_empty(run_id)) {
             cfg_.enqueue_ready_cb(slot);
             return;
         }
-        TaskSlotState &state = *cfg_.ring->slot_state(slot);
         if (state.state.load(std::memory_order_acquire) != TaskState::READY) continue;
         if (state.run_id != run_id || state.worker_type != WorkerType::NEXT_LEVEL || state.is_group() ||
             state.target_worker_id(0) != worker_id) {
@@ -600,6 +685,7 @@ Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(con
         workers.reserve(static_cast<size_t>(group_size));
         result.reserved_worker_ids.reserve(static_cast<size_t>(group_size));
         bool all_workers_idle = true;
+        bool supports_prepared_barrier = !s.config.diagnostics_any();
         for (int32_t i = 0; i < group_size; ++i) {
             const int32_t worker_id = s.target_worker_id(i);
             WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
@@ -609,12 +695,31 @@ Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(con
             if (!result.reserved_worker_ids.insert(worker_id).second) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: duplicate target worker");
             }
+            const WorkerEndpointCaps &caps = worker->caps();
+            supports_prepared_barrier = supports_prepared_barrier && caps.kind == WorkerEndpointKind::LOCAL_MAILBOX &&
+                                        caps.supports_frame_staging;
             const bool worker_idle = worker->idle();
             if (!worker_idle) {
                 all_workers_idle = false;
                 result.busy_target_worker_ids.push_back(worker_id);
             }
             workers.push_back(worker);
+        }
+        if (supports_prepared_barrier) {
+            // A local full-rank group may occupy the staged lane, but it is
+            // not activated until every member reports native preparation
+            // complete and the target active lanes are idle.
+            all_workers_idle = std::all_of(workers.begin(), workers.end(), [&](WorkerThread *worker) {
+                return worker->can_stage(s.pipeline_lease.slot_id);
+            });
+            if (!all_workers_idle) {
+                result.busy_target_worker_ids.clear();
+                for (WorkerThread *worker : workers) {
+                    if (!worker->can_stage(s.pipeline_lease.slot_id)) {
+                        result.busy_target_worker_ids.push_back(worker->worker_id());
+                    }
+                }
+            }
         }
         if (!all_workers_idle) {
             for (size_t i = 0; i < workers.size(); ++i) {
@@ -658,8 +763,11 @@ Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(con
             commit_group_vectors_locked(s, prepared);
             reset_group_state_locked(s, GroupMemberState::RUNNING);
         }
+        if (supports_prepared_barrier) pending_group_barriers_.insert(slot);
         for (int32_t i = 0; i < group_size; ++i) {
-            dispatch_claimed(workers[static_cast<size_t>(i)], WorkerDispatch{slot, i}, /*prepared=*/false);
+            WorkerDispatch dispatch{slot, i};
+            dispatch.require_native_prepare = supports_prepared_barrier;
+            dispatch_claimed(workers[static_cast<size_t>(i)], dispatch, /*prepared=*/supports_prepared_barrier);
         }
     }
     return {};

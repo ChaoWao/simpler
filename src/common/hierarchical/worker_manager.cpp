@@ -32,6 +32,7 @@
 
 #include "common/host_span_names.h"
 #include "common/host_span_scope.h"
+#include "mpi_group_mailbox.h"
 #include "ring.h"
 
 namespace {
@@ -91,7 +92,8 @@ trace_dispatch_attrs(RunId run_id, const WorkerDispatch &dispatch, const WorkerE
     attrs << "run_id=" << run_id << " task_slot=" << dispatch.task_slot << " group_index=" << dispatch.group_index
           << " worker_id=" << caps.worker_id << " dispatch_id=" << dispatch.dispatch_id
           << " endpoint_kind=" << endpoint_kind_name(caps.kind)
-          << " prepare_only=" << static_cast<int>(dispatch.prepare_only) << " role=" << role;
+          << " prepare_only=" << static_cast<int>(dispatch.prepare_only)
+          << " require_native_prepare=" << static_cast<int>(dispatch.require_native_prepare) << " role=" << role;
     return attrs.str();
 }
 
@@ -206,6 +208,8 @@ void WorkerEndpoint::submit_progress(Ring *, const WorkerDispatch &) {
 }
 bool WorkerEndpoint::poll_progress(WorkerEndpointProgress &) { return false; }
 bool WorkerEndpoint::activate_progress(RunId) { return false; }
+
+bool WorkerEndpoint::cancel_progress(RunId, const std::string &) { return false; }
 void WorkerEndpoint::request_progress_stop() noexcept {}
 void WorkerEndpoint::report_progress_error(const std::string &) { request_progress_stop(); }
 bool WorkerEndpoint::report_submission_error(const WorkerDispatch &, const std::string &reason) {
@@ -287,6 +291,13 @@ void LocalMailboxEndpoint::write_mailbox_state(MailboxState s, char *frame) {
 #else
     __atomic_store(ptr, &v, __ATOMIC_RELEASE);
 #endif
+    notify_child();
+}
+
+void LocalMailboxEndpoint::notify_child() noexcept {
+    auto *notification = reinterpret_cast<int32_t *>(mbox() + MAILBOX_OFF_NOTIFICATION);
+    (void)__atomic_add_fetch(notification, 1, __ATOMIC_RELEASE);
+    mpi_group_mailbox::wake_word(notification);
 }
 
 bool mailbox_compare_exchange_state(char *frame, MailboxState expected, MailboxState desired) noexcept {
@@ -402,19 +413,21 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: dispatch has no run identity");
         return;
     }
-    bool staged_lane_occupied = false;
+    bool staging_unavailable = false;
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        const LaneState &active = lane(LaneKind::ACTIVE);
         LaneState &staged = lane(LaneKind::STAGED);
-        if (staged.occupied) {
-            staged_lane_occupied = true;
+        if (staged.occupied || (active.occupied && active.pipeline_slot_id == slot->pipeline_lease.slot_id)) {
+            staging_unavailable = true;
         } else {
             staged.occupied = true;
             staged.run_id = slot->run_id;
+            staged.pipeline_slot_id = slot->pipeline_lease.slot_id;
         }
     }
-    if (staged_lane_occupied) {
-        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker already owns a staged run");
+    if (staging_unavailable) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker cannot stage on the requested pipeline slot");
         return;
     }
     SubmitDispatchResult result;
@@ -462,6 +475,8 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
             return SubmitDispatchResult::STAGED_IDENTITY_CHANGED;
         }
         dispatch_lane.dispatch_id = d.dispatch_id;
+        const TaskSlotState *state = ring_ == nullptr ? nullptr : ring_->slot_state(d.task_slot);
+        if (state != nullptr) dispatch_lane.pipeline_slot_id = state->pipeline_lease.slot_id;
     }
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
@@ -504,13 +519,31 @@ bool WorkerThread::activate_prepared(RunId run_id) {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
     LaneState &active = lane(LaneKind::ACTIVE);
     LaneState &staged = lane(LaneKind::STAGED);
-    if (!staged.occupied || staged.run_id != run_id || staged.dispatch_id == 0 || active.occupied) {
+    if (!staged.occupied || staged.run_id != run_id || staged.dispatch_id == 0 || staged.cancellation_requested) {
         return false;
     }
+    // A host-staged successor must not be activated while the predecessor
+    // still owns this endpoint.  Local chip completion is earlier than the
+    // whole L3 run's retire fence; arming here lets the successor enter the
+    // native runtime before parent resources are safe to reuse.
+    if (active.occupied) return false;
     active = staged;
     active.activation_requested = true;
     staged = {};
     return true;
+}
+
+bool WorkerThread::cancel_prepared(RunId run_id, const std::string &reason) {
+    if (run_id == INVALID_RUN_ID) return false;
+    std::lock_guard<std::mutex> admission_lk(admission_mu_);
+    if (shutdown_.load(std::memory_order_acquire)) return false;
+    {
+        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        LaneState &staged = lane(LaneKind::STAGED);
+        if (!staged.occupied || staged.run_id != run_id || staged.dispatch_id == 0) return false;
+        staged.cancellation_requested = true;
+    }
+    return endpoint_->cancel_progress(run_id, reason);
 }
 
 bool WorkerThread::has_staged_run(RunId run_id) const {
@@ -519,9 +552,23 @@ bool WorkerThread::has_staged_run(RunId run_id) const {
     return staged.occupied && staged.run_id == run_id;
 }
 
+bool WorkerThread::prepared_ready(RunId run_id) const {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    const LaneState &staged = lane(LaneKind::STAGED);
+    return staged.occupied && staged.run_id == run_id && staged.dispatch_id != 0 && staged.staged_ready &&
+           !staged.cancellation_requested;
+}
+
 bool WorkerThread::can_stage() const {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
     return caps().supports_frame_staging && !lane(LaneKind::STAGED).occupied;
+}
+
+bool WorkerThread::can_stage(uint32_t pipeline_slot_id) const {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    const LaneState &active = lane(LaneKind::ACTIVE);
+    return caps().supports_frame_staging && !lane(LaneKind::STAGED).occupied &&
+           (!active.occupied || active.pipeline_slot_id != pipeline_slot_id);
 }
 
 bool WorkerThread::idle() const {
@@ -585,14 +632,23 @@ void WorkerThread::progress() {
             {
                 std::lock_guard<std::mutex> lane_lk(lane_mu_);
                 const LaneState &active = lane(LaneKind::ACTIVE);
-                if (active.occupied && active.activation_requested) activated = active.run_id;
+                const LaneState &staged = lane(LaneKind::STAGED);
+                if (active.occupied && active.activation_requested) {
+                    activated = active.run_id;
+                } else if (staged.occupied && staged.activation_requested) {
+                    activated = staged.run_id;
+                }
             }
             if (activated != INVALID_RUN_ID) {
                 try {
                     if (endpoint_->activate_progress(activated)) {
                         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-                        LaneState &active = lane(LaneKind::ACTIVE);
-                        if (active.occupied && active.run_id == activated) active.activation_requested = false;
+                        for (LaneState &dispatch_lane : lanes_) {
+                            if (dispatch_lane.occupied && dispatch_lane.run_id == activated) {
+                                dispatch_lane.activation_requested = false;
+                                break;
+                            }
+                        }
                     }
                 } catch (const std::exception &e) {
                     fail_progress_driver(std::string("activate_progress failed: ") + e.what());
@@ -636,9 +692,12 @@ void WorkerThread::fail_submission(const WorkerDispatch &dispatch, const std::st
 void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progress) {
     const WorkerDispatch &dispatch = progress.dispatch;
     if (progress.kind == WorkerProgressKind::FRAME_STAGED) {
-        // The endpoint already owns the prepared frame. This cursor-only event
-        // keeps the progress poll moving; acceptance, completion, and inflight
-        // ownership intentionally remain unchanged until activation/terminal.
+        // Publish readiness to the group barrier. Acceptance, completion, and
+        // inflight ownership intentionally remain unchanged until
+        // activation/terminal.
+        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        LaneState &staged = lane(LaneKind::STAGED);
+        if (staged.occupied && staged.dispatch_id == progress.dispatch.dispatch_id) staged.staged_ready = true;
         return;
     }
 
@@ -700,11 +759,12 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
     on_complete_(std::move(completion));
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        for (LaneState &dispatch_lane : lanes_) {
-            if (dispatch_lane.occupied && dispatch_lane.dispatch_id == dispatch.dispatch_id) {
-                dispatch_lane = {};
-                break;
-            }
+        LaneState &active = lane(LaneKind::ACTIVE);
+        LaneState &staged = lane(LaneKind::STAGED);
+        if (active.occupied && active.dispatch_id == dispatch.dispatch_id) {
+            active = {};
+        } else if (staged.occupied && staged.dispatch_id == dispatch.dispatch_id) {
+            staged = {};
         }
     }
     inflight_.fetch_sub(1, std::memory_order_acq_rel);
@@ -721,6 +781,9 @@ void WorkerThread::fail_progress_driver(const std::string &reason) noexcept {
 
 void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dispatch) {
     if (ring == nullptr) throw std::invalid_argument("LocalMailboxEndpoint::submit_progress: null ring");
+    if (dispatch.require_native_prepare && !dispatch.prepare_only) {
+        throw std::invalid_argument("LocalMailboxEndpoint::submit_progress: prepared mode requires staged dispatch");
+    }
     TaskSlotState *slot_state = ring->slot_state(dispatch.task_slot);
     if (slot_state == nullptr) throw std::out_of_range("LocalMailboxEndpoint::submit_progress: invalid task slot");
     TaskSlotState &state = *slot_state;
@@ -813,7 +876,11 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     record.run_id = state.run_id;
     record.slot_id = slot_id;
     record.generation = state.pipeline_lease.generation;
-    write_mailbox_state(dispatch.prepare_only ? MailboxState::PREPARE_READY : MailboxState::TASK_READY, frame);
+    const MailboxState ready_state =
+        dispatch.require_native_prepare ?
+            MailboxState::NATIVE_PREPARE_READY :
+            (dispatch.prepare_only ? MailboxState::PREPARE_READY : MailboxState::TASK_READY);
+    write_mailbox_state(ready_state, frame);
 }
 
 bool LocalMailboxEndpoint::frame_identity_matches(const FrameRecord &record, const char *frame) const {
@@ -842,8 +909,29 @@ bool LocalMailboxEndpoint::try_publish_activation(FrameRecord &record, char *fra
     }
     if (mailbox_compare_exchange_state(frame, MailboxState::FRAME_STAGED, MailboxState::ACTIVATE)) {
         record.activation_published = true;
+        notify_child();
     }
     return record.activation_published;
+}
+
+bool LocalMailboxEndpoint::try_publish_cancellation(FrameRecord &record, char *frame) {
+    if (!record.cancellation_requested || record.cancellation_published) return record.cancellation_published;
+    if (!frame_identity_matches(record, frame)) {
+        poison_progress("stale staged frame identity before cancellation");
+        return false;
+    }
+    int32_t error_code = -1;
+    std::memcpy(frame + MAILBOX_OFF_ERROR, &error_code, sizeof(error_code));
+    std::memset(frame + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
+    if (!record.cancellation_reason.empty()) {
+        const size_t n = std::min(record.cancellation_reason.size(), MAILBOX_ERROR_MSG_SIZE - 1);
+        std::memcpy(frame + MAILBOX_OFF_ERROR_MSG, record.cancellation_reason.data(), n);
+    }
+    if (mailbox_compare_exchange_state(frame, MailboxState::FRAME_STAGED, MailboxState::ABANDON)) {
+        record.cancellation_published = true;
+        notify_child();
+    }
+    return record.cancellation_published;
 }
 
 void LocalMailboxEndpoint::poison_progress(const std::string &reason) {
@@ -932,7 +1020,10 @@ bool LocalMailboxEndpoint::poll_progress(WorkerEndpointProgress &progress) {
                 poison_progress("stale frame identity at endpoint staging");
                 break;
             }
-            if (record.activation_requested) {
+            if (record.cancellation_requested) {
+                (void)try_publish_cancellation(record, frame);
+                if (endpoint_poisoned_) break;
+            } else if (record.activation_requested) {
                 (void)try_publish_activation(record, frame);
                 if (endpoint_poisoned_) break;
             }
@@ -981,7 +1072,8 @@ bool LocalMailboxEndpoint::poll_progress(WorkerEndpointProgress &progress) {
         }
 
         if (state != MailboxState::TASK_READY && state != MailboxState::PREPARE_READY &&
-            state != MailboxState::ACTIVATE && state != MailboxState::TASK_LAUNCHED) {
+            state != MailboxState::NATIVE_PREPARE_READY && state != MailboxState::ACTIVATE &&
+            state != MailboxState::TASK_LAUNCHED && state != MailboxState::ABANDON) {
             poison_progress("task frame entered an invalid state " + std::to_string(static_cast<int32_t>(state)));
             break;
         }
@@ -1027,6 +1119,23 @@ bool LocalMailboxEndpoint::activate_progress(RunId run_id) {
         char *frame = task_frame(index);
         (void)try_publish_activation(record, frame);
         lk.unlock();
+        return true;
+    }
+    return false;
+}
+
+bool LocalMailboxEndpoint::cancel_progress(RunId run_id, const std::string &reason) {
+    std::lock_guard<std::mutex> lk(progress_mu_);
+    if (endpoint_poisoned_) return false;
+    for (size_t index = 0; index < task_frame_count_; ++index) {
+        FrameRecord &record = frames_[index];
+        if (!record.occupied || !record.dispatch.prepare_only || record.run_id != run_id) continue;
+        record.cancellation_requested = true;
+        record.cancellation_reason = reason;
+        char *frame = task_frame(index);
+        if (read_mailbox_state(frame) == MailboxState::FRAME_STAGED) {
+            (void)try_publish_cancellation(record, frame);
+        }
         return true;
     }
     return false;

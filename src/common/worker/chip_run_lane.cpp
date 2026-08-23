@@ -14,12 +14,14 @@
 #include "chip_worker.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <deque>
 #include <exception>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct ChipRunState {
@@ -40,13 +42,26 @@ struct ChipRunState {
     bool activated{false};
     bool crossed_launch_fence{false};
     bool depth_one_fallback{false};
+    bool wait_in_progress{false};
     std::exception_ptr error;
 };
 
 struct ChipRunLaneState {
     explicit ChipRunLaneState(ChipWorker &worker) :
         worker(&worker),
-        generations(worker.pipeline_depth(), 0) {}
+        generations(worker.pipeline_depth(), 0),
+        progress_worker([this]() {
+            progress_loop();
+        }) {}
+
+    ~ChipRunLaneState() {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stopping = true;
+        }
+        cv.notify_all();
+        if (progress_worker.joinable()) progress_worker.join();
+    }
 
     void require_usable() const {
         if (closed) throw std::runtime_error("chip run lane is closed");
@@ -68,6 +83,16 @@ struct ChipRunLaneState {
     bool permits_native_successor(const ChipRunState &predecessor, const CallConfig &successor_config) const {
         return worker->supports_concurrent_native_prepare() && !predecessor.config.diagnostics_any() &&
                !successor_config.diagnostics_any() && predecessor.phase == ChipRunState::Phase::LAUNCHED;
+    }
+
+    static bool permits_resident_completion(const ChipRunState &run) noexcept {
+        // Some diagnostics, notably host_build_graph dep_gen, keep capture
+        // state on the submitter thread and export it during finalize. Keep
+        // those depth-one runs on that same thread. Direct runs also retain
+        // their caller-owned lifecycle: their second submission must be able
+        // to stage against an unfinalized predecessor. The resident owner is
+        // for scheduler-leased asynchronous serving runs only.
+        return run.pipeline_leased && !run.config.diagnostics_any();
     }
 
     bool permits_native_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
@@ -172,6 +197,7 @@ struct ChipRunLaneState {
             return true;
         }
         if (target->phase != ChipRunState::Phase::LAUNCHED) return false;
+        if (target->wait_in_progress) return false;
 
         try {
             if (!worker->poll_native_run(target->native_run)) return false;
@@ -185,6 +211,64 @@ struct ChipRunLaneState {
         }
         finish(target);
         launch_front();
+        return true;
+    }
+
+    void progress_loop() noexcept {
+        std::unique_lock<std::mutex> lock(mu);
+        while (true) {
+            cv.wait(lock, [this]() {
+                return stopping || (!fifo.empty() && fifo.front()->phase == ChipRunState::Phase::LAUNCHED &&
+                                    !fifo.front()->wait_in_progress && permits_resident_completion(*fifo.front()));
+            });
+            if (stopping) return;
+            const auto target = fifo.front();
+            target->wait_in_progress = true;
+            lock.unlock();
+            std::exception_ptr native_error;
+            try {
+                worker->wait_native_run(target->native_run);
+            } catch (...) {
+                native_error = std::current_exception();
+            }
+            // This thread owns the native token until terminal publication.
+            // Native wait and finalization stay outside the lane mutex; the
+            // mutex protects terminal publication and successor launch.
+            try {
+                worker->finalize_native_run(target->native_run);
+            } catch (...) {
+                if (native_error == nullptr) native_error = std::current_exception();
+            }
+            lock.lock();
+            target->wait_in_progress = false;
+            if (target->phase == ChipRunState::Phase::LAUNCHED) {
+                if (native_error != nullptr) {
+                    target->error = native_error;
+                    poison_with(native_error);
+                }
+                target->phase = ChipRunState::Phase::TERMINAL;
+                if (!fifo.empty() && fifo.front() == target) fifo.pop_front();
+                launch_front();
+            }
+            cv.notify_all();
+        }
+    }
+
+    bool block_front_on_caller() noexcept {
+        if (fifo.empty()) return false;
+        const auto run = fifo.front();
+        if (run->phase != ChipRunState::Phase::LAUNCHED || run->wait_in_progress) {
+            return false;
+        }
+        try {
+            worker->wait_native_run(run->native_run);
+        } catch (...) {
+            run->error = std::current_exception();
+            poison_with(run->error);
+        }
+        finish(run);
+        launch_front();
+        cv.notify_all();
         return true;
     }
 
@@ -220,35 +304,16 @@ struct ChipRunLaneState {
         }
     }
 
-    // Block on the device for the launched front, for waiters with no deadline
-    // to bound them. Only the front can be LAUNCHED, so its completion is what
-    // lets any waiter in the FIFO advance. Re-polling instead would hold a core
-    // for the whole run — the case codestyle rule 5 sends to a wakeup primitive
-    // rather than a busy loop. Reports whether it actually blocked, so a caller
-    // that cannot be unblocked this way does not spin on it.
-    bool block_on_front() noexcept {
-        if (fifo.empty()) return false;
-        const auto front = fifo.front();
-        if (front->phase != ChipRunState::Phase::LAUNCHED) return false;
-        try {
-            worker->wait_native_run(front->native_run);
-        } catch (...) {
-            const std::exception_ptr wait_error = std::current_exception();
-            if (front->error == nullptr) front->error = wait_error;
-            poison_with(front->error);
-        }
-        finish(front);
-        launch_front();
-        return true;
-    }
-
     ChipWorker *worker;
     mutable std::mutex mu;
+    std::condition_variable cv;
     std::deque<std::shared_ptr<ChipRunState>> fifo;
     std::vector<uint64_t> generations;
     uint64_t direct_generation{0};
     std::exception_ptr poison;
     bool closed{false};
+    bool stopping{false};
+    std::thread progress_worker;
 };
 
 ChipRun::ChipRun(std::shared_ptr<ChipRunLaneState> lane, std::shared_ptr<ChipRunState> run) :
@@ -258,26 +323,69 @@ ChipRun::ChipRun(std::shared_ptr<ChipRunLaneState> lane, std::shared_ptr<ChipRun
 bool ChipRun::done() {
     if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
     std::lock_guard<std::mutex> lk(lane_->mu);
+    lane_->cv.notify_all();
     return lane_->progress(run_);
 }
 
 bool ChipRun::wait_until(Deadline deadline) {
     if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
     const bool unbounded = deadline == Deadline::max();
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lk(lane_->mu);
-            if (lane_->progress(run_)) {
-                ChipRunLaneState::rethrow_run_error(run_);
-                return true;
+    if (run_->config.diagnostics_any() || !run_->pipeline_leased) {
+        // Diagnostic finalizers can consume thread-affine capture state. Match
+        // the pre-resident direct lifecycle: poll (for a bounded wait), or
+        // block and finalize on the submitter/waiter thread for an unbounded
+        // wait. This also preserves direct depth-two successor staging.
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lk(lane_->mu);
+                if (lane_->progress(run_)) {
+                    ChipRunLaneState::rethrow_run_error(run_);
+                    return true;
+                }
+                if (unbounded && lane_->block_front_on_caller()) continue;
             }
-            // An unbounded waiter has no deadline to end its loop, so polling
-            // here would spin for the whole run. Block on the device instead;
-            // if nothing is blockable yet the poll loop below still applies.
-            if (unbounded && lane_->block_on_front()) continue;
+            if (Clock::now() >= deadline) return false;
+            std::this_thread::yield();
         }
-        if (Clock::now() >= deadline) return false;
     }
+    std::unique_lock<std::mutex> lk(lane_->mu);
+    lane_->cv.notify_all();
+    const auto terminal = [this]() {
+        return run_->phase == ChipRunState::Phase::TERMINAL;
+    };
+    if (unbounded) {
+        lane_->cv.wait(lk, terminal);
+    } else if (!lane_->cv.wait_until(lk, deadline, terminal)) {
+        return false;
+    }
+    ChipRunLaneState::rethrow_run_error(run_);
+    return true;
+}
+
+void ChipRun::prepare() {
+    if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
+    std::lock_guard<std::mutex> lk(lane_->mu);
+    if (run_->phase == ChipRunState::Phase::TERMINAL) {
+        ChipRunLaneState::rethrow_run_error(run_);
+        return;
+    }
+    if (run_->activated || run_->phase == ChipRunState::Phase::LAUNCHED) {
+        throw std::logic_error("cannot prepare a ChipRun after activation");
+    }
+    if (run_->phase == ChipRunState::Phase::PREPARED) return;
+    if (lane_->fifo.empty() || lane_->fifo.front() != run_) {
+        throw std::logic_error("only the front ChipRun can be prepared without activation");
+    }
+    try {
+        lane_->prepare(run_);
+    } catch (...) {
+        run_->error = std::current_exception();
+        run_->phase = ChipRunState::Phase::TERMINAL;
+        lane_->fifo.pop_front();
+        lane_->cv.notify_all();
+        throw;
+    }
+    lane_->cv.notify_all();
 }
 
 void ChipRun::activate() {
@@ -292,6 +400,8 @@ void ChipRun::activate() {
     if (lane_->fifo.size() == 2 && lane_->fifo.front() == run_) {
         lane_->prepare_successor_if_eligible(lane_->fifo.back());
     }
+    lane_->cv.notify_all();
+    ChipRunLaneState::rethrow_run_error(run_);
 }
 
 void ChipRun::abandon() {
@@ -404,6 +514,7 @@ ChipRun ChipRunLane::submit(
         auto it = std::find(state_->fifo.begin(), state_->fifo.end(), run);
         if (it != state_->fifo.end()) state_->fifo.erase(it);
     }
+    state_->cv.notify_all();
     return ChipRun(state_, std::move(run));
 }
 
@@ -411,7 +522,7 @@ ChipRun ChipRunLane::submit(
     int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config, volatile int32_t *accepted_state,
     int32_t accepted_value
 ) {
-    std::lock_guard<std::mutex> lk(state_->mu);
+    std::unique_lock<std::mutex> lk(state_->mu);
     state_->require_usable();
     if (state_->generations.empty()) throw std::runtime_error("chip run lane has no runtime slots");
 
@@ -424,6 +535,16 @@ ChipRun ChipRunLane::submit(
         const bool has_successor_capacity =
             state_->fifo.size() == 1 && state_->permits_native_successor(*state_->fifo.front(), config);
         if (has_successor_capacity) break;
+        if (state_->fifo.front()->wait_in_progress) {
+            state_->cv.wait(lk, [this, &config]() {
+                if (state_->fifo.empty()) return true;
+                if (state_->fifo.size() == 1 && state_->permits_native_successor(*state_->fifo.front(), config)) {
+                    return true;
+                }
+                return !state_->fifo.front()->wait_in_progress;
+            });
+            continue;
+        }
         state_->drain_front();
         state_->require_usable();
         state_->launch_front();
@@ -461,25 +582,45 @@ ChipRun ChipRunLane::submit(
     } else {
         state_->prepare_successor_if_eligible(run);
     }
+    state_->cv.notify_all();
     return ChipRun(state_, std::move(run));
 }
 
 void ChipRunLane::drain() {
-    std::lock_guard<std::mutex> lk(state_->mu);
-    while (!state_->fifo.empty())
+    std::unique_lock<std::mutex> lk(state_->mu);
+    while (!state_->fifo.empty()) {
+        if (state_->fifo.front()->wait_in_progress) {
+            state_->cv.wait(lk, [this]() {
+                return state_->fifo.empty() || !state_->fifo.front()->wait_in_progress;
+            });
+            continue;
+        }
         state_->drain_front();
+    }
     if (state_->poison != nullptr) std::rethrow_exception(state_->poison);
 }
 
 void ChipRunLane::close() {
-    std::lock_guard<std::mutex> lk(state_->mu);
+    std::unique_lock<std::mutex> lk(state_->mu);
     if (state_->closed) {
         if (state_->poison != nullptr) std::rethrow_exception(state_->poison);
         return;
     }
-    while (!state_->fifo.empty())
+    while (!state_->fifo.empty()) {
+        if (state_->fifo.front()->wait_in_progress) {
+            state_->cv.wait(lk, [this]() {
+                return state_->fifo.empty() || !state_->fifo.front()->wait_in_progress;
+            });
+            continue;
+        }
         state_->drain_front();
+    }
     state_->closed = true;
+    state_->stopping = true;
+    state_->cv.notify_all();
+    lk.unlock();
+    if (state_->progress_worker.joinable()) state_->progress_worker.join();
+    lk.lock();
     if (state_->poison != nullptr) std::rethrow_exception(state_->poison);
 }
 
