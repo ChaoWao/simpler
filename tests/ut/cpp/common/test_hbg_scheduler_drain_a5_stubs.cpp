@@ -13,4 +13,7 @@
 
 #include "aicpu/platform_regs.h"
 
+// The a5 drain target links no platform-regs implementation, so the symbols its
+// aicpu sources reference are defined here. Strong, not weak: nothing else in that
+// link supplies them, unlike a2a3 where inner_platform_regs.cpp does.
 void write_reg(uint64_t, RegId, uint64_t) {}

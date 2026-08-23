@@ -667,6 +667,17 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     bool coordinator = thread_idx == 0;
 
     PTO2TaskSlotState *slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
+    // Null means this thread arrived after the drain it entered for had already
+    // reopened, and no check above rejects it: the reopen below clears pending_task
+    // before sync_start_pending, so a thread entering on a stale non-zero snapshot of
+    // that gate lands here; drain_attempt still names this round and every ack token
+    // is already published, so the reduction and the follower barrier both pass
+    // immediately. It never acked for this round -- the coordinator collected every
+    // ack before clearing -- so there is nothing to stage and nothing to unwind.
+    //
+    // Not the converse case: a thread already past this load cannot see the clear,
+    // because the coordinator waits on drain_stage_done_mask for every thread and a
+    // thread sets its bit only after staging, which is after this load.
     if (slot_state == nullptr) return;
     // OWNER is acquired before the drain is published and persists through
     // completion, so every staging thread makes the same gate decision even if
