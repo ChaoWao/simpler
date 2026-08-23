@@ -161,6 +161,10 @@ struct PTO2OrchestratorState {
     void graph_abort(void *recording_handle);
     bool graph_end();
     void graph_commit();
+    // Bodies of the two above. Both have several early returns, so the phase
+    // record that measures them wraps the call instead of every exit.
+    GraphScopeResult graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash);
+    void graph_commit_inner();
     void mark_done();
 };
 

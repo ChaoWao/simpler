@@ -662,6 +662,12 @@ enum class HostPhaseKind : uint32_t {
     OrchRecordNode,
     OrchGraphSubmit,
     OrchBuildDefinition,
+    OrchGraphBegin,
+    OrchRecordingWait,
+    OrchGraphCommit,
+    OrchSubmitAdmit,
+    OrchRecordHandoff,
+    OrchGeneratedArgs,
     Count
 };
 
@@ -669,7 +675,7 @@ constexpr uint32_t kHostPhaseKindCount = static_cast<uint32_t>(HostPhaseKind::Co
 
 /**
  * Whether this kind ends with a task submitted to the runtime, i.e. whether its
- * record's `payload` is a task id and whether it counts towards the pass's
+ * record's `payload` is a task id and whether it counts towards the bind's
  * total_tasks. The three that do are what a per-submit consumer sees; the rest
  * are sub-operations of a submit, or bind work with no task at all.
  */
@@ -727,6 +733,18 @@ inline const char *host_phase_kind_name(HostPhaseKind kind) {
         return "graph_submit";
     case HostPhaseKind::OrchBuildDefinition:
         return "build_definition";
+    case HostPhaseKind::OrchGraphBegin:
+        return "graph_begin";
+    case HostPhaseKind::OrchRecordingWait:
+        return "recording_wait";
+    case HostPhaseKind::OrchGraphCommit:
+        return "graph_commit";
+    case HostPhaseKind::OrchSubmitAdmit:
+        return "submit_admit";
+    case HostPhaseKind::OrchRecordHandoff:
+        return "record_handoff";
+    case HostPhaseKind::OrchGeneratedArgs:
+        return "generated_args";
     case HostPhaseKind::Count:
         break;
     }
@@ -752,10 +770,10 @@ using ChipSwimlaneAicpuOrchPhasePool = ChipSwimlaneAicpuTaskPool;
 // instead of device shared memory, but not the head + free_queue plumbing: those
 // exist so a single device producer can hand filled buffers to a host reader
 // mid-run, and the host pool has many concurrent producers and one reader that
-// only ever looks after the pass is closed. It is defined in
+// only ever looks after the bind is closed. It is defined in
 // host/host_phase_records.h, which owns that host-only shape; the buffers are
 // smaller and fewer than a device thread's because a producer emits hundreds of
-// records per pass rather than tens of thousands (see
+// records per bind rather than tens of thousands (see
 // PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER).
 using HostPhaseRecordBuffer = TypedBuffer<HostPhaseRecord, PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER>;
 

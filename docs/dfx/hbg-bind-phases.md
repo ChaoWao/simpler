@@ -21,7 +21,7 @@ only once the lesson is an invariant its code depends on.
 ## What the segments are
 
 `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` makes the runtime emit one `bind phase=`
-line per segment per pass at `LOG_TIMING`:
+line per segment per bind at `LOG_TIMING`:
 
 | Segment | What it covers |
 | ------- | -------------- |
@@ -29,7 +29,7 @@ line per segment per pass at `LOG_TIMING`:
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
 | `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
 | `graph_upload` | uploading the Definition objects and binding every Graph task to the one with its key |
-| `arena_h2d` | the one H2D of the pass: the arena's copied zone and the shared-memory image |
+| `arena_h2d` | the one H2D of the bind: the arena's copied zone and the shared-memory image |
 | `host_view_close` | unmapping the host views taken in `args` |
 
 The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
@@ -43,12 +43,12 @@ and `sm_h2d` date from when the shared-memory image was relocated and copied on
 its own; it now travels inside the single `arena_h2d` copy as that segment's
 `sm=`. `hbg_bind_phases` keeps both in its control-plane set so a log that
 predates the change still totals correctly, and names them under its `total` row
-as absent from every pass. The table above is what a current run emits: ten
+as absent from every bind. The table above is what a current run emits: ten
 segments, three of them control plane.
 
 **The control plane is a sum of costs, not an interval.** `arena_h2d` runs
 *after* `host_view_close`, hundreds of milliseconds later, so the segments do not
-form one contiguous window. Sum the ones the pass has; do not subtract two
+form one contiguous window. Sum the ones the bind has; do not subtract two
 timestamps.
 
 ## Prerequisites
@@ -88,10 +88,10 @@ The ready-made invocation for either case lives in the
 per-phase statistics. This section is what the switches mean and why the traps
 below exist.
 
-Six rounds is the working minimum: this box is shared, and a single pass has been
+Six rounds is the working minimum: this box is shared, and a single bind has been
 seen to land 3.5× off its own minimum. Which statistic to read depends on the
 question. For "how long does this path take", take the **minimum of the per-round
-sums** — the quietest pass is the closest this box gets to the machine's own cost.
+sums** — the quietest bind is the closest this box gets to the machine's own cost.
 For "did a change move it", see [Comparing two branches](#comparing-two-branches)
 below; the answer there is not a minimum.
 
@@ -116,8 +116,8 @@ otherwise dispatched by the module runner as one subprocess per class, and
 passing run yields a log with **no** `bind phase=` lines at all. qwen is
 `level=2` and needs no child command.
 
-A 2-rank case emits one pass per rank per round, so six rounds is twelve passes.
-Pass `--rounds` to the parser so it infers the rank count and drops one cold pass
+A 2-rank case emits one bind per rank per round, so six rounds is twelve binds.
+Pass `--rounds` to the parser so it infers the rank count and drops one cold bind
 *per rank* rather than one in total.
 
 A skipped run still writes `host_phase_records.jsonl`, so Recipe B works without
@@ -136,18 +136,18 @@ grep -oE 'bind phase=[a-z0-9_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_
 ```
 
 The character class has to admit digits. `[a-z_]+` matches no segment whose name
-carries one, so it silently drops every `arena_h2d` line — the pass-closing
+carries one, so it silently drops every `arena_h2d` line — the bind-closing
 segment, the only H2D left, and the one that itemizes the whole upload. On a
-two-pass log that is 18 lines where 20 exist, with nothing to say a segment went
+two-bind log that is 18 lines where 20 exist, with nothing to say a segment went
 missing.
 
 Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
 own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=` and
 `submissions=` on `graph_upload`, and `arena_h2d`'s itemized upload. Group the
-lines into passes — `arena_h2d` is the last segment of a pass, so it closes one —
-then sum the control-plane segments **within each pass** and take the minimum of
+lines into binds — `arena_h2d` is the last segment of a bind, so it closes one —
+then sum the control-plane segments **within each bind** and take the minimum of
 those sums. Never sum
-minima taken across passes; that total belongs to no pass and can point the wrong
+minima taken across binds; that total belongs to no bind and can point the wrong
 way (see below).
 
 **A segment's `bytes=` is what that segment itself copied, so no copy is counted
@@ -160,7 +160,7 @@ with every other task's arguments rather than as a population of their own.
 then ships as `sm=`; that is the one figure two segments both report, and neither
 is a copy count of the other.)
 
-The first pass of each rank is warm-up and belongs in neither statistic; drop it
+The first bind of each rank is warm-up and belongs in neither statistic; drop it
 explicitly rather than letting a minimum quietly exclude it.
 
 Device wall clock for the same rounds comes from the `[STRACE]` markers, on a run
@@ -196,15 +196,15 @@ larger than most effects worth measuring. Alternate instead —
 `base, measure, base, measure` — which gives one minimum-of-sums per arm per
 repetition, and require the delta between them to **agree in sign across the
 repetitions**. A repetition that disagrees says the run was contended, not that
-the effect is small: on one dsv4 pass `graph_upload` came out +0.46 ms against
-−0.20 ms on the other three, and the same pass carried a bind whose `sm_h2d` was
+the effect is small: on one dsv4 bind `graph_upload` came out +0.46 ms against
+−0.20 ms on the other three, and the same bind carried a run whose `sm_h2d` was
 5.93 ms against a 0.6 ms norm.
 
-**One statistic decides: the minimum of the per-pass sums.** Sum the
-control-plane segments *within* each pass, take the minimum across the warm
-passes, and compare those. A min of sums is not a sum of mins and the two can
-disagree in sign — each segment's minimum comes from whichever pass was quietest
-*for that segment*, so summing per-segment minima produces a total no pass
+**One statistic decides: the minimum of the per-bind sums.** Sum the
+control-plane segments *within* each bind, take the minimum across the warm
+binds, and compare those. A min of sums is not a sum of mins and the two can
+disagree in sign — each segment's minimum comes from whichever bind was quietest
+*for that segment*, so summing per-segment minima produces a total no bind
 achieved. On one dsv4 comparison the sum-of-minima moved −0.30 ms while the
 minimum-of-sums moved +0.16 ms, from the same log. `hbg_phase_stats` reports the
 minimum-of-sums as its `total` row; never assemble a total by hand from the
@@ -216,11 +216,11 @@ range has made the cost less predictable, which is a cost of its own and worth
 reporting alongside the minimum.
 
 **Judge a segment the diff does not touch.** `host_orch`'s own scatter on dsv4
-spans 2.6–4.9 ms across passes of an unmodified `main` — wider than most changes
+spans 2.6–4.9 ms across binds of an unmodified `main` — wider than most changes
 being tested — so a ±0.5 ms difference there is not resolvable by comparing
 durations however many rounds are run. When a segment matters and its scatter
 swamps it, instrument the mechanism instead: a sub-counter around the suspected
-work answers in one pass what a duration comparison cannot answer in ten.
+work answers in one run what a duration comparison cannot answer in ten.
 
 ## Recipe B — one round with a swimlane
 
@@ -268,9 +268,9 @@ for dsv4).
 
 ## Reading the result
 
-**The first round is cold, and not by a little.** On dsv4's first pass
+**The first round is cold, and not by a little.** On dsv4's first bind
 `static_arena` spends 97.8 ms allocating the 2 GiB ring heap against 0.002 ms on
-later passes, and `host_orch` runs 8% long. Recipe B therefore describes
+later binds, and `host_orch` runs 8% long. Recipe B therefore describes
 *structure* — the order of operations, the per-operation distribution — while
 Recipe A gives the numbers.
 
@@ -298,9 +298,9 @@ signal than any duration on a shared box.
 | Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
 | Comparing a log with no `[stamp]` first line | the parser says so above the table | re-run it through the recipe; conditions cannot be recovered from memory |
 | Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the segments; `arena_h2d` is not adjacent |
-| Summing per-segment minima by hand | a total no pass achieved; can invert the sign | read the tool's `total` row — the minimum of the per-pass sums |
-| `--rounds 1` for numbers | the tool refuses: every pass is a rank's warm-up | six rounds; `--keep-first` only to look at the cold pass deliberately |
-| Single pass, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
+| Summing per-segment minima by hand | a total no bind achieved; can invert the sign | read the tool's `total` row — the minimum of the per-bind sums |
+| `--rounds 1` for numbers | the tool refuses: every bind is a rank's warm-up | six rounds; `--keep-first` only to look at the cold bind deliberately |
+| Single bind, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
 | `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the arms and require the sign to agree per repetition |
 | Stale build | mass collection errors, or a `launch_aicpu_num (0)` failure | `pip install --no-build-isolation -e .` after every `HEAD` move |
 
@@ -308,9 +308,10 @@ signal than any duration on a shared box.
 
 Both columns are one measurement session on `main` at **`777d4171`**, host
 `host_build_graph`, on one a2a3 die for qwen and two for dsv4, four rounds each with
-the warm-up pass dropped — 3 steady-state passes for qwen and 7 for dsv4, since a
-2-rank case emits one per rank. Durations are the full **range** across those
-passes; `heap_used`, every `bytes=` and every count are exact and repeat
+the warm-up bind dropped — 3 steady-state binds for qwen and 6 for dsv4, since a
+2-rank case emits one bind per rank per round and the parser drops one cold bind per
+rank. Durations are the full **range** across those
+binds; `heap_used`, every `bytes=` and every count are exact and repeat
 byte-identically.
 
 **For orientation, not thresholds, and pinned to a commit for a reason.** The

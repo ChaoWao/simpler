@@ -35,6 +35,8 @@
 
 #include <atomic>
 #include <cerrno>
+#include <sys/resource.h>
+
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
@@ -129,7 +131,7 @@ static bool is_power_of_2_u64(uint64_t value) { return value != 0 && (value & (v
 static int64_t bind_now_ns() { return static_cast<int64_t>(host_phase_now_ns()); }
 
 // Close one segment of the bind path, recording it and keeping its attributes for
-// the line the breakdown prints at the end of the pass.
+// the line the breakdown prints at the end of the bind.
 //
 // The breakdown is LOG_TIMING lines rather than `[STRACE]` markers on purpose:
 // the marker grammar is the platform's public per-run-stage contract (see
@@ -137,8 +139,48 @@ static int64_t bind_now_ns() { return static_cast<int64_t>(host_phase_now_ns());
 // stage set, while everything below is host_build_graph's internal breakdown of
 // one stage. LOG_TIMING sits at the default log threshold, so these are visible
 // without a flag and at any --rounds.
+// Minor faults the process has taken. First touch of a freshly mapped region traps
+// once per page, and the bind maps its shared-memory mirror and arenas per call, so
+// a phase's fault count is what separates work from page-table cost — a count, so it
+// does not move with how loaded the box is.
+struct BindKernelCounters {
+    uint64_t minflt;
+    uint64_t nivcsw;  // involuntary: the scheduler took the CPU away
+    uint64_t nvcsw;   // voluntary: the thread blocked
+};
+
+static BindKernelCounters bind_kernel_counters() {
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) return BindKernelCounters{};
+    return BindKernelCounters{
+        static_cast<uint64_t>(usage.ru_minflt), static_cast<uint64_t>(usage.ru_nivcsw),
+        static_cast<uint64_t>(usage.ru_nvcsw)
+    };
+}
+
+// A phase's own count is the delta since the previous marker, because the markers
+// partition the bind span. Process-wide, so a phase that runs while the Graph
+// recorders are working is charged their faults too — which is the intent: it is the
+// bind's total page-table cost that is being attributed, not one thread's.
+static BindKernelCounters g_bind_counter_mark{};
+
 static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *attrs = "", uint64_t payload = 0) {
-    host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), attrs, payload);
+    if (!host_phase_breakdown_enabled()) {
+        host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), attrs, payload);
+        return;
+    }
+    const BindKernelCounters now = bind_kernel_counters();
+    auto since = [](uint64_t current, uint64_t mark) {
+        return current >= mark ? current - mark : 0;
+    };
+    char with_counters[352];
+    snprintf(
+        with_counters, sizeof(with_counters), "%s%sminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64, attrs,
+        *attrs == '\0' ? "" : " ", since(now.minflt, g_bind_counter_mark.minflt),
+        since(now.nivcsw, g_bind_counter_mark.nivcsw), since(now.nvcsw, g_bind_counter_mark.nvcsw)
+    );
+    g_bind_counter_mark = now;
+    host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload);
 }
 
 template <typename T>
@@ -593,9 +635,9 @@ int32_t run_host_orchestration(
     rt_scope_end(rt);
     rt_orchestration_done(rt);
 #if SIMPLER_ORCH_PROFILING
-    // Per-sub-step cumulatives across this pass's submits. The accumulators only
+    // Per-sub-step cumulatives across this bind's submits. The accumulators only
     // exist in a SIMPLER_ORCH_PROFILING build (build_runtimes.py --profiling-orch 1),
-    // and reading them also resets them, so this is the pass's own total. Emitted
+    // and reading them also resets them, so this is the bind's own total. Emitted
     // as spans rather than LOG_INFO because INFO is suppressed at the default log
     // level. Like the phase spans these are summed cost shares, not intervals.
     {
@@ -635,15 +677,15 @@ int32_t run_host_orchestration(
 
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     {
-        char attrs[96];
+        char attrs[160];
         snprintf(
-            attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64, total_tasks,
-            orchestrator.ring.task_allocator.heap_used_bytes()
+            attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64 " sm_mirror=%" PRIu64, total_tasks,
+            orchestrator.ring.task_allocator.heap_used_bytes(), sm_size
         );
         record_bind_phase(HostPhaseKind::BindHostOrch, t_orch_ns, attrs);
     }
     // After the span closes: the reduction walks a few hundred records and emits
-    // five markers, which must not be charged to the pass it measures.
+    // five markers, which must not be charged to the bind it measures.
 
     // Upload each distinct Definition as its own retained device object and bind
     // every outer Graph task to it. Per-invocation data already lives in that
@@ -930,9 +972,9 @@ extern "C" int bind_callable_to_runtime_impl(
 
     // Arm before the first segment below: the record pool has to exist for
     // `args`, which runs well before the device collector is provisioned. The
-    // guard ends the pass on every exit, not just the successful one — a bind
+    // guard ends the bind on every exit, not just the successful one — a bind
     // that fails part-way is exactly when its breakdown is worth having, and an
-    // unfinished pass publishes nothing.
+    // unfinished bind publishes nothing.
     host_phase_trace_begin(api);
     auto host_phase_guard = RAIIScopeGuard([]() {
         host_phase_trace_end();

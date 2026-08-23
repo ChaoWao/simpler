@@ -246,13 +246,18 @@ so records and spans read against each other with no alignment step.
 | Group | Kinds |
 | ----- | ----- |
 | Bind segments (partition the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `sm_h2d`, `arena_h2d`, `host_view_close` |
-| Orchestrator operations (inside `host_orch`) | `submit_task`, `alloc_tensors`, `record_node`, `graph_submit`, `build_definition` |
+| Orchestrator operations (inside `host_orch`) | `submit_task`, `alloc_tensors`, `record_node`, `graph_submit`, `build_definition`, `graph_begin`, `recording_wait`, `graph_commit`, `submit_admit`, `record_handoff`, `generated_args` |
 
 Three of the orchestrator kinds end with a task submitted — `submit_task`,
-`alloc_tensors`, `graph_submit` — so their count is the pass's `total_tasks`.
-The other two are sub-operations of one of those, which is why a per-kind total
-is a **cost share, not an interval**: a per-event mean is `total_ns / count`, and
-the spread is not recoverable from it.
+`alloc_tensors`, `graph_submit` — so their count is the bind's `total_tasks`
+(`host_phase_kind_submits_task` is the one place that answers this). The other
+eight are sub-operations of one of those, or the segments between them, which is
+why a per-kind total is a **cost share, not an interval**: a per-event mean is
+`total_ns / count`, and the spread is not recoverable from it.
+
+The last three come from the generated orchestration `.so` rather than the runtime,
+through the ops table's `record_orch_phase`, so they carry submit group 0 rather
+than the submission they belong to.
 
 ### The three switches
 
@@ -268,11 +273,11 @@ with no records and records with no breakdown.
 
 Collection is armed by **either** of the other two — a level-4 run collects
 records with the variable unset, and the variable collects them with the level at
-0. What is recorded does not depend on which one armed the pass: the swimlane's
+0. What is recorded does not depend on which one armed the bind: the swimlane's
 share is a projection at export, not a branch at record time, so the two
 configurations measure the same overhead and their numbers are comparable.
 
-Collecting and writing are separate questions. A collected pass reaches
+Collecting and writing are separate questions. A collected bind reaches
 `host_phase_records.jsonl` whenever the run has an output directory, so a level-4
 run produces the artifact too; conversely the variable arms nothing when there is
 no directory to write into, since a pool no reader drains would be pure cost.
@@ -306,12 +311,12 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   makes this the channel for steady state, where `--rounds > 1` switches every
   artifact collector off.
 
-  Every line is written at the end of the pass, keeping the log write off the path
+  Every line is written at the end of the bind, keeping the log write off the path
   being measured. The line therefore carries its own `start_ns`; the log prefix
   timestamps the write, not the segment.
 
 - **`host_phase_records.jsonl`** in the per-case output directory, when a
-  collecting pass has one. One JSON Lines object per pass carrying `pid` / `inv`
+  collecting bind has one. One JSON Lines object per bind carrying `pid` / `inv`
   — the identity the `[STRACE]` tree groups by — and one record per operation.
   This is the channel to read for a distribution or a per-event timeline; the
   summed lines cannot express either. Every record carries its producer Linux
@@ -333,7 +338,7 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   inside a millisecond — is visible against the device execution it precedes; the
   rest of the bind stage is host-only setup with no device counterpart.
 
-  The `host_capture` block reports `expected_records` (the pass's task count)
+  The `host_capture` block reports `expected_records` (the bind's task count)
   against `recorded_records` (the submit projection), plus `pool_records` for the
   whole population — a pool count above the projection is normal, not incomplete.
 

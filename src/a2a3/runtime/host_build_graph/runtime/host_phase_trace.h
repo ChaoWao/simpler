@@ -56,14 +56,14 @@ bool host_phase_breakdown_enabled();
  * whether to arm the pool, so a level-4 run collects records with the variable
  * unset, and this variable collects them with the level at 0.
  *
- * Collection only. Whether a collected pass also reaches
+ * Collection only. Whether a collected bind also reaches
  * `host_phase_records.jsonl` is the runner's decision, and it turns on the run
  * having an output directory.
  */
 bool host_phase_records_enabled();
 
 /**
- * Host monotonic nanoseconds, or 0 when this pass records nothing — which is
+ * Host monotonic nanoseconds, or 0 when this bind records nothing — which is
  * what keeps the orchestrator's per-operation hooks down to two calls returning
  * a constant.
  */
@@ -95,7 +95,7 @@ void host_phase_record(uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64
 void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload = 0);
 
 /**
- * Arm a pass: take the pool the runner offers, and clear the counters.
+ * Arm a bind: take the pool the runner offers, and clear the counters.
  *
  * Must run before the first bind segment, which is before the orchestration
  * phase and therefore well before the device collector exists.
@@ -106,14 +106,14 @@ void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs,
 void host_phase_trace_begin(const void *host_api);
 
 /**
- * Report how many tasks this pass submitted, at the point that becomes known —
- * inside the orchestration segment, well before the pass ends. A reader compares
+ * Report how many tasks this bind submitted, at the point that becomes known —
+ * inside the orchestration segment, well before the bind ends. A reader compares
  * it against the records whose kind submits a task.
  */
 void host_phase_trace_note_submitted(uint64_t submitted_tasks);
 
 /**
- * Close the pass: hand the submitted-task count and the run's invocation id to
+ * Close the bind: hand the submitted-task count and the run's invocation id to
  * the runner, then emit the per-kind `LOG_TIMING` breakdown from the counters.
  *
  * The records stay in the pool for its readers.

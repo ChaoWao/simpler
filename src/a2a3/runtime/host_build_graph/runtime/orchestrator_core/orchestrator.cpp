@@ -182,7 +182,7 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
     return static_cast<uint64_t>(ts.tv_sec) * PLATFORM_PROF_SYS_CNT_FREQ +
            static_cast<uint64_t>(ts.tv_nsec) * PLATFORM_PROF_SYS_CNT_FREQ / 1000000000ull;
 }
-// submit_idx tags a record with its position in the pass's submit order.
+// submit_idx tags a record with its position in the orchestration's submit order.
 static uint32_t g_orch_submit_idx = 0;
 // The per-sub-step accumulators exist only in an ORCH_PROFILING build, so at this
 // level there is nothing to time.
@@ -216,6 +216,9 @@ enum class HostOrchPhase : uint32_t {
     RecordNode = 14,       // graph_record_submit_node: one recorded Graph node
     GraphSubmit = 15,      // graph_submit_definition: one outer GRAPH task
     BuildDefinition = 16,  // graph_build_definition: nodes compacted into the image
+    GraphBegin = 17,       // graph_begin: the whole entry, GraphSubmit nested inside
+    RecordingWait = 18,    // graph_commit's wait for the last recorder to finish
+    GraphCommit = 19,      // graph_commit: the wait plus back-patching every shell
 };
 #define ORCH_PHASE_START() const uint64_t _orch_phase_t0 = host_phase_now_ns()
 #define ORCH_PHASE_END(phase, detail)                                                                         \
@@ -225,10 +228,27 @@ enum class HostOrchPhase : uint32_t {
             g_orch_submit_idx                                                                                 \
         );                                                                                                    \
     } while (0)
+// For a phase that spans a submission rather than sitting inside one: the index
+// advances during the span, so the group is taken at the start or the record
+// files itself under the next submission.
+#define ORCH_PHASE_START_SPANNING() \
+    ORCH_PHASE_START();             \
+    const uint32_t _orch_phase_group = g_orch_submit_idx
+#define ORCH_PHASE_END_SPANNING(phase, detail)                                                                \
+    do {                                                                                                      \
+        host_phase_record(                                                                                    \
+            _orch_phase_t0, host_phase_now_ns(), static_cast<uint32_t>(phase), static_cast<uint64_t>(detail), \
+            _orch_phase_group                                                                                 \
+        );                                                                                                    \
+    } while (0)
 #else
 #define ORCH_PHASE_START()
 #define ORCH_PHASE_END(phase, detail) \
     do {                              \
+    } while (0)
+#define ORCH_PHASE_START_SPANNING()
+#define ORCH_PHASE_END_SPANNING(phase, detail) \
+    do {                                       \
     } while (0)
 #endif
 
@@ -1810,7 +1830,7 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
     return true;
 }
 
-// Record one internal Graph node during the recording pass without consuming a
+// Record one internal Graph node while recording, without consuming a
 // ring task-window slot. Builds the node's metadata and materialized outputs
 // exactly as submit_task_common would, but assigns output buffers from the
 // bit-63 virtual address range and derives internal fanins from tensor-source
@@ -2065,6 +2085,14 @@ TaskOutputTensors graph_record_submit_node(
 
 GraphScopeResult
 PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+    ORCH_PHASE_START_SPANNING();
+    const GraphScopeResult result = graph_begin_inner(graph_key, args, callable_hash);
+    ORCH_PHASE_END_SPANNING(HostOrchPhase::GraphBegin, graph_key);
+    return result;
+}
+
+GraphScopeResult
+PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -2105,7 +2133,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 
     // This key is already recording: publish another zero-heap shell against it.
     // A recording that ended has its Definition in the cache, so reaching here
-    // with no recording object means the pass failed and this key is spent.
+    // with no recording object means the recording failed and this key is spent.
     auto inflight_it = state->inflight.find(full_key);
     if (inflight_it != state->inflight.end()) {
         GraphInflightRecording &entry = *inflight_it->second;
@@ -2231,7 +2259,7 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
     state->recording_cv.notify_all();
 }
 
-// Finish the background recording pass and publish the Definition. The main
+// Finish the background recording and publish the Definition. The main
 // thread finalizes the already-submitted outer Graph tasks in graph_commit.
 bool PTO2OrchestratorState::graph_end() {
     GraphHostState *state = graph_state_from(this);
@@ -2278,6 +2306,12 @@ bool PTO2OrchestratorState::graph_end() {
 // Join every recording in flight and back-patch all deferred shells in submit
 // order. Orchestration completion is the only normal-path barrier.
 void PTO2OrchestratorState::graph_commit() {
+    ORCH_PHASE_START_SPANNING();
+    graph_commit_inner();
+    ORCH_PHASE_END_SPANNING(HostOrchPhase::GraphCommit, 0);
+}
+
+void PTO2OrchestratorState::graph_commit_inner() {
     if (active_graph_recording(this) != nullptr) return;
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || state->inflight_count.load(std::memory_order_acquire) == 0) return;
@@ -2286,9 +2320,13 @@ void PTO2OrchestratorState::graph_commit() {
     {
         std::unique_lock<std::mutex> lock(state->recording_mutex);
         if (state->inflight.empty()) return;
-        state->recording_cv.wait(lock, [&]() {
-            return !state->any_recording();
-        });
+        {
+            ORCH_PHASE_START();
+            state->recording_cv.wait(lock, [&]() {
+                return !state->any_recording();
+            });
+            ORCH_PHASE_END(HostOrchPhase::RecordingWait, state->inflight.size());
+        }
         drained.swap(state->inflight);
         state->inflight_count.store(0, std::memory_order_release);
     }
