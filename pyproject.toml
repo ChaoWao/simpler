@@ -8,7 +8,12 @@
 # -----------------------------------------------------------------------------------------------------------
 
 [build-system]
-requires = ["scikit-build-core>=0.10.0", "nanobind>=2.0.0", "cmake>=3.15"]
+# nanobind is capped below 3: nanobind 3.x requires Python >= 3.10 in its
+# nanobind-config.cmake, and this project supports >= 3.9 (see requires-python
+# below). nanobind ships no requires-python metadata, so pip installs 3.x onto a
+# 3.9 interpreter happily and the floor only surfaces as a cmake configure
+# error. Raise the cap together with requires-python, never before it.
+requires = ["scikit-build-core>=0.10.0", "nanobind>=2.0.0,<3", "cmake>=3.15"]
 build-backend = "scikit_build_core.build"
 
 [project]

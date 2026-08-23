@@ -201,7 +201,7 @@ clang-tidy runs.
 #    are noarch, so this matters only for ABI flags during simpler's
 #    own link step. (See "Why source-install" below.)
 pip uninstall -y simpler nanobind pybind11
-pip install --no-binary nanobind --no-binary pybind11 nanobind pybind11
+pip install --no-binary nanobind --no-binary pybind11 'nanobind<3' pybind11
 
 # 2. Wipe build/ to drop any cached compile_commands.json or .a files
 #    that were produced with the previous compiler.
