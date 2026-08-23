@@ -563,12 +563,16 @@ void Scheduler::dispatch_preparable_next_level_singles() {
         WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
         if (worker == nullptr || !worker->can_stage()) continue;
         TaskSlot slot;
-        if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, slot)) continue;
+        if (!cfg_.ready_next_level_queues->try_front_single(worker_id, run_id, slot)) continue;
+        TaskSlotState &state = *cfg_.ring->slot_state(slot);
+        if (!worker->can_stage(state.pipeline_lease.slot_id)) continue;
+        TaskSlot popped = INVALID_SLOT;
+        if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, popped)) continue;
+        if (popped != slot) throw std::runtime_error("prepared single queue head changed during dispatch");
         if (!cfg_.ready_next_level_queues->groups_empty(run_id)) {
             cfg_.enqueue_ready_cb(slot);
             return;
         }
-        TaskSlotState &state = *cfg_.ring->slot_state(slot);
         if (state.state.load(std::memory_order_acquire) != TaskState::READY) continue;
         if (state.run_id != run_id || state.worker_type != WorkerType::NEXT_LEVEL || state.is_group() ||
             state.target_worker_id(0) != worker_id) {
@@ -705,13 +709,13 @@ Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(con
             // A local full-rank group may occupy the staged lane, but it is
             // not activated until every member reports native preparation
             // complete and the target active lanes are idle.
-            all_workers_idle = std::all_of(workers.begin(), workers.end(), [](WorkerThread *worker) {
-                return worker->can_stage();
+            all_workers_idle = std::all_of(workers.begin(), workers.end(), [&](WorkerThread *worker) {
+                return worker->can_stage(s.pipeline_lease.slot_id);
             });
             if (!all_workers_idle) {
                 result.busy_target_worker_ids.clear();
                 for (WorkerThread *worker : workers) {
-                    if (!worker->can_stage()) {
+                    if (!worker->can_stage(s.pipeline_lease.slot_id)) {
                         result.busy_target_worker_ids.push_back(worker->worker_id());
                     }
                 }

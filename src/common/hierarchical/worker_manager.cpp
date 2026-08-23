@@ -413,19 +413,21 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: dispatch has no run identity");
         return;
     }
-    bool staged_lane_occupied = false;
+    bool staging_unavailable = false;
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        const LaneState &active = lane(LaneKind::ACTIVE);
         LaneState &staged = lane(LaneKind::STAGED);
-        if (staged.occupied) {
-            staged_lane_occupied = true;
+        if (staged.occupied || (active.occupied && active.pipeline_slot_id == slot->pipeline_lease.slot_id)) {
+            staging_unavailable = true;
         } else {
             staged.occupied = true;
             staged.run_id = slot->run_id;
+            staged.pipeline_slot_id = slot->pipeline_lease.slot_id;
         }
     }
-    if (staged_lane_occupied) {
-        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker already owns a staged run");
+    if (staging_unavailable) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker cannot stage on the requested pipeline slot");
         return;
     }
     SubmitDispatchResult result;
@@ -473,6 +475,8 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
             return SubmitDispatchResult::STAGED_IDENTITY_CHANGED;
         }
         dispatch_lane.dispatch_id = d.dispatch_id;
+        const TaskSlotState *state = ring_ == nullptr ? nullptr : ring_->slot_state(d.task_slot);
+        if (state != nullptr) dispatch_lane.pipeline_slot_id = state->pipeline_lease.slot_id;
     }
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
@@ -558,6 +562,13 @@ bool WorkerThread::prepared_ready(RunId run_id) const {
 bool WorkerThread::can_stage() const {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
     return caps().supports_frame_staging && !lane(LaneKind::STAGED).occupied;
+}
+
+bool WorkerThread::can_stage(uint32_t pipeline_slot_id) const {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    const LaneState &active = lane(LaneKind::ACTIVE);
+    return caps().supports_frame_staging && !lane(LaneKind::STAGED).occupied &&
+           (!active.occupied || active.pipeline_slot_id != pipeline_slot_id);
 }
 
 bool WorkerThread::idle() const {

@@ -567,6 +567,7 @@ public:
     // dispatchable on the same device.
     bool idle() const;
     bool can_stage() const;
+    bool can_stage(uint32_t pipeline_slot_id) const;
     bool busy() const { return inflight_.load(std::memory_order_acquire) != 0; }
     const WorkerEndpointCaps &caps() const;
     int32_t worker_id() const;
@@ -666,6 +667,7 @@ private:
         bool cancellation_requested{false};
         RunId run_id{INVALID_RUN_ID};
         uint64_t dispatch_id{0};
+        uint32_t pipeline_slot_id{UINT32_MAX};
     };
 
     Ring *ring_{nullptr};

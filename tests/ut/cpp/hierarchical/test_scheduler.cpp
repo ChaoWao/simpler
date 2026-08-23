@@ -1201,6 +1201,8 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
     );
 
     worker.dispatch(WorkerDispatch{active_slot, 0});
+    EXPECT_FALSE(worker.can_stage(/*pipeline_slot_id=*/0));
+    EXPECT_TRUE(worker.can_stage(/*pipeline_slot_id=*/1));
     worker.dispatch_prepared(WorkerDispatch{staged_slot, 0});
     EXPECT_TRUE(endpoint_ptr->wait_submitted(2));
     std::vector<WorkerDispatch> submitted = endpoint_ptr->submitted();
