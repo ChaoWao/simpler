@@ -410,8 +410,8 @@ struct PTO2TaskPayload {
         scalar_count = args.scalar_count();
 
         // bind_regions must already have run: an unbound region reads back as null and
-        // the stores below would go through it. A count of zero needs no region, which
-        // is how an outer GRAPH task reaches here with both unbound.
+        // the stores below would go through it. A count of zero needs no region, so a
+        // task with neither argument kind may leave both unbound.
         debug_assert(args.tensor_count() == 0 || tensor_data() != nullptr);
         debug_assert(args.scalar_count() == 0 || scalar_data() != nullptr);
 

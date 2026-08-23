@@ -28,8 +28,8 @@ line per segment per pass at `LOG_TIMING`:
 | `args` | staging the caller's host tensors and mapping them for host access |
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
 | `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
-| `graph_upload` | uploading the Definition objects, and laying out the replay boundary images the `arena_h2d` copy carries |
-| `arena_h2d` | the one H2D of the pass: the arena's copied zone, the shared-memory image and the Graph submission block |
+| `graph_upload` | uploading the Definition objects and binding every Graph task to the one with its key |
+| `arena_h2d` | the one H2D of the pass: the arena's copied zone and the shared-memory image |
 | `host_view_close` | unmapping the host views taken in `args` |
 
 The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
@@ -151,13 +151,14 @@ minima taken across passes; that total belongs to no pass and can point the wron
 way (see below).
 
 **A segment's `bytes=` is what that segment itself copied, so no copy is counted
-twice.** `graph_upload` counts the Definition objects it uploads and nothing
-else; `arena_h2d`'s `bytes=` is its single copy, exactly partitioned by the
-`copied=`, `sm=` and `subs=` beside it. The Graph submission block is that
-`subs=` — `graph_upload` lays the block out but copies none of it, so it is
-absent from that segment's `bytes=`. (`shared_mem`'s `bytes=` is the image the
-arena grew to hold, which `arena_h2d` then ships as `sm=`; that is the one figure
-two segments both report, and neither is a copy count of the other.)
+twice.** `graph_upload` counts the Definition objects it uploads, which are all it
+copies; `arena_h2d`'s `bytes=` is its single copy, exactly partitioned by the
+`copied=` and `sm=` beside it. A Graph invocation's boundary values are inside that
+`sm=`: they live in the outer Graph task's ordinary argument pools, so they travel
+with every other task's arguments rather than as a population of their own.
+(`shared_mem`'s `bytes=` is the image the arena grew to hold, which `arena_h2d`
+then ships as `sm=`; that is the one figure two segments both report, and neither
+is a copy count of the other.)
 
 The first pass of each rank is warm-up and belongs in neither statistic; drop it
 explicitly rather than letting a minimum quietly exclude it.
@@ -335,8 +336,9 @@ meant to outlive it.
 upload was restructured: `graph_upload`'s `bytes=` then also counted the Graph
 submission block, `sm_h2d` was still a copy of its own, and `arena_h2d` was the
 copied zone alone. A run today emits no `sm_h2d`, counts only the Definition
-objects in `graph_upload`, and ships all three regions in `arena_h2d` — so the
-same case reports different figures for the same work.
+objects in `graph_upload`, carries no submission block at all, and ships both
+remaining regions in `arena_h2d` — so the same case reports different figures for
+the same work.
 
 Three of these deserve reading together. `host_orch` is the whole story on dsv4 —
 839 `submit_task`, 743 `record_node` and 272 `alloc_tensors` per bind against qwen's
