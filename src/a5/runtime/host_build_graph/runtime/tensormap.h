@@ -115,15 +115,15 @@ struct alignas(64) PTO2TensorMapEntry {
     // === Cache line 1 (64B) — lookup hot path; mirrors ChipTensor line 1 from byte 16 ===
     uint64_t buffer_addr;  // 8B [0, 8):   tensor base address (hash key, mirrors ChipTensor::buffer.addr)
     PTO2TensorMapEntry
-        *next_in_bucket;          // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
-    PTO2TaskId producer_task_id;  // 8B [16,24):  mirrors ChipTensor::owner_task_id slot
-    uint64_t start_offset;        // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
-    int32_t version;              // 4B [32,36):  mirrors ChipTensor::version
-    uint32_t ndims;               // 4B [36,40):  mirrors ChipTensor::ndims
-    DataType dtype;               // 1B [40,41):  mirrors ChipTensor::dtype
-    bool manual_dep;              // 1B [41,42):  mirrors ChipTensor::manual_dep
-    bool is_contiguous;           // 1B [42,43):  mirrors ChipTensor::is_contiguous
-    uint8_t __padding1__;         // 1B [43,44):  mirrors ChipTensor padding
+        *next_in_bucket;      // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
+    TaskId producer_task_id;  // 8B [16,24):  mirrors ChipTensor::owner_task_id slot
+    uint64_t start_offset;    // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
+    int32_t version;          // 4B [32,36):  mirrors ChipTensor::version
+    uint32_t ndims;           // 4B [36,40):  mirrors ChipTensor::ndims
+    DataType dtype;           // 1B [40,41):  mirrors ChipTensor::dtype
+    bool manual_dep;          // 1B [41,42):  mirrors ChipTensor::manual_dep
+    bool is_contiguous;       // 1B [42,43):  mirrors ChipTensor::is_contiguous
+    uint8_t __padding1__;     // 1B [43,44):  mirrors ChipTensor padding
     uint32_t shapes[MAX_TENSOR_DIMS];  // 20B [44,64): mirrors ChipTensor::shapes
 
     // === Cache line 2 (64B) — chain manipulation + non-contiguous overlap data ===
@@ -521,7 +521,7 @@ struct PTO2TensorMap {
      * @param tensor            ChipTensor produced
      * @param producer_task_id  Task ID of producer
      */
-    void insert(const ChipTensor &tensor, PTO2TaskId producer_task_id) {
+    void insert(const ChipTensor &tensor, TaskId producer_task_id) {
         PTO2TensorMapEntry *entry = new_entry();
         entry->copy_from_tensor(tensor);
         link_entry(entry, tensor.buffer.addr, producer_task_id);
@@ -547,7 +547,7 @@ struct PTO2TensorMap {
     /**
      * Link an initialized entry into bucket and task chains.
      */
-    void link_entry(PTO2TensorMapEntry *entry, uint64_t addr, PTO2TaskId producer_task_id) {
+    void link_entry(PTO2TensorMapEntry *entry, uint64_t addr, TaskId producer_task_id) {
 #if SIMPLER_TENSORMAP_PROFILING
         g_insert_count++;
 #endif

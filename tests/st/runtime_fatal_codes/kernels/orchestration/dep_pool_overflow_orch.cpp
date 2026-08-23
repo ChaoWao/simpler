@@ -50,7 +50,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
     PTO2_SCOPE() {
-        PTO2TaskId producers[PRODUCER_COUNT];
+        TaskId producers[PRODUCER_COUNT];
         for (int32_t i = 0; i < PRODUCER_COUNT; i++) {
             CoreTaskArgs args;
             args.add_output(ci);

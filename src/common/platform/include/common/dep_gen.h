@@ -108,7 +108,7 @@ struct DepGenRecord {
     uint32_t flags;                                     // DepGenRecordFlags bitmask
     uint16_t tensor_count;                              // number of valid ChipTensor slots
     uint16_t explicit_dep_count;                        // number of valid explicit_dep slots
-    uint64_t explicit_deps[DEP_GEN_MAX_EXPLICIT_DEPS];  // PTO2TaskId::raw, length = explicit_dep_count
+    uint64_t explicit_deps[DEP_GEN_MAX_EXPLICIT_DEPS];  // TaskId::raw, length = explicit_dep_count
     uint8_t arg_types[CORE_MAX_TENSOR_ARGS];            // TensorArgType, length = tensor_count
     int32_t kernel_id[3];  // per-subslot kernel id (AIC, AIV0, AIV1); INVALID_KERNEL_ID = -1
     uint32_t block_num;    // SPMD logical block count; 1 means non-SPMD
@@ -154,7 +154,7 @@ struct DepGenOverflowRecord {
     uint32_t flags;      // DEP_GEN_FLAG_OVERFLOW [| DEP_GEN_FLAG_LAST_OVERFLOW]
     uint16_t dep_count;  // number of valid entries in deps[]
     uint16_t _reserved;
-    uint64_t deps[DEP_GEN_OVERFLOW_DEPS_PER_RECORD];  // PTO2TaskId::raw, length = dep_count
+    uint64_t deps[DEP_GEN_OVERFLOW_DEPS_PER_RECORD];  // TaskId::raw, length = dep_count
 } __attribute__((aligned(64)));
 
 static_assert(

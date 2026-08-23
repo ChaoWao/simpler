@@ -153,7 +153,7 @@ TEST_F(TensorMapTest, HashBoundedByBucketCount) {
 
 TEST_F(TensorMapTest, InsertThenLookupFindsProducer) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    PTO2TaskId tid = PTO2TaskId::make(0, 0);
+    TaskId tid = TaskId::make(0, 0);
     tmap.insert(t, tid);
 
     TestLookupResult result;
@@ -172,8 +172,8 @@ TEST_F(TensorMapTest, LookupEmptyReturnsZero) {
 TEST_F(TensorMapTest, InsertMultipleSameBuffer) {
     ChipTensor t1 = make_test_tensor(0x1000, 256);
     ChipTensor t2 = make_test_tensor(0x1000, 128);
-    PTO2TaskId tid1 = PTO2TaskId::make(0, 0);
-    PTO2TaskId tid2 = PTO2TaskId::make(0, 1);
+    TaskId tid1 = TaskId::make(0, 0);
+    TaskId tid2 = TaskId::make(0, 1);
 
     tmap.insert(t1, tid1);
     tmap.insert(t2, tid2);
@@ -187,18 +187,18 @@ TEST_F(TensorMapTest, InsertMultipleSameBuffer) {
 TEST_F(TensorMapTest, InsertDifferentBuffersNoCollision) {
     ChipTensor t1 = make_test_tensor(0x1000, 256);
     ChipTensor t2 = make_test_tensor(0x2000, 256);
-    tmap.insert(t1, PTO2TaskId::make(0, 0));
-    tmap.insert(t2, PTO2TaskId::make(0, 1));
+    tmap.insert(t1, TaskId::make(0, 0));
+    tmap.insert(t2, TaskId::make(0, 1));
 
     TestLookupResult r1;
     run_lookup(tmap, t1, r1);
     EXPECT_EQ(r1.count, 1);
-    EXPECT_EQ(r1.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 0));
+    EXPECT_EQ(r1.entries[0].entry->producer_task_id, TaskId::make(0, 0));
 
     TestLookupResult r2;
     run_lookup(tmap, t2, r2);
     EXPECT_EQ(r2.count, 1);
-    EXPECT_EQ(r2.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 1));
+    EXPECT_EQ(r2.entries[0].entry->producer_task_id, TaskId::make(0, 1));
 }
 
 // =============================================================================
@@ -210,7 +210,7 @@ TEST_F(TensorMapTest, OverlapFastPathCovered) {
     // Consumer covers producer -> COVERED
     ChipTensor producer = make_test_tensor(0x1000, 256);
     ChipTensor consumer = make_test_tensor(0x1000, 512);
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -223,7 +223,7 @@ TEST_F(TensorMapTest, OverlapFastPathOther) {
     // Consumer does NOT cover producer -> OTHER
     ChipTensor producer = make_test_tensor(0x1000, 512);
     ChipTensor consumer = make_test_tensor(0x1000, 256);
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -233,7 +233,7 @@ TEST_F(TensorMapTest, OverlapFastPathOther) {
 
 TEST_F(TensorMapTest, OverlapFastPathExactMatch) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, t, result);
@@ -256,7 +256,7 @@ TEST_F(TensorMapTest, OverlapSlowPathNoOverlap) {
     uint32_t con_offsets[] = {128, 0};
     ChipTensor consumer = base.view(con_shapes, con_offsets);
 
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -274,7 +274,7 @@ TEST_F(TensorMapTest, OverlapSlowPathPartialOverlap) {
     uint32_t con_offsets[] = {64, 0};
     ChipTensor consumer = base.view(con_shapes, con_offsets);
 
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -293,7 +293,7 @@ TEST_F(TensorMapTest, OverlapSlowPathCovered) {
     uint32_t con_offsets[] = {0, 0};
     ChipTensor consumer = base.view(con_shapes, con_offsets);
 
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -310,7 +310,7 @@ TEST_F(TensorMapTest, VersionMismatchReturnsOther) {
     ChipTensor producer = make_test_tensor(0x1000, 256, 1, 0);
     ChipTensor consumer = make_test_tensor(0x1000, 256, 1, 1);
 
-    tmap.insert(producer, PTO2TaskId::make(0, 0));
+    tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
     run_lookup(tmap, consumer, result);
@@ -324,8 +324,8 @@ TEST_F(TensorMapTest, VersionMismatchReturnsOther) {
 
 TEST_F(TensorMapTest, StaleEntriesSkippedDuringLookup) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 0));
-    tmap.insert(t, PTO2TaskId::make(0, 1));
+    tmap.insert(t, TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(0, 1));
 
     // Advance validity to skip task 0
     tmap.sync_validity(0, 1);
@@ -333,14 +333,14 @@ TEST_F(TensorMapTest, StaleEntriesSkippedDuringLookup) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 1));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(0, 1));
 }
 
 TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     // Ring 0, task 0 and Ring 1, task 0 -> same bucket
-    tmap.insert(t, PTO2TaskId::make(0, 0));
-    tmap.insert(t, PTO2TaskId::make(1, 0));
+    tmap.insert(t, TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(1, 0));
 
     // Invalidate ring 0 only
     tmap.sync_validity(0, 1);
@@ -349,7 +349,7 @@ TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
     run_lookup(tmap, t, result);
     // Ring 1 task 0 still valid, ring 0 task 0 invalidated
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 0));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(1, 0));
 }
 
 // =============================================================================
@@ -358,9 +358,9 @@ TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
 
 TEST_F(TensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 0));
-    tmap.insert(t, PTO2TaskId::make(0, 1));
-    tmap.insert(t, PTO2TaskId::make(0, 2));
+    tmap.insert(t, TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(0, 1));
+    tmap.insert(t, TaskId::make(0, 2));
     EXPECT_EQ(tmap.valid_count(), 3);
 
     // Cleanup tasks [0, 2) on ring 0
@@ -371,13 +371,13 @@ TEST_F(TensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 2));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(0, 2));
 }
 
 TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 0));
-    tmap.insert(t, PTO2TaskId::make(1, 0));
+    tmap.insert(t, TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(1, 0));
 
     tmap.cleanup_retired(0, 0, 1);
 
@@ -386,12 +386,12 @@ TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 0));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(1, 0));
 }
 
 TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(0, 0));
     EXPECT_EQ(tmap.free_num, 0);
     EXPECT_EQ(tmap.next_entry_idx, 1);
 
@@ -400,7 +400,7 @@ TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
     EXPECT_EQ(tmap.free_num, 1) << "Cleaned entry should be in free list";
 
     // New insert should reuse free entry instead of allocating fresh
-    tmap.insert(t, PTO2TaskId::make(0, 1));
+    tmap.insert(t, TaskId::make(0, 1));
     EXPECT_EQ(tmap.free_num, 0);
     EXPECT_EQ(tmap.next_entry_idx, 1) << "Should reuse freed entry, not allocate new";
 }
@@ -412,8 +412,8 @@ TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
 TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
-    tmap.insert(t, PTO2TaskId::make(0, 0));
-    tmap.insert(t, PTO2TaskId::make(0, WINDOW_SIZE));
+    tmap.insert(t, TaskId::make(0, 0));
+    tmap.insert(t, TaskId::make(0, WINDOW_SIZE));
     ASSERT_EQ(tmap.valid_count(), 2);
 
     // Retire only task 0.
@@ -424,7 +424,7 @@ TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, WINDOW_SIZE));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(0, WINDOW_SIZE));
 }
 
 // =============================================================================
@@ -433,9 +433,9 @@ TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
 
 TEST_F(TensorMapTest, MultiRingIndependentLookup) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, PTO2TaskId::make(0, 5));
-    tmap.insert(t, PTO2TaskId::make(1, 3));
-    tmap.insert(t, PTO2TaskId::make(2, 7));
+    tmap.insert(t, TaskId::make(0, 5));
+    tmap.insert(t, TaskId::make(1, 3));
+    tmap.insert(t, TaskId::make(2, 7));
 
     TestLookupResult result;
     run_lookup(tmap, t, result);
@@ -448,7 +448,7 @@ TEST_F(TensorMapTest, MultiRingIndependentLookup) {
     TestLookupResult result2;
     run_lookup(tmap, t, result2);
     EXPECT_EQ(result2.count, 1);
-    EXPECT_EQ(result2.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 3));
+    EXPECT_EQ(result2.entries[0].entry->producer_task_id, TaskId::make(1, 3));
 }
 
 // =============================================================================
@@ -459,7 +459,7 @@ TEST_F(TensorMapTest, LookupReturnsAllMatches) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     // Insert 20 entries for the same buffer (was capped at 16 before #669)
     for (int i = 0; i < 20; i++) {
-        tmap.insert(t, PTO2TaskId::make(0, i));
+        tmap.insert(t, TaskId::make(0, i));
     }
 
     TestLookupResult result;
@@ -475,28 +475,28 @@ TEST_F(TensorMapTest, PoolExhaustionAsserts) {
     // With pool_size=64, inserting 64 entries should work, 65th should fail
     for (int i = 0; i < POOL_SIZE; i++) {
         ChipTensor t = make_test_tensor(0x1000 + i * 0x100, 256);
-        tmap.insert(t, PTO2TaskId::make(0, i));
+        tmap.insert(t, TaskId::make(0, i));
     }
     EXPECT_EQ(tmap.next_entry_idx, POOL_SIZE);
     EXPECT_EQ(tmap.free_num, 0);
 
     // 65th insert should trigger always_assert (pool overflow)
     ChipTensor overflow = make_test_tensor(0x9000, 256);
-    EXPECT_THROW(tmap.insert(overflow, PTO2TaskId::make(0, POOL_SIZE)), std::runtime_error);
+    EXPECT_THROW(tmap.insert(overflow, TaskId::make(0, POOL_SIZE)), std::runtime_error);
 }
 
 TEST_F(TensorMapTest, FreeListRecycling) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     // Insert and cleanup 10 entries
     for (int i = 0; i < 10; i++) {
-        tmap.insert(t, PTO2TaskId::make(0, i));
+        tmap.insert(t, TaskId::make(0, i));
     }
     tmap.cleanup_retired(0, 0, 10);
     EXPECT_EQ(tmap.free_num, 10);
 
     // Re-insert should use free list
     for (int i = 10; i < 20; i++) {
-        tmap.insert(t, PTO2TaskId::make(0, i));
+        tmap.insert(t, TaskId::make(0, i));
     }
     EXPECT_EQ(tmap.free_num, 0);
     EXPECT_EQ(tmap.next_entry_idx, 10) << "No new pool entries consumed when free list available";
@@ -509,7 +509,7 @@ TEST_F(TensorMapTest, FreeListRecycling) {
 TEST_F(TensorMapTest, PerTaskEntryListTracksMultipleOutputs) {
     ChipTensor t1 = make_test_tensor(0x1000, 256);
     ChipTensor t2 = make_test_tensor(0x2000, 128);
-    PTO2TaskId tid = PTO2TaskId::make(0, 5);
+    TaskId tid = TaskId::make(0, 5);
 
     tmap.insert(t1, tid);
     tmap.insert(t2, tid);
@@ -527,9 +527,9 @@ TEST_F(TensorMapTest, PerTaskEntryListTracksMultipleOutputs) {
 
 TEST_F(TensorMapTest, RemoveMiddleEntryPreservesChain) {
     ChipTensor t = make_test_tensor(0x1000, 256);
-    PTO2TaskId tid0 = PTO2TaskId::make(0, 0);
-    PTO2TaskId tid1 = PTO2TaskId::make(0, 1);
-    PTO2TaskId tid2 = PTO2TaskId::make(0, 2);
+    TaskId tid0 = TaskId::make(0, 0);
+    TaskId tid1 = TaskId::make(0, 1);
+    TaskId tid2 = TaskId::make(0, 2);
 
     tmap.insert(t, tid0);
     tmap.insert(t, tid1);
@@ -551,37 +551,37 @@ TEST_F(TensorMapTest, RemoveMiddleEntryPreservesChain) {
 }
 
 // =============================================================================
-// PTO2TaskId encoding/decoding
+// TaskId encoding/decoding
 // =============================================================================
 
 TEST(TaskIdTest, MakeAndDecode) {
-    auto tid = PTO2TaskId::make(3, 42);
+    auto tid = TaskId::make(3, 42);
     EXPECT_EQ(tid.ring(), 3);
     EXPECT_EQ(tid.local(), 42u);
 }
 
 TEST(TaskIdTest, InvalidSentinel) {
-    auto inv = PTO2TaskId::invalid();
+    auto inv = TaskId::invalid();
     EXPECT_FALSE(inv.is_valid());
     EXPECT_EQ(inv.raw, UINT64_MAX);
 }
 
 TEST(TaskIdTest, Equality) {
-    auto a = PTO2TaskId::make(1, 100);
-    auto b = PTO2TaskId::make(1, 100);
-    auto c = PTO2TaskId::make(2, 100);
+    auto a = TaskId::make(1, 100);
+    auto b = TaskId::make(1, 100);
+    auto c = TaskId::make(2, 100);
     EXPECT_EQ(a, b);
     EXPECT_NE(a, c);
 }
 
 TEST(TaskIdTest, RingIdMaxValue) {
-    auto tid = PTO2TaskId::make(255, 0);
+    auto tid = TaskId::make(255, 0);
     EXPECT_EQ(tid.ring(), 255);
     EXPECT_EQ(tid.local(), 0u);
 }
 
 TEST(TaskIdTest, LocalIdMaxValue) {
-    auto tid = PTO2TaskId::make(0, UINT32_MAX);
+    auto tid = TaskId::make(0, UINT32_MAX);
     EXPECT_EQ(tid.ring(), 0);
     EXPECT_EQ(tid.local(), UINT32_MAX);
 }

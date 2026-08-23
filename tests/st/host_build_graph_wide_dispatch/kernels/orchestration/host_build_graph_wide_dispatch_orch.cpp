@@ -29,7 +29,7 @@ MixedKernels mix_kernels() {
     return kernels;
 }
 
-PTO2TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
+TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
     CoreTaskArgs args;
     args.add_inout(output);
     args.add_scalar(0);
@@ -38,7 +38,7 @@ PTO2TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-PTO2TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
+TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t base, TaskId producer) {
     CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
@@ -49,7 +49,7 @@ PTO2TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t 
     return rt_submit_task(mix_kernels(), args).task_id();
 }
 
-void submit_normal_mix(const ChipTensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
+void submit_normal_mix(const ChipTensor &output, int16_t block_num, int64_t base, TaskId producer) {
     CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
@@ -75,8 +75,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int16_t aiv_blocks = static_cast<int16_t>(rt_available_aiv_count());
     int16_t mix_blocks = static_cast<int16_t>(rt_available_cluster_count());
 
-    PTO2TaskId aiv = submit_aiv(output, aiv_blocks);
-    PTO2TaskId sync_mix = submit_sync_mix(output, mix_blocks, aiv_blocks, aiv);
+    TaskId aiv = submit_aiv(output, aiv_blocks);
+    TaskId sync_mix = submit_sync_mix(output, mix_blocks, aiv_blocks, aiv);
     int64_t normal_base = aiv_blocks + 3 * mix_blocks;
     submit_normal_mix(output, mix_blocks, normal_base, sync_mix);
 

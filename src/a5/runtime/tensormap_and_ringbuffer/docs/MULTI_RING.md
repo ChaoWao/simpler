@@ -27,11 +27,11 @@ Task IDs are widened from 32-bit to 64-bit to carry the ring identity:
 task_id.raw = (ring_id << 32) | local_id
 ```
 
-`PTO2TaskId` exposes direct accessors in `src/common/task_interface/task_id.h`:
+`TaskId` exposes direct accessors in `src/common/task_interface/task_id.h`:
 
 | API | Purpose |
 | --- | ------- |
-| `PTO2TaskId::make(ring_id, local_id)` | Compose a 64-bit task ID (`PTO2TaskId`) |
+| `TaskId::make(ring_id, local_id)` | Compose a 64-bit task ID (`TaskId`) |
 | `task_id.ring()` | Extract `ring_id` (bits 63-32) |
 | `task_id.local()` | Extract `local_id` (bits 31-0) |
 | `task_id.raw` | Access the packed 64-bit encoding |
@@ -40,8 +40,8 @@ Type changes:
 
 | Field | Before | After |
 | ----- | ------ | ----- |
-| `PTO2TaskDescriptor.task_id` | `int32_t` | `PTO2TaskId` |
-| `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `PTO2TaskId` |
+| `PTO2TaskDescriptor.task_id` | `int32_t` | `TaskId` |
+| `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
 | `PTO2TaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures

@@ -73,7 +73,7 @@ public:
     /**
      * Append one or more dependencies to the bundled buffer. May be called
      * multiple times; deps accumulate. Variadic accepts any non-zero number
-     * of PTO2TaskId arguments.
+     * of TaskId arguments.
      *
      * Overflow (more than MAX_DEP_COUNT total) records an error on the
      * underlying Arg; the error surfaces at submit time.
@@ -81,9 +81,7 @@ public:
     template <typename... Ids>
     void add_dep(Ids... ids) {
         static_assert(sizeof...(Ids) >= 1, "add_dep: at least one task id is required");
-        static_assert(
-            (std::is_same_v<std::decay_t<Ids>, PTO2TaskId> && ...), "add_dep: all arguments must be PTO2TaskId"
-        );
+        static_assert((std::is_same_v<std::decay_t<Ids>, TaskId> && ...), "add_dep: all arguments must be TaskId");
         if (count_ + sizeof...(Ids) > MAX_DEP_COUNT) {
             CoreTaskArgs::set_error(
                 "CoreTaskArgsWithDeps::add_dep: dep count exceeds MAX_DEP_COUNT (bump the template arg)"
@@ -118,7 +116,7 @@ public:
     }
 
 private:
-    PTO2TaskId deps_[MAX_DEP_COUNT];
+    TaskId deps_[MAX_DEP_COUNT];
     uint32_t count_ = 0;
 };
 

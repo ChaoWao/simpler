@@ -138,7 +138,7 @@ constexpr bool dep_has_retain(DepFlags f) { return (f & DEP_RETAIN) != DEP_NONE;
 class TaskOutputTensors {
 public:
     TaskOutputTensors() :
-        task_id_(PTO2TaskId::invalid()),
+        task_id_(TaskId::invalid()),
         output_count_(0) {}
 
     bool empty() const { return output_count_ == 0; }
@@ -157,12 +157,12 @@ public:
         tensors_[output_count_++] = &tensor;
     }
 
-    void set_task_id(PTO2TaskId id) { task_id_ = id; }
+    void set_task_id(TaskId id) { task_id_ = id; }
 
-    PTO2TaskId task_id() const { return task_id_; }
+    TaskId task_id() const { return task_id_; }
 
 private:
-    PTO2TaskId task_id_;
+    TaskId task_id_;
     uint32_t output_count_;
     // Upper bound: a task cannot have more outputs than total tensor args
     // (every OUTPUT/OUTPUT_EXISTING slot is one of the Arg's tensor slots).
@@ -419,7 +419,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
      * count == 0 is a valid "set empty" — it clears any previously stored deps
      * and returns. This lets callers that build the dep set conditionally pass
      * the result through unguarded, including in the no-dep branch:
-     *   PTO2TaskId deps[3];
+     *   TaskId deps[3];
      *   uint32_t n = 0;
      *   if (have_prev) deps[n++] = prev;
      *   if (is_last)   deps[n++] = alloc;
@@ -429,7 +429,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
      * deps are already set will fail with set_error(). Use count == 0 first
      * if you need to re-set.
      */
-    void set_dependencies(const PTO2TaskId *deps, uint32_t count) {
+    void set_dependencies(const TaskId *deps, uint32_t count) {
         if (count == 0) {
             explicit_deps_ = nullptr;
             explicit_dep_count_ = 0;
@@ -457,7 +457,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
      * with count > 0 is rejected; use set_dependencies() for the
      * conservative DEP_WAIT|DEP_RETAIN default.
      */
-    void set_dependencies_with_kinds(const PTO2TaskId *deps, const DepFlags *kinds, uint32_t count) {
+    void set_dependencies_with_kinds(const TaskId *deps, const DepFlags *kinds, uint32_t count) {
         if (count == 0) {
             explicit_deps_ = nullptr;
             explicit_dep_count_ = 0;
@@ -479,7 +479,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
 
     uint32_t explicit_dep_count() const { return explicit_dep_count_; }
 
-    PTO2TaskId explicit_dep(uint32_t index) const {
+    TaskId explicit_dep(uint32_t index) const {
         always_assert(index < explicit_dep_count_);
         return explicit_deps_[index];
     }
@@ -494,7 +494,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         return explicit_dep_kinds_ ? explicit_dep_kinds_[index] : (DEP_WAIT | DEP_RETAIN);
     }
 
-    const PTO2TaskId *explicit_deps_data() const { return explicit_deps_; }
+    const TaskId *explicit_deps_data() const { return explicit_deps_; }
 
     /**
      * Add scalar values. Types are deduced per argument; each value is
@@ -592,7 +592,7 @@ private:
 #if SIMPLER_DFX
     DumpArgSelection dump_arg_selection_;
 #endif
-    const PTO2TaskId *explicit_deps_{nullptr};
+    const TaskId *explicit_deps_{nullptr};
     const DepFlags *explicit_dep_kinds_{nullptr};
     uint32_t explicit_dep_count_{0};
 #if SIMPLER_DFX

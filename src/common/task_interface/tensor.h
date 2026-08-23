@@ -95,7 +95,7 @@ enum class TensorArgType : int32_t {
 struct alignas(64) ChipTensor {
     // === Cache line 1 (64B) — hot path ===
     PTOBufferHandle buffer;            // Underlying memory buffer (addr in bytes, size in bytes)
-    PTO2TaskId owner_task_id;          // Creator task; PTO2TaskId::invalid() for external tensors
+    TaskId owner_task_id;              // Creator task; TaskId::invalid() for external tensors
     uint64_t start_offset;             // 1D ELEMENT offset of the view origin into `buffer`
     int32_t version;                   // ChipTensor version for overlap detection
     uint32_t ndims;                    // Number of dimensions used
@@ -190,7 +190,7 @@ struct alignas(64) ChipTensor {
         is_contiguous = true;
         address_space = in_address_space;
         start_offset = 0;
-        owner_task_id = PTO2TaskId::invalid();
+        owner_task_id = TaskId::invalid();
         // Single reverse pass: write shapes, accumulate row-major stride, and
         // track numel — `s` ends as prod(shapes) which is also extent_elem
         // for a contiguous view.
@@ -537,7 +537,7 @@ inline ChipTensor make_tensor_strided(
     t.manual_dep = manual_dep;
     t.address_space = address_space;
     t.start_offset = 0;
-    t.owner_task_id = PTO2TaskId::invalid();
+    t.owner_task_id = TaskId::invalid();
     for (uint32_t i = 0; i < ndims; i++) {
         t.shapes[i] = shapes[i];
         t.strides[i] = strides[i];

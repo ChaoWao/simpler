@@ -132,13 +132,13 @@ struct AsyncCtx {
     volatile __gm__ int32_t *completion_error_code;
     volatile __gm__ DeferredCompletionEntry *completion_entries;
     uint32_t completion_capacity;
-    PTO2TaskId task_token;
+    TaskId task_token;
 
-    static inline AsyncCtx make(PTO2TaskId task_token, volatile __gm__ DeferredCompletionSlab *buffer) {
+    static inline AsyncCtx make(TaskId task_token, volatile __gm__ DeferredCompletionSlab *buffer) {
         AsyncCtx ctx{};
         ctx.task_token = task_token;
         if (buffer == nullptr) {
-            ctx.task_token = PTO2TaskId::invalid();
+            ctx.task_token = TaskId::invalid();
             return ctx;
         }
         ctx.completion_count = &buffer->count;

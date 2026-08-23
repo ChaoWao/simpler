@@ -159,7 +159,7 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
 MAYBE_UNINITIALIZED_BEGIN
 static bool
 wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
-    PTO2TaskId owner = tensor.owner_task_id;
+    TaskId owner = tensor.owner_task_id;
     PTO2OrchestratorState &orch = *rt->orchestrator;
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
@@ -176,7 +176,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
     // Returns nullptr for every rejected producer, having latched the fatal.
     // Callers branch on the returned pointer, not on `failed`: the slot is
     // dereferenced immediately and a null return is the only safe signal.
-    auto resolve_producer = [&](PTO2TaskId producer) -> const PTO2TaskSlotState * {
+    auto resolve_producer = [&](TaskId producer) -> const PTO2TaskSlotState * {
         if (!producer.is_valid() || producer.ring() != 0) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
@@ -294,7 +294,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
-            PTO2TaskId pid = entry.producer_task_id;
+            TaskId pid = entry.producer_task_id;
             const auto *slot = resolve_producer(pid);
             if (slot == nullptr) return false;
             try_push(*slot);

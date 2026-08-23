@@ -311,7 +311,7 @@ private:
 
 static bool append_fanin_or_fail(
     PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, PTO2TaskSlotState *prod_state,
-    PTO2TaskId producer_task_id, PTO2FaninBuilder *fanin_builder, uint8_t ring_id, DepFlags kind
+    TaskId producer_task_id, PTO2FaninBuilder *fanin_builder, uint8_t ring_id, DepFlags kind
 ) {
     // Decide-and-claim under the producer's fanout_lock. Two conditions make this
     // resolved slot a non-dependency, and both must be checked together with the
@@ -530,7 +530,7 @@ static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotS
 static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *task_slot_state);
 
 struct PTO2PreparedTask {
-    PTO2TaskId task_id = PTO2TaskId::invalid();
+    TaskId task_id = TaskId::invalid();
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
     PTO2TaskDescriptor *task = nullptr;
     PTO2TaskPayload *payload = nullptr;
@@ -601,7 +601,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = PTO2TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
+    out->task_id = TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->rings[ring_id].get_slot_state_by_slot(out->alloc_result.slot);
     out->task = &orch->sm_header->rings[ring_id].task_descriptors[out->alloc_result.slot];
     out->payload = &orch->sm_header->rings[ring_id].task_payloads[out->alloc_result.slot];
@@ -897,7 +897,7 @@ static TaskOutputTensors submit_task_common(
     uint8_t ring_id = prepared.task_id.ring();
     PTO2SchedulerState *sched = orch->scheduler;
     PTO2RingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
-    PTO2TaskId task_id = prepared.task_id;
+    TaskId task_id = prepared.task_id;
     PTO2TaskSlotState &cur_slot_state = *prepared.slot_state;
     PTO2TaskDescriptor &task = *prepared.task;
     PTO2TaskPayload &payload = *prepared.payload;
@@ -959,7 +959,7 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_LAP(g_orch_sync_cycle);
 
     for (uint32_t i = 0; i < args.explicit_dep_count(); i++) {
-        PTO2TaskId dep_task_id = args.explicit_dep(i);
+        TaskId dep_task_id = args.explicit_dep(i);
         if (!dep_task_id.is_valid()) {
             orch->report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "Arg.set_dependencies(...) requires valid task ids"
@@ -989,7 +989,7 @@ static TaskOutputTensors submit_task_common(
         args.explicit_deps_data(),
     };
 
-    auto runtime_emit = [&](PTO2TaskId producer_task_id, DepFlags kind) -> bool {
+    auto runtime_emit = [&](TaskId producer_task_id, DepFlags kind) -> bool {
         uint8_t prod_ring = producer_task_id.ring();
         PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->rings[prod_ring];
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));

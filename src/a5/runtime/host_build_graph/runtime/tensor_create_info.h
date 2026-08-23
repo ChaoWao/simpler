@@ -114,7 +114,7 @@ inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &
     always_assert(ci.ndims > 0 && ci.ndims <= MAX_TENSOR_DIMS);
     memcpy(&t, &ci, 64);
     t.buffer = {reinterpret_cast<uint64_t>(addr), buffer_size};
-    t.owner_task_id = PTO2TaskId::invalid();  // caller (orchestrator) overwrites with actual task_id
+    t.owner_task_id = TaskId::invalid();  // caller (orchestrator) overwrites with actual task_id
     uint32_t s = 1;
     for (int32_t i = static_cast<int32_t>(t.ndims) - 1; i >= 0; --i) {
         t.strides[i] = s;

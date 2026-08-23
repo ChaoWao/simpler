@@ -25,7 +25,7 @@ constexpr int32_t POOL_CAPACITY = 8;
 void make_head_match_old_structural_predicate(
     PTO2TaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
 ) {
-    descriptor.task_id = PTO2TaskId::make(ring_id, local_task_id);
+    descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
     head.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
     head.fanout_count = PTO2_FANOUT_SCOPE_BIT;

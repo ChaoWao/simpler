@@ -175,7 +175,7 @@ static_assert(sizeof(ChipSwimlaneAicpuTaskRecord) == 32, "ChipSwimlaneAicpuTaskR
 struct ChipSwimlaneAicoreTaskRecord {
     uint64_t start_time;               // Post-dcci+ack timestamp (kernel begins next)
     uint64_t end_time;                 // Post-kernel timestamp
-    uint64_t task_token_raw;           // PTO2TaskId::raw — identity (NOT join key)
+    uint64_t task_token_raw;           // TaskId::raw — identity (NOT join key)
     uint32_t reg_task_id;              // Per-core dispatch token — host join key vs AICPU stream
     uint32_t receive_to_start_cycles;  // start_time - receive_time (AICore-local dcci + ack cost)
 } __attribute__((aligned(32)));

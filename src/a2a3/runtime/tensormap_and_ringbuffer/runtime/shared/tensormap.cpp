@@ -112,7 +112,7 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
         entry_pool_arena[i].prev_in_bucket = nullptr;
         entry_pool_arena[i].next_in_task = nullptr;
         entry_pool_arena[i].prev_in_task = nullptr;
-        entry_pool_arena[i].producer_task_id = PTO2TaskId{};
+        entry_pool_arena[i].producer_task_id = TaskId{};
     }
 
     // free_entry_list: zeroed (was calloc'd before); contents become meaningful
@@ -255,7 +255,7 @@ int32_t PTO2TensorMap::valid_count() {
     return count;
 }
 
-void PTO2TensorMap::sync_tensormap(PTO2TaskId task_id, int32_t sm_last_task_alive) {
+void PTO2TensorMap::sync_tensormap(TaskId task_id, int32_t sm_last_task_alive) {
     auto ring_id = task_id.ring();
     auto local_id = task_id.local();
     sync_validity(ring_id, sm_last_task_alive);

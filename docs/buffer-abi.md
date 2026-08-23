@@ -104,7 +104,7 @@ resolved address, which by definition does not exist while the argument is still
 crossing processes. `owner_task_id` / `version` / `manual_dep` are L2 OverlapMap
 state — the producing task and its dependency treatment are decided by the chip
 runtime, so an L3 builder has nothing to put there (`make_tensor_strided` fills
-`PTO2TaskId::invalid()`, `0`, `false`). `is_contiguous` and `extent_elem_cache`
+`TaskId::invalid()`, `0`, `false`). `is_contiguous` and `extent_elem_cache`
 are derived from `shapes`/`strides`, cached for the AICore hot path so it can
 skip cache line 2.
 

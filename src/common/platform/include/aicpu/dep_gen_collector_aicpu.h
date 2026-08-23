@@ -30,7 +30,7 @@
  *   dep_gen_aicpu_finalize()            — clear bookkeeping.
  *
  * All-primitive interface (no runtime types in platform header):
- *   - task_id passed as raw uint64 (PTO2TaskId::raw)
+ *   - task_id passed as raw uint64 (TaskId::raw)
  *   - tensor data passed via opaque void* pointers (memcpy'd into the
  *     DEP_GEN_TENSOR_SIZE-byte slot; static_asserted against sizeof(ChipTensor)
  *     in the .cpp)
@@ -96,14 +96,14 @@ void dep_gen_aicpu_init();
  * submit whose chain would exceed the buffer's remaining capacity (even
  * after switch) is truncated to fit; the dropped tail is logged.
  *
- * @param task_id_raw         PTO2TaskId::raw (the assigned task_id for this submit)
+ * @param task_id_raw         TaskId::raw (the assigned task_id for this submit)
  * @param in_manual_scope     true iff the submit happened inside a manual scope
  * @param tensor_count        Number of slots in tensor_ptrs / arg_types (≤ CORE_MAX_TENSOR_ARGS)
  * @param tensor_ptrs         Per-slot ChipTensor pointer (nullptr to skip the slot)
  * @param arg_types           Per-slot TensorArgType (interpreted as raw byte)
  * @param explicit_dep_count  Number of explicit_deps — no static cap; truncated only when the
  *                            chain would not fit in a single DepGenBuffer
- * @param explicit_deps_raw   Per-dep PTO2TaskId::raw (length = explicit_dep_count)
+ * @param explicit_deps_raw   Per-dep TaskId::raw (length = explicit_dep_count)
  * @param block_num           SPMD logical block count; 1 means non-SPMD
  * @param kernel_ids          Per-subslot kernel id triple {AIC, AIV0, AIV1};
  *                            inactive subslots use INVALID_KERNEL_ID (-1).

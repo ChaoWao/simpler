@@ -22,7 +22,7 @@
 struct GraphScopeResult {
     bool execute_block{true};
     bool recording{false};
-    PTO2TaskId task_id{PTO2TaskId::invalid()};
+    TaskId task_id{TaskId::invalid()};
     // The recording this call opened, non-null exactly when `recording` is set.
     // The recording thread hands it back to graph_prepare so binding needs no
     // lookup: several Definitions record at once, and finding one by key would

@@ -179,7 +179,7 @@ these through `int(v)` which accepts either form, so the schema is
 JS-safe without burdening Python.
 
 Task ids encode `(ring_id << 32) | local_id` — the same layout as
-`PTO2TaskId::raw`:
+`TaskId::raw`:
 
 ```python
 ring = (raw >> 32) & 0xFF
@@ -211,7 +211,7 @@ Each edge is `{pred, succ}` plus annotation. Fields:
 
 | Field | Type | When present | Meaning |
 | ----- | ---- | ------------ | ------- |
-| `pred`, `succ` | uint64 (string) | always | `PTO2TaskId::raw` of producer and consumer |
+| `pred`, `succ` | uint64 (string) | always | `TaskId::raw` of producer and consumer |
 | `arg` | int32 | always | Consumer's arg-slot index; `-1` for `explicit` source |
 | `source` | string | always | `explicit` (from `explicit_deps[]`), `creator` (`owner_task_id` retention), or `tensormap` (overlap lookup hit) |
 | `flags` | string array | always | Subset of `["wait", "retain"]` — the edge's `DepFlags`. `wait` = ordering (readiness); `retain` = producer lifetime held until the consumer releases. `creator` edges are `["wait","retain"]`; `tensormap` edges `["wait"]`. `explicit` edges are **always recorded as `["wait","retain"]`**: the `DepGenRecord` does not carry per-dep kinds, so a replayed explicit dep cannot distinguish the ordering-only `CoreTaskArgsWithDeps::add_dep_wait()` API from the default. The differential gate is unaffected (both passes read the same constant). At runtime an `add_dep_wait()` edge is genuinely `["wait"]`; that distinction is a known replay limitation, not written to `deps.json`. |

@@ -1275,18 +1275,18 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t11.launch_spec.set_block_num((t_dim_inline757_inline8959 / 8));
         params_t11.set_allow_early_resolve(true);
         TaskOutputTensors task_11_outs = rt_submit_aiv_task(11, params_t11);
-        PTO2TaskId rms_tid_inline758_inline8904 = task_11_outs.task_id();
-        PTO2TaskId rms_tid_inline8953 = rms_tid_inline758_inline8904;
+        TaskId rms_tid_inline758_inline8904 = task_11_outs.task_id();
+        TaskId rms_tid_inline8953 = rms_tid_inline758_inline8904;
 
         // Phase-fence barrier 0: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_0;
-        PTO2TaskId params_phase_fence_barrier_0_deps[1];
+        TaskId params_phase_fence_barrier_0_deps[1];
         uint32_t params_phase_fence_barrier_0_deps_count = 0;
         params_phase_fence_barrier_0_deps[params_phase_fence_barrier_0_deps_count++] = rms_tid_inline758_inline8904;
         params_phase_fence_barrier_0.set_dependencies(
             params_phase_fence_barrier_0_deps, params_phase_fence_barrier_0_deps_count
         );
-        PTO2TaskId late_dep_inline8961 = PTO2TaskId::invalid();
+        TaskId late_dep_inline8961 = TaskId::invalid();
         if (params_phase_fence_barrier_0_deps_count > 0) {
             TaskOutputTensors phase_fence_barrier_0_outs = rt_submit_dummy_task(params_phase_fence_barrier_0);
             late_dep_inline8961 = phase_fence_barrier_0_outs.task_id();
@@ -1456,7 +1456,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t18.add_scalar(t_matmul_inline856_inline8847);
         params_t18.add_scalar(t_dim_inline889_inline8972);
         params_t18.launch_spec.set_block_num(16);
-        PTO2TaskId params_t18_deps[1];
+        TaskId params_t18_deps[1];
         uint32_t params_t18_deps_count = 0;
         if (late_dep_inline8961.is_valid()) params_t18_deps[params_t18_deps_count++] = late_dep_inline8961;
         params_t18.set_dependencies(params_t18_deps, params_t18_deps_count);
@@ -1499,12 +1499,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         };
         ChipTensor ori_kv_flat_inline1033_inline8970 =
             kv_cache_l0_inline603.reshape(ori_kv_flat_inline1033_inline8970_shapes, 2);
-        PTO2TaskId proj_b_tids_inline1013_inline9033[8];
+        TaskId proj_b_tids_inline1013_inline9033[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            proj_b_tids_inline1013_inline9033[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId gather_tids_inline1022_inline9089[1];
+            proj_b_tids_inline1013_inline9033[__init_i] = TaskId::invalid();
+        TaskId gather_tids_inline1022_inline9089[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
-            gather_tids_inline1022_inline9089[__init_i] = PTO2TaskId::invalid();
+            gather_tids_inline1022_inline9089[__init_i] = TaskId::invalid();
 
         // Spmd swa_gather_kv_spmd: swa_gather_kv
         CoreTaskArgs params_t22;
@@ -1513,17 +1513,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t22.add_input(ori_kv_flat_inline1033_inline8970);
         params_t22.launch_spec.set_block_num(32);
         TaskOutputTensors task_22_outs = rt_submit_aiv_task(22, params_t22);
-        PTO2TaskId gather_tid_inline1039_inline9091 = task_22_outs.task_id();
+        TaskId gather_tid_inline1039_inline9091 = task_22_outs.task_id();
         gather_tids_inline1022_inline9089[0] = gather_tid_inline1039_inline9091;
         uint32_t q_flat_inline1064_inline8925_shapes[2] = {512, 512};
         ChipTensor q_flat_inline1064_inline8925 = q_inline8956.reshape(q_flat_inline1064_inline8925_shapes, 2);
         uint32_t o_packed_inline1065_inline9106_shapes[2] = {64, 4096};
         ChipTensor o_packed_inline1065_inline9106 =
             o_packed_heads_inline1025_inline8944.reshape(o_packed_inline1065_inline9106_shapes, 2);
-        PTO2TaskId _submit_deps_buf_inline1099_inline9111[1];
+        TaskId _submit_deps_buf_inline1099_inline9111[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
-            _submit_deps_buf_inline1099_inline9111[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId t__tmp_v127 = gather_tids_inline1022_inline9089[0];
+            _submit_deps_buf_inline1099_inline9111[__init_i] = TaskId::invalid();
+        TaskId t__tmp_v127 = gather_tids_inline1022_inline9089[0];
         _submit_deps_buf_inline1099_inline9111[0] = t__tmp_v127;
 
         // Group qk_pv: MixedKernels (AIC + AIV lanes)
@@ -1538,13 +1538,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mixed_23 = {23, 24, 24};
         params_t23.launch_spec.set_block_num(8);
         params_t23.set_allow_early_resolve(true);
-        PTO2TaskId params_t23_deps[1];
+        TaskId params_t23_deps[1];
         uint32_t params_t23_deps_count = 0;
         if (_submit_deps_buf_inline1099_inline9111[0].is_valid())
             params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline1099_inline9111[0];
         params_t23.set_dependencies(params_t23_deps, params_t23_deps_count);
         TaskOutputTensors task_23_outs = rt_submit_task(mixed_23, params_t23);
-        PTO2TaskId qk_tid_inline993_inline8938 = task_23_outs.task_id();
+        TaskId qk_tid_inline993_inline8938 = task_23_outs.task_id();
 
         // Task 24: rope_cs
         CoreTaskArgs params_t24;
@@ -1554,7 +1554,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t24.add_input(rope_cos_t_inline8914);
         params_t24.add_input(rope_sin_t_inline8931);
         TaskOutputTensors task_24_outs = rt_submit_aiv_task(25, params_t24);
-        PTO2TaskId rope_tid_inline998_inline8791 = task_24_outs.task_id();
+        TaskId rope_tid_inline998_inline8791 = task_24_outs.task_id();
 
         // Spmd merge_norm_spmd: merge_norm
         CoreTaskArgs params_t25;
@@ -1568,13 +1568,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t25.add_inout(o_packed_heads_inline1025_inline8944);
         params_t25.launch_spec.set_block_num(32);
         params_t25.set_allow_early_resolve(true);
-        PTO2TaskId params_t25_deps[2];
+        TaskId params_t25_deps[2];
         uint32_t params_t25_deps_count = 0;
         params_t25_deps[params_t25_deps_count++] = qk_tid_inline993_inline8938;
         params_t25_deps[params_t25_deps_count++] = rope_tid_inline998_inline8791;
         params_t25.set_dependencies(params_t25_deps, params_t25_deps_count);
         TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
-        PTO2TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
+        TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
         ChipTensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
         PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline8746 = 0; g_inline978_inline8746 < 8; g_inline978_inline8746 += 1) {
@@ -1591,13 +1591,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t26.add_scalar(out_col_g_inline1092_inline8900);
                 params_t26.launch_spec.set_block_num(8);
                 params_t26.set_allow_early_resolve(true);
-                PTO2TaskId params_t26_deps[1];
+                TaskId params_t26_deps[1];
                 uint32_t params_t26_deps_count = 0;
                 params_t26_deps[params_t26_deps_count++] = merge_tid_inline1108_inline8902;
                 params_t26.set_dependencies(params_t26_deps, params_t26_deps_count);
                 TaskOutputTensors task_26_outs = rt_submit_aic_task(27, params_t26);
                 int64_t n0_inline1077_inline8742 = 0;
-                PTO2TaskId pa_tid_inline1023_inline8744 = task_26_outs.task_id();
+                TaskId pa_tid_inline1023_inline8744 = task_26_outs.task_id();
                 int64_t col_g_inline1089_inline8999 = (g_inline978_inline8746 * 1024);
 
                 // Task 27: quant
@@ -1607,13 +1607,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t27.add_input(o_r_pad_inline974_inline8862__rv_v2);
                 params_t27.add_scalar(col_g_inline1089_inline8999);
                 params_t27.add_scalar(g_inline978_inline8746);
-                PTO2TaskId params_t27_deps[1];
+                TaskId params_t27_deps[1];
                 uint32_t params_t27_deps_count = 0;
                 params_t27_deps[params_t27_deps_count++] = pa_tid_inline1023_inline8744;
                 params_t27.set_dependencies(params_t27_deps, params_t27_deps_count);
                 params_t27.set_allow_early_resolve(true);
                 TaskOutputTensors task_27_outs = rt_submit_aiv_task(28, params_t27);
-                PTO2TaskId q_tid_inline1085_inline8958 = task_27_outs.task_id();
+                TaskId q_tid_inline1085_inline8958 = task_27_outs.task_id();
 
                 // Spmd proj_b_mm_spmd: proj_b_mm
                 CoreTaskArgs params_t28;
@@ -1625,33 +1625,33 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t28.add_scalar(g_inline978_inline8746);
                 params_t28.launch_spec.set_block_num(8);
                 params_t28.set_allow_early_resolve(true);
-                PTO2TaskId params_t28_deps[1];
+                TaskId params_t28_deps[1];
                 uint32_t params_t28_deps_count = 0;
                 params_t28_deps[params_t28_deps_count++] = q_tid_inline1085_inline8958;
                 params_t28.set_dependencies(params_t28_deps, params_t28_deps_count);
                 TaskOutputTensors task_28_outs = rt_submit_aic_task(29, params_t28);
-                PTO2TaskId pb_tid_inline954_inline8979 = task_28_outs.task_id();
+                TaskId pb_tid_inline954_inline8979 = task_28_outs.task_id();
                 proj_b_tids_inline1013_inline9033[g_inline978_inline8746] = pb_tid_inline954_inline8979;
             }
         }
-        PTO2TaskId _submit_deps_buf_inline949_inline9070[8];
+        TaskId _submit_deps_buf_inline949_inline9070[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            _submit_deps_buf_inline949_inline9070[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId t__tmp_v147 = proj_b_tids_inline1013_inline9033[0];
+            _submit_deps_buf_inline949_inline9070[__init_i] = TaskId::invalid();
+        TaskId t__tmp_v147 = proj_b_tids_inline1013_inline9033[0];
         _submit_deps_buf_inline949_inline9070[0] = t__tmp_v147;
-        PTO2TaskId t__tmp_v148 = proj_b_tids_inline1013_inline9033[1];
+        TaskId t__tmp_v148 = proj_b_tids_inline1013_inline9033[1];
         _submit_deps_buf_inline949_inline9070[1] = t__tmp_v148;
-        PTO2TaskId t__tmp_v149 = proj_b_tids_inline1013_inline9033[2];
+        TaskId t__tmp_v149 = proj_b_tids_inline1013_inline9033[2];
         _submit_deps_buf_inline949_inline9070[2] = t__tmp_v149;
-        PTO2TaskId t__tmp_v150 = proj_b_tids_inline1013_inline9033[3];
+        TaskId t__tmp_v150 = proj_b_tids_inline1013_inline9033[3];
         _submit_deps_buf_inline949_inline9070[3] = t__tmp_v150;
-        PTO2TaskId t__tmp_v151 = proj_b_tids_inline1013_inline9033[4];
+        TaskId t__tmp_v151 = proj_b_tids_inline1013_inline9033[4];
         _submit_deps_buf_inline949_inline9070[4] = t__tmp_v151;
-        PTO2TaskId t__tmp_v152 = proj_b_tids_inline1013_inline9033[5];
+        TaskId t__tmp_v152 = proj_b_tids_inline1013_inline9033[5];
         _submit_deps_buf_inline949_inline9070[5] = t__tmp_v152;
-        PTO2TaskId t__tmp_v153 = proj_b_tids_inline1013_inline9033[6];
+        TaskId t__tmp_v153 = proj_b_tids_inline1013_inline9033[6];
         _submit_deps_buf_inline949_inline9070[6] = t__tmp_v153;
-        PTO2TaskId t__tmp_v154 = proj_b_tids_inline1013_inline9033[7];
+        TaskId t__tmp_v154 = proj_b_tids_inline1013_inline9033[7];
         _submit_deps_buf_inline949_inline9070[7] = t__tmp_v154;
 
         // Spmd proj_b_act_spmd: proj_b_act
@@ -1662,7 +1662,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t29.add_inout(attn_out_inline9085);
         params_t29.launch_spec.set_block_num(8);
         params_t29.set_allow_early_resolve(true);
-        PTO2TaskId params_t29_deps[8];
+        TaskId params_t29_deps[8];
         uint32_t params_t29_deps_count = 0;
         if (_submit_deps_buf_inline949_inline9070[0].is_valid())
             params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline949_inline9070[0];
@@ -1907,7 +1907,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         // Phase-fence barrier 1: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_1;
         TaskOutputTensors phase_fence_barrier_1_outs = rt_submit_dummy_task(params_phase_fence_barrier_1);
-        PTO2TaskId seed_dummy_inline2602_inline9321 = phase_fence_barrier_1_outs.task_id();
+        TaskId seed_dummy_inline2602_inline9321 = phase_fence_barrier_1_outs.task_id();
         for (int64_t t0_inline2605_inline9256 = 0;
              t0_inline2605_inline9256 < active_gate_tokens_inline2604_inline9313__phi_v2;
              t0_inline2605_inline9256 += 8) {
@@ -1917,7 +1917,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t38.add_output(x_norm_i8_inline9265);
             params_t38.add_input(xg_buf_inline2582_inline9396);
             params_t38.add_scalar(t0_inline2605_inline9256);
-            PTO2TaskId params_t38_deps[1];
+            TaskId params_t38_deps[1];
             uint32_t params_t38_deps_count = 0;
             if (seed_dummy_inline2602_inline9321.is_valid())
                 params_t38_deps[params_t38_deps_count++] = seed_dummy_inline2602_inline9321;
@@ -2076,7 +2076,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t47.add_scalar(arrived_ctx);
         params_t47.set_allow_early_resolve(true);
         TaskOutputTensors task_47_outs = rt_submit_aiv_task(49, params_t47);
-        PTO2TaskId _meta_tid_inline2705_inline9406 = task_47_outs.task_id();
+        TaskId _meta_tid_inline2705_inline9406 = task_47_outs.task_id();
 
         // Spmd dispatch_push_spmd: dispatch_push
         CoreTaskArgs params_t48;
@@ -2097,7 +2097,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t48.launch_spec.set_block_num(32);
         params_t48.set_allow_early_resolve(true);
         TaskOutputTensors task_48_outs = rt_submit_aiv_task(50, params_t48);
-        PTO2TaskId _push_tid_inline2710_inline9278 = task_48_outs.task_id();
+        TaskId _push_tid_inline2710_inline9278 = task_48_outs.task_id();
 
         // Task 49: dispatch_wait
         CoreTaskArgs params_t49;
@@ -2105,13 +2105,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t49.add_input(ext_data_arrived);
         params_t49.add_scalar(my_rank);
         params_t49.add_scalar(data_arrived_ctx);
-        PTO2TaskId params_t49_deps[1];
+        TaskId params_t49_deps[1];
         uint32_t params_t49_deps_count = 0;
         params_t49_deps[params_t49_deps_count++] = _push_tid_inline2710_inline9278;
         params_t49.set_dependencies(params_t49_deps, params_t49_deps_count);
         params_t49.set_allow_early_resolve(true);
         TaskOutputTensors task_49_outs = rt_submit_aiv_task(51, params_t49);
-        PTO2TaskId _wait_tid_inline2685_inline9261 = task_49_outs.task_id();
+        TaskId _wait_tid_inline2685_inline9261 = task_49_outs.task_id();
 
         // Spmd dispatch_gather_spmd: dispatch_gather
         CoreTaskArgs params_t50;
@@ -2127,13 +2127,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t50.add_scalar(recv_aux_ctx);
         params_t50.add_scalar(recv_route_ctx);
         params_t50.launch_spec.set_block_num(32);
-        PTO2TaskId params_t50_deps[2];
+        TaskId params_t50_deps[2];
         uint32_t params_t50_deps_count = 0;
         params_t50_deps[params_t50_deps_count++] = _wait_tid_inline2685_inline9261;
         params_t50_deps[params_t50_deps_count++] = _meta_tid_inline2705_inline9406;
         params_t50.set_dependencies(params_t50_deps, params_t50_deps_count);
         TaskOutputTensors task_50_outs = rt_submit_aiv_task(52, params_t50);
-        PTO2TaskId dispatch_push_tid_inline9438 = _push_tid_inline2710_inline9278;
+        TaskId dispatch_push_tid_inline9438 = _push_tid_inline2710_inline9278;
         PTO2_SCOPE() {
             uint32_t recv_y_inline9209_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline9209_ci(recv_y_inline9209_ci_shapes, 3, DataType::BFLOAT16);
@@ -2424,20 +2424,20 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t57.add_scalar(routed_y_buf_ctx);
             params_t57.launch_spec.set_block_num(32);
             TaskOutputTensors task_57_outs = rt_submit_aiv_task(59, params_t57);
-            PTO2TaskId _combine_tid_inline2817_inline9389 = task_57_outs.task_id();
+            TaskId _combine_tid_inline2817_inline9389 = task_57_outs.task_id();
 
             // Task 58: combine_wait
             CoreTaskArgs params_t58;
             params_t58.add_input(ext_combine_arrived);
             params_t58.add_scalar(my_rank);
             params_t58.add_scalar(combine_arrived_ctx);
-            PTO2TaskId params_t58_deps[2];
+            TaskId params_t58_deps[2];
             uint32_t params_t58_deps_count = 0;
             params_t58_deps[params_t58_deps_count++] = _combine_tid_inline2817_inline9389;
             params_t58_deps[params_t58_deps_count++] = _push_tid_inline2710_inline9278;
             params_t58.set_dependencies(params_t58_deps, params_t58_deps_count);
             TaskOutputTensors task_58_outs = rt_submit_aiv_task(60, params_t58);
-            PTO2TaskId _cwait_tid_inline2826_inline9164 = task_58_outs.task_id();
+            TaskId _cwait_tid_inline2826_inline9164 = task_58_outs.task_id();
             int64_t active_tokens_inline2816_inline9356 = static_cast<int64_t>(nt_inline677__rv_v2);
             int64_t active_tokens_inline2816_inline9356__phi_v4;
             if ((8 < active_tokens_inline2816_inline9356)) {
@@ -2455,7 +2455,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t59.add_scalar(active_tokens_inline2816_inline9356__phi_v4);
             params_t59.add_scalar(routed_y_buf_ctx);
             params_t59.launch_spec.set_block_num(8);
-            PTO2TaskId params_t59_deps[1];
+            TaskId params_t59_deps[1];
             uint32_t params_t59_deps_count = 0;
             params_t59_deps[params_t59_deps_count++] = _cwait_tid_inline2826_inline9164;
             params_t59.set_dependencies(params_t59_deps, params_t59_deps_count);
@@ -2695,18 +2695,18 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t68.launch_spec.set_block_num((t_dim_inline757_inline9721 / 8));
         params_t68.set_allow_early_resolve(true);
         TaskOutputTensors task_68_outs = rt_submit_aiv_task(70, params_t68);
-        PTO2TaskId rms_tid_inline758_inline9666 = task_68_outs.task_id();
-        PTO2TaskId rms_tid_inline9715 = rms_tid_inline758_inline9666;
+        TaskId rms_tid_inline758_inline9666 = task_68_outs.task_id();
+        TaskId rms_tid_inline9715 = rms_tid_inline758_inline9666;
 
         // Phase-fence barrier 2: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_2;
-        PTO2TaskId params_phase_fence_barrier_2_deps[1];
+        TaskId params_phase_fence_barrier_2_deps[1];
         uint32_t params_phase_fence_barrier_2_deps_count = 0;
         params_phase_fence_barrier_2_deps[params_phase_fence_barrier_2_deps_count++] = rms_tid_inline758_inline9666;
         params_phase_fence_barrier_2.set_dependencies(
             params_phase_fence_barrier_2_deps, params_phase_fence_barrier_2_deps_count
         );
-        PTO2TaskId late_dep_inline9723 = PTO2TaskId::invalid();
+        TaskId late_dep_inline9723 = TaskId::invalid();
         if (params_phase_fence_barrier_2_deps_count > 0) {
             TaskOutputTensors phase_fence_barrier_2_outs = rt_submit_dummy_task(params_phase_fence_barrier_2);
             late_dep_inline9723 = phase_fence_barrier_2_outs.task_id();
@@ -2876,7 +2876,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t75.add_scalar(t_matmul_inline856_inline9609);
         params_t75.add_scalar(t_dim_inline889_inline9734);
         params_t75.launch_spec.set_block_num(16);
-        PTO2TaskId params_t75_deps[1];
+        TaskId params_t75_deps[1];
         uint32_t params_t75_deps_count = 0;
         if (late_dep_inline9723.is_valid()) params_t75_deps[params_t75_deps_count++] = late_dep_inline9723;
         params_t75.set_dependencies(params_t75_deps, params_t75_deps_count);
@@ -2919,12 +2919,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         };
         ChipTensor ori_kv_flat_inline1033_inline9732 =
             kv_cache_l1_inline569.reshape(ori_kv_flat_inline1033_inline9732_shapes, 2);
-        PTO2TaskId proj_b_tids_inline1013_inline9795[8];
+        TaskId proj_b_tids_inline1013_inline9795[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            proj_b_tids_inline1013_inline9795[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId gather_tids_inline1022_inline9851[1];
+            proj_b_tids_inline1013_inline9795[__init_i] = TaskId::invalid();
+        TaskId gather_tids_inline1022_inline9851[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
-            gather_tids_inline1022_inline9851[__init_i] = PTO2TaskId::invalid();
+            gather_tids_inline1022_inline9851[__init_i] = TaskId::invalid();
 
         // Spmd swa_gather_kv_spmd_0: swa_gather_kv_0
         CoreTaskArgs params_t79;
@@ -2933,17 +2933,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t79.add_input(ori_kv_flat_inline1033_inline9732);
         params_t79.launch_spec.set_block_num(32);
         TaskOutputTensors task_79_outs = rt_submit_aiv_task(81, params_t79);
-        PTO2TaskId gather_tid_inline1039_inline9853 = task_79_outs.task_id();
+        TaskId gather_tid_inline1039_inline9853 = task_79_outs.task_id();
         gather_tids_inline1022_inline9851[0] = gather_tid_inline1039_inline9853;
         uint32_t q_flat_inline1064_inline9687_shapes[2] = {512, 512};
         ChipTensor q_flat_inline1064_inline9687 = q_inline9718.reshape(q_flat_inline1064_inline9687_shapes, 2);
         uint32_t o_packed_inline1065_inline9868_shapes[2] = {64, 4096};
         ChipTensor o_packed_inline1065_inline9868 =
             o_packed_heads_inline1025_inline9706.reshape(o_packed_inline1065_inline9868_shapes, 2);
-        PTO2TaskId _submit_deps_buf_inline1099_inline9873[1];
+        TaskId _submit_deps_buf_inline1099_inline9873[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
-            _submit_deps_buf_inline1099_inline9873[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId t__tmp_v425 = gather_tids_inline1022_inline9851[0];
+            _submit_deps_buf_inline1099_inline9873[__init_i] = TaskId::invalid();
+        TaskId t__tmp_v425 = gather_tids_inline1022_inline9851[0];
         _submit_deps_buf_inline1099_inline9873[0] = t__tmp_v425;
 
         // Group qk_pv_0: MixedKernels (AIC + AIV lanes)
@@ -2958,13 +2958,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mixed_80 = {82, 83, 83};
         params_t80.launch_spec.set_block_num(8);
         params_t80.set_allow_early_resolve(true);
-        PTO2TaskId params_t80_deps[1];
+        TaskId params_t80_deps[1];
         uint32_t params_t80_deps_count = 0;
         if (_submit_deps_buf_inline1099_inline9873[0].is_valid())
             params_t80_deps[params_t80_deps_count++] = _submit_deps_buf_inline1099_inline9873[0];
         params_t80.set_dependencies(params_t80_deps, params_t80_deps_count);
         TaskOutputTensors task_80_outs = rt_submit_task(mixed_80, params_t80);
-        PTO2TaskId qk_tid_inline993_inline9700 = task_80_outs.task_id();
+        TaskId qk_tid_inline993_inline9700 = task_80_outs.task_id();
 
         // Task 81: rope_cs_0
         CoreTaskArgs params_t81;
@@ -2974,7 +2974,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t81.add_input(rope_cos_t_inline9676);
         params_t81.add_input(rope_sin_t_inline9693);
         TaskOutputTensors task_81_outs = rt_submit_aiv_task(84, params_t81);
-        PTO2TaskId rope_tid_inline998_inline9553 = task_81_outs.task_id();
+        TaskId rope_tid_inline998_inline9553 = task_81_outs.task_id();
 
         // Spmd merge_norm_spmd_0: merge_norm_0
         CoreTaskArgs params_t82;
@@ -2988,13 +2988,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t82.add_inout(o_packed_heads_inline1025_inline9706);
         params_t82.launch_spec.set_block_num(32);
         params_t82.set_allow_early_resolve(true);
-        PTO2TaskId params_t82_deps[2];
+        TaskId params_t82_deps[2];
         uint32_t params_t82_deps_count = 0;
         params_t82_deps[params_t82_deps_count++] = qk_tid_inline993_inline9700;
         params_t82_deps[params_t82_deps_count++] = rope_tid_inline998_inline9553;
         params_t82.set_dependencies(params_t82_deps, params_t82_deps_count);
         TaskOutputTensors task_82_outs = rt_submit_aiv_task(85, params_t82);
-        PTO2TaskId merge_tid_inline1108_inline9664 = task_82_outs.task_id();
+        TaskId merge_tid_inline1108_inline9664 = task_82_outs.task_id();
         ChipTensor o_r_pad_inline974_inline9624__rv_v2 = o_r_pad_inline974_inline9624;
         PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline9508 = 0; g_inline978_inline9508 < 8; g_inline978_inline9508 += 1) {
@@ -3011,13 +3011,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t83.add_scalar(out_col_g_inline1092_inline9662);
                 params_t83.launch_spec.set_block_num(8);
                 params_t83.set_allow_early_resolve(true);
-                PTO2TaskId params_t83_deps[1];
+                TaskId params_t83_deps[1];
                 uint32_t params_t83_deps_count = 0;
                 params_t83_deps[params_t83_deps_count++] = merge_tid_inline1108_inline9664;
                 params_t83.set_dependencies(params_t83_deps, params_t83_deps_count);
                 TaskOutputTensors task_83_outs = rt_submit_aic_task(86, params_t83);
                 int64_t n0_inline1077_inline9504 = 0;
-                PTO2TaskId pa_tid_inline1023_inline9506 = task_83_outs.task_id();
+                TaskId pa_tid_inline1023_inline9506 = task_83_outs.task_id();
                 int64_t col_g_inline1089_inline9761 = (g_inline978_inline9508 * 1024);
 
                 // Task 84: quant_0
@@ -3027,13 +3027,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t84.add_input(o_r_pad_inline974_inline9624__rv_v2);
                 params_t84.add_scalar(col_g_inline1089_inline9761);
                 params_t84.add_scalar(g_inline978_inline9508);
-                PTO2TaskId params_t84_deps[1];
+                TaskId params_t84_deps[1];
                 uint32_t params_t84_deps_count = 0;
                 params_t84_deps[params_t84_deps_count++] = pa_tid_inline1023_inline9506;
                 params_t84.set_dependencies(params_t84_deps, params_t84_deps_count);
                 params_t84.set_allow_early_resolve(true);
                 TaskOutputTensors task_84_outs = rt_submit_aiv_task(87, params_t84);
-                PTO2TaskId q_tid_inline1085_inline9720 = task_84_outs.task_id();
+                TaskId q_tid_inline1085_inline9720 = task_84_outs.task_id();
 
                 // Spmd proj_b_mm_spmd_0: proj_b_mm_0
                 CoreTaskArgs params_t85;
@@ -3045,33 +3045,33 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t85.add_scalar(g_inline978_inline9508);
                 params_t85.launch_spec.set_block_num(8);
                 params_t85.set_allow_early_resolve(true);
-                PTO2TaskId params_t85_deps[1];
+                TaskId params_t85_deps[1];
                 uint32_t params_t85_deps_count = 0;
                 params_t85_deps[params_t85_deps_count++] = q_tid_inline1085_inline9720;
                 params_t85.set_dependencies(params_t85_deps, params_t85_deps_count);
                 TaskOutputTensors task_85_outs = rt_submit_aic_task(88, params_t85);
-                PTO2TaskId pb_tid_inline954_inline9741 = task_85_outs.task_id();
+                TaskId pb_tid_inline954_inline9741 = task_85_outs.task_id();
                 proj_b_tids_inline1013_inline9795[g_inline978_inline9508] = pb_tid_inline954_inline9741;
             }
         }
-        PTO2TaskId _submit_deps_buf_inline949_inline9832[8];
+        TaskId _submit_deps_buf_inline949_inline9832[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            _submit_deps_buf_inline949_inline9832[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId t__tmp_v445 = proj_b_tids_inline1013_inline9795[0];
+            _submit_deps_buf_inline949_inline9832[__init_i] = TaskId::invalid();
+        TaskId t__tmp_v445 = proj_b_tids_inline1013_inline9795[0];
         _submit_deps_buf_inline949_inline9832[0] = t__tmp_v445;
-        PTO2TaskId t__tmp_v446 = proj_b_tids_inline1013_inline9795[1];
+        TaskId t__tmp_v446 = proj_b_tids_inline1013_inline9795[1];
         _submit_deps_buf_inline949_inline9832[1] = t__tmp_v446;
-        PTO2TaskId t__tmp_v447 = proj_b_tids_inline1013_inline9795[2];
+        TaskId t__tmp_v447 = proj_b_tids_inline1013_inline9795[2];
         _submit_deps_buf_inline949_inline9832[2] = t__tmp_v447;
-        PTO2TaskId t__tmp_v448 = proj_b_tids_inline1013_inline9795[3];
+        TaskId t__tmp_v448 = proj_b_tids_inline1013_inline9795[3];
         _submit_deps_buf_inline949_inline9832[3] = t__tmp_v448;
-        PTO2TaskId t__tmp_v449 = proj_b_tids_inline1013_inline9795[4];
+        TaskId t__tmp_v449 = proj_b_tids_inline1013_inline9795[4];
         _submit_deps_buf_inline949_inline9832[4] = t__tmp_v449;
-        PTO2TaskId t__tmp_v450 = proj_b_tids_inline1013_inline9795[5];
+        TaskId t__tmp_v450 = proj_b_tids_inline1013_inline9795[5];
         _submit_deps_buf_inline949_inline9832[5] = t__tmp_v450;
-        PTO2TaskId t__tmp_v451 = proj_b_tids_inline1013_inline9795[6];
+        TaskId t__tmp_v451 = proj_b_tids_inline1013_inline9795[6];
         _submit_deps_buf_inline949_inline9832[6] = t__tmp_v451;
-        PTO2TaskId t__tmp_v452 = proj_b_tids_inline1013_inline9795[7];
+        TaskId t__tmp_v452 = proj_b_tids_inline1013_inline9795[7];
         _submit_deps_buf_inline949_inline9832[7] = t__tmp_v452;
 
         // Spmd proj_b_act_spmd_0: proj_b_act_0
@@ -3082,7 +3082,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t86.add_inout(attn_out_inline9847);
         params_t86.launch_spec.set_block_num(8);
         params_t86.set_allow_early_resolve(true);
-        PTO2TaskId params_t86_deps[8];
+        TaskId params_t86_deps[8];
         uint32_t params_t86_deps_count = 0;
         if (_submit_deps_buf_inline949_inline9832[0].is_valid())
             params_t86_deps[params_t86_deps_count++] = _submit_deps_buf_inline949_inline9832[0];
@@ -3331,7 +3331,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         // Phase-fence barrier 3: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_3;
         TaskOutputTensors phase_fence_barrier_3_outs = rt_submit_dummy_task(params_phase_fence_barrier_3);
-        PTO2TaskId seed_dummy_inline2602_inline10083 = phase_fence_barrier_3_outs.task_id();
+        TaskId seed_dummy_inline2602_inline10083 = phase_fence_barrier_3_outs.task_id();
         for (int64_t t0_inline2605_inline10018 = 0;
              t0_inline2605_inline10018 < active_gate_tokens_inline2604_inline10075__phi_v2;
              t0_inline2605_inline10018 += 8) {
@@ -3341,7 +3341,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t95.add_output(x_norm_i8_inline10027);
             params_t95.add_input(xg_buf_inline2582_inline10158);
             params_t95.add_scalar(t0_inline2605_inline10018);
-            PTO2TaskId params_t95_deps[1];
+            TaskId params_t95_deps[1];
             uint32_t params_t95_deps_count = 0;
             if (seed_dummy_inline2602_inline10083.is_valid())
                 params_t95_deps[params_t95_deps_count++] = seed_dummy_inline2602_inline10083;
@@ -3502,7 +3502,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t104.add_scalar(arrived_ctx);
         params_t104.set_allow_early_resolve(true);
         TaskOutputTensors task_104_outs = rt_submit_aiv_task(108, params_t104);
-        PTO2TaskId _meta_tid_inline2705_inline10168 = task_104_outs.task_id();
+        TaskId _meta_tid_inline2705_inline10168 = task_104_outs.task_id();
 
         // Spmd dispatch_push_spmd_0: dispatch_push_0
         CoreTaskArgs params_t105;
@@ -3523,7 +3523,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t105.launch_spec.set_block_num(32);
         params_t105.set_allow_early_resolve(true);
         TaskOutputTensors task_105_outs = rt_submit_aiv_task(109, params_t105);
-        PTO2TaskId _push_tid_inline2710_inline10040 = task_105_outs.task_id();
+        TaskId _push_tid_inline2710_inline10040 = task_105_outs.task_id();
 
         // Task 106: dispatch_wait_0
         CoreTaskArgs params_t106;
@@ -3531,13 +3531,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t106.add_input(ext_data_arrived);
         params_t106.add_scalar(my_rank);
         params_t106.add_scalar(data_arrived_ctx);
-        PTO2TaskId params_t106_deps[1];
+        TaskId params_t106_deps[1];
         uint32_t params_t106_deps_count = 0;
         params_t106_deps[params_t106_deps_count++] = _push_tid_inline2710_inline10040;
         params_t106.set_dependencies(params_t106_deps, params_t106_deps_count);
         params_t106.set_allow_early_resolve(true);
         TaskOutputTensors task_106_outs = rt_submit_aiv_task(110, params_t106);
-        PTO2TaskId _wait_tid_inline2685_inline10023 = task_106_outs.task_id();
+        TaskId _wait_tid_inline2685_inline10023 = task_106_outs.task_id();
 
         // Spmd dispatch_gather_spmd_0: dispatch_gather_0
         CoreTaskArgs params_t107;
@@ -3553,13 +3553,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t107.add_scalar(recv_aux_ctx);
         params_t107.add_scalar(recv_route_ctx);
         params_t107.launch_spec.set_block_num(32);
-        PTO2TaskId params_t107_deps[2];
+        TaskId params_t107_deps[2];
         uint32_t params_t107_deps_count = 0;
         params_t107_deps[params_t107_deps_count++] = _wait_tid_inline2685_inline10023;
         params_t107_deps[params_t107_deps_count++] = _meta_tid_inline2705_inline10168;
         params_t107.set_dependencies(params_t107_deps, params_t107_deps_count);
         TaskOutputTensors task_107_outs = rt_submit_aiv_task(111, params_t107);
-        PTO2TaskId dispatch_push_tid_inline10200 = _push_tid_inline2710_inline10040;
+        TaskId dispatch_push_tid_inline10200 = _push_tid_inline2710_inline10040;
         PTO2_SCOPE() {
             uint32_t recv_y_inline9971_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline9971_ci(recv_y_inline9971_ci_shapes, 3, DataType::BFLOAT16);
@@ -3852,20 +3852,20 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t114.add_scalar(routed_y_buf_ctx);
             params_t114.launch_spec.set_block_num(32);
             TaskOutputTensors task_114_outs = rt_submit_aiv_task(118, params_t114);
-            PTO2TaskId _combine_tid_inline2817_inline10151 = task_114_outs.task_id();
+            TaskId _combine_tid_inline2817_inline10151 = task_114_outs.task_id();
 
             // Task 115: combine_wait_0
             CoreTaskArgs params_t115;
             params_t115.add_input(ext_combine_arrived);
             params_t115.add_scalar(my_rank);
             params_t115.add_scalar(combine_arrived_ctx);
-            PTO2TaskId params_t115_deps[2];
+            TaskId params_t115_deps[2];
             uint32_t params_t115_deps_count = 0;
             params_t115_deps[params_t115_deps_count++] = _combine_tid_inline2817_inline10151;
             params_t115_deps[params_t115_deps_count++] = _push_tid_inline2710_inline10040;
             params_t115.set_dependencies(params_t115_deps, params_t115_deps_count);
             TaskOutputTensors task_115_outs = rt_submit_aiv_task(119, params_t115);
-            PTO2TaskId _cwait_tid_inline2826_inline9926 = task_115_outs.task_id();
+            TaskId _cwait_tid_inline2826_inline9926 = task_115_outs.task_id();
             int64_t active_tokens_inline2816_inline10118 = static_cast<int64_t>(nt_inline677__rv_v2);
             int64_t active_tokens_inline2816_inline10118__phi_v4;
             if ((8 < active_tokens_inline2816_inline10118)) {
@@ -3883,7 +3883,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t116.add_scalar(active_tokens_inline2816_inline10118__phi_v4);
             params_t116.add_scalar(routed_y_buf_ctx);
             params_t116.launch_spec.set_block_num(8);
-            PTO2TaskId params_t116_deps[1];
+            TaskId params_t116_deps[1];
             uint32_t params_t116_deps_count = 0;
             params_t116_deps[params_t116_deps_count++] = _cwait_tid_inline2826_inline9926;
             params_t116.set_dependencies(params_t116_deps, params_t116_deps_count);
@@ -4977,19 +4977,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t128.launch_spec.set_block_num((t_dim_inline1640_inline10473 / 8));
             params_t128.set_allow_early_resolve(true);
             TaskOutputTensors task_128_outs = rt_submit_aiv_task(132, params_t128);
-            PTO2TaskId rms_tid_inline1641_inline10652 = task_128_outs.task_id();
-            PTO2TaskId rms_tid_inline10816 = rms_tid_inline1641_inline10652;
+            TaskId rms_tid_inline1641_inline10652 = task_128_outs.task_id();
+            TaskId rms_tid_inline10816 = rms_tid_inline1641_inline10652;
 
             // Phase-fence barrier 4: dependency-only dummy task
             CoreTaskArgs params_phase_fence_barrier_4;
-            PTO2TaskId params_phase_fence_barrier_4_deps[1];
+            TaskId params_phase_fence_barrier_4_deps[1];
             uint32_t params_phase_fence_barrier_4_deps_count = 0;
             params_phase_fence_barrier_4_deps[params_phase_fence_barrier_4_deps_count++] =
                 rms_tid_inline1641_inline10652;
             params_phase_fence_barrier_4.set_dependencies(
                 params_phase_fence_barrier_4_deps, params_phase_fence_barrier_4_deps_count
             );
-            PTO2TaskId late_dep_inline10645 = PTO2TaskId::invalid();
+            TaskId late_dep_inline10645 = TaskId::invalid();
             if (params_phase_fence_barrier_4_deps_count > 0) {
                 TaskOutputTensors phase_fence_barrier_4_outs = rt_submit_dummy_task(params_phase_fence_barrier_4);
                 late_dep_inline10645 = phase_fence_barrier_4_outs.task_id();
@@ -5180,7 +5180,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t135.add_scalar(t_matmul_inline1739_inline10470);
             params_t135.add_scalar(t_dim_inline1772_inline10498);
             params_t135.launch_spec.set_block_num(16);
-            PTO2TaskId params_t135_deps[1];
+            TaskId params_t135_deps[1];
             uint32_t params_t135_deps_count = 0;
             if (late_dep_inline10645.is_valid()) params_t135_deps[params_t135_deps_count++] = late_dep_inline10645;
             params_t135.set_dependencies(params_t135_deps, params_t135_deps_count);
@@ -5262,7 +5262,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t139.add_inout(cmp4_kv_proj_pad_inline1900_inline10467);
             params_t139.add_inout(cmp4_score_proj_pad_inline1878_inline10597);
             params_t139.launch_spec.set_block_num(16);
-            PTO2TaskId params_t139_deps[1];
+            TaskId params_t139_deps[1];
             uint32_t params_t139_deps_count = 0;
             if (late_dep_inline10645.is_valid()) params_t139_deps[params_t139_deps_count++] = late_dep_inline10645;
             params_t139.set_dependencies(params_t139_deps, params_t139_deps_count);
@@ -5363,7 +5363,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t148.add_input(csa_weights_proj_csa_inline553);
             params_t148.add_inout(weights_partial_inline2014_inline10666);
             params_t148.launch_spec.set_block_num(4);
-            PTO2TaskId params_t148_deps[1];
+            TaskId params_t148_deps[1];
             uint32_t params_t148_deps_count = 0;
             if (late_dep_inline10645.is_valid()) params_t148_deps[params_t148_deps_count++] = late_dep_inline10645;
             params_t148.set_dependencies(params_t148_deps, params_t148_deps_count);
@@ -5405,7 +5405,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t150.add_inout(kv_proj_pad_inline14688);
             params_t150.add_inout(score_proj_pad_inline14676);
             params_t150.launch_spec.set_block_num(8);
-            PTO2TaskId params_t150_deps[1];
+            TaskId params_t150_deps[1];
             uint32_t params_t150_deps_count = 0;
             if (late_dep_inline10645.is_valid()) params_t150_deps[params_t150_deps_count++] = late_dep_inline10645;
             params_t150.set_dependencies(params_t150_deps, params_t150_deps_count);
@@ -5529,7 +5529,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t158.add_inout(qk_order_inline2147_inline10861);
             params_t158.set_allow_early_resolve(true);
             TaskOutputTensors task_158_outs = rt_submit_aiv_task(163, params_t158);
-            PTO2TaskId qk_plan_tid_inline2134_inline10864 = task_158_outs.task_id();
+            TaskId qk_plan_tid_inline2134_inline10864 = task_158_outs.task_id();
             int64_t cmp_block_num_inline2124_inline10406 = (int64_t)cmp_kv_csa_inline638.shapes[0];
             uint32_t cmp_kv_flat_inline2128_inline10589_shapes[2] = {
                 static_cast<uint32_t>((cmp_block_num_inline2124_inline10406 * 128)), 512
@@ -5558,7 +5558,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             MixedKernels mixed_159 = {164, 165, 165};
             params_t159.launch_spec.set_block_num(24);
             params_t159.set_allow_early_resolve(true);
-            PTO2TaskId params_t159_deps[1];
+            TaskId params_t159_deps[1];
             uint32_t params_t159_deps_count = 0;
             params_t159_deps[params_t159_deps_count++] = qk_plan_tid_inline2134_inline10864;
             params_t159.set_dependencies(params_t159_deps, params_t159_deps_count);
@@ -5586,10 +5586,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t161.add_inout(o_packed_inline2242_inline10294);
             params_t161.launch_spec.set_block_num(32);
             TaskOutputTensors task_161_outs = rt_submit_aiv_task(167, params_t161);
-            PTO2TaskId merge_tid_inline2186_inline10613 = task_161_outs.task_id();
-            PTO2TaskId proj_b_tids_inline2079_inline10609[8];
+            TaskId merge_tid_inline2186_inline10613 = task_161_outs.task_id();
+            TaskId proj_b_tids_inline2079_inline10609[8];
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-                proj_b_tids_inline2079_inline10609[__init_i] = PTO2TaskId::invalid();
+                proj_b_tids_inline2079_inline10609[__init_i] = TaskId::invalid();
             ChipTensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
             PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
                 for (int64_t g_inline2162_inline10271 = 0; g_inline2162_inline10271 < 8;
@@ -5607,13 +5607,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t162.add_scalar(out_col_g_inline2181_inline10439);
                     params_t162.launch_spec.set_block_num(8);
                     params_t162.set_allow_early_resolve(true);
-                    PTO2TaskId params_t162_deps[1];
+                    TaskId params_t162_deps[1];
                     uint32_t params_t162_deps_count = 0;
                     params_t162_deps[params_t162_deps_count++] = merge_tid_inline2186_inline10613;
                     params_t162.set_dependencies(params_t162_deps, params_t162_deps_count);
                     TaskOutputTensors task_162_outs = rt_submit_aic_task(168, params_t162);
                     int64_t n0_inline2077_inline10269 = 0;
-                    PTO2TaskId pa_tid_inline2168_inline10270 = task_162_outs.task_id();
+                    TaskId pa_tid_inline2168_inline10270 = task_162_outs.task_id();
                     int64_t col_g_inline2196_inline10384 = (g_inline2162_inline10271 * 1024);
 
                     // Task 163: quant_1
@@ -5623,13 +5623,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t163.add_input(o_r_pad_inline2225_inline10832__rv_v2);
                     params_t163.add_scalar(col_g_inline2196_inline10384);
                     params_t163.add_scalar(g_inline2162_inline10271);
-                    PTO2TaskId params_t163_deps[1];
+                    TaskId params_t163_deps[1];
                     uint32_t params_t163_deps_count = 0;
                     params_t163_deps[params_t163_deps_count++] = pa_tid_inline2168_inline10270;
                     params_t163.set_dependencies(params_t163_deps, params_t163_deps_count);
                     params_t163.set_allow_early_resolve(true);
                     TaskOutputTensors task_163_outs = rt_submit_aiv_task(169, params_t163);
-                    PTO2TaskId q_tid_inline2071_inline10277 = task_163_outs.task_id();
+                    TaskId q_tid_inline2071_inline10277 = task_163_outs.task_id();
 
                     // Spmd proj_b_mm_spmd_1: proj_b_mm_1
                     CoreTaskArgs params_t164;
@@ -5641,33 +5641,33 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t164.add_scalar(g_inline2162_inline10271);
                     params_t164.launch_spec.set_block_num(8);
                     params_t164.set_allow_early_resolve(true);
-                    PTO2TaskId params_t164_deps[1];
+                    TaskId params_t164_deps[1];
                     uint32_t params_t164_deps_count = 0;
                     params_t164_deps[params_t164_deps_count++] = q_tid_inline2071_inline10277;
                     params_t164.set_dependencies(params_t164_deps, params_t164_deps_count);
                     TaskOutputTensors task_164_outs = rt_submit_aic_task(170, params_t164);
-                    PTO2TaskId pb_tid_inline2057_inline10779 = task_164_outs.task_id();
+                    TaskId pb_tid_inline2057_inline10779 = task_164_outs.task_id();
                     proj_b_tids_inline2079_inline10609[g_inline2162_inline10271] = pb_tid_inline2057_inline10779;
                 }
             }
-            PTO2TaskId _submit_deps_buf_inline2166_inline10248[8];
+            TaskId _submit_deps_buf_inline2166_inline10248[8];
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-                _submit_deps_buf_inline2166_inline10248[__init_i] = PTO2TaskId::invalid();
-            PTO2TaskId t__tmp_v1016 = proj_b_tids_inline2079_inline10609[0];
+                _submit_deps_buf_inline2166_inline10248[__init_i] = TaskId::invalid();
+            TaskId t__tmp_v1016 = proj_b_tids_inline2079_inline10609[0];
             _submit_deps_buf_inline2166_inline10248[0] = t__tmp_v1016;
-            PTO2TaskId t__tmp_v1017 = proj_b_tids_inline2079_inline10609[1];
+            TaskId t__tmp_v1017 = proj_b_tids_inline2079_inline10609[1];
             _submit_deps_buf_inline2166_inline10248[1] = t__tmp_v1017;
-            PTO2TaskId t__tmp_v1018 = proj_b_tids_inline2079_inline10609[2];
+            TaskId t__tmp_v1018 = proj_b_tids_inline2079_inline10609[2];
             _submit_deps_buf_inline2166_inline10248[2] = t__tmp_v1018;
-            PTO2TaskId t__tmp_v1019 = proj_b_tids_inline2079_inline10609[3];
+            TaskId t__tmp_v1019 = proj_b_tids_inline2079_inline10609[3];
             _submit_deps_buf_inline2166_inline10248[3] = t__tmp_v1019;
-            PTO2TaskId t__tmp_v1020 = proj_b_tids_inline2079_inline10609[4];
+            TaskId t__tmp_v1020 = proj_b_tids_inline2079_inline10609[4];
             _submit_deps_buf_inline2166_inline10248[4] = t__tmp_v1020;
-            PTO2TaskId t__tmp_v1021 = proj_b_tids_inline2079_inline10609[5];
+            TaskId t__tmp_v1021 = proj_b_tids_inline2079_inline10609[5];
             _submit_deps_buf_inline2166_inline10248[5] = t__tmp_v1021;
-            PTO2TaskId t__tmp_v1022 = proj_b_tids_inline2079_inline10609[6];
+            TaskId t__tmp_v1022 = proj_b_tids_inline2079_inline10609[6];
             _submit_deps_buf_inline2166_inline10248[6] = t__tmp_v1022;
-            PTO2TaskId t__tmp_v1023 = proj_b_tids_inline2079_inline10609[7];
+            TaskId t__tmp_v1023 = proj_b_tids_inline2079_inline10609[7];
             _submit_deps_buf_inline2166_inline10248[7] = t__tmp_v1023;
 
             // Spmd proj_b_act_spmd_1: proj_b_act_1
@@ -5678,7 +5678,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t165.add_inout(attn_out_inline10836);
             params_t165.launch_spec.set_block_num(8);
             params_t165.set_allow_early_resolve(true);
-            PTO2TaskId params_t165_deps[8];
+            TaskId params_t165_deps[8];
             uint32_t params_t165_deps_count = 0;
             if (_submit_deps_buf_inline2166_inline10248[0].is_valid())
                 params_t165_deps[params_t165_deps_count++] = _submit_deps_buf_inline2166_inline10248[0];
@@ -5933,7 +5933,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             // Phase-fence barrier 5: dependency-only dummy task
             CoreTaskArgs params_phase_fence_barrier_5;
             TaskOutputTensors phase_fence_barrier_5_outs = rt_submit_dummy_task(params_phase_fence_barrier_5);
-            PTO2TaskId seed_dummy_inline2602_inline11128 = phase_fence_barrier_5_outs.task_id();
+            TaskId seed_dummy_inline2602_inline11128 = phase_fence_barrier_5_outs.task_id();
             for (int64_t t0_inline2605_inline11063 = 0;
                  t0_inline2605_inline11063 < active_gate_tokens_inline2604_inline11120__phi_v2;
                  t0_inline2605_inline11063 += 8) {
@@ -5943,7 +5943,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t174.add_inout(x_norm_i8_inline11072);
                 params_t174.add_input(xg_buf_inline2582_inline11203);
                 params_t174.add_scalar(t0_inline2605_inline11063);
-                PTO2TaskId params_t174_deps[1];
+                TaskId params_t174_deps[1];
                 uint32_t params_t174_deps_count = 0;
                 if (seed_dummy_inline2602_inline11128.is_valid())
                     params_t174_deps[params_t174_deps_count++] = seed_dummy_inline2602_inline11128;
@@ -6124,7 +6124,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t184.add_scalar(arrived_ctx);
             params_t184.set_allow_early_resolve(true);
             TaskOutputTensors task_184_outs = rt_submit_aiv_task(191, params_t184);
-            PTO2TaskId _meta_tid_inline2705_inline11213 = task_184_outs.task_id();
+            TaskId _meta_tid_inline2705_inline11213 = task_184_outs.task_id();
 
             // Spmd dispatch_push_spmd_1: dispatch_push_1
             CoreTaskArgs params_t185;
@@ -6145,7 +6145,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t185.launch_spec.set_block_num(32);
             params_t185.set_allow_early_resolve(true);
             TaskOutputTensors task_185_outs = rt_submit_aiv_task(192, params_t185);
-            PTO2TaskId _push_tid_inline2710_inline11085 = task_185_outs.task_id();
+            TaskId _push_tid_inline2710_inline11085 = task_185_outs.task_id();
 
             // Task 186: dispatch_wait_1
             CoreTaskArgs params_t186;
@@ -6154,13 +6154,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t186.add_scalar(my_rank);
             params_t186.add_scalar(csa_moe_epoch_inline715);
             params_t186.add_scalar(data_arrived_ctx);
-            PTO2TaskId params_t186_deps[1];
+            TaskId params_t186_deps[1];
             uint32_t params_t186_deps_count = 0;
             params_t186_deps[params_t186_deps_count++] = _push_tid_inline2710_inline11085;
             params_t186.set_dependencies(params_t186_deps, params_t186_deps_count);
             params_t186.set_allow_early_resolve(true);
             TaskOutputTensors task_186_outs = rt_submit_aiv_task(193, params_t186);
-            PTO2TaskId _wait_tid_inline2685_inline11068 = task_186_outs.task_id();
+            TaskId _wait_tid_inline2685_inline11068 = task_186_outs.task_id();
 
             // Spmd dispatch_gather_spmd_1: dispatch_gather_1
             CoreTaskArgs params_t187;
@@ -6176,13 +6176,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t187.add_scalar(recv_aux_ctx);
             params_t187.add_scalar(recv_route_ctx);
             params_t187.launch_spec.set_block_num(32);
-            PTO2TaskId params_t187_deps[2];
+            TaskId params_t187_deps[2];
             uint32_t params_t187_deps_count = 0;
             params_t187_deps[params_t187_deps_count++] = _wait_tid_inline2685_inline11068;
             params_t187_deps[params_t187_deps_count++] = _meta_tid_inline2705_inline11213;
             params_t187.set_dependencies(params_t187_deps, params_t187_deps_count);
             TaskOutputTensors task_187_outs = rt_submit_aiv_task(194, params_t187);
-            PTO2TaskId dispatch_push_tid_inline11245 = _push_tid_inline2710_inline11085;
+            TaskId dispatch_push_tid_inline11245 = _push_tid_inline2710_inline11085;
             PTO2_SCOPE() {
                 uint32_t recv_y_inline11016_ci_shapes[3] = {32, 16, 4096};
                 TensorCreateInfo recv_y_inline11016_ci(recv_y_inline11016_ci_shapes, 3, DataType::BFLOAT16);
@@ -6481,7 +6481,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t194.add_scalar(routed_y_buf_ctx);
                 params_t194.launch_spec.set_block_num(32);
                 TaskOutputTensors task_194_outs = rt_submit_aiv_task(201, params_t194);
-                PTO2TaskId _combine_tid_inline2817_inline11196 = task_194_outs.task_id();
+                TaskId _combine_tid_inline2817_inline11196 = task_194_outs.task_id();
 
                 // Task 195: combine_wait_1
                 CoreTaskArgs params_t195;
@@ -6489,13 +6489,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t195.add_scalar(my_rank);
                 params_t195.add_scalar(csa_moe_epoch_inline715);
                 params_t195.add_scalar(combine_arrived_ctx);
-                PTO2TaskId params_t195_deps[2];
+                TaskId params_t195_deps[2];
                 uint32_t params_t195_deps_count = 0;
                 params_t195_deps[params_t195_deps_count++] = _combine_tid_inline2817_inline11196;
                 params_t195_deps[params_t195_deps_count++] = _push_tid_inline2710_inline11085;
                 params_t195.set_dependencies(params_t195_deps, params_t195_deps_count);
                 TaskOutputTensors task_195_outs = rt_submit_aiv_task(202, params_t195);
-                PTO2TaskId _cwait_tid_inline2826_inline10971 = task_195_outs.task_id();
+                TaskId _cwait_tid_inline2826_inline10971 = task_195_outs.task_id();
                 int64_t active_tokens_inline2816_inline11163 = static_cast<int64_t>(nt_inline677__rv_v2);
                 int64_t active_tokens_inline2816_inline11163__phi_v4;
                 if ((8 < active_tokens_inline2816_inline11163)) {
@@ -6513,7 +6513,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t196.add_scalar(active_tokens_inline2816_inline11163__phi_v4);
                 params_t196.add_scalar(routed_y_buf_ctx);
                 params_t196.launch_spec.set_block_num(8);
-                PTO2TaskId params_t196_deps[1];
+                TaskId params_t196_deps[1];
                 uint32_t params_t196_deps_count = 0;
                 params_t196_deps[params_t196_deps_count++] = _cwait_tid_inline2826_inline10971;
                 params_t196.set_dependencies(params_t196_deps, params_t196_deps_count);
@@ -7311,19 +7311,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t206.launch_spec.set_block_num((t_dim_inline1151_inline11588 / 8));
             params_t206.set_allow_early_resolve(true);
             TaskOutputTensors task_206_outs = rt_submit_aiv_task(213, params_t206);
-            PTO2TaskId rms_tid_inline1152_inline11584 = task_206_outs.task_id();
-            PTO2TaskId rms_tid_inline11632 = rms_tid_inline1152_inline11584;
+            TaskId rms_tid_inline1152_inline11584 = task_206_outs.task_id();
+            TaskId rms_tid_inline11632 = rms_tid_inline1152_inline11584;
 
             // Phase-fence barrier 6: dependency-only dummy task
             CoreTaskArgs params_phase_fence_barrier_6;
-            PTO2TaskId params_phase_fence_barrier_6_deps[1];
+            TaskId params_phase_fence_barrier_6_deps[1];
             uint32_t params_phase_fence_barrier_6_deps_count = 0;
             params_phase_fence_barrier_6_deps[params_phase_fence_barrier_6_deps_count++] =
                 rms_tid_inline1152_inline11584;
             params_phase_fence_barrier_6.set_dependencies(
                 params_phase_fence_barrier_6_deps, params_phase_fence_barrier_6_deps_count
             );
-            PTO2TaskId late_dep_inline11598 = PTO2TaskId::invalid();
+            TaskId late_dep_inline11598 = TaskId::invalid();
             if (params_phase_fence_barrier_6_deps_count > 0) {
                 TaskOutputTensors phase_fence_barrier_6_outs = rt_submit_dummy_task(params_phase_fence_barrier_6);
                 late_dep_inline11598 = phase_fence_barrier_6_outs.task_id();
@@ -7514,7 +7514,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t213.add_scalar(t_matmul_inline1250_inline11559);
             params_t213.add_scalar(t_dim_inline1283_inline11618);
             params_t213.launch_spec.set_block_num(16);
-            PTO2TaskId params_t213_deps[1];
+            TaskId params_t213_deps[1];
             uint32_t params_t213_deps_count = 0;
             if (late_dep_inline11598.is_valid()) params_t213_deps[params_t213_deps_count++] = late_dep_inline11598;
             params_t213.set_dependencies(params_t213_deps, params_t213_deps_count);
@@ -7582,7 +7582,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t217.add_inout(score_proj_pad_inline1382_inline11463);
             params_t217.add_scalar(bs_inline1375_inline11667);
             params_t217.launch_spec.set_block_num((t_matmul_inline1366_inline11787 / 2));
-            PTO2TaskId params_t217_deps[1];
+            TaskId params_t217_deps[1];
             uint32_t params_t217_deps_count = 0;
             if (late_dep_inline11598.is_valid()) params_t217_deps[params_t217_deps_count++] = late_dep_inline11598;
             params_t217.set_dependencies(params_t217_deps, params_t217_deps_count);
@@ -7608,7 +7608,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t218.add_scalar(b_dim_inline1393_inline11785);
             params_t218.add_scalar(s_dim_inline1364_inline11456);
             TaskOutputTensors task_218_outs = rt_submit_aiv_task(225, params_t218);
-            PTO2TaskId pool_tid_inline1365_inline11753 = task_218_outs.task_id();
+            TaskId pool_tid_inline1365_inline11753 = task_218_outs.task_id();
             uint32_t norm_w_2d_inline1362_inline11652_shapes[2] = {1, 512};
             ChipTensor norm_w_2d_inline1362_inline11652 =
                 hca_cmp_norm_w_hca_inline520.reshape(norm_w_2d_inline1362_inline11652_shapes, 2);
@@ -7635,7 +7635,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t219.add_input(cmp_slot_mapping_bsd_inline11721);
             params_t219.add_scalar(b_dim_inline1393_inline11785);
             params_t219.add_scalar(s_dim_inline1364_inline11456);
-            PTO2TaskId params_t219_deps[1];
+            TaskId params_t219_deps[1];
             uint32_t params_t219_deps_count = 0;
             params_t219_deps[params_t219_deps_count++] = pool_tid_inline1365_inline11753;
             params_t219.set_dependencies(params_t219_deps, params_t219_deps_count);
@@ -7680,7 +7680,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t222.add_input(cmp_kv_flat_inline1500_inline11375);
             params_t222.launch_spec.set_block_num(32);
             TaskOutputTensors task_222_outs = rt_submit_aiv_task(229, params_t222);
-            PTO2TaskId gather_tid_inline1486_inline11365 = task_222_outs.task_id();
+            TaskId gather_tid_inline1486_inline11365 = task_222_outs.task_id();
             uint32_t q_flat_inline1542_inline11350_shapes[2] = {512, 512};
             ChipTensor q_flat_inline1542_inline11350 = q_inline11621.reshape(q_flat_inline1542_inline11350_shapes, 2);
 
@@ -7696,7 +7696,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             MixedKernels mixed_223 = {230, 231, 231};
             params_t223.launch_spec.set_block_num(16);
             params_t223.set_allow_early_resolve(true);
-            PTO2TaskId params_t223_deps[1];
+            TaskId params_t223_deps[1];
             uint32_t params_t223_deps_count = 0;
             params_t223_deps[params_t223_deps_count++] = gather_tid_inline1486_inline11365;
             params_t223.set_dependencies(params_t223_deps, params_t223_deps_count);
@@ -7728,10 +7728,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t226.add_inout(o_packed_inline1463_inline11349);
             params_t226.launch_spec.set_block_num(32);
             TaskOutputTensors task_226_outs = rt_submit_aiv_task(234, params_t226);
-            PTO2TaskId merge_tid_inline1576_inline11323 = task_226_outs.task_id();
-            PTO2TaskId proj_b_tids_inline1519_inline11335[8];
+            TaskId merge_tid_inline1576_inline11323 = task_226_outs.task_id();
+            TaskId proj_b_tids_inline1519_inline11335[8];
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-                proj_b_tids_inline1519_inline11335[__init_i] = PTO2TaskId::invalid();
+                proj_b_tids_inline1519_inline11335[__init_i] = TaskId::invalid();
             ChipTensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
             PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
                 for (int64_t g_inline1480_inline11801 = 0; g_inline1480_inline11801 < 8;
@@ -7749,13 +7749,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t227.add_scalar(out_col_g_inline1609_inline11551);
                     params_t227.launch_spec.set_block_num(8);
                     params_t227.set_allow_early_resolve(true);
-                    PTO2TaskId params_t227_deps[1];
+                    TaskId params_t227_deps[1];
                     uint32_t params_t227_deps_count = 0;
                     params_t227_deps[params_t227_deps_count++] = merge_tid_inline1576_inline11323;
                     params_t227.set_dependencies(params_t227_deps, params_t227_deps_count);
                     TaskOutputTensors task_227_outs = rt_submit_aic_task(235, params_t227);
                     int64_t n0_inline1453_inline11306 = 0;
-                    PTO2TaskId pa_tid_inline1586_inline11308 = task_227_outs.task_id();
+                    TaskId pa_tid_inline1586_inline11308 = task_227_outs.task_id();
                     int64_t col_g_inline1449_inline11676 = (g_inline1480_inline11801 * 1024);
 
                     // Task 228: quant_2
@@ -7765,13 +7765,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t228.add_input(o_r_pad_inline1536_inline11403__rv_v2);
                     params_t228.add_scalar(col_g_inline1449_inline11676);
                     params_t228.add_scalar(g_inline1480_inline11801);
-                    PTO2TaskId params_t228_deps[1];
+                    TaskId params_t228_deps[1];
                     uint32_t params_t228_deps_count = 0;
                     params_t228_deps[params_t228_deps_count++] = pa_tid_inline1586_inline11308;
                     params_t228.set_dependencies(params_t228_deps, params_t228_deps_count);
                     params_t228.set_allow_early_resolve(true);
                     TaskOutputTensors task_228_outs = rt_submit_aiv_task(236, params_t228);
-                    PTO2TaskId q_tid_inline1448_inline11299 = task_228_outs.task_id();
+                    TaskId q_tid_inline1448_inline11299 = task_228_outs.task_id();
 
                     // Spmd proj_b_mm_spmd_2: proj_b_mm_2
                     CoreTaskArgs params_t229;
@@ -7783,33 +7783,33 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t229.add_scalar(g_inline1480_inline11801);
                     params_t229.launch_spec.set_block_num(8);
                     params_t229.set_allow_early_resolve(true);
-                    PTO2TaskId params_t229_deps[1];
+                    TaskId params_t229_deps[1];
                     uint32_t params_t229_deps_count = 0;
                     params_t229_deps[params_t229_deps_count++] = q_tid_inline1448_inline11299;
                     params_t229.set_dependencies(params_t229_deps, params_t229_deps_count);
                     TaskOutputTensors task_229_outs = rt_submit_aic_task(237, params_t229);
-                    PTO2TaskId pb_tid_inline1437_inline11597 = task_229_outs.task_id();
+                    TaskId pb_tid_inline1437_inline11597 = task_229_outs.task_id();
                     proj_b_tids_inline1519_inline11335[g_inline1480_inline11801] = pb_tid_inline1437_inline11597;
                 }
             }
-            PTO2TaskId _submit_deps_buf_inline1434_inline11286[8];
+            TaskId _submit_deps_buf_inline1434_inline11286[8];
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-                _submit_deps_buf_inline1434_inline11286[__init_i] = PTO2TaskId::invalid();
-            PTO2TaskId t__tmp_v1414 = proj_b_tids_inline1519_inline11335[0];
+                _submit_deps_buf_inline1434_inline11286[__init_i] = TaskId::invalid();
+            TaskId t__tmp_v1414 = proj_b_tids_inline1519_inline11335[0];
             _submit_deps_buf_inline1434_inline11286[0] = t__tmp_v1414;
-            PTO2TaskId t__tmp_v1415 = proj_b_tids_inline1519_inline11335[1];
+            TaskId t__tmp_v1415 = proj_b_tids_inline1519_inline11335[1];
             _submit_deps_buf_inline1434_inline11286[1] = t__tmp_v1415;
-            PTO2TaskId t__tmp_v1416 = proj_b_tids_inline1519_inline11335[2];
+            TaskId t__tmp_v1416 = proj_b_tids_inline1519_inline11335[2];
             _submit_deps_buf_inline1434_inline11286[2] = t__tmp_v1416;
-            PTO2TaskId t__tmp_v1417 = proj_b_tids_inline1519_inline11335[3];
+            TaskId t__tmp_v1417 = proj_b_tids_inline1519_inline11335[3];
             _submit_deps_buf_inline1434_inline11286[3] = t__tmp_v1417;
-            PTO2TaskId t__tmp_v1418 = proj_b_tids_inline1519_inline11335[4];
+            TaskId t__tmp_v1418 = proj_b_tids_inline1519_inline11335[4];
             _submit_deps_buf_inline1434_inline11286[4] = t__tmp_v1418;
-            PTO2TaskId t__tmp_v1419 = proj_b_tids_inline1519_inline11335[5];
+            TaskId t__tmp_v1419 = proj_b_tids_inline1519_inline11335[5];
             _submit_deps_buf_inline1434_inline11286[5] = t__tmp_v1419;
-            PTO2TaskId t__tmp_v1420 = proj_b_tids_inline1519_inline11335[6];
+            TaskId t__tmp_v1420 = proj_b_tids_inline1519_inline11335[6];
             _submit_deps_buf_inline1434_inline11286[6] = t__tmp_v1420;
-            PTO2TaskId t__tmp_v1421 = proj_b_tids_inline1519_inline11335[7];
+            TaskId t__tmp_v1421 = proj_b_tids_inline1519_inline11335[7];
             _submit_deps_buf_inline1434_inline11286[7] = t__tmp_v1421;
 
             // Spmd proj_b_act_spmd_2: proj_b_act_2
@@ -7820,7 +7820,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t230.add_inout(attn_out_inline11390);
             params_t230.launch_spec.set_block_num(8);
             params_t230.set_allow_early_resolve(true);
-            PTO2TaskId params_t230_deps[8];
+            TaskId params_t230_deps[8];
             uint32_t params_t230_deps_count = 0;
             if (_submit_deps_buf_inline1434_inline11286[0].is_valid())
                 params_t230_deps[params_t230_deps_count++] = _submit_deps_buf_inline1434_inline11286[0];
@@ -8075,7 +8075,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             // Phase-fence barrier 7: dependency-only dummy task
             CoreTaskArgs params_phase_fence_barrier_7;
             TaskOutputTensors phase_fence_barrier_7_outs = rt_submit_dummy_task(params_phase_fence_barrier_7);
-            PTO2TaskId seed_dummy_inline2602_inline12007 = phase_fence_barrier_7_outs.task_id();
+            TaskId seed_dummy_inline2602_inline12007 = phase_fence_barrier_7_outs.task_id();
             for (int64_t t0_inline2605_inline11942 = 0;
                  t0_inline2605_inline11942 < active_gate_tokens_inline2604_inline11999__phi_v2;
                  t0_inline2605_inline11942 += 8) {
@@ -8085,7 +8085,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t239.add_inout(x_norm_i8_inline11951);
                 params_t239.add_input(xg_buf_inline2582_inline12082);
                 params_t239.add_scalar(t0_inline2605_inline11942);
-                PTO2TaskId params_t239_deps[1];
+                TaskId params_t239_deps[1];
                 uint32_t params_t239_deps_count = 0;
                 if (seed_dummy_inline2602_inline12007.is_valid())
                     params_t239_deps[params_t239_deps_count++] = seed_dummy_inline2602_inline12007;
@@ -8252,7 +8252,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t248.add_scalar(arrived_ctx);
             params_t248.set_allow_early_resolve(true);
             TaskOutputTensors task_248_outs = rt_submit_aiv_task(257, params_t248);
-            PTO2TaskId _meta_tid_inline2705_inline12092 = task_248_outs.task_id();
+            TaskId _meta_tid_inline2705_inline12092 = task_248_outs.task_id();
 
             // Spmd dispatch_push_spmd_2: dispatch_push_2
             CoreTaskArgs params_t249;
@@ -8273,7 +8273,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t249.launch_spec.set_block_num(32);
             params_t249.set_allow_early_resolve(true);
             TaskOutputTensors task_249_outs = rt_submit_aiv_task(258, params_t249);
-            PTO2TaskId _push_tid_inline2710_inline11964 = task_249_outs.task_id();
+            TaskId _push_tid_inline2710_inline11964 = task_249_outs.task_id();
 
             // Task 250: dispatch_wait_2
             CoreTaskArgs params_t250;
@@ -8282,13 +8282,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t250.add_scalar(my_rank);
             params_t250.add_scalar(hca_moe_epoch_inline716);
             params_t250.add_scalar(data_arrived_ctx);
-            PTO2TaskId params_t250_deps[1];
+            TaskId params_t250_deps[1];
             uint32_t params_t250_deps_count = 0;
             params_t250_deps[params_t250_deps_count++] = _push_tid_inline2710_inline11964;
             params_t250.set_dependencies(params_t250_deps, params_t250_deps_count);
             params_t250.set_allow_early_resolve(true);
             TaskOutputTensors task_250_outs = rt_submit_aiv_task(259, params_t250);
-            PTO2TaskId _wait_tid_inline2685_inline11947 = task_250_outs.task_id();
+            TaskId _wait_tid_inline2685_inline11947 = task_250_outs.task_id();
 
             // Spmd dispatch_gather_spmd_2: dispatch_gather_2
             CoreTaskArgs params_t251;
@@ -8304,13 +8304,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t251.add_scalar(recv_aux_ctx);
             params_t251.add_scalar(recv_route_ctx);
             params_t251.launch_spec.set_block_num(32);
-            PTO2TaskId params_t251_deps[2];
+            TaskId params_t251_deps[2];
             uint32_t params_t251_deps_count = 0;
             params_t251_deps[params_t251_deps_count++] = _wait_tid_inline2685_inline11947;
             params_t251_deps[params_t251_deps_count++] = _meta_tid_inline2705_inline12092;
             params_t251.set_dependencies(params_t251_deps, params_t251_deps_count);
             TaskOutputTensors task_251_outs = rt_submit_aiv_task(260, params_t251);
-            PTO2TaskId dispatch_push_tid_inline12124 = _push_tid_inline2710_inline11964;
+            TaskId dispatch_push_tid_inline12124 = _push_tid_inline2710_inline11964;
             PTO2_SCOPE() {
                 uint32_t recv_y_inline11895_ci_shapes[3] = {32, 16, 4096};
                 TensorCreateInfo recv_y_inline11895_ci(recv_y_inline11895_ci_shapes, 3, DataType::BFLOAT16);
@@ -8609,7 +8609,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t258.add_scalar(routed_y_buf_ctx);
                 params_t258.launch_spec.set_block_num(32);
                 TaskOutputTensors task_258_outs = rt_submit_aiv_task(267, params_t258);
-                PTO2TaskId _combine_tid_inline2817_inline12075 = task_258_outs.task_id();
+                TaskId _combine_tid_inline2817_inline12075 = task_258_outs.task_id();
 
                 // Task 259: combine_wait_2
                 CoreTaskArgs params_t259;
@@ -8617,13 +8617,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t259.add_scalar(my_rank);
                 params_t259.add_scalar(hca_moe_epoch_inline716);
                 params_t259.add_scalar(combine_arrived_ctx);
-                PTO2TaskId params_t259_deps[2];
+                TaskId params_t259_deps[2];
                 uint32_t params_t259_deps_count = 0;
                 params_t259_deps[params_t259_deps_count++] = _combine_tid_inline2817_inline12075;
                 params_t259_deps[params_t259_deps_count++] = _push_tid_inline2710_inline11964;
                 params_t259.set_dependencies(params_t259_deps, params_t259_deps_count);
                 TaskOutputTensors task_259_outs = rt_submit_aiv_task(268, params_t259);
-                PTO2TaskId _cwait_tid_inline2826_inline11850 = task_259_outs.task_id();
+                TaskId _cwait_tid_inline2826_inline11850 = task_259_outs.task_id();
                 int64_t active_tokens_inline2816_inline12042 = static_cast<int64_t>(nt_inline677__rv_v2);
                 int64_t active_tokens_inline2816_inline12042__phi_v4;
                 if ((8 < active_tokens_inline2816_inline12042)) {
@@ -8641,7 +8641,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t260.add_scalar(active_tokens_inline2816_inline12042__phi_v4);
                 params_t260.add_scalar(routed_y_buf_ctx);
                 params_t260.launch_spec.set_block_num(8);
-                PTO2TaskId params_t260_deps[1];
+                TaskId params_t260_deps[1];
                 uint32_t params_t260_deps_count = 0;
                 params_t260_deps[params_t260_deps_count++] = _cwait_tid_inline2826_inline11850;
                 params_t260.set_dependencies(params_t260_deps, params_t260_deps_count);
@@ -9708,18 +9708,18 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t272.launch_spec.set_block_num((t_dim_inline1640_inline12397 / 8));
         params_t272.set_allow_early_resolve(true);
         TaskOutputTensors task_272_outs = rt_submit_aiv_task(281, params_t272);
-        PTO2TaskId rms_tid_inline1641_inline12576 = task_272_outs.task_id();
-        PTO2TaskId rms_tid_inline12740 = rms_tid_inline1641_inline12576;
+        TaskId rms_tid_inline1641_inline12576 = task_272_outs.task_id();
+        TaskId rms_tid_inline12740 = rms_tid_inline1641_inline12576;
 
         // Phase-fence barrier 8: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_8;
-        PTO2TaskId params_phase_fence_barrier_8_deps[1];
+        TaskId params_phase_fence_barrier_8_deps[1];
         uint32_t params_phase_fence_barrier_8_deps_count = 0;
         params_phase_fence_barrier_8_deps[params_phase_fence_barrier_8_deps_count++] = rms_tid_inline1641_inline12576;
         params_phase_fence_barrier_8.set_dependencies(
             params_phase_fence_barrier_8_deps, params_phase_fence_barrier_8_deps_count
         );
-        PTO2TaskId late_dep_inline12569 = PTO2TaskId::invalid();
+        TaskId late_dep_inline12569 = TaskId::invalid();
         if (params_phase_fence_barrier_8_deps_count > 0) {
             TaskOutputTensors phase_fence_barrier_8_outs = rt_submit_dummy_task(params_phase_fence_barrier_8);
             late_dep_inline12569 = phase_fence_barrier_8_outs.task_id();
@@ -9900,7 +9900,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t279.add_scalar(t_matmul_inline1739_inline12394);
         params_t279.add_scalar(t_dim_inline1772_inline12422);
         params_t279.launch_spec.set_block_num(16);
-        PTO2TaskId params_t279_deps[1];
+        TaskId params_t279_deps[1];
         uint32_t params_t279_deps_count = 0;
         if (late_dep_inline12569.is_valid()) params_t279_deps[params_t279_deps_count++] = late_dep_inline12569;
         params_t279.set_dependencies(params_t279_deps, params_t279_deps_count);
@@ -9979,7 +9979,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t283.add_inout(cmp4_kv_proj_pad_inline1900_inline12391);
         params_t283.add_inout(cmp4_score_proj_pad_inline1878_inline12521);
         params_t283.launch_spec.set_block_num(16);
-        PTO2TaskId params_t283_deps[1];
+        TaskId params_t283_deps[1];
         uint32_t params_t283_deps_count = 0;
         if (late_dep_inline12569.is_valid()) params_t283_deps[params_t283_deps_count++] = late_dep_inline12569;
         params_t283.set_dependencies(params_t283_deps, params_t283_deps_count);
@@ -10080,7 +10080,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t292.add_input(csa_weights_proj_last_inline671);
         params_t292.add_inout(weights_partial_inline2014_inline12590);
         params_t292.launch_spec.set_block_num(4);
-        PTO2TaskId params_t292_deps[1];
+        TaskId params_t292_deps[1];
         uint32_t params_t292_deps_count = 0;
         if (late_dep_inline12569.is_valid()) params_t292_deps[params_t292_deps_count++] = late_dep_inline12569;
         params_t292.set_dependencies(params_t292_deps, params_t292_deps_count);
@@ -10122,7 +10122,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t294.add_inout(kv_proj_pad_inline15316);
         params_t294.add_inout(score_proj_pad_inline15304);
         params_t294.launch_spec.set_block_num(8);
-        PTO2TaskId params_t294_deps[1];
+        TaskId params_t294_deps[1];
         uint32_t params_t294_deps_count = 0;
         if (late_dep_inline12569.is_valid()) params_t294_deps[params_t294_deps_count++] = late_dep_inline12569;
         params_t294.set_dependencies(params_t294_deps, params_t294_deps_count);
@@ -10245,7 +10245,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t302.add_output(qk_order_inline2147_inline12785);
         params_t302.set_allow_early_resolve(true);
         TaskOutputTensors task_302_outs = rt_submit_aiv_task(312, params_t302);
-        PTO2TaskId qk_plan_tid_inline2134_inline12788 = task_302_outs.task_id();
+        TaskId qk_plan_tid_inline2134_inline12788 = task_302_outs.task_id();
         int64_t cmp_block_num_inline2124_inline12330 = (int64_t)cmp_kv_last_inline555.shapes[0];
         uint32_t cmp_kv_flat_inline2128_inline12513_shapes[2] = {
             static_cast<uint32_t>((cmp_block_num_inline2124_inline12330 * 128)), 512
@@ -10274,7 +10274,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mixed_303 = {313, 314, 314};
         params_t303.launch_spec.set_block_num(24);
         params_t303.set_allow_early_resolve(true);
-        PTO2TaskId params_t303_deps[1];
+        TaskId params_t303_deps[1];
         uint32_t params_t303_deps_count = 0;
         params_t303_deps[params_t303_deps_count++] = qk_plan_tid_inline2134_inline12788;
         params_t303.set_dependencies(params_t303_deps, params_t303_deps_count);
@@ -10302,10 +10302,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t305.add_inout(o_packed_inline2242_inline12218);
         params_t305.launch_spec.set_block_num(32);
         TaskOutputTensors task_305_outs = rt_submit_aiv_task(316, params_t305);
-        PTO2TaskId merge_tid_inline2186_inline12537 = task_305_outs.task_id();
-        PTO2TaskId proj_b_tids_inline2079_inline12533[8];
+        TaskId merge_tid_inline2186_inline12537 = task_305_outs.task_id();
+        TaskId proj_b_tids_inline2079_inline12533[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            proj_b_tids_inline2079_inline12533[__init_i] = PTO2TaskId::invalid();
+            proj_b_tids_inline2079_inline12533[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline2225_inline12756__rv_v2 = o_r_pad_inline2225_inline12756;
         PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline2162_inline12195 = 0; g_inline2162_inline12195 < 8; g_inline2162_inline12195 += 1) {
@@ -10322,13 +10322,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t306.add_scalar(out_col_g_inline2181_inline12363);
                 params_t306.launch_spec.set_block_num(8);
                 params_t306.set_allow_early_resolve(true);
-                PTO2TaskId params_t306_deps[1];
+                TaskId params_t306_deps[1];
                 uint32_t params_t306_deps_count = 0;
                 params_t306_deps[params_t306_deps_count++] = merge_tid_inline2186_inline12537;
                 params_t306.set_dependencies(params_t306_deps, params_t306_deps_count);
                 TaskOutputTensors task_306_outs = rt_submit_aic_task(317, params_t306);
                 int64_t n0_inline2077_inline12193 = 0;
-                PTO2TaskId pa_tid_inline2168_inline12194 = task_306_outs.task_id();
+                TaskId pa_tid_inline2168_inline12194 = task_306_outs.task_id();
                 int64_t col_g_inline2196_inline12308 = (g_inline2162_inline12195 * 1024);
 
                 // Task 307: quant_3
@@ -10338,13 +10338,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t307.add_input(o_r_pad_inline2225_inline12756__rv_v2);
                 params_t307.add_scalar(col_g_inline2196_inline12308);
                 params_t307.add_scalar(g_inline2162_inline12195);
-                PTO2TaskId params_t307_deps[1];
+                TaskId params_t307_deps[1];
                 uint32_t params_t307_deps_count = 0;
                 params_t307_deps[params_t307_deps_count++] = pa_tid_inline2168_inline12194;
                 params_t307.set_dependencies(params_t307_deps, params_t307_deps_count);
                 params_t307.set_allow_early_resolve(true);
                 TaskOutputTensors task_307_outs = rt_submit_aiv_task(318, params_t307);
-                PTO2TaskId q_tid_inline2071_inline12201 = task_307_outs.task_id();
+                TaskId q_tid_inline2071_inline12201 = task_307_outs.task_id();
 
                 // Spmd proj_b_mm_spmd_3: proj_b_mm_3
                 CoreTaskArgs params_t308;
@@ -10356,33 +10356,33 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_t308.add_scalar(g_inline2162_inline12195);
                 params_t308.launch_spec.set_block_num(8);
                 params_t308.set_allow_early_resolve(true);
-                PTO2TaskId params_t308_deps[1];
+                TaskId params_t308_deps[1];
                 uint32_t params_t308_deps_count = 0;
                 params_t308_deps[params_t308_deps_count++] = q_tid_inline2071_inline12201;
                 params_t308.set_dependencies(params_t308_deps, params_t308_deps_count);
                 TaskOutputTensors task_308_outs = rt_submit_aic_task(319, params_t308);
-                PTO2TaskId pb_tid_inline2057_inline12703 = task_308_outs.task_id();
+                TaskId pb_tid_inline2057_inline12703 = task_308_outs.task_id();
                 proj_b_tids_inline2079_inline12533[g_inline2162_inline12195] = pb_tid_inline2057_inline12703;
             }
         }
-        PTO2TaskId _submit_deps_buf_inline2166_inline12172[8];
+        TaskId _submit_deps_buf_inline2166_inline12172[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
-            _submit_deps_buf_inline2166_inline12172[__init_i] = PTO2TaskId::invalid();
-        PTO2TaskId t__tmp_v1986 = proj_b_tids_inline2079_inline12533[0];
+            _submit_deps_buf_inline2166_inline12172[__init_i] = TaskId::invalid();
+        TaskId t__tmp_v1986 = proj_b_tids_inline2079_inline12533[0];
         _submit_deps_buf_inline2166_inline12172[0] = t__tmp_v1986;
-        PTO2TaskId t__tmp_v1987 = proj_b_tids_inline2079_inline12533[1];
+        TaskId t__tmp_v1987 = proj_b_tids_inline2079_inline12533[1];
         _submit_deps_buf_inline2166_inline12172[1] = t__tmp_v1987;
-        PTO2TaskId t__tmp_v1988 = proj_b_tids_inline2079_inline12533[2];
+        TaskId t__tmp_v1988 = proj_b_tids_inline2079_inline12533[2];
         _submit_deps_buf_inline2166_inline12172[2] = t__tmp_v1988;
-        PTO2TaskId t__tmp_v1989 = proj_b_tids_inline2079_inline12533[3];
+        TaskId t__tmp_v1989 = proj_b_tids_inline2079_inline12533[3];
         _submit_deps_buf_inline2166_inline12172[3] = t__tmp_v1989;
-        PTO2TaskId t__tmp_v1990 = proj_b_tids_inline2079_inline12533[4];
+        TaskId t__tmp_v1990 = proj_b_tids_inline2079_inline12533[4];
         _submit_deps_buf_inline2166_inline12172[4] = t__tmp_v1990;
-        PTO2TaskId t__tmp_v1991 = proj_b_tids_inline2079_inline12533[5];
+        TaskId t__tmp_v1991 = proj_b_tids_inline2079_inline12533[5];
         _submit_deps_buf_inline2166_inline12172[5] = t__tmp_v1991;
-        PTO2TaskId t__tmp_v1992 = proj_b_tids_inline2079_inline12533[6];
+        TaskId t__tmp_v1992 = proj_b_tids_inline2079_inline12533[6];
         _submit_deps_buf_inline2166_inline12172[6] = t__tmp_v1992;
-        PTO2TaskId t__tmp_v1993 = proj_b_tids_inline2079_inline12533[7];
+        TaskId t__tmp_v1993 = proj_b_tids_inline2079_inline12533[7];
         _submit_deps_buf_inline2166_inline12172[7] = t__tmp_v1993;
 
         // Spmd proj_b_act_spmd_3: proj_b_act_3
@@ -10393,7 +10393,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t309.add_inout(attn_out_inline12760);
         params_t309.launch_spec.set_block_num(8);
         params_t309.set_allow_early_resolve(true);
-        PTO2TaskId params_t309_deps[8];
+        TaskId params_t309_deps[8];
         uint32_t params_t309_deps_count = 0;
         if (_submit_deps_buf_inline2166_inline12172[0].is_valid())
             params_t309_deps[params_t309_deps_count++] = _submit_deps_buf_inline2166_inline12172[0];
@@ -10643,7 +10643,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         // Phase-fence barrier 9: dependency-only dummy task
         CoreTaskArgs params_phase_fence_barrier_9;
         TaskOutputTensors phase_fence_barrier_9_outs = rt_submit_dummy_task(params_phase_fence_barrier_9);
-        PTO2TaskId seed_dummy_inline2602_inline13052 = phase_fence_barrier_9_outs.task_id();
+        TaskId seed_dummy_inline2602_inline13052 = phase_fence_barrier_9_outs.task_id();
         for (int64_t t0_inline2605_inline12987 = 0;
              t0_inline2605_inline12987 < active_gate_tokens_inline2604_inline13044__phi_v2;
              t0_inline2605_inline12987 += 8) {
@@ -10653,7 +10653,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t318.add_output(x_norm_i8_inline12996);
             params_t318.add_input(xg_buf_inline2582_inline13127);
             params_t318.add_scalar(t0_inline2605_inline12987);
-            PTO2TaskId params_t318_deps[1];
+            TaskId params_t318_deps[1];
             uint32_t params_t318_deps_count = 0;
             if (seed_dummy_inline2602_inline13052.is_valid())
                 params_t318_deps[params_t318_deps_count++] = seed_dummy_inline2602_inline13052;
@@ -10815,7 +10815,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t327.add_scalar(arrived_ctx);
         params_t327.set_allow_early_resolve(true);
         TaskOutputTensors task_327_outs = rt_submit_aiv_task(339, params_t327);
-        PTO2TaskId _meta_tid_inline2705_inline13137 = task_327_outs.task_id();
+        TaskId _meta_tid_inline2705_inline13137 = task_327_outs.task_id();
 
         // Spmd dispatch_push_spmd_3: dispatch_push_3
         CoreTaskArgs params_t328;
@@ -10836,7 +10836,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t328.launch_spec.set_block_num(32);
         params_t328.set_allow_early_resolve(true);
         TaskOutputTensors task_328_outs = rt_submit_aiv_task(340, params_t328);
-        PTO2TaskId _push_tid_inline2710_inline13009 = task_328_outs.task_id();
+        TaskId _push_tid_inline2710_inline13009 = task_328_outs.task_id();
 
         // Task 329: dispatch_wait_3
         CoreTaskArgs params_t329;
@@ -10845,13 +10845,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t329.add_scalar(my_rank);
         params_t329.add_scalar(last_moe_epoch_inline624);
         params_t329.add_scalar(data_arrived_ctx);
-        PTO2TaskId params_t329_deps[1];
+        TaskId params_t329_deps[1];
         uint32_t params_t329_deps_count = 0;
         params_t329_deps[params_t329_deps_count++] = _push_tid_inline2710_inline13009;
         params_t329.set_dependencies(params_t329_deps, params_t329_deps_count);
         params_t329.set_allow_early_resolve(true);
         TaskOutputTensors task_329_outs = rt_submit_aiv_task(341, params_t329);
-        PTO2TaskId _wait_tid_inline2685_inline12992 = task_329_outs.task_id();
+        TaskId _wait_tid_inline2685_inline12992 = task_329_outs.task_id();
 
         // Spmd dispatch_gather_spmd_3: dispatch_gather_3
         CoreTaskArgs params_t330;
@@ -10867,13 +10867,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t330.add_scalar(recv_aux_ctx);
         params_t330.add_scalar(recv_route_ctx);
         params_t330.launch_spec.set_block_num(32);
-        PTO2TaskId params_t330_deps[2];
+        TaskId params_t330_deps[2];
         uint32_t params_t330_deps_count = 0;
         params_t330_deps[params_t330_deps_count++] = _wait_tid_inline2685_inline12992;
         params_t330_deps[params_t330_deps_count++] = _meta_tid_inline2705_inline13137;
         params_t330.set_dependencies(params_t330_deps, params_t330_deps_count);
         TaskOutputTensors task_330_outs = rt_submit_aiv_task(342, params_t330);
-        PTO2TaskId dispatch_push_tid_inline13169 = _push_tid_inline2710_inline13009;
+        TaskId dispatch_push_tid_inline13169 = _push_tid_inline2710_inline13009;
         PTO2_SCOPE() {
             uint32_t recv_y_inline12940_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline12940_ci(recv_y_inline12940_ci_shapes, 3, DataType::BFLOAT16);
@@ -11167,7 +11167,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t337.add_scalar(routed_y_buf_ctx);
             params_t337.launch_spec.set_block_num(32);
             TaskOutputTensors task_337_outs = rt_submit_aiv_task(349, params_t337);
-            PTO2TaskId _combine_tid_inline2817_inline13120 = task_337_outs.task_id();
+            TaskId _combine_tid_inline2817_inline13120 = task_337_outs.task_id();
 
             // Task 338: combine_wait_3
             CoreTaskArgs params_t338;
@@ -11175,13 +11175,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t338.add_scalar(my_rank);
             params_t338.add_scalar(last_moe_epoch_inline624);
             params_t338.add_scalar(combine_arrived_ctx);
-            PTO2TaskId params_t338_deps[2];
+            TaskId params_t338_deps[2];
             uint32_t params_t338_deps_count = 0;
             params_t338_deps[params_t338_deps_count++] = _combine_tid_inline2817_inline13120;
             params_t338_deps[params_t338_deps_count++] = _push_tid_inline2710_inline13009;
             params_t338.set_dependencies(params_t338_deps, params_t338_deps_count);
             TaskOutputTensors task_338_outs = rt_submit_aiv_task(350, params_t338);
-            PTO2TaskId _cwait_tid_inline2826_inline12895 = task_338_outs.task_id();
+            TaskId _cwait_tid_inline2826_inline12895 = task_338_outs.task_id();
             int64_t active_tokens_inline2816_inline13087 = static_cast<int64_t>(nt_inline677__rv_v2);
             int64_t active_tokens_inline2816_inline13087__phi_v4;
             if ((8 < active_tokens_inline2816_inline13087)) {
@@ -11199,7 +11199,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_t339.add_scalar(active_tokens_inline2816_inline13087__phi_v4);
             params_t339.add_scalar(routed_y_buf_ctx);
             params_t339.launch_spec.set_block_num(8);
-            PTO2TaskId params_t339_deps[1];
+            TaskId params_t339_deps[1];
             uint32_t params_t339_deps_count = 0;
             params_t339_deps[params_t339_deps_count++] = _cwait_tid_inline2826_inline12895;
             params_t339.set_dependencies(params_t339_deps, params_t339_deps_count);
@@ -11284,7 +11284,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_hc_head_mixes_zero.launch_spec.set_block_num(((t_linear_inline13230 + 15) / 16));
         TaskOutputTensors hc_head_mixes_zero_outs = rt_submit_aiv_task(367, params_hc_head_mixes_zero);
         const ChipTensor &mixes_raw_inline13234 = hc_head_mixes_zero_outs.get_ref(0);
-        PTO2TaskId hc_head_mixes_zero_tid = hc_head_mixes_zero_outs.task_id();
+        TaskId hc_head_mixes_zero_tid = hc_head_mixes_zero_outs.task_id();
 
         // Spmd hc_head_linear_spmd: hc_head_linear
         CoreTaskArgs params_t343;
@@ -11292,7 +11292,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t343.add_input(ext_hc_head_fn);
         params_t343.add_inout(mixes_raw_inline13234);
         params_t343.launch_spec.set_block_num(((t_linear_inline13230 / 16) * 16));
-        PTO2TaskId params_t343_deps[1];
+        TaskId params_t343_deps[1];
         params_t343_deps[0] = hc_head_mixes_zero_tid;
         params_t343.set_dependencies(params_t343_deps, 1);
         rt_submit_aic_task(355, params_t343);
@@ -11340,7 +11340,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t347.add_scalar(my_rank);
         params_t347.add_scalar(lm_head_hidden_done_ctx);
         TaskOutputTensors task_347_outs = rt_submit_aiv_task(359, params_t347);
-        PTO2TaskId _dwait_tid_inline26_inline13309 = task_347_outs.task_id();
+        TaskId _dwait_tid_inline26_inline13309 = task_347_outs.task_id();
 
         // Spmd lm_head_dispatch_gather_spmd: lm_head_dispatch_gather
         CoreTaskArgs params_t348;
@@ -11348,7 +11348,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t348.add_inout(owner_hiddens_inline50_inline13292);
         params_t348.add_scalar(lm_head_hidden_window_ctx);
         params_t348.launch_spec.set_block_num(8);
-        PTO2TaskId params_t348_deps[1];
+        TaskId params_t348_deps[1];
         uint32_t params_t348_deps_count = 0;
         params_t348_deps[params_t348_deps_count++] = _dwait_tid_inline26_inline13309;
         params_t348.set_dependencies(params_t348_deps, params_t348_deps_count);
@@ -11380,7 +11380,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t351.add_scalar(my_rank);
         params_t351.add_scalar(lm_head_logits_done_ctx);
         TaskOutputTensors task_351_outs = rt_submit_aiv_task(363, params_t351);
-        PTO2TaskId _cwait_tid_inline8_inline13331 = task_351_outs.task_id();
+        TaskId _cwait_tid_inline8_inline13331 = task_351_outs.task_id();
 
         // Spmd lm_head_combine_gather_spmd: lm_head_combine_gather
         CoreTaskArgs params_t352;
@@ -11388,7 +11388,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t352.add_input(ext_lm_head_logits_window);
         params_t352.add_scalar(lm_head_logits_window_ctx);
         params_t352.launch_spec.set_block_num(24);
-        PTO2TaskId params_t352_deps[1];
+        TaskId params_t352_deps[1];
         uint32_t params_t352_deps_count = 0;
         params_t352_deps[params_t352_deps_count++] = _cwait_tid_inline8_inline13331;
         params_t352.set_dependencies(params_t352_deps, params_t352_deps_count);

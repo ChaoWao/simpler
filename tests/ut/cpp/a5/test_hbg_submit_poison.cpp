@@ -107,7 +107,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     ASSERT_TRUE(root.task_id().is_valid());
 
     // 2. Multi-fanin dummy consumer (duplicate dep deduped to one fanin).
-    PTO2TaskId deps[] = {root.task_id(), root.task_id()};
+    TaskId deps[] = {root.task_id(), root.task_id()};
     CoreTaskArgs consumer_args;
     consumer_args.set_dependencies(deps, 2);
     TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);

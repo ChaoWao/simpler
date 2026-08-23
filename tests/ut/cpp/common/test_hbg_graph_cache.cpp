@@ -453,7 +453,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     ASSERT_NE(execution, nullptr);
 
     PTO2TaskDescriptor outer_task{};
-    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
@@ -477,7 +477,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
 
     graph_execution_mark_completed(*execution);
     execution->retired_nodes.store(2, std::memory_order_release);
-    outer_task.task_id = PTO2TaskId::make(1, 8);
+    outer_task.task_id = TaskId::make(1, 8);
 
     // Poison every field the rebuild is responsible for restoring. A replay that
     // preserved any of them would leave the poison observable.
@@ -501,7 +501,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(node.payload.scalar_data()[0], 99U);
     EXPECT_EQ(execution->node_at(1).payload.scalar_data()[0], 18U);
     EXPECT_EQ(node.payload.tensor_data()[0].version, 0);
-    EXPECT_EQ(node.task.task_id, PTO2TaskId::make(1, (8U << 10U)));
+    EXPECT_EQ(node.task.task_id, TaskId::make(1, (8U << 10U)));
     EXPECT_EQ(node.task.packed_buffer_base, heap.base());
     EXPECT_EQ(node.payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(second_boundary.data()));
     EXPECT_EQ(execution->node_at(1).payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
@@ -529,7 +529,7 @@ TEST(GraphExecutionReplay, MaterializesBoundaryScalarPoolWiderThanTaskPayload) {
     ASSERT_NE(execution, nullptr);
 
     PTO2TaskDescriptor outer_task{};
-    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
@@ -709,7 +709,7 @@ TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
 
     AsyncWaitList wait_list{};
     wait_list.entries[0].slot_state = &node.slot;
-    wait_list.entries[0].task_token = PTO2TaskId::make(0, 1);
+    wait_list.entries[0].task_token = TaskId::make(0, 1);
     wait_list.entries[0].normal_done = true;
     wait_list.count = 1;
 
@@ -736,7 +736,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     ASSERT_NE(execution, nullptr);
 
     PTO2TaskDescriptor outer_task{};
-    outer_task.task_id = PTO2TaskId::make(1, 5);
+    outer_task.task_id = TaskId::make(1, 5);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
