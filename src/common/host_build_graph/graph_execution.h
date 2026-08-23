@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include <atomic>
+#include <cstddef>
 #include <type_traits>
 
 #include "pto_runtime2_types.h"
@@ -178,6 +179,103 @@ struct GraphDefinition {
     uint32_t off_predicates;
 };
 
+inline uint64_t graph_definition_hash_rotl(uint64_t value, uint32_t shift) {
+    return (value << shift) | (value >> (64U - shift));
+}
+
+inline uint64_t graph_definition_hash_round(uint64_t accumulator, uint64_t input) {
+    constexpr uint64_t PRIME2 = 14029467366897019727ULL;
+    constexpr uint64_t PRIME1 = 11400714785074694791ULL;
+    accumulator += input * PRIME2;
+    accumulator = graph_definition_hash_rotl(accumulator, 31);
+    return accumulator * PRIME1;
+}
+
+inline uint64_t graph_definition_hash_word(const uint8_t *bytes, size_t offset) {
+    constexpr size_t CONTENT_HASH_OFFSET = offsetof(GraphDefinition, content_hash);
+    static_assert(CONTENT_HASH_OFFSET % sizeof(uint64_t) == 0);
+    if (offset == CONTENT_HASH_OFFSET) return 0;
+    uint64_t word = 0;
+    __builtin_memcpy(&word, bytes + offset, sizeof(word));
+    return word;
+}
+
+// The Definition hash follows XXH64's four-lane structure so large images do
+// not serialize one multiply per word, and is bit-identical to XXH64 with this
+// seed for any image whose content_hash field is already zero.
+//
+// `data` must be the base of a GraphDefinition image: the word at
+// offsetof(GraphDefinition, content_hash) is read as zero, which is what lets
+// the device verify in place instead of copying the image to clear that field.
+// Hashing any other buffer, or a subrange that does not start at the image base,
+// silently substitutes zero for eight bytes of it.
+//
+// Definitions are rebuilt and rehashed by the same runtime version, so this is
+// an integrity checksum rather than a persisted wire-format identifier.
+inline uint64_t graph_definition_content_hash(const void *data, size_t size) {
+    constexpr uint64_t SEED = 1469598103934665603ULL;
+    constexpr uint64_t PRIME1 = 11400714785074694791ULL;
+    constexpr uint64_t PRIME2 = 14029467366897019727ULL;
+    constexpr uint64_t PRIME3 = 1609587929392839161ULL;
+    constexpr uint64_t PRIME4 = 9650029242287828579ULL;
+    constexpr uint64_t PRIME5 = 2870177450012600261ULL;
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    size_t offset = 0;
+    uint64_t hash = 0;
+
+    if (size >= 32) {
+        uint64_t lane1 = SEED + PRIME1 + PRIME2;
+        uint64_t lane2 = SEED + PRIME2;
+        uint64_t lane3 = SEED;
+        uint64_t lane4 = SEED - PRIME1;
+        const size_t stripes_end = size - 32;
+        do {
+            lane1 = graph_definition_hash_round(lane1, graph_definition_hash_word(bytes, offset));
+            lane2 = graph_definition_hash_round(lane2, graph_definition_hash_word(bytes, offset + 8));
+            lane3 = graph_definition_hash_round(lane3, graph_definition_hash_word(bytes, offset + 16));
+            lane4 = graph_definition_hash_round(lane4, graph_definition_hash_word(bytes, offset + 24));
+            offset += 32;
+        } while (offset <= stripes_end);
+        hash = graph_definition_hash_rotl(lane1, 1) + graph_definition_hash_rotl(lane2, 7) +
+               graph_definition_hash_rotl(lane3, 12) + graph_definition_hash_rotl(lane4, 18);
+        hash ^= graph_definition_hash_round(0, lane1);
+        hash = hash * PRIME1 + PRIME4;
+        hash ^= graph_definition_hash_round(0, lane2);
+        hash = hash * PRIME1 + PRIME4;
+        hash ^= graph_definition_hash_round(0, lane3);
+        hash = hash * PRIME1 + PRIME4;
+        hash ^= graph_definition_hash_round(0, lane4);
+        hash = hash * PRIME1 + PRIME4;
+    } else {
+        hash = SEED + PRIME5;
+    }
+
+    hash += size;
+    while (offset + sizeof(uint64_t) <= size) {
+        const uint64_t mixed = graph_definition_hash_round(0, graph_definition_hash_word(bytes, offset));
+        hash ^= mixed;
+        hash = graph_definition_hash_rotl(hash, 27) * PRIME1 + PRIME4;
+        offset += sizeof(uint64_t);
+    }
+    if (offset + sizeof(uint32_t) <= size) {
+        uint32_t word = 0;
+        __builtin_memcpy(&word, bytes + offset, sizeof(word));
+        hash ^= static_cast<uint64_t>(word) * PRIME1;
+        hash = graph_definition_hash_rotl(hash, 23) * PRIME2 + PRIME3;
+        offset += sizeof(uint32_t);
+    }
+    while (offset < size) {
+        hash ^= static_cast<uint64_t>(bytes[offset]) * PRIME5;
+        hash = graph_definition_hash_rotl(hash, 11) * PRIME1;
+        ++offset;
+    }
+    hash ^= hash >> 33;
+    hash *= PRIME2;
+    hash ^= hash >> 29;
+    hash *= PRIME3;
+    hash ^= hash >> 32;
+    return hash;
+}
 static_assert(std::is_trivially_copyable_v<GraphTensorSourceRef>);
 static_assert(std::is_standard_layout_v<GraphTensorSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphTensor>);
@@ -192,6 +290,21 @@ static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);
 static_assert(std::is_standard_layout_v<GraphBoundarySignature>);
 static_assert(std::is_trivially_copyable_v<GraphDefinition>);
 static_assert(std::is_standard_layout_v<GraphDefinition>);
+
+// Section starts are offsets from the image base, so a section is correctly
+// aligned only if the buffer holding the image is. The builder writes each
+// section through a typed pointer into a std::vector<std::byte>, whose data() is
+// aligned for any type with fundamental alignment and no further — so a section
+// type that asked for more would make every one of those stores undefined, with
+// no diagnostic.
+static_assert(
+    alignof(GraphNodeDefinition) <= alignof(std::max_align_t) && alignof(GraphTensor) <= alignof(std::max_align_t) &&
+        alignof(GraphTensorSourceRef) <= alignof(std::max_align_t) &&
+        alignof(GraphScalarSourceRef) <= alignof(std::max_align_t) &&
+        alignof(GraphBoundarySignature) <= alignof(std::max_align_t) &&
+        alignof(GraphPredicate) <= alignof(std::max_align_t),
+    "a Definition section type must not be over-aligned: its storage is a byte vector"
+);
 
 inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
     GraphTensor packed{};

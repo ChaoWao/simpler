@@ -120,7 +120,7 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     definition.total_bytes = static_cast<uint32_t>(image.size());
     std::memcpy(image.data(), &definition, sizeof(definition));
 
-    definition.content_hash = graph_hash_bytes(1469598103934665603ULL, image.data(), image.size());
+    definition.content_hash = graph_definition_content_hash(image.data(), image.size());
     std::memcpy(image.data(), &definition, sizeof(definition));
     return image;
 }
@@ -260,6 +260,55 @@ private:
 };
 
 }  // namespace
+
+// Only the embedded content_hash is excluded — every other word of the image has
+// to reach the digest. Sweeping one bit per 8-byte word is what distinguishes
+// "content_hash is skipped" from "a whole region is skipped": the latter reads as
+// a passing hash test right up until two different Definitions collide.
+TEST(GraphDefinitionHash, IgnoresOnlyEmbeddedContentHash) {
+    const std::vector<std::byte> original = make_test_definition(23, 0x1000);
+    std::vector<std::byte> image = original;
+    const uint64_t expected = graph_definition_content_hash(image.data(), image.size());
+
+    const uint64_t replacement = 0x0123456789abcdefULL;
+    std::memcpy(image.data() + offsetof(GraphDefinition, content_hash), &replacement, sizeof(replacement));
+    EXPECT_EQ(graph_definition_content_hash(image.data(), image.size()), expected);
+
+    for (size_t offset = 0; offset + sizeof(uint64_t) <= original.size(); offset += sizeof(uint64_t)) {
+        image = original;
+        image[offset] ^= std::byte{1};
+        const uint64_t hashed = graph_definition_content_hash(image.data(), image.size());
+        if (offset == offsetof(GraphDefinition, content_hash)) {
+            EXPECT_EQ(hashed, expected) << "word at " << offset << " must be excluded";
+        } else {
+            EXPECT_NE(hashed, expected) << "word at " << offset << " must be covered";
+        }
+    }
+
+    image = original;
+    image.back() ^= std::byte{1};
+    EXPECT_NE(graph_definition_content_hash(image.data(), image.size()), expected);
+}
+
+// The digest is a transcription of XXH64, and a wrong rotate or prime would still
+// agree with itself on both sides of the H2D — host and device share this code, so
+// self-consistency proves nothing about the transcription. Pin it to values taken
+// from a reference XXH64 (python-xxhash 3.8.1) at this seed. Bytes 8..15 are zeroed
+// in the input so the content_hash substitution is a no-op and the two
+// implementations must agree exactly; the three sizes cover the 8-byte, 4-byte and
+// single-byte tail branches, which no real Definition reaches because every image
+// this builder emits is a whole number of 8-byte words.
+TEST(GraphDefinitionHash, MatchesReferenceXxh64) {
+    std::array<uint8_t, 200> buffer{};
+    for (size_t i = 0; i < buffer.size(); ++i) {
+        buffer[i] = static_cast<uint8_t>(i * 7 + 1);
+    }
+    std::fill_n(buffer.begin() + offsetof(GraphDefinition, content_hash), sizeof(uint64_t), uint8_t{0});
+
+    EXPECT_EQ(graph_definition_content_hash(buffer.data(), 120), 0x240ec7f0e9812487ULL);
+    EXPECT_EQ(graph_definition_content_hash(buffer.data(), 124), 0xbccc608fbca2e6c5ULL);
+    EXPECT_EQ(graph_definition_content_hash(buffer.data(), 127), 0x440c5d9a1f5c42e0ULL);
+}
 
 TEST(GraphCache, RejectsEmptyBoundary) {
     GraphTaskArgs args;
