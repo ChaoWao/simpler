@@ -6,7 +6,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Tests for Resource phase failure summaries emitted by the root conftest."""
+"""Tests for root-conftest behavior: Resource phase failure summaries and
+device-poison classification."""
 
 from __future__ import annotations
 
@@ -99,3 +100,28 @@ def test_emit_resource_failure_summary_can_emit_compact_recap(capsys):
     assert "rc=2 devices=[7] duration=3.0s" in out
     assert "full output is in the Resource child group above" in out
     assert "hidden tail" not in out
+
+
+def test_device_poison_codes_key_on_the_host_band_not_the_latched_one():
+    """Poison classification reads host-band codes only.
+
+    The a5 DeviceRunner fail-fast ("marked unusable") and a poisoned card whose
+    CANN code an intermediate layer flattened both report the host-side generic
+    code, and both must trigger the worker rebuild. A device-latched code must
+    not: SCOPE_DEADLOCK is an orchestration bug, and treating it as a poisoned
+    context turns one red test into a misleading runtime-wide skip.
+
+    The two bands are defined in src/common/worker/pto_runtime_c_api.h; the set
+    here has to move with them, which is what this test pins.
+    """
+    cf = _load_root_conftest()
+
+    # Host band: PTO_RUNTIME_ERR_INTERNAL, plus the CANN sticky-error codes.
+    assert cf._is_device_runtime_error_msg("run failed with code -1000")
+    assert cf._is_device_runtime_error_msg("simpler_init failed with code 507899")
+
+    # Device-latched band (-1..-999): never poison, whatever the mechanism.
+    assert not cf._is_device_runtime_error_msg("run failed with code -1")  # SCOPE_DEADLOCK
+    assert not cf._is_device_runtime_error_msg("run failed with code -3")  # FLOW_CONTROL_DEADLOCK
+    assert not cf._is_device_runtime_error_msg("run failed with code -100")  # SCHEDULER_TIMEOUT
+    assert not any(-999 <= code <= -1 for code in cf._DEVICE_POISON_CODES)

@@ -18,6 +18,7 @@
 #include "common/unified_log.h"
 #include "common/platform_config.h"
 #include "common/acl_hal_device.h"
+#include "pto_runtime_c_api.h"
 #include "runtime/rt.h"
 #include "ascend_hal.h"  // CANN HAL API definitions (MODULE_TYPE_AICORE, INFO_TYPE_OCCUPY, etc.)
 #include <chrono>
@@ -99,7 +100,7 @@ get_aicore_reg_info(std::vector<int64_t> &aic, std::vector<int64_t> &aiv, const 
 
     if (halFunc == nullptr) {
         LOG_ERROR("halMemCtl not found in symbol table");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     struct AddrMapInPara in_map_para;
@@ -187,7 +188,7 @@ int init_aicore_register_addresses(
 ) {
     if (runtime_regs_ptr == nullptr) {
         LOG_ERROR("init_aicore_register_addresses(%s): Invalid parameters", kind_to_name(kind));
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::vector<int64_t> host_regs;
@@ -197,21 +198,21 @@ int init_aicore_register_addresses(
     }
     if (host_regs.empty()) {
         LOG_ERROR("init_aicore_register_addresses(%s): Empty address array", kind_to_name(kind));
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     size_t regs_size = host_regs.size() * sizeof(int64_t);
     void *reg_ptr = allocator.alloc(regs_size);
     if (reg_ptr == nullptr) {
         LOG_ERROR("Failed to allocate device memory for %s register addresses", kind_to_name(kind));
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int ret = rtMemcpy(reg_ptr, regs_size, host_regs.data(), regs_size, RT_MEMCPY_HOST_TO_DEVICE);
     if (ret != 0) {
         LOG_ERROR("Failed to copy %s register addresses to device (rc=%d)", kind_to_name(kind), ret);
         allocator.free(reg_ptr);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     *runtime_regs_ptr = reinterpret_cast<uint64_t>(reg_ptr);

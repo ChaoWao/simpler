@@ -76,6 +76,18 @@
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
+// This file returns both kinds of negative status — a latched device code
+// negated, and PTO_RUNTIME_ERR_* for a host-side failure — so a caller can
+// attribute one to a mechanism only while the two bands stay disjoint. The
+// second conjunct is the structural half and holds for any latched code; the
+// first is a spot check on the highest one this runtime defines, so a new
+// four-digit latched code needs the ceiling raised here as well.
+static_assert(
+    PTO2_ERROR_READY_QUEUE_OVERFLOW <= PTO_RUNTIME_LATCHED_CODE_MAX &&
+        PTO_RUNTIME_ERR_BASE < -PTO_RUNTIME_LATCHED_CODE_MAX,
+    "host-side C API codes must stay below the negation of every latched device code"
+);
+
 extern "C" const PipelineContract *get_pipeline_contract(void) {
     // Host orchestration materializes this run's own graph into the image it
     // uploads, so every device-resident region carries per-run content.
@@ -558,27 +570,27 @@ int32_t run_host_orchestration(
             layout.orch, host_arena, host_sm, gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0]
         )) {
         LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, rt->scheduler);
 
     PTO2SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init_per_ring(host_sm, sm_size, eff_task_window_sizes, eff_heap_sizes)) {
         LOG_ERROR("host-orch: host SM init_per_ring failed");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     GraphHostStatePtr graph_state = make_graph_host_state();
     if (!graph_state) {
         LOG_ERROR("host-orch: failed to allocate Graph host state");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
 
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
         LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime_finalize_after_wire(
         rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
@@ -588,7 +600,7 @@ int32_t run_host_orchestration(
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
     if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     rt->active_callable_hash = reinterpret_cast<uint64_t>(entry_points->entry);
     rt->tensor_access = &tensor_access;
@@ -634,8 +646,9 @@ int32_t run_host_orchestration(
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
         // noticed. A fatal with no code left to read is the only generic failure.
-        const int32_t status =
-            orch_error != PTO2_ERROR_NONE ? runtime_status_from_error_codes(orch_error, PTO2_ERROR_NONE) : -1;
+        const int32_t status = orch_error != PTO2_ERROR_NONE ?
+                                   runtime_status_from_error_codes(orch_error, PTO2_ERROR_NONE) :
+                                   PTO_RUNTIME_ERR_INTERNAL;
         LOG_RUNTIME_FAILURE(orch_error, PTO2_ERROR_NONE, status);
         LOG_ERROR(
             "host-orch: refusing to upload an incomplete graph after %" PRIu64 " heap bytes",
@@ -664,7 +677,7 @@ int32_t run_host_orchestration(
     std::vector<StagedSubmission> staged_submissions;
     uint64_t submission_block_bytes = 0;
     if (!plan_graph_submissions(api, *graph_state, &staged_submissions, &submission_block_bytes, &definition_uploads)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         // `bytes` is what this segment copied: the Definition objects alone. The
@@ -683,7 +696,7 @@ int32_t run_host_orchestration(
     // [0, task_window] would make those copies read/write out of bounds.
     if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > eff_task_window_sizes[0]) {
         LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, eff_task_window_sizes[0]);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     host_phase_trace_note_submitted(static_cast<uint64_t>(total_tasks));
 
@@ -728,12 +741,12 @@ int32_t run_host_orchestration(
     const uint64_t device_arena_bytes = off_submissions + submission_block_bytes;
     if (api->setup_static_arena(total_heap_size, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
         LOG_ERROR("host-orch: failed to commit %" PRIu64 " bytes of device runtime arena", device_arena_bytes);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     device_arena = api->acquire_pooled_runtime_arena();
     if (device_arena == nullptr) {
         LOG_ERROR("%s", "host-orch: failed to re-acquire the pooled runtime arena");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     char *arena_dev = static_cast<char *>(device_arena);
     void *device_sm = arena_dev + layout.off_copied_end;
@@ -774,7 +787,7 @@ int32_t run_host_orchestration(
     const int64_t t_h2d_ns = bind_now_ns();
     if (api->copy_to_device(arena_dev + layout.off_copied_begin, upload_base, upload_bytes) != 0) {
         LOG_ERROR("host-orch: H2D of the runtime image failed");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         // Eight uint64 fields plus their labels; 96 would truncate the trailing
@@ -807,11 +820,11 @@ int32_t run_host_orchestration(
 extern "C" int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out) {
     if (callable == nullptr) {
         LOG_ERROR("Callable pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr || out == nullptr) {
         LOG_ERROR("HostApi or out is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
@@ -821,12 +834,12 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
             callable, api, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash, &out->aicore_image_hash
         ) != 0) {
         LOG_ERROR("Failed to upload ChipCallable buffer");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (const ChildKernelAddr &c : out->kernel_addrs) {
         if (c.func_id < 0 || c.func_id >= RUNTIME_MAX_FUNC_ID) {
             LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, RUNTIME_MAX_FUNC_ID);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
     }
 
@@ -835,7 +848,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 
     if (orch_so_binary == nullptr || orch_so_size == 0) {
         LOG_ERROR("Orchestration SO binary is required for host orchestration");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     out->orch_so_data = orch_so_binary;
@@ -853,17 +866,17 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         const char *orch_func_name = callable->func_name();
         if (orch_func_name == nullptr || orch_func_name[0] == '\0') {
             LOG_ERROR("host-orch: orchestration function name is empty");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         std::string so_path;
         if (!create_orch_so_tempfile(orch_so_binary, orch_so_size, &so_path)) {
             LOG_ERROR("host-orch: failed to materialize orchestration .so");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         void *handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (handle == nullptr) {
             LOG_ERROR("host-orch: dlopen failed: %s", dlerror());
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         const char *bind_log_error = nullptr;
         if (simpler::log::bind_loaded_host_log_state(handle, HostLogger::get_instance().state(), &bind_log_error) !=
@@ -873,13 +886,13 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
                 bind_log_error != nullptr ? bind_log_error : "unknown error"
             );
             dlclose(handle);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         void *entry = dlsym(handle, orch_func_name);
         if (entry == nullptr) {
             LOG_ERROR("host-orch: dlsym('%s') failed: %s", orch_func_name, dlerror());
             dlclose(handle);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         // The orch .so has its own framework_bind_runtime / g_current_runtime
         // (orchestration/common.cpp is compiled into it); resolve it now so the
@@ -888,13 +901,13 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         if (bind_sym == nullptr) {
             LOG_ERROR("host-orch: orch .so does not export framework_bind_runtime: %s", dlerror());
             dlclose(handle);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         void *prewarm_sym = dlsym(handle, "framework_prewarm_graph_recorders");
         if (prewarm_sym == nullptr) {
             LOG_ERROR("host-orch: orch .so does not export framework_prewarm_graph_recorders: %s", dlerror());
             dlclose(handle);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         reinterpret_cast<OrchestrationPrewarmFunc>(prewarm_sym)();
         // Safe to unlink now: the handle keeps the .so mapped regardless of path.
@@ -932,15 +945,15 @@ extern "C" int bind_callable_to_runtime_impl(
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (orch_args == nullptr) {
         LOG_ERROR("orch_args pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     // host_build_graph host-orch: register_callable_impl resolved the
     // orchestration entry on the host and passed it here as host_orch_func_ptr;
@@ -962,7 +975,7 @@ extern "C" int bind_callable_to_runtime_impl(
     uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH];
     uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH];
     if (!resolve_ring_config(ring_task_window, ring_heap, eff_task_window_sizes, eff_heap_sizes)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     const std::string task_window_log = format_ring_array(eff_task_window_sizes);
     const std::string heap_log = format_ring_array(eff_heap_sizes);
@@ -994,7 +1007,7 @@ extern "C" int bind_callable_to_runtime_impl(
         void *dev_ptr = api->device_malloc(size);
         if (dev_ptr == nullptr) {
             LOG_ERROR("Failed to allocate device memory for tensor %d", i);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         // Pure write-only OUTPUT buffers are never read by the kernel and hold
@@ -1007,7 +1020,7 @@ extern "C" int bind_callable_to_runtime_impl(
             if (rc != 0) {
                 LOG_ERROR("Failed to stage tensor %d to device", i);
                 api->device_free(dev_ptr);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             staged_bytes += static_cast<uint64_t>(size);
             ++staged_tensors;
@@ -1034,7 +1047,7 @@ extern "C" int bind_callable_to_runtime_impl(
         // device address.
         if (!tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr)) {
             LOG_ERROR("host-orch: no host view for tensor %d (dev_ptr %p, %zu bytes)", i, dev_ptr, size);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         t.buffer.addr = reinterpret_cast<uint64_t>(dev_ptr);
@@ -1061,7 +1074,7 @@ extern "C" int bind_callable_to_runtime_impl(
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         if (eff_heap_sizes[r] > std::numeric_limits<uint64_t>::max() - total_heap_size) {
             LOG_ERROR("Total ring heap size overflows uint64_t");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         total_heap_size += eff_heap_sizes[r];
     }
@@ -1072,7 +1085,7 @@ extern "C" int bind_callable_to_runtime_impl(
     PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_sizes, eff_heap_sizes);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         char attrs[64];
@@ -1098,7 +1111,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // places tasks.
     if (api->setup_static_arena(total_heap_size, /*gm_sm_size=*/0, layout.device_bytes) != 0) {
         LOG_ERROR("Failed to setup pooled static arena");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         char attrs[96];
@@ -1111,7 +1124,7 @@ extern "C" int bind_callable_to_runtime_impl(
     record_bind_phase(HostPhaseKind::BindGmHeap, t_heap_ns);
     if (gm_heap == nullptr) {
         LOG_ERROR("Failed to acquire pooled GM heap");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime->set_gm_heap(gm_heap);
     // The shared memory is placed at the end of orchestration, so until then this
@@ -1122,7 +1135,7 @@ extern "C" int bind_callable_to_runtime_impl(
     void *runtime_arena_dev = api->acquire_pooled_runtime_arena();
     if (runtime_arena_dev == nullptr) {
         LOG_ERROR("Failed to acquire pooled runtime arena");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Set up orchestration state (consumed by the host orchestrator below)
@@ -1146,7 +1159,7 @@ extern "C" int bind_callable_to_runtime_impl(
     );
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime_wire_arena_pointers(host_arena, layout, rt);
     runtime_wire_host_only_pointers(host_arena, layout, rt);
@@ -1161,7 +1174,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     if (host_orch_func_ptr == nullptr) {
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         ChipTaskArgs orch_l2;
@@ -1195,7 +1208,7 @@ extern "C" int bind_callable_to_runtime_impl(
     runtime_arena_dev = api->acquire_pooled_runtime_arena();
     if (runtime_arena_dev == nullptr) {
         LOG_ERROR("%s", "Failed to re-acquire the pooled runtime arena after orchestration");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);
 
@@ -1220,11 +1233,11 @@ extern "C" int bind_callable_to_runtime_impl(
 extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int rc = 0;

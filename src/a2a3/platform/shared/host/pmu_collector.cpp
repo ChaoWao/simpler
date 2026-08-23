@@ -31,6 +31,7 @@
 
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
+#include "../../../../common/worker/pto_runtime_c_api.h"
 
 namespace {
 
@@ -73,14 +74,14 @@ int PmuCollector::init(
 ) {
     if (num_cores <= 0 || num_threads <= 0 || alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR("PmuCollector::init: invalid arguments");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (num_cores > PLATFORM_MAX_CORES || num_threads > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(
             "PmuCollector::init: dimensions out of range (cores=%d/%d threads=%d/%d)", num_cores, PLATFORM_MAX_CORES,
             num_threads, PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -104,7 +105,7 @@ int PmuCollector::init(
     if (!recycled_seed_capacity_is_sufficient(
             num_cores, num_threads, kPmuSurplusPerCore, decltype(manager_)::kRecycledQueueCapacity
         )) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // ---- Allocate shared header + buffer-state region ----
@@ -112,7 +113,7 @@ int PmuCollector::init(
     shm_dev_ = alloc_cb(shm_size_);
     if (shm_dev_ == nullptr) {
         LOG_ERROR("PmuCollector: failed to allocate PMU shared memory (%zu bytes)", shm_size_);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     if (register_cb != nullptr) {
@@ -143,7 +144,7 @@ int PmuCollector::init(
             void *dev_ptr = alloc_cb(buf_size);
             if (dev_ptr == nullptr) {
                 LOG_ERROR("PmuCollector: failed to allocate PmuBuffer c=%d b=%d", c, b);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
 
             void *host_ptr = dev_ptr;

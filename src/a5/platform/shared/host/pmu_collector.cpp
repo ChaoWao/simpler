@@ -37,6 +37,7 @@
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "host/profiling_copy.h"
+#include "../../../../common/worker/pto_runtime_c_api.h"
 
 namespace {
 
@@ -79,18 +80,18 @@ int PmuCollector::init(
 ) {
     if (num_cores <= 0 || num_threads <= 0 || alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR("PmuCollector::init: invalid arguments");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (num_cores > PLATFORM_MAX_CORES || num_threads > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(
             "PmuCollector::init: dimensions out of range (cores=%d/%d threads=%d/%d)", num_cores, PLATFORM_MAX_CORES,
             num_threads, PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (initialized_) {
         LOG_ERROR("PmuCollector already initialized");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -112,7 +113,7 @@ int PmuCollector::init(
     if (!recycled_seed_capacity_is_sufficient(
             num_cores, num_threads, kPmuSurplusPerCore, decltype(manager_)::kRecycledQueueCapacity
         )) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Stash callbacks on the base up-front so alloc_paired_buffer sees
@@ -137,7 +138,7 @@ int PmuCollector::init(
     void *shm_dev_local = alloc_paired_buffer(shm_size, &shm_host_local);
     if (shm_dev_local == nullptr) {
         LOG_ERROR("PmuCollector: failed to allocate PMU shared memory (%zu bytes)", shm_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::memset(shm_host_local, 0, shm_size);
@@ -160,7 +161,7 @@ int PmuCollector::init(
     void *ring_addrs_dev_local = alloc_paired_buffer(table_size, &ring_addrs_host_local);
     if (ring_addrs_dev_local == nullptr) {
         LOG_ERROR("PmuCollector: failed to allocate aicore ring address table (%zu bytes)", table_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     std::memset(ring_addrs_host_local, 0, table_size);
 
@@ -174,7 +175,7 @@ int PmuCollector::init(
         void *ring_dev = alloc_cb(sizeof(PmuAicoreRing));
         if (ring_dev == nullptr) {
             LOG_ERROR("PmuCollector: failed to allocate PmuAicoreRing for core %d", c);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         aicore_rings_dev_local[c] = ring_dev;
         guard.add_direct_ptr(ring_dev);
@@ -186,7 +187,7 @@ int PmuCollector::init(
             void *dev_ptr = alloc_paired_buffer(buf_size, &host_ptr);
             if (dev_ptr == nullptr) {
                 LOG_ERROR("PmuCollector: failed to allocate PmuBuffer c=%d b=%d", c, b);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
 
             if (b < PLATFORM_PMU_SLOT_COUNT) {

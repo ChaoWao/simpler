@@ -79,20 +79,20 @@ static void device_free(void *runner_ctx, void *dev_ptr) {
 }
 
 static int copy_to_device(void *runner_ctx, void *dev_ptr, const void *host_ptr, size_t size) {
-    if (runner_ctx == nullptr || dev_ptr == nullptr || host_ptr == nullptr) return -1;
+    if (runner_ctx == nullptr || dev_ptr == nullptr || host_ptr == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(runner_ctx)->copy_to_device(dev_ptr, host_ptr, size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
 static int copy_from_device(void *runner_ctx, void *host_ptr, const void *dev_ptr, size_t size) {
-    if (runner_ctx == nullptr || host_ptr == nullptr || dev_ptr == nullptr) return -1;
+    if (runner_ctx == nullptr || host_ptr == nullptr || dev_ptr == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(runner_ctx)->copy_from_device(host_ptr, dev_ptr, size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -113,11 +113,11 @@ static void unregister_device_memory_from_host(void *runner_ctx, void *dev_ptr) 
 }
 
 static int device_memset(void *runner_ctx, void *dev_ptr, int value, size_t size) {
-    if (runner_ctx == nullptr || dev_ptr == nullptr) return -1;
+    if (runner_ctx == nullptr || dev_ptr == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(runner_ctx)->device_memset(dev_ptr, value, size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -182,12 +182,12 @@ static void host_phase_pool_finish(void *runner_ctx, uint64_t submitted_tasks, u
 static int setup_static_arena_wrapper(
     void *runner_ctx, uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
 ) {
-    if (runner_ctx == nullptr) return -1;
+    if (runner_ctx == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(runner_ctx)
             ->setup_static_arena(arena_bank, gm_heap_size, gm_sm_size, runtime_arena_size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -315,30 +315,30 @@ void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr) {
 }
 
 int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_ptr, size_t size) {
-    if (ctx == NULL || dev_ptr == NULL || host_ptr == NULL) return -1;
+    if (ctx == NULL || dev_ptr == NULL || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(ctx)->copy_to_device(dev_ptr, host_ptr, size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
 int copy_from_device_ctx(DeviceContextHandle ctx, void *host_ptr, const void *dev_ptr, size_t size) {
-    if (ctx == NULL || host_ptr == NULL || dev_ptr == NULL) return -1;
+    if (ctx == NULL || host_ptr == NULL || dev_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<SimDeviceRunnerBase *>(ctx)->copy_from_device(host_ptr, dev_ptr, size);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
 int finalize_device(DeviceContextHandle ctx) {
-    if (ctx == NULL) return -1;
+    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
         if (runner->native_run_active()) {
             LOG_ERROR("finalize_device: native run must be finalized first");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         int rc = runner->finalize();
         int dev = pto_cpu_sim_get_bound_device();
@@ -347,7 +347,7 @@ int finalize_device(DeviceContextHandle ctx) {
         }
         return rc;
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -363,7 +363,7 @@ int simpler_init(
     (void)dispatcher_binary;
     (void)dispatcher_size;
 
-    if (ctx == NULL) return -1;
+    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
 
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
 
@@ -371,7 +371,7 @@ int simpler_init(
     try {
         rc = runner->attach_current_thread(device_id);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (rc != 0) return rc;
 
@@ -386,7 +386,7 @@ int simpler_init(
         }
         runner->set_executors(std::move(aicpu_vec), std::move(aicore_vec));
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     // No CANN dlog on sim. ChipWorker bound this module's logger to the
     // process-owned state before calling simpler_init.
@@ -402,7 +402,7 @@ int simpler_init(
                 prewarm_config->runtime_env.ring_dep_pool
             );
         } catch (...) {
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         if (rc != 0) return rc;
     }
@@ -414,11 +414,11 @@ int simpler_init(
  * =========================================================================== */
 
 int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, const void *callable) {
-    if (ctx == NULL || callable == NULL) return -1;
+    if (ctx == NULL || callable == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
     if (runner->native_run_active()) {
         LOG_ERROR("simpler_register_callable: native run must be finalized before mutating the callable registry");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     try {
@@ -474,7 +474,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         }
         return rc;
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -592,11 +592,11 @@ static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, 
     const long long trace_start_ns = state->trace_start_ns;
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
     state->runner->finish_clock_correlation_session(false);
-    int validation_rc = -1;
+    int validation_rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, execution_rc);
     } catch (...) {
-        validation_rc = -1;
+        validation_rc = PTO_RUNTIME_ERR_INTERNAL;
     }
     if (state->prepared_execution != nullptr) {
         state->runner->abandon_prepared_execution(*state->prepared_execution);
@@ -614,36 +614,37 @@ int simpler_prepare_run(
     DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config,
     const NativeRunDescriptor *descriptor
 ) {
-    if (ctx == nullptr || runtime == nullptr || config == nullptr || descriptor == nullptr) return -1;
+    if (ctx == nullptr || runtime == nullptr || config == nullptr || descriptor == nullptr)
+        return PTO_RUNTIME_ERR_INTERNAL;
     if (descriptor->pipeline_slot >= PTO_PIPELINE_MAX_DEPTH || descriptor->arena_bank >= PTO_PIPELINE_MAX_DEPTH) {
         LOG_ERROR(
             "simpler_prepare_run: descriptor selects slot=%u bank=%u outside [0, %u)", descriptor->pipeline_slot,
             descriptor->arena_bank, PTO_PIPELINE_MAX_DEPTH
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (reinterpret_cast<uintptr_t>(runtime) % alignof(SimNativeRunContext) != 0) {
         LOG_ERROR("simpler_prepare_run: runtime storage does not satisfy get_runtime_alignment()");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
     if (!runner->has_callable(callable_id)) {
         LOG_ERROR("simpler_prepare_run: callable_id=%d not registered", callable_id);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (!runner->can_accept_run()) {
         LOG_ERROR("simpler_prepare_run: runner is poisoned by an uncertain partial launch");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     uint64_t magic = 0;
     std::memcpy(&magic, runtime, sizeof(magic));
     if (magic == SimNativeRunContext::kMagic) {
         LOG_ERROR("simpler_prepare_run: runtime already contains a prepared run; finalize it before reuse");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (magic != 0) {
         LOG_ERROR("simpler_prepare_run: runtime storage was not zero-initialized before its first use");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     SimNativeRunContext *state = nullptr;
@@ -655,7 +656,7 @@ int simpler_prepare_run(
         if (!runner->try_acquire_native_run(state, state->identity(), &state->launch_permit)) {
             LOG_ERROR("simpler_prepare_run: another native run is active on this device context");
             destroy_native_run_context(state);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         state->runner_claimed = true;
         state->trace_inv = trace_inv;
@@ -685,18 +686,19 @@ int simpler_prepare_run(
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
         return 0;
     } catch (...) {
-        if (state != nullptr) return cleanup_failed_prepare(state, -1, true);
-        return -1;
+        if (state != nullptr) return cleanup_failed_prepare(state, PTO_RUNTIME_ERR_INTERNAL, true);
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_launch_run");
-    if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
-    if (!state->runner_claimed || !state->runner->native_run_owned_by(state)) return -1;
+    if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared)
+        return PTO_RUNTIME_ERR_INTERNAL;
+    if (!state->runner_claimed || !state->runner->native_run_owned_by(state)) return PTO_RUNTIME_ERR_INTERNAL;
 
     state->runner_trace_start_ns = STRACE_NOW_NS();
-    int rc = -1;
+    int rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         rc = state->runner->attach_current_thread(state->runner->device_id());
         if (rc == 0) {
@@ -705,10 +707,11 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
             rc = launch.rc;
             state->prepared_execution = std::move(launch.prepared);
             state->active_execution = std::move(launch.active);
-            if (launch.progress == LaunchProgress::Complete && !state->publish_acceptance(launch.receipt)) rc = -1;
+            if (launch.progress == LaunchProgress::Complete && !state->publish_acceptance(launch.receipt))
+                rc = PTO_RUNTIME_ERR_INTERNAL;
         }
     } catch (...) {
-        rc = -1;
+        rc = PTO_RUNTIME_ERR_INTERNAL;
     }
     if (rc != 0) {
         state->completion_rc = rc;
@@ -737,27 +740,27 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 
 int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_wait_run");
-    if (state == nullptr) return -1;
+    if (state == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
-    if (phase == NativeRunPhase::Prepared) return -1;
+    if (phase == NativeRunPhase::Prepared) return PTO_RUNTIME_ERR_INTERNAL;
     if (phase == NativeRunPhase::Complete) return state->completion_rc;
     // Bind the calling thread to this runner's simulated device before the
     // drain, so sim's lifecycle entry points carry the same contract as
     // onboard's. attach_current_thread() is idempotent for a thread already
     // bound to this device.
-    int drain_rc = -1;
+    int drain_rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         drain_rc = state->runner->attach_current_thread(state->runner->device_id());
         if (drain_rc != 0) {
             LOG_ERROR("simpler_wait_run: attach_current_thread failed: %d (%s)", drain_rc, state->trace_attrs);
         } else {
-            drain_rc = -1;
+            drain_rc = PTO_RUNTIME_ERR_INTERNAL;
             if (state->active_execution != nullptr) {
                 drain_rc = state->runner->drain_execution(*state->active_execution);
             }
         }
     } catch (...) {
-        drain_rc = -1;
+        drain_rc = PTO_RUNTIME_ERR_INTERNAL;
         LOG_ERROR("simpler_wait_run: drain threw (%s)", state->trace_attrs);
     }
     if (state->completion_rc == 0) state->completion_rc = drain_rc;
@@ -768,7 +771,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 
 int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_finalize_run");
-    if (state == nullptr) return -1;
+    if (state == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
@@ -787,11 +790,11 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     // Bind the calling thread to this runner's simulated device before the
     // drain and the validation below. attach_current_thread() is idempotent
     // for a thread already bound to this device.
-    int attach_rc = -1;
+    int attach_rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         attach_rc = state->runner->attach_current_thread(state->runner->device_id());
     } catch (...) {
-        attach_rc = -1;
+        attach_rc = PTO_RUNTIME_ERR_INTERNAL;
     }
     if (attach_rc != 0) {
         LOG_ERROR("simpler_finalize_run: attach_current_thread failed: %d (%s)", attach_rc, state->trace_attrs);
@@ -799,7 +802,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     if (phase == NativeRunPhase::Running && launched) {
         int drain_rc = attach_rc;
         if (attach_rc == 0) {
-            drain_rc = -1;
+            drain_rc = PTO_RUNTIME_ERR_INTERNAL;
             try {
                 drain_rc = state->runner->drain_execution(*state->active_execution);
             } catch (...) {
@@ -812,20 +815,22 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     }
     emit_native_run_runner_wall(state);
 
-    int validation_rc = -1;
+    int validation_rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
         if (attach_rc == 0) {
             {
                 STRACE("chip.run.validate");
-                validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, launched ? execution_rc : -1);
+                validation_rc = validate_runtime_impl(
+                    &state->runtime, &state->host_api, launched ? execution_rc : PTO_RUNTIME_ERR_INTERNAL
+                );
             }
             if (launched && execution_rc == 0) emit_device_phase_markers(state->runner);
         } else {
             validation_rc = attach_rc;
         }
     } catch (...) {
-        validation_rc = -1;
+        validation_rc = PTO_RUNTIME_ERR_INTERNAL;
     }
 
     if (state->prepared_execution != nullptr) {
@@ -874,18 +879,18 @@ uint64_t get_retained_temp_addr_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
 }
 
 int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
-    if (ctx == NULL) return -1;
+    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
         if (runner->native_run_active()) {
             LOG_ERROR(
                 "simpler_unregister_callable: native run must be finalized before mutating the callable registry"
             );
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         return runner->unregister_callable(callable_id);
     } catch (...) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 
@@ -931,7 +936,7 @@ int simpler_provision_dma_workspace(
     (void)ctx;
     (void)sdma_warmup_binary;
     (void)sdma_warmup_size;
-    return required_mask == 0 ? 0 : -1;
+    return required_mask == 0 ? 0 : PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
 }  // extern "C"

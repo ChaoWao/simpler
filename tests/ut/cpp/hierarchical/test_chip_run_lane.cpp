@@ -69,7 +69,7 @@ int prepare_run(
     g_events.push_back("prepare" + std::to_string(descriptor->pipeline_slot));
     ++g_prepare_count[descriptor->pipeline_slot];
     if (g_reject_first_prepare[descriptor->pipeline_slot] && g_prepare_count[descriptor->pipeline_slot] == 1) {
-        return -3;
+        return PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
     }
     return g_prepare_rc[descriptor->pipeline_slot];
 }
@@ -379,6 +379,38 @@ TEST(ChipRunLaneTest, DirectIncompatibleSuccessorRetriesAfterPredecessorFence) {
     EXPECT_EQ(g_prepare_count[1], 2u);
     g_complete[1] = true;
     EXPECT_TRUE(second.done());
+    lane.close();
+    worker.finalize();
+}
+
+// PTO2_ERROR_FLOW_CONTROL_DEADLOCK (3) negated — the status a device latches for
+// a flow-control deadlock. Spelled out rather than included: the PTO2_ERROR_*
+// macros live in each runtime's private pto_runtime_status.h, which this
+// worker-level test does not compile against.
+constexpr int kLatchedFlowControlDeadlock = -3;
+
+// A latched deadlock is terminal. PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE once held
+// this same value, so the lane read the deadlock as "prepare at depth one instead"
+// and retried it — reporting a successful run over a device that had wedged.
+TEST(ChipRunLaneTest, LatchedFlowControlDeadlockIsTerminalRatherThanRetried) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+    ChipStorageTaskArgs args{};
+
+    // A live predecessor is what puts the successor's prepare on the overlapping
+    // path, where the incompatible-prepare retry lives.
+    ChipRun first = lane.submit(1, args, CallConfig{});
+    g_prepare_rc[1] = kLatchedFlowControlDeadlock;
+    ChipRun second = lane.submit(1, args, CallConfig{});
+
+    EXPECT_TRUE(second.done());
+    EXPECT_THROW(second.wait_until(ChipRunLane::Deadline::max()), std::runtime_error);
+    EXPECT_EQ(g_prepare_count[1], 1u) << "latched deadlock was retried as an incompatible prepare";
+    EXPECT_FALSE(lane.poisoned());
+
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
     lane.close();
     worker.finalize();
 }

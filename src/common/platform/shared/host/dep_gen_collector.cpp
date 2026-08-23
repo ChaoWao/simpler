@@ -34,6 +34,7 @@
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "host/profiling_copy.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 DepGenCollector::~DepGenCollector() { stop(); }
 
@@ -47,14 +48,14 @@ int DepGenCollector::init(
 ) {
     if (initialized_) {
         LOG_ERROR("DepGenCollector already initialized");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (num_threads <= 0 || num_threads > PLATFORM_MAX_AICPU_THREADS || alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR(
             "DepGenCollector::init: invalid arguments (num_threads=%d, valid range: 1-%d)", num_threads,
             PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -87,7 +88,7 @@ int DepGenCollector::init(
     void *shm_dev_local = alloc_paired_buffer(shm_size, &shm_host_local);
     if (shm_dev_local == nullptr) {
         LOG_ERROR("DepGenCollector: failed to allocate dep_gen shared memory (%zu bytes)", shm_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::memset(shm_host_local, 0, shm_size);
@@ -104,7 +105,7 @@ int DepGenCollector::init(
         void *dev_ptr = alloc_paired_buffer(buf_size, &host_ptr);
         if (dev_ptr == nullptr) {
             LOG_ERROR("DepGenCollector: failed to allocate DepGenBuffer b=%d", b);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
 
         if (b < PLATFORM_DEP_GEN_SLOT_COUNT) {

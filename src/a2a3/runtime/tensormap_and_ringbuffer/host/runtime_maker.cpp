@@ -58,6 +58,18 @@
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
+// This file returns both kinds of negative status — a latched device code
+// negated, and PTO_RUNTIME_ERR_* for a host-side failure — so a caller can
+// attribute one to a mechanism only while the two bands stay disjoint. The
+// second conjunct is the structural half and holds for any latched code; the
+// first is a spot check on the highest one this runtime defines, so a new
+// four-digit latched code needs the ceiling raised here as well.
+static_assert(
+    PTO2_ERROR_ASYNC_REGISTRATION_FAILED <= PTO_RUNTIME_LATCHED_CODE_MAX &&
+        PTO_RUNTIME_ERR_BASE < -PTO_RUNTIME_LATCHED_CODE_MAX,
+    "host-side C API codes must stay below the negation of every latched device code"
+);
+
 extern "C" const PipelineContract *get_pipeline_contract(void) {
     // Orchestration runs on the device, so this run's own content is confined to
     // its task args. The three pooled regions are built and uploaded once per
@@ -405,11 +417,11 @@ private:
 extern "C" int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out) {
     if (callable == nullptr) {
         LOG_ERROR("Callable pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr || out == nullptr) {
         LOG_ERROR("HostApi or out is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
@@ -419,12 +431,12 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
             callable, api, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash, &out->aicore_image_hash
         ) != 0) {
         LOG_ERROR("Failed to upload ChipCallable buffer");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (const ChildKernelAddr &c : out->kernel_addrs) {
         if (c.func_id < 0 || c.func_id >= RUNTIME_MAX_FUNC_ID) {
             LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, RUNTIME_MAX_FUNC_ID);
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
     }
 
@@ -433,7 +445,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 
     if (orch_so_binary == nullptr || orch_so_size == 0) {
         LOG_ERROR("Orchestration SO binary is required for device orchestration");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     out->orch_so_data = orch_so_binary;
@@ -508,10 +520,10 @@ static bool resolve_arena_sizing(
 extern "C" int prepared_run_config_compatible_impl(
     const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
 ) {
-    if (api == nullptr) return -1;
+    if (api == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
 
     ArenaSizingConfig sizing;
-    if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) return -1;
+    if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) return PTO_RUNTIME_ERR_INTERNAL;
 
     PrebuiltRuntimeArenaCacheProbe probe = make_prebuilt_runtime_arena_cache_probe(sizing);
     void *gm_heap = nullptr;
@@ -858,22 +870,22 @@ extern "C" int bind_callable_to_runtime_impl(
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (orch_args == nullptr) {
         LOG_ERROR("orch_args pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     // trb runs orchestration on the device — there is no host-side orch
     // function pointer to invoke. The c_api signature accepts one for
     // symmetry with hbg; assert the trb-side invariant here.
     if (host_orch_func_ptr != nullptr) {
         LOG_ERROR("bind_callable_to_runtime_impl: trb does not accept a host_orch_func_ptr");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int tensor_count = orch_args->tensor_count();
@@ -885,7 +897,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     ArenaSizingConfig sizing;
     if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // The retained temporary buffer is always used on the trb path — it is an
@@ -895,7 +907,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // bump-slice from it.
     RetainedTempBump bump;
     if (!bump.begin(api, orch_args)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     auto bind_cleanup = RAIIScopeGuard([&]() {
@@ -904,7 +916,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     ChipStorageTaskArgs device_args;
     if (!stage_device_args(runtime, api, orch_args, signature, sig_count, &bump, &device_args)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     apply_orch_sched_env_flags(runtime);
@@ -915,7 +927,7 @@ extern "C" int bind_callable_to_runtime_impl(
         PrebuiltRuntimeArenaCacheProbe cache_probe = make_prebuilt_runtime_arena_cache_probe(sizing);
         int cache_rc = bind_cached_runtime_image(runtime, api, cache_probe, device_args);
         if (cache_rc < 0) {
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         if (cache_rc != 0) {
             // Miss: build + upload the arena image, then wire the runtime
@@ -927,7 +939,7 @@ extern "C" int bind_callable_to_runtime_impl(
             StaticArenaPtrs ptrs;
             PTO2RuntimeArenaLayout layout;
             if (!build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout)) {
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             runtime->set_orch_args(device_args);
             runtime->set_gm_sm_ptr(ptrs.gm_sm);
@@ -960,16 +972,16 @@ extern "C" int prewarm_config_impl(
 ) {
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     ArenaSizingConfig sizing;
     if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     STRACE("chip.prewarm.build");
-    return build_and_cache_prebuilt_arena(api, sizing) ? 0 : -1;
+    return build_and_cache_prebuilt_arena(api, sizing) ? 0 : PTO_RUNTIME_ERR_INTERNAL;
 }
 
 /**
@@ -988,11 +1000,11 @@ extern "C" int prewarm_config_impl(
 extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int rc = 0;

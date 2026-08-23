@@ -69,7 +69,7 @@ int KernelArgsHelper::init_runtime_args(const Runtime &host_runtime, MemoryAlloc
         void *runtime_dev = allocator_->alloc(runtime_size);
         if (runtime_dev == nullptr) {
             LOG_ERROR("Alloc for runtime_args failed");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         args.runtime_args = reinterpret_cast<Runtime *>(runtime_dev);
     }
@@ -98,7 +98,7 @@ int KernelArgsHelper::init_device_kernel_args(MemoryAllocator &allocator) {
         void *dev_ptr = allocator_->alloc(sizeof(KernelArgs));
         if (dev_ptr == nullptr) {
             LOG_ERROR("Alloc for device KernelArgs failed");
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         device_k_args_ = reinterpret_cast<KernelArgs *>(dev_ptr);
     }

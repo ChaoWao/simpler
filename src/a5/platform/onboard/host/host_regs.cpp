@@ -18,6 +18,7 @@
 #include "common/unified_log.h"
 #include "common/platform_config.h"
 #include "common/acl_hal_device.h"
+#include "pto_runtime_c_api.h"
 #include "runtime/rt.h"
 #include "ascend_hal.h"  // CANN HAL API definitions
 #include <dlfcn.h>
@@ -37,7 +38,7 @@ static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
 
     if (halFunc == nullptr) {
         LOG_ERROR("halResMap not found in symbol table");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     const int64_t phys_device_id = pto::acl_to_hal_device_id(device_id);
@@ -106,7 +107,7 @@ static int get_aicore_regs(std::vector<int64_t> &regs, uint64_t device_id) {
 int init_aicore_register_addresses(uint64_t *runtime_regs_ptr, uint64_t device_id, MemoryAllocator &allocator) {
     if (runtime_regs_ptr == nullptr) {
         LOG_ERROR("init_aicore_register_addresses: Invalid parameters");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Step 1: Get register addresses from HAL
@@ -122,7 +123,7 @@ int init_aicore_register_addresses(uint64_t *runtime_regs_ptr, uint64_t device_i
     void *reg_ptr = allocator.alloc(regs_size);
     if (reg_ptr == nullptr) {
         LOG_ERROR("Failed to allocate device memory for register addresses");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Step 3: Copy register addresses to device memory
@@ -130,7 +131,7 @@ int init_aicore_register_addresses(uint64_t *runtime_regs_ptr, uint64_t device_i
     if (ret != 0) {
         LOG_ERROR("Failed to copy register addresses to device (rc=%d)", ret);
         allocator.free(reg_ptr);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Step 4: Store device pointer in output regs field

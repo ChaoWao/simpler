@@ -47,7 +47,8 @@
  * copied, or used for overlapping runs while it contains a prepared run. The
  * caller must serialize phase functions for a given context/storage pair;
  * poll/wait/finalize are not concurrent operations on the same run.
- * Error codes: 0 = success, negative = error.
+ * Error codes: 0 = success, negative = error — see the two disjoint negative
+ * bands documented on the PTO_RUNTIME_ERR_* enum below.
  */
 
 #pragma once
@@ -70,14 +71,41 @@ extern "C" {
 typedef void *RuntimeHandle;
 typedef void *DeviceContextHandle;
 
+/**
+ * Host-side status codes, and the band they are confined to.
+ *
+ * A negative return from any entry point below names one of two mechanisms, and
+ * a caller must be able to tell which from the number alone:
+ *
+ *   - a **device-latched** runtime code, reported as its own value negated.
+ *     Orchestration codes occupy 1..99 and scheduler codes 100 upwards, so the
+ *     latched band is -1..-PTO_RUNTIME_LATCHED_CODE_MAX (the codes themselves
+ *     are PTO2_ERROR_* in src/{arch}/runtime/{runtime}/common/pto_runtime_status.h;
+ *     the per-code triage tables are in
+ *     docs/troubleshooting/device-error-codes.md).
+ *   - a **host-side** code from this enum, at or below PTO_RUNTIME_ERR_BASE.
+ *
+ * The two bands are disjoint, and a static_assert in each runtime's
+ * runtime_maker.cpp holds them apart. So a host-side failure never reports -1
+ * (which is SCOPE_DEADLOCK) or -3 (FLOW_CONTROL_DEADLOCK): it reports
+ * PTO_RUNTIME_ERR_INTERNAL, or a more specific code from this band.
+ */
 enum {
-    PTO_RUNTIME_ERR_UNSUPPORTED = -2,
-    PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE = -3,
+    /* Ceiling on a device-latched code, and therefore the floor of the latched
+       band once negated. */
+    PTO_RUNTIME_LATCHED_CODE_MAX = 999,
+    /* Highest host-side code; the band descends from here. */
+    PTO_RUNTIME_ERR_BASE = -(PTO_RUNTIME_LATCHED_CODE_MAX + 1),
+    /* A host-side failure whose diagnosis is the log line that preceded it. */
+    PTO_RUNTIME_ERR_INTERNAL = PTO_RUNTIME_ERR_BASE,
+    /* The request names a capability this platform/runtime does not implement. */
+    PTO_RUNTIME_ERR_UNSUPPORTED = PTO_RUNTIME_ERR_BASE - 1,
+    PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE = PTO_RUNTIME_ERR_BASE - 2,
 };
 
 /** Return values from simpler_poll_run(). */
 enum {
-    SIMPLER_NATIVE_RUN_POLL_ERROR = -1,
+    SIMPLER_NATIVE_RUN_POLL_ERROR = PTO_RUNTIME_ERR_INTERNAL,
     SIMPLER_NATIVE_RUN_POLL_NOT_READY = 0,
     SIMPLER_NATIVE_RUN_POLL_COMPLETE = 1,
 };

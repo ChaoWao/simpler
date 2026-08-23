@@ -91,6 +91,7 @@
 #include <vector>
 
 #include "common/unified_log.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 namespace profiling_common {
 
@@ -535,7 +536,7 @@ public:
                 static_cast<const void *>(host_field), static_cast<const void *>(host_field + size),
                 static_cast<const void *>(host_base), static_cast<const void *>(host_base + shm_size_)
             );
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         size_t offset = static_cast<size_t>(host_field - host_base);
         void *dev_field = static_cast<char *>(shared_mem_dev_) + offset;
@@ -570,7 +571,7 @@ public:
                 static_cast<const void *>(host_field), static_cast<const void *>(host_field + size),
                 static_cast<const void *>(host_base), static_cast<const void *>(host_base + shm_size_)
             );
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
         size_t offset = static_cast<size_t>(host_field - host_base);
         const void *dev_field = static_cast<const char *>(shared_mem_dev_) + offset;

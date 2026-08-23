@@ -207,6 +207,7 @@
 #include "common/unified_log.h"
 #include "host/buffer_pool_manager.h"
 #include "host/profiling_copy.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 namespace profiling_common {
 
@@ -257,7 +258,7 @@ using ProfFreeCallback = std::function<int(void *dev_ptr)>;
  *       set_memory_context(...);
  *       InitRollbackGuard<Manager> guard(manager_, free_cb);
  *       void *dev_ptr = alloc_paired_buffer(size, &host_ptr);
- *       if (dev_ptr == nullptr) return -1;       // guard runs, frees nothing yet
+ *       if (dev_ptr == nullptr) return PTO_RUNTIME_ERR_INTERNAL;       // guard runs, frees nothing yet
  *       ...
  *       void *direct = alloc_cb(...);
  *       guard.add_direct_ptr(direct);            // ensure it's freed on abort
@@ -890,12 +891,13 @@ public:
             // Capture `this` so the malloc'd shadow can be registered as
             // framework-owned via the manager.
             auto copy_to_device = copy_to_device_;
-            ops.reg = [this, copy_to_device](void *dev_ptr, size_t size, int /*device_id*/, void **host_ptr_out) {
-                if (host_ptr_out == nullptr) return -1;
+            ops.reg = [this,
+                       copy_to_device](void *dev_ptr, size_t size, int /*device_id*/, void **host_ptr_out) -> int {
+                if (host_ptr_out == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
                 void *host_ptr = std::malloc(size);
                 if (host_ptr == nullptr) {
                     *host_ptr_out = nullptr;
-                    return -1;
+                    return PTO_RUNTIME_ERR_INTERNAL;
                 }
                 std::memset(host_ptr, 0, size);
                 int rc = copy_to_device(dev_ptr, host_ptr, size);

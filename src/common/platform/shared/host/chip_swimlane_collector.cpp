@@ -35,6 +35,7 @@
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "host/profiling_copy.h"
+#include "../../../worker/pto_runtime_c_api.h"
 
 // =============================================================================
 // ChipSwimlaneCollector Implementation
@@ -89,27 +90,27 @@ int ChipSwimlaneCollector::initialize(
 ) {
     if (shm_host_ != nullptr) {
         LOG_ERROR("ChipSwimlaneCollector already initialized");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // register_cb may legitimately be null on simulation / non-SVM platforms;
     // alloc and free callbacks are mandatory. Matches dep_gen / pmu / scope_stats.
     if (alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR("ChipSwimlaneCollector::initialize: alloc_cb/free_cb must be non-null");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     LOG_INFO("Initializing performance profiling");
 
     if (num_aicore <= 0 || num_aicore > PLATFORM_MAX_CORES) {
         LOG_ERROR("Invalid number of AICores: %d (max=%d)", num_aicore, PLATFORM_MAX_CORES);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (aicpu_thread_num <= 0 || aicpu_thread_num > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(
             "Invalid number of AICPU threads: %d (valid range: 1-%d)", aicpu_thread_num, PLATFORM_MAX_AICPU_THREADS
         );
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -171,7 +172,7 @@ int ChipSwimlaneCollector::initialize(
     void *perf_dev_ptr = alloc_paired_buffer(total_size, &perf_host_ptr);
     if (perf_dev_ptr == nullptr) {
         LOG_ERROR("Failed to allocate shared memory (%zu bytes)", total_size);
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     LOG_DEBUG("Allocated shared memory: dev=%p host=%p", perf_dev_ptr, perf_host_ptr);
 
@@ -228,7 +229,7 @@ int ChipSwimlaneCollector::initialize(
             "ChipSwimlaneAicpuTask", num_aicore, aicpu_thread_num, kAicpuSurplusPerCore,
             decltype(manager_)::kRecycledQueueCapacity
         )) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (int i = 0; i < num_aicore; i++) {
         ChipSwimlaneAicpuTaskPool *state = get_perf_buffer_state(perf_host_ptr, i);
@@ -245,7 +246,7 @@ int ChipSwimlaneCollector::initialize(
             void *dev_buf_ptr = alloc_paired_buffer(sizeof(ChipSwimlaneAicpuTaskBuffer), &host_buf_ptr);
             if (dev_buf_ptr == nullptr) {
                 LOG_ERROR("Failed to allocate ChipSwimlaneAicpuTaskBuffer for core %d, buffer %d", i, s);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             ChipSwimlaneAicpuTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicpuTaskBuffer *>(host_buf_ptr);
             memset(buf, 0, sizeof(ChipSwimlaneAicpuTaskBuffer));
@@ -276,7 +277,7 @@ int ChipSwimlaneCollector::initialize(
             "ChipSwimlaneAicoreTask", num_aicore, aicpu_thread_num, kAicoreSurplusPerCore,
             decltype(manager_)::kRecycledQueueCapacity
         )) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (int i = 0; i < num_aicore; i++) {
         ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(perf_host_ptr, num_aicore, i);
@@ -288,7 +289,7 @@ int ChipSwimlaneCollector::initialize(
             void *dev_buf_ptr = alloc_paired_buffer(sizeof(ChipSwimlaneAicoreTaskBuffer), &host_buf_ptr);
             if (dev_buf_ptr == nullptr) {
                 LOG_ERROR("Failed to allocate ChipSwimlaneAicoreTaskBuffer for core %d, buffer %d", i, s);
-                return -1;
+                return PTO_RUNTIME_ERR_INTERNAL;
             }
             ChipSwimlaneAicoreTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicoreTaskBuffer *>(host_buf_ptr);
             memset(buf, 0, sizeof(ChipSwimlaneAicoreTaskBuffer));
@@ -334,7 +335,7 @@ int ChipSwimlaneCollector::initialize(
             LOG_ERROR(
                 "Failed to allocate chip_swimlane_aicore_rotation_table (rotation) table (%zu bytes)", table_bytes
             );
-            return -1;
+            return PTO_RUNTIME_ERR_INTERNAL;
         }
     }
 
@@ -367,7 +368,7 @@ int ChipSwimlaneCollector::initialize(
                 void *dev_buf_ptr = alloc_paired_buffer(buffer_bytes, &host_buf_ptr);
                 if (dev_buf_ptr == nullptr) {
                     LOG_ERROR("Failed to allocate %s phase buffer for thread %d, slot %d", kind_label, t, s);
-                    return -1;
+                    return PTO_RUNTIME_ERR_INTERNAL;
                 }
                 // Zero only the `count` word at the buffer's tail, using the
                 // matching Buffer type. The records payload is overwritten by
@@ -406,7 +407,7 @@ int ChipSwimlaneCollector::initialize(
             /*state_count=*/num_phase_threads, /*buffer_count=*/aicpu_thread_num,
             /*buffers_per_thread=*/PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD, ProfBufferType::AICPU_SCHED_PHASE, "sched"
         ) != 0) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     auto orch_get_state = [](void *base, int n_cores, int t) {
         return get_orch_phase_buffer_state(base, n_cores, t);
@@ -417,7 +418,7 @@ int ChipSwimlaneCollector::initialize(
             /*state_count=*/num_phase_threads, /*buffer_count=*/orch_buffer_count,
             /*buffers_per_thread=*/PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD, ProfBufferType::AICPU_ORCH_PHASE, "orch"
         ) != 0) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     LOG_DEBUG(
         "Initialized %d sched (%d buf/thread) + %d orch (%d buf/thread) PhaseBufferStates", num_phase_threads,
@@ -930,7 +931,7 @@ void ChipSwimlaneCollector::finish_clock_correlation_session() { clock_correlati
 // rebuild, and shrinks this file to a pure dump.
 int ChipSwimlaneCollector::export_swimlane_json() {
     if (shm_host_ == nullptr) {
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     merge_collector_shards();
 
@@ -963,25 +964,25 @@ int ChipSwimlaneCollector::export_swimlane_json() {
     has_any_records = has_any_records || any_phase_records(collected_sched_phase_records_) || has_aicpu_orch_phases;
     if (!has_any_records) {
         LOG_WARN("Warning: No performance data to export.");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (has_aicpu_orch_phases && host_orchestrated_) {
         LOG_ERROR("Both host and AICPU orchestrator records are present; refusing mixed clock-domain export");
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::error_code ec;
     std::filesystem::create_directories(output_prefix_, ec);
     if (ec) {
         LOG_ERROR("Error: Failed to create output directory %s: %s", output_prefix_.c_str(), ec.message().c_str());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     std::string filepath = output_prefix_ + "/chip_swimlane_records.json";
     std::ofstream outfile(filepath);
     if (!outfile.is_open()) {
         LOG_ERROR("Error: Failed to open file: %s", filepath.c_str());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int chip_swimlane_level = static_cast<int>(chip_swimlane_level_);
@@ -1269,7 +1270,7 @@ int ChipSwimlaneCollector::export_swimlane_json() {
 
     if (!outfile) {
         LOG_ERROR("Failed to write JSON file (stream error): %s", filepath.c_str());
-        return -1;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     LOG_INFO("=== JSON Export Complete ===");
