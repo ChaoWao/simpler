@@ -88,9 +88,11 @@ struct ChipRunLaneState {
     static bool permits_resident_completion(const ChipRunState &run) noexcept {
         // Some diagnostics, notably host_build_graph dep_gen, keep capture
         // state on the submitter thread and export it during finalize. Keep
-        // those depth-one runs on that same thread; the resident owner is for
-        // the normal asynchronous serving path only.
-        return !run.config.diagnostics_any();
+        // those depth-one runs on that same thread. Direct runs also retain
+        // their caller-owned lifecycle: their second submission must be able
+        // to stage against an unfinalized predecessor. The resident owner is
+        // for scheduler-leased asynchronous serving runs only.
+        return run.pipeline_leased && !run.config.diagnostics_any();
     }
 
     bool permits_native_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
@@ -252,10 +254,10 @@ struct ChipRunLaneState {
         }
     }
 
-    bool block_diagnostic_front_on_caller() noexcept {
+    bool block_front_on_caller() noexcept {
         if (fifo.empty()) return false;
         const auto run = fifo.front();
-        if (run->phase != ChipRunState::Phase::LAUNCHED || run->wait_in_progress || permits_resident_completion(*run)) {
+        if (run->phase != ChipRunState::Phase::LAUNCHED || run->wait_in_progress) {
             return false;
         }
         try {
@@ -328,10 +330,11 @@ bool ChipRun::done() {
 bool ChipRun::wait_until(Deadline deadline) {
     if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
     const bool unbounded = deadline == Deadline::max();
-    if (run_->config.diagnostics_any()) {
+    if (run_->config.diagnostics_any() || !run_->pipeline_leased) {
         // Diagnostic finalizers can consume thread-affine capture state. Match
-        // the pre-resident lifecycle: poll (for a bounded wait), or block and
-        // finalize on the submitter/waiter thread for an unbounded wait.
+        // the pre-resident direct lifecycle: poll (for a bounded wait), or
+        // block and finalize on the submitter/waiter thread for an unbounded
+        // wait. This also preserves direct depth-two successor staging.
         while (true) {
             {
                 std::lock_guard<std::mutex> lk(lane_->mu);
@@ -339,7 +342,7 @@ bool ChipRun::wait_until(Deadline deadline) {
                     ChipRunLaneState::rethrow_run_error(run_);
                     return true;
                 }
-                if (unbounded && lane_->block_diagnostic_front_on_caller()) continue;
+                if (unbounded && lane_->block_front_on_caller()) continue;
             }
             if (Clock::now() >= deadline) return false;
             std::this_thread::yield();
