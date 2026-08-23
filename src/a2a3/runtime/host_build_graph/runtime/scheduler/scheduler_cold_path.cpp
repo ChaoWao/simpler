@@ -1082,7 +1082,7 @@ void SchedulerContext::on_orchestration_done(
     }
 
     // Fold tasks completed inline during orchestration
-    int32_t inline_completed = static_cast<int32_t>(rt->orchestrator.inline_completed_tasks);
+    int32_t inline_completed = static_cast<int32_t>(rt->inline_completed_tasks);
     if (inline_completed > 0) {
         completed_tasks_.fetch_add(inline_completed, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING

@@ -395,8 +395,6 @@ struct GraphRecording {
     // (the shape every generated orchestration uses) would therefore record a
     // node with no edge to its actual producer, and the Definition would replay
     // a DAG the same body never had when submitted task by task.
-    DeviceArena tensor_map_arena;
-    PTO2TensorMapLayout tensor_map_layout{};
     PTO2TensorMap tensor_map{};
     bool tensor_map_ready{false};
     // Scope depth as the body sees it. begin_scope/end_scope leave the real
@@ -556,19 +554,14 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // is no ordinary-path fallback left to take.
 constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 
-// Stand the recording's hazard map up on its own host allocation. Failure is
+// Stand the recording's hazard map up on its own allocation. Failure is
 // reported to the caller, which is still before the outer shell is submitted and
 // so can still take the ordinary path, rather than producing a Definition with
 // inferred edges missing.
 bool graph_recording_init_tensor_map(GraphRecording &recording) {
-    recording.tensor_map_layout = PTO2TensorMap::reserve_layout(
-        recording.tensor_map_arena, PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES
-    );
-    if (recording.tensor_map_arena.commit() == nullptr) return false;
-    if (!recording.tensor_map.init_data_from_layout(recording.tensor_map_layout, recording.tensor_map_arena)) {
+    if (!recording.tensor_map.init(PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
         return false;
     }
-    recording.tensor_map.wire_arena_pointers(recording.tensor_map_layout, recording.tensor_map_arena);
     recording.tensor_map_ready = true;
     return true;
 }
@@ -940,7 +933,8 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
         memset(
-            orch->fanin_seen_epoch, 0, static_cast<size_t>(orch->sm_header->ring.task_window_size) * sizeof(uint32_t)
+            orch->fanin_seen_epoch.get(), 0,
+            static_cast<size_t>(orch->sm_header->ring.task_window_size) * sizeof(uint32_t)
         );
         next = 1;
     }
@@ -975,7 +969,7 @@ struct PTO2FaninBuilder {
         if (prod_ring >= PTO2_MAX_RING_DEPTH || prod_slot < 0) {
             return false;
         }
-        uint32_t *seen = orch->fanin_seen_epoch;
+        uint32_t *seen = orch->fanin_seen_epoch.get();
         uint32_t slot = static_cast<uint32_t>(prod_slot);
         if (seen[slot] == seen_epoch) {
             return true;
@@ -1152,11 +1146,9 @@ static bool prepare_task(
 
 static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *task_slot_state) {
     if (orch->scope_tasks_size >= orch->scope_tasks_capacity) {
-        // scope_tasks lives in the per-Worker arena (single backing allocation),
-        // so realloc is not legal. Capacity is the total in-flight slot budget
-        // (the runtime task window; see reserve_layout) — hitting it means the
-        // ring is saturated, so no further push could succeed regardless of
-        // buffer growth.
+        // Capacity is the total in-flight slot budget (the runtime task window;
+        // see PTO2OrchestratorState::init) — hitting it means the ring is
+        // saturated, so no further push could succeed regardless of buffer growth.
         orch->report_fatal(
             PTO2_ERROR_SCOPE_TASKS_OVERFLOW, __FUNCTION__,
             "scope_tasks buffer saturated at %d entries (all rings full)", orch->scope_tasks_capacity

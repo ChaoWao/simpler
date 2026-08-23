@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <vector>
 
-#include "utils/device_arena.h"
 #include "pto_tensormap.h"
 
 namespace {
@@ -58,19 +57,8 @@ protected:
     static constexpr int32_t WINDOW_SIZE = 32;
 
     PTO2TensorMap tmap{};
-    DeviceArena arena;
 
-    void SetUp() override {
-        auto layout = PTO2TensorMap::reserve_layout(arena, NUM_BUCKETS, POOL_SIZE, WINDOW_SIZE);
-        ASSERT_NE(arena.commit(), nullptr);
-        ASSERT_TRUE(tmap.init_data_from_layout(layout, arena));
-        tmap.wire_arena_pointers(layout, arena);
-    }
-
-    void TearDown() override {
-        tmap.destroy();
-        arena.release();
-    }
+    void SetUp() override { ASSERT_TRUE(tmap.init(NUM_BUCKETS, POOL_SIZE, WINDOW_SIZE)); }
 };
 
 // Completion progress alone cannot make an older producer disappear. Direct

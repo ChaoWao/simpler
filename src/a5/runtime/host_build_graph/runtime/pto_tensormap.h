@@ -16,8 +16,12 @@
  * - Maps ChipTensor -> producer task ID
  * - Used by pto_submit_task() to find dependencies
  *
+ * host_build_graph runs its orchestrator on the host, so this map is host-only
+ * state: it owns its four arrays outright rather than addressing them as offsets
+ * into a device-shaped arena. Nothing here is copied to the device.
+ *
  * Key design features:
- * 1. Fixed-capacity arena pool for entries (no malloc/free)
+ * 1. Fixed-capacity entry pool (no per-entry malloc/free)
  * 2. Task completion does not retire entries; a producer stays visible until
  *    dependency computation explicitly removes it as semantically covered
  * 3. Per-task entry tracking for explicit removal
@@ -43,9 +47,10 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common.h"
 #include "profiling_config.h"
-#include "utils/device_arena.h"
 #include "pto_runtime2_types.h"
 #include "tensor.h"
 
@@ -64,23 +69,6 @@ struct Segment {
 
     bool line_segment_intersection(const Segment &other) const { return end > other.begin && other.end > begin; }
     bool contains(const Segment &other) const { return begin <= other.begin && other.end <= end; }
-};
-
-/**
- * Layout descriptor produced by PTO2TensorMap::reserve_layout(). Stores the
- * region offsets returned by DeviceArena::reserve() so init_from_layout()
- * can fetch the matching pointers after the arena is committed.
- *
- * All offsets are relative to the arena's base.
- */
-struct PTO2TensorMapLayout {
-    size_t off_buckets;
-    size_t off_entry_pool;
-    size_t off_free_entry_list;
-    size_t off_task_entry_heads;
-    int32_t num_buckets;
-    int32_t pool_size;
-    int32_t task_window_size;
 };
 
 // TensorMap Lookup Profiling (must precede inline lookup/insert methods).
@@ -357,23 +345,26 @@ static_assert(
  * TensorMap structure
  *
  * Hash table with a fixed-capacity entry pool and no watermark invalidation.
+ * Owns its four arrays; init() sizes them and leaves the map empty.
  */
 struct PTO2TensorMap {
-    // Hash table buckets (fixed size, power of 2)
-    PTO2TensorMapEntry **buckets;  // Array of offsets into entry_pool (-1 = empty)
-    int32_t num_buckets;           // Must be power of 2 for fast modulo
+    // Hash table buckets (fixed size, power of 2). An empty bucket is nullptr.
+    std::unique_ptr<PTO2TensorMapEntry *[]> buckets;
+    int32_t num_buckets{0};  // Must be power of 2 for fast modulo
 
-    // Entry pool: bump allocation plus reuse of explicitly removed entries.
-    PTO2TensorMapEntry *entry_pool;
-    PTO2TensorMapEntry **free_entry_list;
-    int32_t pool_size;       // Total pool capacity
-    int32_t next_entry_idx;  // id when next entry insert
-    int32_t free_num;        // free entry number in entry pool
+    // Entry pool: bump allocation plus reuse of explicitly removed entries. A
+    // linked entry is reached by pointer, so the pool is allocated once at
+    // pool_size and never resized.
+    std::unique_ptr<PTO2TensorMapEntry[]> entry_pool;
+    std::unique_ptr<PTO2TensorMapEntry *[]> free_entry_list;
+    int32_t pool_size{0};       // Total pool capacity
+    int32_t next_entry_idx{0};  // id when next entry insert
+    int32_t free_num{0};        // free entry number in entry pool
 
     // Per-task entry tracking for O(1) unlinking of covered producers.
     // Indexed by [local_id & (task_window_size - 1)]
-    PTO2TensorMapEntry **task_entry_heads;
-    int32_t task_window_size;  // Task window size (for slot masking)
+    std::unique_ptr<PTO2TensorMapEntry *[]> task_entry_heads;
+    int32_t task_window_size{0};  // Task window size (for slot masking)
 
     uint32_t get_task_local_id_slot(uint32_t task_local_id) const { return task_local_id & (task_window_size - 1); }
 
@@ -396,7 +387,7 @@ struct PTO2TensorMap {
         }
         always_assert(next_entry_idx < pool_size);
         PTO2TensorMapEntry *res = &entry_pool[next_entry_idx++];
-        // Init-on-write: the pool is not pre-zeroed (init_data_from_layout skips
+        // Init-on-write: the pool is not pre-zeroed (init() skips
         // the O(pool_size) memset), so put this fresh slot into the same clean
         // unlinked state free_entry() leaves recycled slots in. The insert path
         // overwrites the remaining fields exactly as it does for a recycled slot,
@@ -439,40 +430,25 @@ struct PTO2TensorMap {
     // =============================================================================
 
     /**
-     * Phase 1: reserve every sub-region (buckets, entry_pool, free list, per-ring
-     * task_entry_heads) on the supplied arena. Records the resulting offsets in
-     * the returned layout descriptor. Must be called before the arena is
-     * committed.
+     * Allocate the four arrays and leave the map empty. num_buckets must be a
+     * power of two; task_window_size must be a power of two, since a producer's
+     * task chain is selected by `local_id & (task_window_size - 1)`.
+     *
+     * Returns false when an allocation fails, so a caller that still has an
+     * alternative path can take it rather than proceed without a hazard map.
+     *
+     * Clearing is O(num_buckets + task_window_size), not O(pool_size): the entry
+     * pool is left uninitialized and new_entry() puts each slot into the clean
+     * unlinked state on first use, and free_entry_list is a stack meaningful only
+     * below free_num.
      */
-    static PTO2TensorMapLayout
-    reserve_layout(DeviceArena &arena, int32_t num_buckets, int32_t pool_size, int32_t task_window_size);
+    bool init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size);
 
     /**
-     * Same as reserve_layout() with default sizes (PTO2_TENSORMAP_NUM_BUCKETS,
+     * Same as init() with default sizes (PTO2_TENSORMAP_NUM_BUCKETS,
      * PTO2_TENSORMAP_POOL_SIZE).
      */
-    static PTO2TensorMapLayout reserve_layout_default(DeviceArena &arena, int32_t task_window_size);
-
-    /**
-     * Phase 3a: write everything *except* arena-internal pointer fields
-     * (buckets, entry_pool, free_entry_list, task_entry_heads).
-     * Uses arena.region_ptr to address the arena regions for data writes,
-     * but does not store those addresses in struct fields. Safe to call on
-     * a host arena that holds the prebuilt image.
-     */
-    bool init_data_from_layout(const PTO2TensorMapLayout &layout, DeviceArena &arena);
-
-    /**
-     * Phase 3b: write the arena-internal pointer fields. Idempotent;
-     * called once on the host arena and once on the AICPU after attach.
-     */
-    void wire_arena_pointers(const PTO2TensorMapLayout &layout, DeviceArena &arena);
-
-    /**
-     * Tear down state. Does not free memory — the arena owns the backing
-     * buffer. Pointers are set to nullptr so accidental reuse traps.
-     */
-    void destroy();
+    bool init_default(int32_t new_task_window_size);
 
     /**
      * Lookup producer for a tensor region

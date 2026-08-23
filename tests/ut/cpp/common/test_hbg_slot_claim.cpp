@@ -33,7 +33,6 @@ protected:
     PTO2SharedMemoryHandle *sm_handle = nullptr;
     PTO2OrchestratorState orch{};
     PTO2SchedulerState sched{};
-    PTO2OrchestratorLayout orch_layout{};
     PTO2SchedulerLayout sched_layout{};
     GraphHostStatePtr graph_state;
     std::vector<char> gm_heap;
@@ -45,16 +44,12 @@ protected:
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(HEAP_BYTES * PTO2_MAX_RING_DEPTH);
 
-        orch_layout = PTO2OrchestratorState::reserve_layout(runtime_arena, static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE));
         sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
-        ASSERT_TRUE(orch.init_data_from_layout(
-            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE
-        ));
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
-        orch.wire_arena_pointers(orch_layout, runtime_arena, &sched);
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE, &sched));
 
         graph_state = make_graph_host_state();
         ASSERT_NE(graph_state, nullptr);
@@ -64,7 +59,6 @@ protected:
     void TearDown() override {
         orch.graph_host_state = nullptr;
         graph_state.reset();
-        orch.destroy();
         sched.destroy();
         runtime_arena.release();
         sm_arena.release();
