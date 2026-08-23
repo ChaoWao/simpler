@@ -37,6 +37,7 @@ public:
 
     bool done();
     bool wait_until(Deadline deadline);
+    void prepare();
     void activate();
     void abandon();
 

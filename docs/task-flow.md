@@ -379,10 +379,10 @@ prepared-but-not-launched run.
 
 A direct A2/A3 chip endpoint with a negotiated depth of at least two uses two
 task frames and advertises `supports_frame_staging`. One `WorkerThread` owns
-both frames and drives them through a non-blocking progress interface; the
-child process likewise has one loop that services control traffic, both task
-frames, and the bounded active/prepared native lifecycles. There is no thread
-per frame.
+both frames and drives them through a non-blocking progress interface. In the
+child process, the mailbox loop services control traffic and both task frames,
+while one resident C++ lifecycle thread per chip lane blocks on the launched
+native token's device completion. There is no thread per frame or per run.
 
 The active and successor paths are:
 
@@ -390,6 +390,9 @@ The active and successor paths are:
 IDLE -> TASK_READY    -> FRAME_STAGED -> TASK_LAUNCHED -> TASK_DONE | TASK_FAILED
 IDLE -> PREPARE_READY -> FRAME_STAGED -> ACTIVATE -> TASK_LAUNCHED
                                                -> TASK_DONE | TASK_FAILED
+IDLE -> NATIVE_PREPARE_READY -> FRAME_STAGED -> ACTIVATE -> TASK_LAUNCHED
+                                                      -> TASK_DONE | TASK_FAILED
+                                     -> ABANDON -> TASK_FAILED
 ```
 
 `FRAME_STAGED` means that the child owns an immutable frame snapshot; it does
@@ -411,16 +414,29 @@ between these meanings.
 
 An HBG successor's prepared token remains unlaunched and unaccepted until
 `ACTIVATE`, and activation still cannot launch it until the predecessor has
-polled complete and finalized. The sticky acceptance word therefore remains
-zero throughout preparation. Shutdown, stale activation, and pre-launch
-failure finalize the token exactly once before the frame becomes terminal.
+completed and finalized. The resident lifecycle thread owns the launched
+native token's blocking wait and finalizes outside the lane mutex; it takes the
+mutex only to publish terminal state and launch the successor. The mailbox
+loop uses a short, bounded wait for launched handles so the binding releases
+the GIL and does not starve that lifecycle thread, while unlaunched handles
+remain non-blocking status probes. The sticky acceptance word therefore
+remains zero throughout preparation. Shutdown, stale activation, and
+pre-launch failure finalize the token exactly once before the frame becomes
+terminal.
 
 The scheduler stages only the first eligible single NEXT_LEVEL task from the
-prepared FIFO successor. Tasks from the active run use only the active lane, so
-the second frame cannot create same-device execution overlap. Prepared groups
-remain on their normal queue and dispatch synchronously after FIFO promotion.
-Remote, SUB, A5, simulation, nested-worker, and single-frame endpoints retain
-the blocking compatibility path.
+prepared FIFO successor. A prepared group never crosses the whole-run FIFO;
+the second frame therefore cannot create same-device execution overlap. A
+non-diagnostic NEXT_LEVEL group whose members all target local two-frame endpoints uses a
+group barrier: the scheduler publishes every member as
+`NATIVE_PREPARE_READY`, keeps all target workers reserved, and publishes no
+`ACTIVATE` until every member has completed native bind/prepare and then
+reported `FRAME_STAGED` with disposition `NATIVE_PREPARED`. It activates every
+member in the same scheduler progress pass. If preparation of one member fails, staged peers receive
+`ABANDON`; the child releases each unlaunched native run and acknowledges
+`TASK_FAILED`, so a partial group can never launch. Diagnostic groups and
+remote, SUB, A5, simulation, nested-worker, and single-frame endpoints retain
+the compatibility path.
 
 The child validates newly visible metadata from both frames before selecting
 the next active `dispatch_id`. It prepares that active token first; preparation
@@ -750,9 +766,9 @@ Step-by-step (one chip worker):
 | 2 | `Worker::run` | `scope_begin` → call `my_orch(&orch_, args.view(), cfg)` |
 | 3 | `Orchestrator::submit_next_level` | `slot = ring.alloc()`; move `chip_args` into `slot.task_args`; walk tags → `tensormap.lookup(a.data)`, `tensormap.lookup(b.data)`, `tensormap.insert(c.data, slot)`; push ready |
 | 4 | Scheduler thread | pop `slot` from worker 0's FIFO; resolve stable worker ID 0 to WT_chip_0; dispatch |
-| 5 | WT_chip_0 parent side | encode one leased task frame: write `config`, digest prefix, and the args blob; publish `TASK_READY` for the active lane or `PREPARE_READY` for a staged successor |
+| 5 | WT_chip_0 parent side | encode one leased task frame: write `config`, digest prefix, and the args blob; publish `TASK_READY` for the active lane, `PREPARE_READY` for a staged successor, or `NATIVE_PREPARE_READY` for a local group barrier member |
 | 6 | chip_0 child process | validate the frame and resolve its digest; ordinary HBG with an active predecessor also prepares the leased inactive arena bank before publishing `FRAME_STAGED`, while a frame with no active predecessor, diagnostic HBG, and TMR publish after validation and defer native prepare |
-| 7 | chip_0 native-run path | after activation and the predecessor's finalization fence, launch an already-prepared HBG run or finish deferred native preparation and then launch; poll it to completion and finalize it before another staged frame may launch. Compatibility endpoints perform the equivalent operation through blocking `ChipWorker::run` |
+| 7 | chip_0 native-run path | after activation and the predecessor's finalization fence, launch an already-prepared HBG run or finish deferred native preparation and then launch; the resident lifecycle owner blocks on device completion, finalizes outside the lane mutex, publishes terminal state, and launches the staged successor. Compatibility endpoints perform the equivalent operation through blocking `ChipWorker::run` |
 | 8 | runtime.so | translate host ptrs → device ptrs; dispatch AICPU / AICore; write output into `c`'s shm |
 | 9 | chip_0 child | native finalization returns; write `TASK_DONE` |
 | 10 | WT_chip_0 parent | observe `TASK_DONE`; push success completion |

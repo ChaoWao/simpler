@@ -647,6 +647,7 @@ class _FakeChipRun:
         self.activated = False
         self._launched = False
         self.terminal = False
+        self.wait_calls = 0
         self.error: Optional[BaseException] = None
         self._disposition = worker_mod._VALIDATED_ONLY
 
@@ -667,6 +668,17 @@ class _FakeChipRun:
         self._lane._launch_front()
         self._lane._prepare_successor()
 
+    def prepare(self) -> None:
+        if self.activated or self._launched:
+            raise RuntimeError("cannot prepare an activated fake ChipRun")
+        if self.terminal:
+            self._raise_if_failed()
+            return
+        if not self._lane._runs or self._lane._runs[0] is not self:
+            raise RuntimeError("only the front fake ChipRun can be prepared")
+        if self.token is None:
+            self._lane._prepare(self)
+
     def abandon(self) -> None:
         if self._launched:
             raise RuntimeError("cannot abandon a launched fake ChipRun")
@@ -674,6 +686,11 @@ class _FakeChipRun:
 
     def done(self) -> bool:
         return self._lane._progress(self)
+
+    def wait(self, timeout: float = -1.0) -> bool:
+        del timeout
+        self.wait_calls += 1
+        return self.done()
 
     def _raise_if_failed(self) -> None:
         assert self.terminal
@@ -1112,6 +1129,7 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
             ("launch", 1),
             ("finalize", 1),
         ]
+        assert all(run.wait_calls > 0 for run in harness.cw._impl._runs)
         launch_entries = [event for event in harness.cw._impl.events if event[0] == "launch_enter"]
         assert launch_entries == [
             ("launch_enter", 0, 0, worker_mod._FRAME_STAGED),
@@ -1351,6 +1369,40 @@ def test_two_frame_prepare_ready_waits_for_sticky_activation():
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
         assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+    finally:
+        harness.close()
+
+
+def test_two_frame_prepare_ready_can_be_abandoned_before_activation():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1, state=worker_mod._PREPARE_READY)
+        harness.start()
+        harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert not harness.cw._impl.launched[0].is_set()
+
+        _mailbox_store_i32(harness.state_addr(0), worker_mod._ABANDON)
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+        assert not harness.cw._impl.launched[0].is_set()
+        assert not harness.cw._impl._runs
+    finally:
+        harness.close()
+
+
+def test_two_frame_native_prepare_ready_prepares_before_group_activation():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1, state=worker_mod._NATIVE_PREPARE_READY)
+        harness.start()
+        harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert harness.cw._impl.prepared[0].is_set()
+        assert harness.preparation_disposition(0) == worker_mod._NATIVE_PREPARED
+        assert not harness.cw._impl.launched[0].is_set()
+
+        _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[0].wait(timeout=1.0)
         harness.cw._impl.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:

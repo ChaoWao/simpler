@@ -234,6 +234,12 @@ inline void mailbox_store_i32(uint64_t addr, int32_t v) {
 #endif
 }
 
+inline void mailbox_notify_i32(uint64_t addr) {
+    auto *ptr = reinterpret_cast<int32_t *>(addr);
+    (void)__atomic_add_fetch(ptr, 1, __ATOMIC_RELEASE);
+    mpi_group_mailbox::wake_word(ptr);
+}
+
 inline void bind_worker(nb::module_ &m) {
     // --- WorkerType ---
     nb::enum_<WorkerType>(m, "WorkerType").value("NEXT_LEVEL", WorkerType::NEXT_LEVEL).value("SUB", WorkerType::SUB);
@@ -859,6 +865,7 @@ inline void bind_worker(nb::module_ &m) {
     m.attr("MAILBOX_SIZE") = static_cast<int>(MAILBOX_SIZE);
     m.attr("MAILBOX_FRAME_SIZE") = static_cast<int>(MAILBOX_FRAME_SIZE);
     m.attr("MAILBOX_OFF_ERROR_MSG") = static_cast<int>(MAILBOX_OFF_ERROR_MSG);
+    m.attr("MAILBOX_OFF_NOTIFICATION") = static_cast<int>(MAILBOX_OFF_NOTIFICATION);
     m.attr("MAILBOX_ERROR_MSG_SIZE") = static_cast<int>(MAILBOX_ERROR_MSG_SIZE);
     // The MailboxState values as the C++ side defines them, keyed by
     // enumerator name. They are a cross-process wire contract: the word at
@@ -881,6 +888,8 @@ inline void bind_worker(nb::module_ &m) {
     mailbox_states["TASK_FAILED"] = static_cast<int32_t>(MailboxState::TASK_FAILED);
     mailbox_states["ACTIVATE"] = static_cast<int32_t>(MailboxState::ACTIVATE);
     mailbox_states["PREPARE_READY"] = static_cast<int32_t>(MailboxState::PREPARE_READY);
+    mailbox_states["ABANDON"] = static_cast<int32_t>(MailboxState::ABANDON);
+    mailbox_states["NATIVE_PREPARE_READY"] = static_cast<int32_t>(MailboxState::NATIVE_PREPARE_READY);
     m.attr("MAILBOX_STATE_VALUES") = mailbox_states;
     nb::dict mailbox_dispositions;
     mailbox_dispositions["NONE"] = static_cast<int32_t>(MailboxPreparationDisposition::NONE);
@@ -907,6 +916,13 @@ inline void bind_worker(nb::module_ &m) {
             mailbox_store_i32(addr, value);
         },
         nb::arg("addr"), nb::arg("value"), "Release-store a 32-bit mailbox word at `addr`."
+    );
+    m.def(
+        "_mailbox_notify_i32",
+        [](uint64_t addr) {
+            mailbox_notify_i32(addr);
+        },
+        nb::arg("addr"), "Increment and wake a 32-bit mailbox notification generation at `addr`."
     );
     m.def(
         "_mailbox_wait_i32",

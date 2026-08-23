@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -39,7 +40,7 @@
 namespace {
 
 std::unordered_map<void *, uint32_t> g_slots;
-std::array<bool, 2> g_complete{};
+std::array<std::atomic<bool>, 2> g_complete{};
 std::array<int, 2> g_prepare_rc{};
 std::array<int, 2> g_launch_rc{};
 std::array<int, 2> g_poll_rc{};
@@ -56,8 +57,13 @@ bool g_supports_successor{true};
 std::mutex g_wait_mu;
 std::condition_variable g_wait_cv;
 bool g_wait_entered{false};
-bool g_release_wait{true};
+bool g_release_wait{false};
 std::vector<std::string> g_events;
+
+void record_event(std::string event) {
+    std::lock_guard<std::mutex> lock(g_wait_mu);
+    g_events.push_back(std::move(event));
+}
 
 uint32_t slot_of(void *runtime) { return g_slots.at(runtime); }
 
@@ -66,7 +72,7 @@ int prepare_run(
 ) {
     EXPECT_EQ(slot_of(runtime), descriptor->pipeline_slot);
     g_complete[descriptor->pipeline_slot] = false;
-    g_events.push_back("prepare" + std::to_string(descriptor->pipeline_slot));
+    record_event("prepare" + std::to_string(descriptor->pipeline_slot));
     ++g_prepare_count[descriptor->pipeline_slot];
     if (g_reject_first_prepare[descriptor->pipeline_slot] && g_prepare_count[descriptor->pipeline_slot] == 1) {
         return PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
@@ -76,7 +82,7 @@ int prepare_run(
 
 int launch_run(void *, void *runtime) {
     const uint32_t slot = slot_of(runtime);
-    g_events.push_back("launch" + std::to_string(slot));
+    record_event("launch" + std::to_string(slot));
     return g_launch_rc[slot];
 }
 
@@ -90,13 +96,13 @@ int poll_run(void *, void *runtime) {
 
 int wait_run(void *, void *runtime) {
     const uint32_t slot = slot_of(runtime);
-    g_events.push_back("wait" + std::to_string(slot));
+    record_event("wait" + std::to_string(slot));
     {
         std::unique_lock<std::mutex> lk(g_wait_mu);
         g_wait_entered = true;
         g_wait_cv.notify_all();
-        g_wait_cv.wait(lk, [] {
-            return g_release_wait;
+        g_wait_cv.wait(lk, [slot] {
+            return g_release_wait || g_complete[slot].load();
         });
     }
     g_complete[slot] = true;
@@ -105,7 +111,7 @@ int wait_run(void *, void *runtime) {
 
 int finalize_run(void *, void *runtime) {
     const uint32_t slot = slot_of(runtime);
-    g_events.push_back("finalize" + std::to_string(slot));
+    record_event("finalize" + std::to_string(slot));
     return g_finalize_rc[slot];
 }
 
@@ -113,7 +119,8 @@ int supports_successor(void *) { return g_supports_successor ? 1 : 0; }
 
 void prime_worker(ChipWorker &worker) {
     g_slots.clear();
-    g_complete = {};
+    for (auto &complete : g_complete)
+        complete.store(false);
     g_prepare_rc = {};
     g_launch_rc = {};
     g_poll_rc = {};
@@ -127,9 +134,12 @@ void prime_worker(ChipWorker &worker) {
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
         g_wait_entered = false;
-        g_release_wait = true;
+        g_release_wait = false;
     }
-    g_events.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_wait_mu);
+        g_events.clear();
+    }
     worker.initialized_ = true;
     worker.pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 2, {}};
     worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t));
@@ -150,6 +160,41 @@ ChipRun submit(ChipRunLane &lane, uint64_t run_id, uint32_t slot, bool activate 
     return lane.submit(1, args, CallConfig{}, PipelineSlotLease{slot, 0, run_id}, run_id, run_id, nullptr, 0, activate);
 }
 
+void complete(uint32_t slot) {
+    // Publish the predicate while holding the same mutex used by wait_run.
+    // Atomic storage alone does not prevent a notification from landing
+    // between the predicate check and the condition-variable wait.
+    {
+        std::lock_guard<std::mutex> lock(g_wait_mu);
+        g_complete[slot] = true;
+    }
+    g_wait_cv.notify_all();
+}
+
+bool await_done(ChipRun &run) { return run.wait_until(std::chrono::steady_clock::now() + std::chrono::seconds(5)); }
+
+bool await_terminal(ChipRun &run) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!run.done() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    return run.done();
+}
+
+std::vector<std::string> events_without_wait() {
+    std::lock_guard<std::mutex> lock(g_wait_mu);
+    std::vector<std::string> events;
+    std::copy_if(g_events.begin(), g_events.end(), std::back_inserter(events), [](const std::string &event) {
+        return event.rfind("wait", 0) != 0;
+    });
+    return events;
+}
+
+bool has_event(const std::string &event) {
+    std::lock_guard<std::mutex> lock(g_wait_mu);
+    return std::find(g_events.begin(), g_events.end(), event) != g_events.end();
+}
+
 }  // namespace
 
 TEST(ChipRunLaneTest, OwnsFifoPreparationAndLaunch) {
@@ -160,18 +205,43 @@ TEST(ChipRunLaneTest, OwnsFifoPreparationAndLaunch) {
     ChipRun first = submit(lane, 101, 0);
     ChipRun second = submit(lane, 102, 1, false);
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
 
     second.activate();
     EXPECT_FALSE(second.done());
-    g_complete[0] = true;
-    EXPECT_TRUE(first.done());
+    complete(0);
+    EXPECT_TRUE(await_done(first));
     EXPECT_FALSE(second.done());
     EXPECT_TRUE(second.launched());
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "launch1"}));
+    EXPECT_EQ(
+        events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "launch1"})
+    );
 
-    g_complete[1] = true;
-    EXPECT_TRUE(second.done());
+    complete(1);
+    EXPECT_TRUE(await_done(second));
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, ExplicitPrepareDoesNotLaunchBeforeActivation) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+
+    ChipRun run = submit(lane, 101, 0, false);
+    EXPECT_EQ(run.preparation_disposition(), ChipRunPreparationDisposition::VALIDATED_ONLY);
+    EXPECT_FALSE(run.launched());
+
+    run.prepare();
+    EXPECT_EQ(run.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
+    EXPECT_FALSE(run.launched());
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0"}));
+
+    run.activate();
+    EXPECT_TRUE(run.launched());
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0"}));
+    complete(0);
+    EXPECT_TRUE(await_done(run));
     lane.close();
     worker.finalize();
 }
@@ -188,13 +258,17 @@ TEST(ChipRunLaneTest, ValidationOnlySuccessorPreparesAfterPromotion) {
     ChipRun first = submit(lane, 101, 0);
     ChipRun second = lane.submit(1, args, diagnostic, PipelineSlotLease{1, 0, 102}, 102, 102, nullptr, 0, false);
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::VALIDATED_ONLY);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0"}));
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0"}));
 
     second.activate();
-    g_complete[0] = true;
-    EXPECT_TRUE(first.done());
+    complete(0);
+    EXPECT_TRUE(await_done(first));
     EXPECT_FALSE(second.done());
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "finalize0", "prepare1", "launch1"}));
+    EXPECT_EQ(
+        events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "finalize0", "prepare1", "launch1"})
+    );
+    complete(1);
+    EXPECT_TRUE(await_done(second));
     lane.close();
     worker.finalize();
 }
@@ -208,18 +282,19 @@ TEST(ChipRunLaneTest, IncompatibleSuccessorRetriesAfterPredecessorFence) {
     ChipRun first = submit(lane, 101, 0);
     ChipRun second = submit(lane, 102, 1, false);
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::VALIDATED_ONLY);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
 
     second.activate();
-    g_complete[0] = true;
-    EXPECT_TRUE(first.done());
+    complete(0);
+    EXPECT_TRUE(await_done(first));
     EXPECT_TRUE(second.launched());
     EXPECT_EQ(
-        g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "prepare1", "launch1"})
+        events_without_wait(),
+        (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "prepare1", "launch1"})
     );
 
-    g_complete[1] = true;
-    EXPECT_TRUE(second.done());
+    complete(1);
+    EXPECT_TRUE(await_done(second));
     lane.close();
     worker.finalize();
 }
@@ -234,14 +309,14 @@ TEST(ChipRunLaneTest, EarlierActiveDispatchOrdersBeforeAnAlreadyStagedSuccessor)
     ChipRun active = submit(lane, 101, 0, true);
     EXPECT_TRUE(active.launched());
     EXPECT_EQ(successor.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
 
     successor.activate();
-    g_complete[0] = true;
-    EXPECT_TRUE(active.done());
+    complete(0);
+    EXPECT_TRUE(await_done(active));
     EXPECT_TRUE(successor.launched());
-    g_complete[1] = true;
-    EXPECT_TRUE(successor.done());
+    complete(1);
+    EXPECT_TRUE(await_done(successor));
     lane.close();
     worker.finalize();
 }
@@ -251,13 +326,13 @@ TEST(ChipRunLaneTest, AcceptsCurrentLeaseGenerationAndRejectsOlderOne) {
     prime_worker(worker);
     ChipRunLane lane(worker);
     ChipRun first = submit(lane, 101, 0);
-    g_complete[0] = true;
-    ASSERT_TRUE(first.done());
+    complete(0);
+    ASSERT_TRUE(await_done(first));
 
     ChipStorageTaskArgs args{};
     ChipRun repeated = lane.submit(1, args, CallConfig{}, PipelineSlotLease{0, 0, 101}, 102, 102, nullptr, 0, true);
-    g_complete[0] = true;
-    ASSERT_TRUE(repeated.done());
+    complete(0);
+    ASSERT_TRUE(await_done(repeated));
     EXPECT_THROW(
         lane.submit(1, args, CallConfig{}, PipelineSlotLease{0, 0, 100}, 103, 103, nullptr, 0, true), std::runtime_error
     );
@@ -274,9 +349,32 @@ TEST(ChipRunLaneTest, ActivateStopsAtTheLaunchFenceBeforePolling) {
     run.activate();
     EXPECT_TRUE(run.launched());
     EXPECT_EQ(g_poll_count, 0);
-    g_complete[0] = true;
-    EXPECT_TRUE(run.done());
-    EXPECT_EQ(g_poll_count, 1);
+    complete(0);
+    EXPECT_TRUE(await_done(run));
+    EXPECT_LE(g_poll_count, 1u);
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, ResidentLifecycleLaunchesSuccessorWithoutCallerPolling) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+
+    ChipRun first = submit(lane, 101, 0);
+    ChipRun second = submit(lane, 102, 1, false);
+    second.activate();
+    complete(0);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!second.launched() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(second.launched());
+
+    complete(1);
+    EXPECT_TRUE(second.wait_until(std::chrono::steady_clock::now() + std::chrono::seconds(1)));
+    EXPECT_TRUE(first.done());
     lane.close();
     worker.finalize();
 }
@@ -288,13 +386,13 @@ TEST(ChipRunLaneTest, DirectGenerationDoesNotConsumeTheFirstPipelineLease) {
     ChipStorageTaskArgs args{};
 
     ChipRun direct = lane.submit(1, args, CallConfig{});
-    g_complete[0] = true;
-    ASSERT_TRUE(direct.done());
+    complete(0);
+    ASSERT_TRUE(await_done(direct));
 
     ChipRun leased = submit(lane, 1, 0);
     EXPECT_TRUE(leased.launched());
-    g_complete[0] = true;
-    EXPECT_TRUE(leased.done());
+    complete(0);
+    EXPECT_TRUE(await_done(leased));
     lane.close();
     worker.finalize();
 }
@@ -310,7 +408,7 @@ TEST(ChipRunLaneTest, DirectCapacityTwoPreparesSuccessorAndBackpressuresThird) {
     EXPECT_TRUE(first.launched());
     EXPECT_FALSE(second.launched());
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+    EXPECT_EQ(events_without_wait(), (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
 
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
@@ -336,11 +434,7 @@ TEST(ChipRunLaneTest, DirectCapacityTwoPreparesSuccessorAndBackpressuresThird) {
     EXPECT_TRUE(entered_wait);
     EXPECT_EQ(g_prepare_count[0], 1u) << "third submit prepared before capacity released";
     EXPECT_EQ(g_prepare_count[1], 1u);
-    {
-        std::lock_guard<std::mutex> lk(g_wait_mu);
-        g_release_wait = true;
-    }
-    g_wait_cv.notify_all();
+    complete(0);
     submitter.join();
 
     ASSERT_EQ(submit_error, nullptr);
@@ -350,11 +444,11 @@ TEST(ChipRunLaneTest, DirectCapacityTwoPreparesSuccessorAndBackpressuresThird) {
     EXPECT_EQ(third->preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
     EXPECT_EQ(g_prepare_count[0], 2u);
 
-    g_complete[1] = true;
-    EXPECT_TRUE(second.done());
+    complete(1);
+    EXPECT_TRUE(await_done(second));
     EXPECT_TRUE(third->launched());
-    g_complete[0] = true;
-    EXPECT_TRUE(third->done());
+    complete(0);
+    EXPECT_TRUE(await_done(*third));
     EXPECT_TRUE(first.done());
     lane.close();
     worker.finalize();
@@ -372,13 +466,13 @@ TEST(ChipRunLaneTest, DirectIncompatibleSuccessorRetriesAfterPredecessorFence) {
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::VALIDATED_ONLY);
     EXPECT_EQ(g_prepare_count[1], 1u);
 
-    g_complete[0] = true;
+    complete(0);
     EXPECT_FALSE(second.done());
-    EXPECT_TRUE(first.done());
+    EXPECT_TRUE(await_done(first));
     EXPECT_TRUE(second.launched());
     EXPECT_EQ(g_prepare_count[1], 2u);
-    g_complete[1] = true;
-    EXPECT_TRUE(second.done());
+    complete(1);
+    EXPECT_TRUE(await_done(second));
     lane.close();
     worker.finalize();
 }
@@ -409,8 +503,8 @@ TEST(ChipRunLaneTest, LatchedFlowControlDeadlockIsTerminalRatherThanRetried) {
     EXPECT_EQ(g_prepare_count[1], 1u) << "latched deadlock was retried as an incompatible prepare";
     EXPECT_FALSE(lane.poisoned());
 
-    g_complete[0] = true;
-    EXPECT_TRUE(first.done());
+    complete(0);
+    EXPECT_TRUE(await_done(first));
     lane.close();
     worker.finalize();
 }
@@ -423,14 +517,15 @@ TEST(ChipRunLaneTest, DirectRuntimeWithoutConcurrentPrepareRetainsDepthOne) {
     ChipStorageTaskArgs args{};
 
     ChipRun first = lane.submit(1, args, CallConfig{});
+    complete(0);
     ChipRun second = lane.submit(1, args, CallConfig{});
 
     EXPECT_TRUE(first.done());
     EXPECT_TRUE(second.launched());
     EXPECT_EQ(g_prepare_count[0], 2u);
     EXPECT_EQ(g_prepare_count[1], 0u);
-    g_complete[0] = true;
-    EXPECT_TRUE(second.done());
+    complete(0);
+    EXPECT_TRUE(await_done(second));
     lane.close();
     worker.finalize();
 }
@@ -448,8 +543,8 @@ TEST(ChipRunLaneTest, PrepareFailureIsTerminalWithoutPoisoningTheLane) {
 
     ChipRun successor = submit(lane, 102, 1);
     EXPECT_TRUE(successor.launched());
-    g_complete[1] = true;
-    EXPECT_TRUE(successor.done());
+    complete(1);
+    EXPECT_TRUE(await_done(successor));
     lane.close();
     worker.finalize();
 }
@@ -467,8 +562,8 @@ TEST(ChipRunLaneTest, ReclaimedLaunchFailureDoesNotPoisonTheLane) {
 
     ChipRun successor = submit(lane, 102, 1);
     EXPECT_TRUE(successor.launched());
-    g_complete[1] = true;
-    EXPECT_TRUE(successor.done());
+    complete(1);
+    EXPECT_TRUE(await_done(successor));
     lane.close();
     worker.finalize();
 }
@@ -481,7 +576,7 @@ TEST(ChipRunLaneTest, ExpiredWaitLeavesTheRunLive) {
 
     EXPECT_FALSE(run.wait_until(ChipRunLane::Clock::now()));
     EXPECT_FALSE(run.done());
-    g_complete[0] = true;
+    complete(0);
     EXPECT_TRUE(run.wait_until(ChipRunLane::Deadline::max()));
     lane.close();
     worker.finalize();
@@ -497,18 +592,24 @@ TEST(ChipRunLaneTest, UnboundedWaitBlocksInsteadOfPolling) {
     ChipRunLane lane(worker);
     ChipRun run = submit(lane, 101, 0);
 
-    // Nothing completes this run except wait_run, so a re-polling implementation
-    // would loop forever. The escape hatch keeps that a fast failure with a
-    // readable message rather than a wedged suite: past the bound the stub
-    // completes the run itself, and the assertions below report the poll count.
+    // Complete only after the resident waiter has entered the blocking native
+    // wait. This keeps the assertion deterministic and proves that no polling
+    // loop is required to make progress.
     ASSERT_FALSE(g_complete[0]);
     g_poll_count = 0;
-    g_poll_completes_after = 64;
+    std::thread completer([] {
+        {
+            std::unique_lock<std::mutex> lk(g_wait_mu);
+            (void)g_wait_cv.wait_for(lk, std::chrono::seconds(1), [] {
+                return g_wait_entered;
+            });
+        }
+        complete(0);
+    });
     EXPECT_TRUE(run.wait_until(ChipRunLane::Deadline::max()));
-    g_poll_completes_after = 0;
+    completer.join();
 
-    EXPECT_NE(std::find(g_events.begin(), g_events.end(), "wait0"), g_events.end())
-        << "unbounded wait never reached the device's blocking wait";
+    EXPECT_TRUE(has_event("wait0")) << "unbounded wait never reached the device's blocking wait";
     EXPECT_LE(g_poll_count, 1u) << "unbounded wait polled " << g_poll_count << " times instead of blocking";
     lane.close();
     worker.finalize();
@@ -519,9 +620,9 @@ TEST(ChipRunLaneTest, FinalizeFailurePoisonsAdmissionAndCloseReportsIt) {
     prime_worker(worker);
     ChipRunLane lane(worker);
     ChipRun first = submit(lane, 101, 0);
-    g_complete[0] = true;
     g_finalize_rc[0] = -7;
-    EXPECT_TRUE(first.done());
+    complete(0);
+    EXPECT_TRUE(await_terminal(first));
     EXPECT_THROW(first.wait_until(ChipRunLane::Clock::time_point::max()), std::runtime_error);
     EXPECT_TRUE(lane.poisoned());
 
@@ -533,15 +634,21 @@ TEST(ChipRunLaneTest, FinalizeFailurePoisonsAdmissionAndCloseReportsIt) {
     worker.finalize();
 }
 
-TEST(ChipRunLaneTest, PollFailureReportsTheTerminalNativeError) {
+TEST(ChipRunLaneTest, WaitFailureReportsTheTerminalNativeError) {
     ChipWorker worker;
     prime_worker(worker);
     ChipRunLane lane(worker);
-    ChipRun run = submit(lane, 101, 0);
-    g_poll_rc[0] = SIMPLER_NATIVE_RUN_POLL_ERROR;
     g_wait_rc[0] = 507015;
+    ChipRun run = submit(lane, 101, 0);
+    {
+        std::unique_lock<std::mutex> lk(g_wait_mu);
+        ASSERT_TRUE(g_wait_cv.wait_for(lk, std::chrono::seconds(1), [] {
+            return g_wait_entered;
+        }));
+    }
+    complete(0);
 
-    EXPECT_TRUE(run.done());
+    EXPECT_TRUE(await_terminal(run));
     EXPECT_THROW(run.wait_until(ChipRunLane::Deadline::max()), std::runtime_error);
     try {
         run.wait_until(ChipRunLane::Deadline::max());
@@ -559,6 +666,7 @@ TEST(ChipRunLaneTest, CloseDrainsAndRejectsNewSubmissions) {
     prime_worker(worker);
     ChipRunLane lane(worker);
     ChipRun first = submit(lane, 101, 0);
+    complete(0);
     lane.close();
     EXPECT_TRUE(first.done());
 

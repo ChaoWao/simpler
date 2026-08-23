@@ -2759,6 +2759,7 @@ NB_MODULE(_task_interface, m) {
 
     nb::class_<ChipRun>(m, "_ChipRun")
         .def("done", &ChipRun::done)
+        .def("prepare", &ChipRun::prepare, nb::call_guard<nb::gil_scoped_release>())
         .def("activate", &ChipRun::activate)
         .def("abandon", &ChipRun::abandon, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("launched", &ChipRun::launched)

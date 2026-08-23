@@ -88,13 +88,16 @@ from typing import Any, cast
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     HOST_STRACE_ENABLED,
+    MAILBOX_OFF_NOTIFICATION,
     MAX_REGISTERED_CALLABLE_IDS,
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
     WorkerType,
     _emit_host_span,
     _mailbox_load_i32,
+    _mailbox_notify_i32,
     _mailbox_store_i32,
+    _mailbox_wait_i32,
     _read_control_copy_request,
     _set_host_span_level_prefix,
     _worker_host_mapped_region_ack_cleanup_error,
@@ -335,7 +338,7 @@ _OFF_FRAME_RUN_ID = _OFF_ACCEPTED - 32
 _OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
 _OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
 _OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
-_TASK_PROTOCOL_VERSION = 3
+_TASK_PROTOCOL_VERSION = 5
 # Mirrors MAILBOX_OFF_SHUTDOWN / MAILBOX_SHUTDOWN_REQUESTED: termination is a
 # sticky one-way word on the control frame, not a MailboxState. _OFF_STATE has
 # three writers (parent CONTROL_REQUEST, child CONTROL_DONE, C++
@@ -369,6 +372,8 @@ _TASK_LAUNCHED = 9
 _TASK_FAILED = 10
 _ACTIVATE = 11
 _PREPARE_READY = 12
+_ABANDON = 13
+_NATIVE_PREPARE_READY = 14
 _TASK_FRAME_COUNT = 2
 
 
@@ -397,6 +402,8 @@ def _assert_mailbox_wire_constants() -> None:
         "TASK_FAILED": _TASK_FAILED,
         "ACTIVATE": _ACTIVATE,
         "PREPARE_READY": _PREPARE_READY,
+        "ABANDON": _ABANDON,
+        "NATIVE_PREPARE_READY": _NATIVE_PREPARE_READY,
     }
     dispositions = {
         "NONE": _DISPOSITION_NONE,
@@ -2048,6 +2055,7 @@ def _request_child_shutdown(buf) -> None:
     """
     _mailbox_store_i32(_buffer_field_addr(buf, _OFF_SHUTDOWN), _SHUTDOWN_REQUESTED)
     _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _SHUTDOWN)
+    _mailbox_notify_i32(_buffer_field_addr(buf, MAILBOX_OFF_NOTIFICATION))
 
 
 def _write_error(buf, code: int, msg: str = "") -> None:
@@ -2112,6 +2120,7 @@ def _reexport_args_from_mailbox(buf, worker: Worker) -> TaskArgs:
 # orphan is reaped before it is noticeable, cheap enough to be lost in the
 # noise of the poll itself.
 _PARENT_LIVENESS_POLL_INTERVAL = 1000
+_CHIP_RUN_PROGRESS_WAIT_S = 0.001
 
 
 def _run_mailbox_loop(
@@ -2970,6 +2979,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             cid: int
             config: CallConfig
             activated: bool
+            require_native_prepare: bool
             chip_run: Any = None
             launched_published: bool = False
 
@@ -2985,7 +2995,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             )
 
         def task_frame_references_digest(digest: bytes) -> bool:
-            live_states = (_TASK_READY, _PREPARE_READY, _ACTIVATE, _FRAME_STAGED, _TASK_LAUNCHED)
+            live_states = (
+                _TASK_READY,
+                _PREPARE_READY,
+                _NATIVE_PREPARE_READY,
+                _ACTIVATE,
+                _FRAME_STAGED,
+                _TASK_LAUNCHED,
+                _ABANDON,
+            )
             for index, frame_buf in enumerate(frame_bufs):
                 if _mailbox_load_i32(frame_addrs[index] + _OFF_STATE) not in live_states:
                     continue
@@ -3037,6 +3055,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     cid=int(cid),
                     config=_read_config_from_mailbox(frame_buf),
                     activated=initial_state in (_TASK_READY, _ACTIVATE),
+                    require_native_prepare=initial_state == _NATIVE_PREPARE_READY,
                 )
             except Exception as e:  # noqa: BLE001
                 _write_error(frame_buf, 1, _format_exc(f"chip_process dev={device_id} frame={index}", e))
@@ -3066,6 +3085,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _TASK_ACCEPTED,
                 False,
             )
+            if frame.require_native_prepare:
+                frame.chip_run.prepare()
             raw_disposition = frame.chip_run.preparation_disposition
             disposition = int(getattr(raw_disposition, "value", raw_disposition))
             if disposition not in (_VALIDATED_ONLY, _NATIVE_PREPARED):
@@ -3080,8 +3101,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
         shutdown_message = f"chip_process dev={device_id}: task loop shut down"
         shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
+        notification_addr = _buffer_field_addr(buf, MAILBOX_OFF_NOTIFICATION)
         try:
             while True:
+                notification_snapshot = _mailbox_load_i32(notification_addr)
                 control_state = _mailbox_load_i32(state_addr)
                 if control_state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
                     break
@@ -3101,7 +3124,12 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     frame_state = _mailbox_load_i32(frame_addrs[index] + _OFF_STATE)
                     staged = staged_frames.get(index)
                     if staged is None:
-                        if frame_state in (_TASK_READY, _PREPARE_READY, _ACTIVATE):
+                        if frame_state in (
+                            _TASK_READY,
+                            _PREPARE_READY,
+                            _NATIVE_PREPARE_READY,
+                            _ACTIVATE,
+                        ):
                             staged = stage_frame(index, frame_state)
                             if staged is not None:
                                 new_frames.append(staged)
@@ -3124,6 +3152,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         except Exception as e:  # noqa: BLE001
                             shutdown_message = _format_exc(f"chip_process dev={device_id}: native activation", e)
                             break
+                    if frame_state == _ABANDON and not staged.activated:
+                        try:
+                            staged.chip_run.abandon()
+                        except Exception as e:  # noqa: BLE001
+                            shutdown_message = _format_exc(f"chip_process dev={device_id}: native abandonment", e)
+                            break
+                        _mailbox_store_i32(staged.frame_addr + _OFF_STATE, _TASK_FAILED)
+                        staged_frames.pop(index, None)
+                        continue
                 else:
                     for staged in sorted(new_frames, key=lambda frame: frame.identity[4]):
                         try:
@@ -3140,7 +3177,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                 _mailbox_store_i32(staged.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
                                 staged.launched_published = True
                                 continue
-                            run_complete = bool(staged.chip_run.done())
+                            # A launched run has a resident C++ completion
+                            # owner. Its bounded wait releases the GIL while
+                            # preserving mailbox responsiveness. Unlaunched
+                            # staged work remains a nonblocking status probe.
+                            run_complete = bool(
+                                staged.chip_run.wait(_CHIP_RUN_PROGRESS_WAIT_S)
+                                if staged.chip_run.launched
+                                else staged.chip_run.done()
+                            )
                             if not run_complete and staged.chip_run.launched and not staged.launched_published:
                                 _mailbox_store_i32(staged.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
                                 staged.launched_published = True
@@ -3181,6 +3226,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                             if os.getppid() != parent_pid:
                                 shutdown_message = f"chip_process dev={device_id}: parent exited"
                                 break
+                        # With no launched run, every interesting transition is
+                        # a parent mailbox publication.  Park on the shared
+                        # generation instead of burning a core in Python.  A
+                        # publication racing this scan changes the expected
+                        # value, so FUTEX_WAIT returns immediately rather than
+                        # losing the wake.
+                        if not any(frame.chip_run.launched for frame in staged_frames.values()):
+                            _mailbox_wait_i32(notification_addr, notification_snapshot, 0.01)
                         continue
                 break
         finally:
@@ -3195,8 +3248,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 if _mailbox_load_i32(frame_state_addr) in (
                     _TASK_READY,
                     _PREPARE_READY,
+                    _NATIVE_PREPARE_READY,
                     _ACTIVATE,
                     _FRAME_STAGED,
+                    _ABANDON,
                     _TASK_LAUNCHED,
                 ):
                     _write_error(frame_buf, 1, shutdown_message)

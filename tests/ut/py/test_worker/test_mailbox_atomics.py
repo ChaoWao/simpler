@@ -33,7 +33,12 @@ import time
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
-from _task_interface import _mailbox_load_i32, _mailbox_store_i32  # pyright: ignore[reportMissingImports]
+from _task_interface import (  # pyright: ignore[reportMissingImports]
+    _mailbox_load_i32,
+    _mailbox_notify_i32,
+    _mailbox_store_i32,
+    _mailbox_wait_i32,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,6 +93,29 @@ class TestSingleProcessRoundtrip:
 
 
 class TestCrossProcess:
+    def test_notification_wakes_cross_process_waiter(self, shm):
+        state_addr = _addr(shm.buf, 0)
+        result_addr = _addr(shm.buf, 8)
+        _mailbox_store_i32(state_addr, 0)
+        _mailbox_store_i32(result_addr, 0)
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                deadline = time.monotonic() + 5.0
+                while _mailbox_load_i32(state_addr) == 0 and time.monotonic() < deadline:
+                    _mailbox_wait_i32(state_addr, 0, 5.0)
+                _mailbox_store_i32(result_addr, int(_mailbox_load_i32(state_addr) == 1))
+            finally:
+                os._exit(0)
+
+        time.sleep(0.02)
+        started = time.monotonic()
+        _mailbox_notify_i32(state_addr)
+        os.waitpid(pid, 0)
+        assert _mailbox_load_i32(result_addr) == 1
+        assert time.monotonic() - started < 1.0
+
     def test_child_transitions_visible_in_parent(self, shm):
         """Child cycles state 0→1→2→3→0; parent must at least see the final 0.
 
@@ -245,6 +273,8 @@ class TestWireConstantAgreement:
             "TASK_FAILED": worker_mod._TASK_FAILED,
             "ACTIVATE": worker_mod._ACTIVATE,
             "PREPARE_READY": worker_mod._PREPARE_READY,
+            "ABANDON": worker_mod._ABANDON,
+            "NATIVE_PREPARE_READY": worker_mod._NATIVE_PREPARE_READY,
         }
         assert declared == dict(MAILBOX_STATE_VALUES)
 
@@ -278,7 +308,7 @@ class TestWireConstantAgreement:
         from simpler import worker as worker_mod  # noqa: PLC0415
 
         original = worker_mod.MAILBOX_STATE_VALUES
-        worker_mod.MAILBOX_STATE_VALUES = {**dict(original), "FUTURE_STATE": 13}
+        worker_mod.MAILBOX_STATE_VALUES = {**dict(original), "FUTURE_STATE": 15}
         try:
             with pytest.raises(RuntimeError, match="does not declare"):
                 worker_mod._assert_mailbox_wire_constants()

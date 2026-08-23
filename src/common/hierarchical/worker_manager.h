@@ -79,6 +79,8 @@ enum class MailboxState : int32_t {
     TASK_FAILED = 10,
     ACTIVATE = 11,
     PREPARE_READY = 12,
+    ABANDON = 13,
+    NATIVE_PREPARE_READY = 14,
 };
 
 enum class MailboxPreparationDisposition : int32_t {
@@ -98,7 +100,7 @@ static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
 static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
 static constexpr size_t MAILBOX_FIRST_TASK_FRAME = 1;
 static constexpr size_t MAILBOX_SIZE = MAILBOX_FRAME_SIZE * (1 + MAILBOX_TASK_FRAME_COUNT);
-static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 3;
+static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 5;
 
 // Error message region lives at the mailbox tail. 256 B of headroom is
 // enough for `<ExceptionType>: <short message>` produced by the child-side
@@ -156,6 +158,16 @@ static constexpr ptrdiff_t MAILBOX_OFF_FRAME_DISPATCH_ID = MAILBOX_OFF_ACCEPTED 
 // matter what state word a concurrent control command leaves behind.
 static constexpr ptrdiff_t MAILBOX_OFF_SHUTDOWN = MAILBOX_OFF_FRAME_PROTOCOL - 8;
 static constexpr int32_t MAILBOX_SHUTDOWN_REQUESTED = 1;
+// Mailbox-wide parent-to-child event generation.  A child cannot futex-wait
+// on both task-frame state words (and the control state) at once, so every
+// parent publication increments this shared word and wakes it.  Keeping a
+// generation, rather than wake-only notification, closes the lost-wakeup
+// race between the child's final frame scan and FUTEX_WAIT.
+static constexpr ptrdiff_t MAILBOX_OFF_NOTIFICATION = MAILBOX_OFF_SHUTDOWN + 4;
+static_assert(
+    MAILBOX_OFF_NOTIFICATION + static_cast<ptrdiff_t>(sizeof(int32_t)) <= MAILBOX_OFF_FRAME_PROTOCOL,
+    "mailbox notification word must fit in the trailer before frame protocol"
+);
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_CALLABLE_HASH = MAILBOX_OFF_ARGS;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_ARGS_BLOB =
     MAILBOX_OFF_TASK_CALLABLE_HASH + static_cast<ptrdiff_t>(CALLABLE_HASH_DIGEST_SIZE);
@@ -285,6 +297,7 @@ struct WorkerDispatch {
     int32_t group_index{0};
     uint64_t dispatch_id{0};
     bool prepare_only{false};
+    bool require_native_prepare{false};
 };
 
 enum class WorkerProgressKind : int32_t {
@@ -330,6 +343,7 @@ public:
     virtual void submit_progress(Ring *ring, const WorkerDispatch &dispatch);
     virtual bool poll_progress(WorkerEndpointProgress &progress);
     virtual bool activate_progress(RunId run_id);
+    virtual bool cancel_progress(RunId run_id, const std::string &reason);
     virtual void request_progress_stop() noexcept;
     // Called when the owning progress driver catches an endpoint exception.
     // Implementations must turn already-published work into terminal progress
@@ -400,6 +414,7 @@ public:
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
     bool poll_progress(WorkerEndpointProgress &progress) override;
     bool activate_progress(RunId run_id) override;
+    bool cancel_progress(RunId run_id, const std::string &reason) override;
     void request_progress_stop() noexcept override;
     void report_progress_error(const std::string &reason) override;
     bool report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) override;
@@ -470,6 +485,7 @@ private:
     char *mbox() const { return static_cast<char *>(mailbox_); }
     MailboxState read_mailbox_state(const char *frame = nullptr) const;
     void write_mailbox_state(MailboxState s, char *frame = nullptr);
+    void notify_child() noexcept;
     // Sticky launch acceptance, cleared before this endpoint reuses a task
     // frame. See MAILBOX_OFF_ACCEPTED.
     bool read_task_accepted(const char *frame = nullptr) const;
@@ -483,6 +499,9 @@ private:
         bool accepted_reported{false};
         bool activation_requested{false};
         bool activation_published{false};
+        bool cancellation_requested{false};
+        bool cancellation_published{false};
+        std::string cancellation_reason;
         WorkerDispatch dispatch{};
         RunId run_id{INVALID_RUN_ID};
         uint64_t slot_id{0};
@@ -492,6 +511,7 @@ private:
 
     bool frame_identity_matches(const FrameRecord &record, const char *frame) const;
     bool try_publish_activation(FrameRecord &record, char *frame);
+    bool try_publish_cancellation(FrameRecord &record, char *frame);
     void poison_progress(const std::string &reason);
     bool poisoned_progress_quiesced();
     WorkerCompletion poisoned_completion(const FrameRecord &record) const;
@@ -537,7 +557,9 @@ public:
     // still needs its conservative terminal fallback.
     void complete_unpublished(WorkerDispatch d, const std::string &error_message);
     bool has_staged_run(RunId run_id) const;
+    bool prepared_ready(RunId run_id) const;
     bool activate_prepared(RunId run_id);
+    bool cancel_prepared(RunId run_id, const std::string &reason);
     void progress();
 
     // The active lane and staged-successor lane are intentionally distinct.
@@ -640,6 +662,8 @@ private:
     struct LaneState {
         bool occupied{false};
         bool activation_requested{false};
+        bool staged_ready{false};
+        bool cancellation_requested{false};
         RunId run_id{INVALID_RUN_ID};
         uint64_t dispatch_id{0};
     };
