@@ -673,7 +673,7 @@ T *graph_image_section(std::vector<std::byte> *image, uint32_t offset) {
     return offset == 0 ? nullptr : reinterpret_cast<T *>(image->data() + offset);
 }
 
-bool graph_build_definition_in_place(const GraphRecording &recording, std::vector<std::byte> *image) {
+bool graph_build_definition(const GraphRecording &recording, std::vector<std::byte> *image) {
     if (image == nullptr || recording.unsupported || recording.nodes.empty() ||
         recording.nodes.size() > GRAPH_MAX_NODES || recording.boundary_tensors.empty() ||
         recording.boundary_tensors.size() > UINT16_MAX ||
@@ -746,6 +746,11 @@ bool graph_build_definition_in_place(const GraphRecording &recording, std::vecto
         return false;
     }
     definition.total_bytes = static_cast<uint32_t>(image_bytes);
+    // Zero-filled, not merely sized: the alignment slack between sections is inside
+    // the hashed range, so the content hash identifies two structurally identical
+    // Definitions only while that slack is a fixed value. A reserve-and-fill that
+    // left it uninitialized would still verify on the device — same bytes, same
+    // hash — while giving equal Definitions unequal hashes.
     image->assign(image_bytes, std::byte{0});
     auto *fanout_offsets = graph_image_section<uint32_t>(image, definition.off_fanout_offsets);
     auto *fanout_indices = graph_image_section<uint16_t>(image, definition.off_fanout_indices);
@@ -760,7 +765,6 @@ bool graph_build_definition_in_place(const GraphRecording &recording, std::vecto
     auto *scalar_sources = graph_image_section<GraphScalarSourceRef>(image, definition.off_scalar_sources);
     auto *signatures = graph_image_section<GraphBoundarySignature>(image, definition.off_boundary_signatures);
     auto *predicates = graph_image_section<GraphPredicate>(image, definition.off_predicates);
-    std::fill_n(fanout_offsets, recording.nodes.size() + 1, uint32_t{0});
     uint64_t required_heap = 0;
     size_t tensor_cursor = 0;
     size_t scalar_cursor = 0;
@@ -870,10 +874,6 @@ bool graph_build_definition_in_place(const GraphRecording &recording, std::vecto
     definition.content_hash = graph_definition_content_hash(image->data(), image->size());
     std::memcpy(image->data(), &definition, sizeof(definition));
     return true;
-}
-
-bool graph_build_definition(const GraphRecording &recording, std::vector<std::byte> *image) {
-    return graph_build_definition_in_place(recording, image);
 }
 
 const GraphDefinition *graph_definition(const std::vector<std::byte> &image) {

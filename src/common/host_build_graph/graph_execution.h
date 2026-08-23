@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include <atomic>
+#include <cstddef>
 #include <type_traits>
 
 #include "pto_runtime2_types.h"
@@ -200,8 +201,15 @@ inline uint64_t graph_definition_hash_word(const uint8_t *bytes, size_t offset) 
 }
 
 // The Definition hash follows XXH64's four-lane structure so large images do
-// not serialize one multiply per word. content_hash is treated as zero on both
-// host and device, allowing verification without mutating the uploaded image.
+// not serialize one multiply per word, and is bit-identical to XXH64 with this
+// seed for any image whose content_hash field is already zero.
+//
+// `data` must be the base of a GraphDefinition image: the word at
+// offsetof(GraphDefinition, content_hash) is read as zero, which is what lets
+// the device verify in place instead of copying the image to clear that field.
+// Hashing any other buffer, or a subrange that does not start at the image base,
+// silently substitutes zero for eight bytes of it.
+//
 // Definitions are rebuilt and rehashed by the same runtime version, so this is
 // an integrity checksum rather than a persisted wire-format identifier.
 inline uint64_t graph_definition_content_hash(const void *data, size_t size) {
@@ -282,6 +290,21 @@ static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);
 static_assert(std::is_standard_layout_v<GraphBoundarySignature>);
 static_assert(std::is_trivially_copyable_v<GraphDefinition>);
 static_assert(std::is_standard_layout_v<GraphDefinition>);
+
+// Section starts are offsets from the image base, so a section is correctly
+// aligned only if the buffer holding the image is. The builder writes each
+// section through a typed pointer into a std::vector<std::byte>, whose data() is
+// aligned for any type with fundamental alignment and no further — so a section
+// type that asked for more would make every one of those stores undefined, with
+// no diagnostic.
+static_assert(
+    alignof(GraphNodeDefinition) <= alignof(std::max_align_t) && alignof(GraphTensor) <= alignof(std::max_align_t) &&
+        alignof(GraphTensorSourceRef) <= alignof(std::max_align_t) &&
+        alignof(GraphScalarSourceRef) <= alignof(std::max_align_t) &&
+        alignof(GraphBoundarySignature) <= alignof(std::max_align_t) &&
+        alignof(GraphPredicate) <= alignof(std::max_align_t),
+    "a Definition section type must not be over-aligned: its storage is a byte vector"
+);
 
 inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
     GraphTensor packed{};
