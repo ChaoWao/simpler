@@ -63,7 +63,7 @@ struct alignas(64) PTO2RingFlowControl {
     // submit IDs will be off by the divergence.
     void init() { current_task_index.store(0, std::memory_order_relaxed); }
 
-    bool validate(PTO2SharedMemoryHandle *handle, int32_t ring_id) const;
+    bool validate(PTO2SharedMemoryHandle *handle) const;
 };
 
 static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be exactly one cache line (64B)");
@@ -216,7 +216,6 @@ struct PTO2SharedMemoryHandle {
     // === Static helpers ===
 
     static uint64_t calculate_size(uint64_t task_window_size);
-    static uint64_t calculate_size_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]);
 
     // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init
     // using default PTO2_TASK_WINDOW_SIZE / PTO2_HEAP_SIZE. Only valid when the
@@ -231,17 +230,13 @@ struct PTO2SharedMemoryHandle {
     // init_header. Returns false when `sm_size` is too small for the requested
     // `task_window_size`.
     bool init(void *sm_base, uint64_t sm_size, uint64_t task_window_size, uint64_t heap_size);
-    bool init_per_ring(
-        void *sm_base, uint64_t sm_size, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-        const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-    );
 
     // Attach to an ALREADY-populated shared memory region: point the handle and
     // every ring header's data pointers (descriptors / payloads / slot_states)
     // at `sm_base`, but do NOT reset the flow-control counters / slot states.
     // Used by host_build_graph host-orch, where the host orchestrator populated
     // the SM and H2D'd it; the device must re-point at its own SM base without
-    // wiping the contents (unlike init_per_ring, which also resets the header).
+    // wiping the contents (unlike init, which also resets the header).
     //
     // `live_slots` is the pitch the uploaded arrays were laid out with — the
     // number of slots the host actually submitted, not the ring capacity. It must
@@ -256,8 +251,7 @@ struct PTO2SharedMemoryHandle {
     // pool base is resolved here. The value bounds the region and checks the int32
     // delta reach.
     bool attach_populated(
-        void *sm_base, uint64_t sm_size, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t live_slots,
-        uint64_t image_bytes
+        void *sm_base, uint64_t sm_size, uint64_t task_window_size, uint64_t live_slots, uint64_t image_bytes
     );
 
     void destroy();
@@ -266,14 +260,10 @@ struct PTO2SharedMemoryHandle {
 
 private:
     void init_header(uint64_t task_window_size, uint64_t heap_size);
-    void init_header_per_ring(
-        const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-    );
-    void setup_pointers(uint64_t task_window_size);
-    // `pitch` is the slot count the arrays are dimensioned for. init_per_ring passes
-    // the ring capacity (the mirror the orchestrator writes into); attach_populated
+    // `pitch` is the slot count the arrays are dimensioned for. init passes the
+    // ring capacity (the mirror the orchestrator writes into); attach_populated
     // passes the submitted count (the compacted image that shipped).
-    void setup_pointers_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch);
+    void setup_pointers(uint64_t pitch);
 };
 
 // =============================================================================

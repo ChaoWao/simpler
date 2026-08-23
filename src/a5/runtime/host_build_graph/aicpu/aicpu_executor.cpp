@@ -278,7 +278,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // attach_populated.
             memset(rt->sm_handle, 0, sizeof(*rt->sm_handle));
             if (!rt->sm_handle->attach_populated(
-                    sm_ptr, sm_size, rt->prebuilt_layout.task_window_sizes, live_slots, runtime->sm_image_bytes
+                    sm_ptr, sm_size, rt->prebuilt_layout.task_window_size, live_slots, runtime->sm_image_bytes
                 )) {
                 LOG_ERROR("Thread %d: host-orch: sm_handle->attach_populated failed", thread_idx);
                 rt = nullptr;

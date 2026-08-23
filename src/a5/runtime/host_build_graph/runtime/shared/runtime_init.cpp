@@ -22,27 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <limits>
-
 #include "orchestrator.h"
 #include "runtime_core.h"
 #include "ring_buffer.h"
 #include "shared_memory.h"
 #include "tensormap.h"
 #include "scheduler/scheduler.h"
-
-static bool sum_ring_heap_sizes(const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], uint64_t *total) {
-    uint64_t sum = 0;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        if (heap_sizes[r] > std::numeric_limits<uint64_t>::max() - sum) {
-            LOG_ERROR("Total ring heap size overflows uint64_t");
-            return false;
-        }
-        sum += heap_sizes[r];
-    }
-    *total = sum;
-    return true;
-}
 
 // =============================================================================
 // Ready queue
@@ -236,7 +221,7 @@ bool PTO2OrchestratorState::init(
     auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_base);
     auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_base);
 
-    orch->ring.task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
+    orch->task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
     // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
     // so it holds for whichever SM this orchestrator was pointed at. The cursors
@@ -277,26 +262,11 @@ void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this-
 // Top-level runtime arena
 // =============================================================================
 
-PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size) {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = task_window_size;
-        heap_sizes[r] = 0;
-    }
-    return runtime_reserve_layout(arena, task_window_sizes, heap_sizes);
-}
-
-PTO2RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-) {
+PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
     PTO2RuntimeArenaLayout layout{};
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        layout.task_window_sizes[r] = task_window_sizes[r];
-        layout.heap_sizes[r] = heap_sizes[r];
-    }
+    layout.task_window_size = task_window_size;
+    layout.heap_size = heap_size;
 
     // Reservation order is the zone partition (see PTO2RuntimeArenaLayout):
     // everything the device initializes itself, then the one copied range. Each
@@ -320,17 +290,6 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     return layout;
 }
 
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
-    uint64_t /*sm_size*/, void *gm_heap_dev_base, uint64_t heap_size
-) {
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        heap_sizes[r] = heap_size;
-    }
-    return runtime_init_data_from_layout(arena, layout, mode, sm_dev_base, 0, gm_heap_dev_base, heap_sizes);
-}
-
 /**
  * Populate the prebuilt runtime-arena image in place (host build path).
  *
@@ -344,7 +303,7 @@ PTO2Runtime *runtime_init_data_from_layout(
  */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
-    uint64_t /*sm_size*/, void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+    uint64_t /*sm_size*/, void *gm_heap_dev_base, uint64_t heap_size
 ) {
     PTO2Runtime *rt = static_cast<PTO2Runtime *>(arena.region_ptr(layout.off_runtime));
     memset(rt, 0, sizeof(*rt));
@@ -352,11 +311,7 @@ PTO2Runtime *runtime_init_data_from_layout(
     // rt->ops is filled by the AICPU at boot.
     rt->mode = mode;
     rt->gm_heap = gm_heap_dev_base;
-    uint64_t total_heap_size = 0;
-    if (!sum_ring_heap_sizes(heap_sizes, &total_heap_size)) {
-        return nullptr;
-    }
-    rt->gm_heap_size = total_heap_size;
+    rt->gm_heap_size = heap_size;
     rt->gm_heap_owned = false;
     rt->total_cycles = 0;
     rt->active_callable_hash = 0;

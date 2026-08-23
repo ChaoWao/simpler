@@ -70,18 +70,19 @@
 // =============================================================================
 
 // Task management
-// NOTE: PTO2_TASK_WINDOW_SIZE is now a per-ring default value.
 // Actual window size is passed at runtime to runtime_create_from_sm().
 // Use pto2_task_slot(sched, task_id) for slot calculation.
-#define PTO2_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
+#define PTO2_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
 
-// Single ring. host_build_graph is host-orch: the whole graph is built on the
-// host, fits one ring, and the device runs it once without reclaim (see stages
-// 1-2 — execution-time recycle removed). The multi-ring design existed only to
+// host_build_graph has one ring, and carries no per-ring dimension anywhere:
+// host-orch builds the whole graph on the host, it fits that ring, and the
+// device runs it once without reclaim (execution-time recycle removed). tmr's
+// multi-ring design existed only to
 // let inner scopes reclaim independently under small rings; with no reclaim and
-// a whole-graph-resident ring, per-depth isolation is moot, so all scope depths
-// map to the single ring 0 (0 == 0).
-#define PTO2_MAX_RING_DEPTH 1
+// a whole-graph-resident ring, per-depth isolation is moot, so every scope depth
+// uses the same ring. The RuntimeEnv ABI still carries RUNTIME_ENV_RING_COUNT
+// slots because it is shared with tmr; this runtime reads slot 0 (see
+// bind_callable_to_runtime_impl).
 
 // Memory pools (total = value, single ring)
 #define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB
@@ -90,12 +91,11 @@
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
-// Hard cap for the scope_tasks buffer. Equals the total in-flight ring slot
-// budget (PTO2_TASK_WINDOW_SIZE × PTO2_MAX_RING_DEPTH): once every ring slot
-// is in flight, no more tasks can ever be pushed regardless of buffer size.
-// scope_tasks_push fatals on overflow rather than growing the arena-owned
-// buffer (which would be UB on the arena's malloc'd backing).
-#define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * PTO2_MAX_RING_DEPTH)
+// Hard cap for the scope_tasks buffer. Equals the in-flight ring slot budget:
+// once every ring slot is in flight, no more tasks can ever be pushed regardless
+// of buffer size. scope_tasks_push fatals on overflow rather than growing the
+// buffer.
+#define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE)
 
 // Per-shape ready-queue capacity (power of two). This is a ring buffer that
 // bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task
