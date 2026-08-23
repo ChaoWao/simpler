@@ -25,7 +25,7 @@
 
 #include "call_config.h"
 #include "pipeline_slot_pool.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "task_args.h"
 #include "types.h"
 
@@ -383,9 +383,9 @@ TEST(ChipRunLaneTest, DirectIncompatibleSuccessorRetriesAfterPredecessorFence) {
     worker.finalize();
 }
 
-// PTO2_ERROR_FLOW_CONTROL_DEADLOCK (3) negated — the status a device latches for
-// a flow-control deadlock. Spelled out rather than included: the PTO2_ERROR_*
-// macros live in each runtime's private pto_runtime_status.h, which this
+// SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK (3) negated — the status a device latches for
+// a flow-control deadlock. Spelled out rather than included: the SIMPLER_ERROR_*
+// macros live in each runtime's private runtime_status.h, which this
 // worker-level test does not compile against.
 constexpr int kLatchedFlowControlDeadlock = -3;
 

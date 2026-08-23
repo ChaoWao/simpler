@@ -10,7 +10,7 @@
  */
 /**
  * Unit tests for PTO2FaninPool and for_each_fanin_storage/slot_state
- * from pto_ring_buffer.h / pto_ring_buffer.cpp
+ * from ring_buffer.h / ring_buffer.cpp
  *
  * Tests:
  * 1. PTO2FaninPool — ring buffer allocation, overflow, tail advance,
@@ -25,8 +25,8 @@
 #include <cstring>
 #include <vector>
 
-#include "pto_ring_buffer.h"
-#include "pto_shared_memory.h"
+#include "ring_buffer.h"
+#include "shared_memory.h"
 
 // =============================================================================
 // FaninPool fixture
@@ -37,12 +37,12 @@ protected:
     static constexpr int32_t POOL_CAP = 32;
 
     std::vector<PTO2FaninSpillEntry> entries;
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2FaninPool pool{};
 
     void SetUp() override {
         entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
-        error_code.store(PTO2_ERROR_NONE);
+        error_code.store(SIMPLER_ERROR_NONE);
         pool.init(entries.data(), POOL_CAP, &error_code);
     }
 };
@@ -83,7 +83,7 @@ TEST_F(FaninPoolTest, OverflowReturnsNullptr) {
     }
     auto *overflow = pool.alloc();
     EXPECT_EQ(overflow, nullptr);
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
 }
 
 TEST_F(FaninPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
@@ -97,7 +97,7 @@ TEST_F(FaninPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
     ring.fc.last_task_alive.store(0, std::memory_order_release);
 
     EXPECT_FALSE(pool.ensure_space(ring, 1));
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
 }
 
 TEST_F(FaninPoolTest, AdvanceTailFreesSpace) {
@@ -159,14 +159,14 @@ protected:
     static constexpr int32_t POOL_CAP = 32;
 
     std::vector<PTO2FaninSpillEntry> spill_entries;
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2FaninPool spill_pool{};
 
     alignas(64) PTO2TaskSlotState slots[64];
 
     void SetUp() override {
         spill_entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
-        error_code.store(PTO2_ERROR_NONE);
+        error_code.store(SIMPLER_ERROR_NONE);
         spill_pool.init(spill_entries.data(), POOL_CAP, &error_code);
         memset(slots, 0, sizeof(slots));
     }

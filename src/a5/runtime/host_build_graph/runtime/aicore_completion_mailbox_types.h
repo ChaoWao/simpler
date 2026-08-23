@@ -13,12 +13,12 @@
 
 #include <stdint.h>
 
-#include "pto_constants.h"
+#include "constants.h"
 
 // Types shared across the AICore↔AICPU boundary.
 //
 // This header is reachable from AICore-side translation units (via
-// pto_async_kernel_api.h / pto_completion_token.h / sdma_completion_kernel.h)
+// async_kernel_api.h / completion_token.h / sdma_completion_kernel.h)
 // and must stay parseable by every AICore toolchain configuration: no
 // <atomic>, no __atomic_* intrinsics, no MPSC ring buffer struct.
 //

@@ -23,8 +23,8 @@
 #include <stdint.h>
 
 #include "aicpu/cache_maintenance.h"
-#include "pto_arg_with_deps.h"      // NOLINT(build/include_subdir)
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "arg_with_deps.h"      // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_SLOW_PRODUCER_AIC 0
 #define FUNC_SYNC_CONSUMER_AIV 1
@@ -127,7 +127,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     if (use_pending && (blocker_count <= 0 || blocker_count > BLOCKER_STATUS_CAPACITY || consumer_blocks <= 0 ||
                         consumer_blocks > blocker_count)) {
         rt_report_fatal(
-            PTO2_ERROR_INVALID_ARGS, "invalid pending geometry: blockers=%d consumer=%d", blocker_count, consumer_blocks
+            SIMPLER_ERROR_INVALID_ARGS, "invalid pending geometry: blockers=%d consumer=%d", blocker_count,
+            consumer_blocks
         );
         return;
     }

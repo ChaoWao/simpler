@@ -22,7 +22,7 @@
 #include <cstring>
 #include <vector>
 
-#include "pto_runtime2_types.h"
+#include "runtime_types.h"
 
 namespace {
 

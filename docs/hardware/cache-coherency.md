@@ -150,7 +150,7 @@ SDMA is a separate device-side DMA engine. On a2a3 it writes GM but is
 not known to snoop AICPU's data cache. Current a2a3 runtime code (see
 `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/backend/sdma/sdma_completion_scheduler.h`
 and the SDMA-engine async-wait completion path in
-`runtime/pto_async_wait.h` / `runtime/scheduler/pto_scheduler.h`)
+`runtime/async_wait.h` / `runtime/scheduler/scheduler.h`)
 **does** invalidate before reading SDMA-written counters and records,
 on the conservative assumption that SDMA is not in AICPU's coherency
 domain.

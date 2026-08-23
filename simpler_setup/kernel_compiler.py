@@ -611,7 +611,7 @@ class KernelCompiler:
 
         # HOST_GXX: simulation build (host execution)
         # AARCH64_GXX: cross-compilation for supported runtimes
-        # Runtime calls still go through pto_orchestration_api.h; platform helper sources
+        # Runtime calls still go through orchestration_api.h; platform helper sources
         # are linked only for public AICPU utility headers used directly by orchestration code.
         return self._compile_orchestration_shared_lib(
             source_path,

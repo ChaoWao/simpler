@@ -1268,7 +1268,7 @@ def pytest_runtest_makereport(item, call):
 # The names above are CANN's own (acl/error_codes/rt_error_codes.h); what each one
 # means and how to chase it is in docs/troubleshooting/device-error-codes.md, and the
 # host log now prints that meaning next to the code. -1000 and below is the
-# host-side band (PTO_RUNTIME_ERR_* in src/common/worker/pto_runtime_c_api.h);
+# host-side band (PTO_RUNTIME_ERR_* in src/common/worker/runtime_c_api.h);
 # -1..-999 are device-latched codes and must NOT be listed here — a latched
 # SCOPE_DEADLOCK (-1) is an orchestration bug, not a poisoned device, and
 # treating it as poison is exactly the spurious rebuild this filter avoids.

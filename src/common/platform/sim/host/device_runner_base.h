@@ -40,7 +40,7 @@
 #include <utility>
 #include <vector>
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "native_run_execution.h"
 
 #include "callable.h"

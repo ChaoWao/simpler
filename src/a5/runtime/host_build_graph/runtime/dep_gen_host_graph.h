@@ -33,7 +33,7 @@
  * Control surface, called from the device runner (same host_runtime.so):
  *   set_enabled() / active() / emit()
  *
- * The runtime translation unit links weak no-op fallbacks (pto_orchestrator.cpp)
+ * The runtime translation unit links weak no-op fallbacks (orchestrator.cpp)
  * so the AICPU build, which has no host graph, resolves without this .cpp.
  *
  * The graph lives in thread-local state, so capture is lock-free and two
@@ -46,7 +46,7 @@
  * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is
  * whole-graph-resident and never reuses a task slot at build time (see
- * append_fanin_or_fail in pto_orchestrator.cpp). A runtime that recycles slots
+ * append_fanin_or_fail in orchestrator.cpp). A runtime that recycles slots
  * mid-build would need this key revisited.
  *
  * Output is `deps.json` in the schema documented in docs/dfx/dep-gen.md — the
@@ -58,9 +58,9 @@
 
 #include <cstdint>
 
-#include "pto_task_id.h"
-#include "pto_tensormap.h"
-#include "pto_types.h"  // TensorRef
+#include "task_id.h"
+#include "tensormap.h"
+#include "types.h"  // TensorRef
 #include "tensor.h"
 
 // ---------------------------------------------------------------------------

@@ -22,8 +22,8 @@
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
-#include "pto_runtime2.h"
-#include "pto_shared_memory.h"
+#include "runtime_core.h"
+#include "shared_memory.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
@@ -32,11 +32,11 @@
 // =============================================================================
 
 static void latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
-    if (header == nullptr || error_code == PTO2_ERROR_NONE) {
+    if (header == nullptr || error_code == SIMPLER_ERROR_NONE) {
         return;
     }
     // The first error code/thread pair wins; the bitmap cumulatively records all reporting threads.
-    int32_t expected = PTO2_ERROR_NONE;
+    int32_t expected = SIMPLER_ERROR_NONE;
     if (header->sched_error_code.compare_exchange_strong(expected, error_code, std::memory_order_acq_rel)) {
         header->sched_error_thread.store(thread_idx, std::memory_order_release);
     }
@@ -59,7 +59,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
         return LoopAction::BREAK_LOOP;
     }
     int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR(
             "Thread %d: Fatal error (code=%d), sending EXIT_SIGNAL to all cores. "
             "completed_tasks=%d, total_tasks=%d",
@@ -71,7 +71,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != PTO2_ERROR_NONE) {
+    if (sched_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -97,7 +97,7 @@ SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHea
         return LoopAction::BREAK_LOOP;
     }
     int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Fatal error detected (code=%d), sending EXIT_SIGNAL to all cores", thread_idx, orch_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -105,7 +105,7 @@ SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHea
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != PTO2_ERROR_NONE) {
+    if (sched_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -380,7 +380,7 @@ int32_t SchedulerContext::handle_timeout_exit(
         "[STALL thread=%d idle_iterations=%d] TIMEOUT_EXIT after_idle_iterations=%d", thread_idx, idle_iterations,
         idle_iterations
     );
-    latch_scheduler_error(header, thread_idx, PTO2_ERROR_SCHEDULER_TIMEOUT);
+    latch_scheduler_error(header, thread_idx, SIMPLER_ERROR_SCHEDULER_TIMEOUT);
     if (!completed_.exchange(true, std::memory_order_acq_rel)) {
         log_shutdown_stall_snapshot(thread_idx, idle_iterations, last_progress_count);
 #if SIMPLER_DFX
@@ -414,7 +414,7 @@ int32_t SchedulerContext::handle_timeout_exit(
         cycles_to_us(sched_timeout_ts - sched_start_ts)
     );
 #endif
-    return -PTO2_ERROR_SCHEDULER_TIMEOUT;
+    return -SIMPLER_ERROR_SCHEDULER_TIMEOUT;
 }
 
 #if SIMPLER_DFX
@@ -974,7 +974,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
             // Clear the slab once here; thereafter only the completion path re-clears
             // count (and only when a deferred task dirtied it), never per dispatch.
             slab->count = 0;
-            slab->error_code = PTO2_ERROR_NONE;
+            slab->error_code = SIMPLER_ERROR_NONE;
             dp.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.local_context);
             dp.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.global_context);
         }
@@ -1095,7 +1095,7 @@ void SchedulerContext::on_orchestration_done(
     if (sched_->sm_header) {
         orch_err = sched_->sm_header->orch_error_code.load(std::memory_order_relaxed);
     }
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
         }

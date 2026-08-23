@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2TensorMap from pto_tensormap.h / pto_tensormap.cpp
+ * Unit tests for PTO2TensorMap from tensormap.h / tensormap.cpp
  *
  * Tests hash-table-based producer lookup with overlap detection:
  * - Hash function distribution (golden-ratio multiplicative hash)
@@ -29,8 +29,8 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "pto_orchestration_api.h"
-#include "pto_tensormap.h"
+#include "orchestration_api.h"
+#include "tensormap.h"
 
 // =============================================================================
 // Helpers

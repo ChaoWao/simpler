@@ -16,8 +16,8 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
-#include "pto_completion_token.h"
-#include "pto_runtime_status.h"
+#include "completion_token.h"
+#include "runtime_status.h"
 
 inline uintptr_t sdma_completion_cache_line(const volatile void *addr) {
     return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
@@ -29,14 +29,14 @@ inline uintptr_t sdma_completion_cache_line(const volatile void *addr) {
 // backend_cookie and must not clear or otherwise retire the shared record.
 inline CompletionPollResult poll_sdma_post_done_record(uint64_t record_addr, uint64_t expected_post_id) {
     if (record_addr == 0 || expected_post_id == 0) {
-        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+        return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
     volatile uint64_t *record = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(record_addr));
     cache_invalidate_range(reinterpret_cast<const void *>(sdma_completion_cache_line(record)), PTO2_ALIGN_SIZE);
     uint64_t completed_post_id = __atomic_load_n(record, __ATOMIC_ACQUIRE);
     return {
         completed_post_id >= expected_post_id ? CompletionPollState::READY : CompletionPollState::PENDING,
-        PTO2_ERROR_NONE
+        SIMPLER_ERROR_NONE
     };
 }
 

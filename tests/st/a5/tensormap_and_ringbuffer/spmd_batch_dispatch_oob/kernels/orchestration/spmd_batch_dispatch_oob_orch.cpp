@@ -21,7 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 #define FUNC_AIC 0
 #define FUNC_AIV0 1

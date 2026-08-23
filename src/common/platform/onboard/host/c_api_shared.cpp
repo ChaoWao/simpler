@@ -10,7 +10,7 @@
  */
 /**
  * Shared `pto_runtime_c_api` glue — the byte-identical part of every arch's
- * onboard `pto_runtime_c_api.cpp`. Linked into each arch's
+ * onboard `runtime_c_api.cpp`. Linked into each arch's
  * `libhost_runtime.so` directly (not as a separate library) so all C ABI
  * symbols are exported from each `.so` for ChipWorker's `dlsym`.
  *
@@ -28,7 +28,7 @@
 #include "call_config.h"
 #include "device_runner_base.h"
 #include "prepare_callable_common.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "task_args.h"
 #include "native_run_context.h"
 

@@ -60,7 +60,7 @@ Dependencies are inferred by TensorMap from input/inout/output tensors, so you d
 
 ## Submit API And Kernel IDs
 
-- Submit helpers are defined in `pto_orchestration_api.h`.
+- Submit helpers are defined in `orchestration_api.h`.
 - `rt_submit_aic_task` and `rt_submit_aiv_task` are convenience wrappers around `rt_submit_task` with a `MixedKernels` struct.
 - For mixed AIC+AIV tasks, construct a `MixedKernels` struct directly:
 

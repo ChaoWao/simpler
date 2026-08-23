@@ -17,8 +17,8 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
-#include "pto_completion_token.h"
-#include "pto_runtime_status.h"
+#include "completion_token.h"
+#include "runtime_status.h"
 
 namespace pto2::urma_backend {
 
@@ -132,17 +132,17 @@ inline void update_tail_info(const UrmaCqCtx &cq_ctx, const UrmaWqCtx &wq_ctx, u
 
 inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64_t workspace_addr) {
     if (event_handle == 0) {
-        return {CompletionPollState::READY, PTO2_ERROR_NONE};
+        return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
     }
     if (workspace_addr == 0) {
-        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+        return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
     uint32_t remote_rank = 0;
     uint32_t target_head = 0;
     decode_urma_event_handle(event_handle, remote_rank, target_head);
     if (target_head == 0) {
-        return {CompletionPollState::READY, PTO2_ERROR_NONE};
+        return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
     }
 
     auto *info = reinterpret_cast<volatile UrmaInfo *>(static_cast<uintptr_t>(workspace_addr));
@@ -152,7 +152,7 @@ inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64
     const uint64_t sq_ptr = __atomic_load_n(&info->sq_ptr, __ATOMIC_ACQUIRE);
     const uint64_t scq_ptr = __atomic_load_n(&info->scq_ptr, __ATOMIC_ACQUIRE);
     if (qp_num == 0 || remote_rank >= rank_count || sq_ptr == 0 || scq_ptr == 0) {
-        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+        return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
     const uint64_t ctx_index = static_cast<uint64_t>(remote_rank) * qp_num;
@@ -176,13 +176,13 @@ inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64
     wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
     if (cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 || cq_ctx.cqe_shift_size > kMaxCqeShift ||
         !is_power_of_two(cq_ctx.depth)) {
-        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+        return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
     const uint32_t cqe_size = 1u << cq_ctx.cqe_shift_size;
     uint32_t cur_tail = load_device_u32(cq_ctx.tail_addr);
     if (has_reached(cur_tail, target_head)) {
-        return {CompletionPollState::READY, PTO2_ERROR_NONE};
+        return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
     }
 
     uint32_t next_tail = cur_tail;
@@ -201,7 +201,7 @@ inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64
         if (status != 0 || substatus != 0) {
             ++next_tail;
             update_tail_info(cq_ctx, wq_ctx, next_tail);
-            return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+            return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
         }
         next_tail++;
     }
@@ -210,7 +210,8 @@ inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64
         update_tail_info(cq_ctx, wq_ctx, next_tail);
     }
     return {
-        has_reached(next_tail, target_head) ? CompletionPollState::READY : CompletionPollState::PENDING, PTO2_ERROR_NONE
+        has_reached(next_tail, target_head) ? CompletionPollState::READY : CompletionPollState::PENDING,
+        SIMPLER_ERROR_NONE
     };
 }
 

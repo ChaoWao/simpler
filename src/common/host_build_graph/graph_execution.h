@@ -18,7 +18,7 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "pto_runtime2_types.h"
+#include "runtime_types.h"
 #include "tensor.h"
 
 inline constexpr uint32_t GRAPH_MAX_NODES = 1024;

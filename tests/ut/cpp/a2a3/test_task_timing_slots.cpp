@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "common/device_phase.h"
-#include "pto_runtime2_types.h"
-#include "pto_types.h"
+#include "runtime_types.h"
+#include "types.h"
 
 namespace {
 

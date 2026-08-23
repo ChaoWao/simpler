@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2DepListPool from pto_ring_buffer.h
+ * Unit tests for PTO2DepListPool from ring_buffer.h
  *
  * Tests dependency list pool allocation, prepend chaining, overflow detection,
  * tail advancement, and high-water mark tracking.
@@ -30,7 +30,7 @@
 #include <cstring>
 #include <vector>
 
-#include "pto_ring_buffer.h"
+#include "ring_buffer.h"
 
 // =============================================================================
 // Fixture
@@ -40,12 +40,12 @@ class DepListPoolTest : public ::testing::Test {
 protected:
     static constexpr int32_t POOL_CAP = 8;
     PTO2DepListEntry entries[POOL_CAP]{};
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2DepListPool pool{};
 
     void SetUp() override {
         std::memset(entries, 0, sizeof(entries));
-        error_code.store(PTO2_ERROR_NONE);
+        error_code.store(SIMPLER_ERROR_NONE);
         pool.init(entries, POOL_CAP, &error_code);
     }
 };
@@ -76,7 +76,7 @@ TEST_F(DepListPoolTest, OverflowDetection) {
 
     PTO2DepListEntry *overflow = pool.alloc();
     EXPECT_EQ(overflow, nullptr);
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
 }
 
 TEST_F(DepListPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
@@ -90,7 +90,7 @@ TEST_F(DepListPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
     ring.fc.last_task_alive.store(0, std::memory_order_release);
 
     EXPECT_FALSE(pool.ensure_space(ring, 1));
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
 }
 
 // Prepend builds LIFO linked list: verify each slot_state pointer.

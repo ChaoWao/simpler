@@ -204,7 +204,7 @@ Every failed launch runs a recovery path that is easy to miss:
 
 Four async engines are declared —
 `ASYNC_ENGINE_{SDMA,ROCE,URMA,CCU}`
-(`src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_types.h:53-59`) — and
+(`src/a2a3/runtime/tensormap_and_ringbuffer/runtime/types.h:53-59`) — and
 **two are name only**. ROCE and CCU appear as enum constants,
 `COMPLETION_ENGINE_*` macros, and `return "CCU"` strings in
 `async_engine_name()`; there is no backend directory, submit path, poll op, or
@@ -213,9 +213,9 @@ does treat CCU as a first-class engine (`COMM_ENGINE_CCU = 5` in
 `hccl/hcomm_res_defs.h`), but nothing in `src/` references `COMM_ENGINE_*`.
 
 The single wiring point is the completion-ops table: a2a3 registers COUNTER and
-SDMA_EVENT_RECORD (`.../runtime/pto_async_wait.h:85-89`); a5 registers those
-plus URMA_EVENT_HANDLE (`src/a5/.../pto_async_wait.h:90-98`). Out-of-range
-values yield `PTO2_ERROR_ASYNC_COMPLETION_INVALID`.
+SDMA_EVENT_RECORD (`.../runtime/async_wait.h:85-89`); a5 registers those
+plus URMA_EVENT_HANDLE (`src/a5/.../async_wait.h:90-98`). Out-of-range
+values yield `SIMPLER_ERROR_ASYNC_COMPLETION_INVALID`.
 
 | Engine | a2a3 | a5 | Status |
 | ------ | ---- | -- | ------ |
@@ -241,7 +241,7 @@ CQEs checking the owner bit, advances the tail and rings the doorbell
 submits `TGET_ASYNC`/`TPUT_ASYNC<DmaEngine::URMA>` with 256 MB chunking. Both
 sit behind `PTO_URMA_SUPPORTED`, which is **defined nowhere in this repo and
 nowhere in the installed CANN pto headers**, so the `#else` branch returns
-`PTO2_ERROR_ASYNC_COMPLETION_INVALID` immediately. The host overlay macro is
+`SIMPLER_ERROR_ASYNC_COMPLETION_INVALID` immediately. The host overlay macro is
 fully wired, so turning it on does not help — the device path stays unreachable.
 a5's SDMA and URMA overlays are mutually exclusive by CMake `FATAL_ERROR`
 because `CommContext` exposes a single `workSpace` pair
@@ -301,7 +301,7 @@ re-check before editing.
 | `comm-domain.md:111` | window is VMM + shareable-handle import with `aclrtDeviceEnablePeerAccess` | a2a3 prefers Fabric V2 (`comm_hccl.cpp:762`); the doc never mentions Fabric |
 | `comm-domain.md:262-264` | a producer `CoreCallable` declares the SDMA workspace requirement | that API was removed by PR #1406 |
 | `investigations/2026-07-a2a3-sdma-fault-teardown.md:153` | `sdma_async_completion_demo` is "unaffected by this change" | that demo sets `enable_sdma=True` (test:134), as CI's own comment states |
-| `src/common/worker/pto_runtime_c_api.h:259` | "`config` carries block_dim (0 = auto)" | `CallConfig` has no such field — "There is no block_dim knob" (`src/common/task_interface/call_config.h:22`) |
+| `src/common/worker/runtime_c_api.h:259` | "`config` carries block_dim (0 = auto)" | `CallConfig` has no such field — "There is no block_dim knob" (`src/common/task_interface/call_config.h:22`) |
 | `src/common/platform/sim/host/device_runner_base.h:62-64` | "an explicit block_dim is still honoured" | same as above |
 | `src/common/aicpu_loader/README.md:18-28`, `:47-51` | one `rtsFuncGetByName`; `device_id` in per-task `KernelArgs`; dispatcher under `build/lib/<arch>/onboard/<runtime>/` | loops all symbols; `device_id` lives on `InitArgs`; dispatcher is at `build/lib/<arch>/dispatcher/` |
-| `tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp:139` | "a5 is counter-only (no SDMA event-record backend)" | a5 registers SDMA and URMA ops (`src/a5/.../pto_async_wait.h:90-98`) |
+| `tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp:139` | "a5 is counter-only (no SDMA event-record backend)" | a5 registers SDMA and URMA ops (`src/a5/.../async_wait.h:90-98`) |

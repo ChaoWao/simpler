@@ -37,7 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
-#include "pto_runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
+#include "runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
 #include "host/run_stream_pair.h"
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"

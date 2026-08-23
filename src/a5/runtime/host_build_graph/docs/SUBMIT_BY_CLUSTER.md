@@ -65,7 +65,7 @@ block_num * popcount(active_mask) <= INT16_MAX
 ```
 
 The product is the number stored in the 16-bit completion counter. Invalid
-values latch `PTO2_ERROR_INVALID_ARGS`; they are not capped at the device's
+values latch `SIMPLER_ERROR_INVALID_ARGS`; they are not capped at the device's
 physical cluster count.
 
 `require_sync_start` adds a separate residency constraint because every block

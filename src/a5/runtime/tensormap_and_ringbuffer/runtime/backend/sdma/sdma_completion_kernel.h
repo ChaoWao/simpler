@@ -17,9 +17,9 @@
 #include <pto/comm/async_common/async_event_impl.hpp>
 #include <pto/comm/async/sdma/sdma_async_intrin.hpp>
 
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 #include "aicore_completion_mailbox_types.h"
-#include "pto_runtime_status.h"
+#include "runtime_status.h"
 
 #ifndef __aicore__
 #define __aicore__
@@ -97,7 +97,7 @@ register_pto_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsy
 
     const uint32_t engine = static_cast<uint32_t>(event.engine);
     if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::SDMA)) {
-        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return;
     }
 
@@ -106,7 +106,7 @@ register_pto_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsy
     __gm__ uint8_t *post_done_base = session.sdmaRuntimeCtx.postDoneBase;
     if (!::pto::comm::sdma::detail::DecodeSdmaEventHandle(event.handle, post_id, queue_num) ||
         post_done_base == nullptr) {
-        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return;
     }
     for (uint32_t queue_id = 0; queue_id < queue_num; ++queue_id) {
@@ -127,7 +127,7 @@ inline __aicore__ bool
 send_request_entry(AsyncCtx &ctx, SdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> desc) {
     pto::comm::AsyncSession session;
     if (!pto::comm::BuildAsyncSession(desc.scratch, desc.workspace, session, desc.sync_id)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return false;
     }
 

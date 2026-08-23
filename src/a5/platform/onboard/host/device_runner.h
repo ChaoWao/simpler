@@ -37,7 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "utils/device_arena.h"
 #include "device_runner_base.h"     // common DeviceRunnerBase
 #include "device_runner_helpers.h"  // common KernelArgsHelper

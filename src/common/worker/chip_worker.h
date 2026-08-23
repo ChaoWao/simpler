@@ -27,7 +27,7 @@
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
 #include "pipeline_slot_pool.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "types.h"
 
 /** Opaque identity for one prepared native run owned by a ChipWorker. */

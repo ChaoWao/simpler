@@ -22,7 +22,7 @@
 
 #include <cstring>
 
-#include "pto_runtime_status.h"
+#include "runtime_status.h"
 
 #include "runtime_status/error_names.h"
 
@@ -32,16 +32,16 @@ namespace {
 
 bool is_blank(const char *s) { return s == nullptr || s[0] == '\0'; }
 
-// Every PTO2 error code, including the ones no ST can provoke. 6 is retired and absent from
-// the tensormap_and_ringbuffer header this test compiles against.
+// Every runtime error code, including the ones no ST can provoke. 6 is retired and no longer
+// defined by any runtime's header.
 constexpr int32_t kAllRuntimeCodes[] = {
-    PTO2_ERROR_SCOPE_DEADLOCK,        PTO2_ERROR_HEAP_RING_DEADLOCK,
-    PTO2_ERROR_FLOW_CONTROL_DEADLOCK, PTO2_ERROR_DEP_POOL_OVERFLOW,
-    PTO2_ERROR_INVALID_ARGS,          PTO2_ERROR_REQUIRE_SYNC_START_INVALID,
-    PTO2_ERROR_TENSOR_WAIT_TIMEOUT,   PTO2_ERROR_EXPLICIT_ORCH_FATAL,
-    PTO2_ERROR_SCOPE_TASKS_OVERFLOW,  PTO2_ERROR_TENSORMAP_OVERFLOW,
-    PTO2_ERROR_SCHEDULER_TIMEOUT,     PTO2_ERROR_ASYNC_COMPLETION_INVALID,
-    PTO2_ERROR_ASYNC_WAIT_OVERFLOW,   PTO2_ERROR_ASYNC_REGISTRATION_FAILED,
+    SIMPLER_ERROR_SCOPE_DEADLOCK,        SIMPLER_ERROR_HEAP_RING_DEADLOCK,
+    SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED,
+    SIMPLER_ERROR_INVALID_ARGS,          SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID,
+    SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT,   SIMPLER_ERROR_EXPLICIT_ORCH_FATAL,
+    SIMPLER_ERROR_SCOPE_TASKS_OVERFLOW,  SIMPLER_ERROR_TENSORMAP_OVERFLOW,
+    SIMPLER_ERROR_SCHEDULER_TIMEOUT,     SIMPLER_ERROR_ASYNC_COMPLETION_INVALID,
+    SIMPLER_ERROR_ASYNC_WAIT_OVERFLOW,   SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED,
 };
 
 TEST(RuntimeErrorNames, EveryCodeHasNameDescAndHint) {
@@ -62,8 +62,8 @@ TEST(RuntimeErrorNames, NamesAreDistinct) {
 }
 
 TEST(RuntimeErrorNames, NoErrorIsNotAnError) {
-    EXPECT_STREQ(error_name(PTO2_ERROR_NONE), "none");
-    EXPECT_TRUE(is_blank(error_hint(PTO2_ERROR_NONE)));
+    EXPECT_STREQ(error_name(SIMPLER_ERROR_NONE), "none");
+    EXPECT_TRUE(is_blank(error_hint(SIMPLER_ERROR_NONE)));
 }
 
 // An unrecognised code must be reported as such. Annotating it with a neighbouring code's
@@ -79,20 +79,20 @@ TEST(RuntimeErrorNames, UnknownCodeFallsBack) {
 // The orchestrator and the scheduler each latch into their own field, and at most one is
 // ever non-zero. The annotation has to name the field the code actually came from.
 TEST(RuntimeErrorNames, LatchedCodePicksTheNonZeroField) {
-    EXPECT_EQ(latched_error_code(PTO2_ERROR_SCOPE_DEADLOCK, PTO2_ERROR_NONE), PTO2_ERROR_SCOPE_DEADLOCK);
-    EXPECT_STREQ(latched_error_field(PTO2_ERROR_SCOPE_DEADLOCK, PTO2_ERROR_NONE), "orch_error_code");
+    EXPECT_EQ(latched_error_code(SIMPLER_ERROR_SCOPE_DEADLOCK, SIMPLER_ERROR_NONE), SIMPLER_ERROR_SCOPE_DEADLOCK);
+    EXPECT_STREQ(latched_error_field(SIMPLER_ERROR_SCOPE_DEADLOCK, SIMPLER_ERROR_NONE), "orch_error_code");
 
-    EXPECT_EQ(latched_error_code(PTO2_ERROR_NONE, PTO2_ERROR_SCHEDULER_TIMEOUT), PTO2_ERROR_SCHEDULER_TIMEOUT);
-    EXPECT_STREQ(latched_error_field(PTO2_ERROR_NONE, PTO2_ERROR_SCHEDULER_TIMEOUT), "sched_error_code");
+    EXPECT_EQ(latched_error_code(SIMPLER_ERROR_NONE, SIMPLER_ERROR_SCHEDULER_TIMEOUT), SIMPLER_ERROR_SCHEDULER_TIMEOUT);
+    EXPECT_STREQ(latched_error_field(SIMPLER_ERROR_NONE, SIMPLER_ERROR_SCHEDULER_TIMEOUT), "sched_error_code");
 
-    EXPECT_EQ(latched_error_code(PTO2_ERROR_NONE, PTO2_ERROR_NONE), PTO2_ERROR_NONE);
+    EXPECT_EQ(latched_error_code(SIMPLER_ERROR_NONE, SIMPLER_ERROR_NONE), SIMPLER_ERROR_NONE);
 }
 
 // The stall sub-class already had a name table; keep it and the error table consistent so a
 // SCHEDULER_TIMEOUT annotation and its sub_class= line cannot disagree.
 TEST(RuntimeErrorNames, StallDetailStillNamed) {
-    EXPECT_STREQ(stall_detail_name(PTO2_STALL_DETAIL_RUNNING_STALLED), "S1:running-stalled");
-    EXPECT_STREQ(stall_detail_name(PTO2_STALL_DETAIL_UNKNOWN), "unknown:accounting/corruption");
+    EXPECT_STREQ(stall_detail_name(SIMPLER_STALL_DETAIL_RUNNING_STALLED), "S1:running-stalled");
+    EXPECT_STREQ(stall_detail_name(SIMPLER_STALL_DETAIL_UNKNOWN), "unknown:accounting/corruption");
 }
 
 // ---------------------------------------------------------------------------

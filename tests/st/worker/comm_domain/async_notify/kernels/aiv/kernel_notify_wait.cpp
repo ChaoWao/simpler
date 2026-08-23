@@ -19,7 +19,7 @@
 #endif
 
 #include <pto/pto-inst.hpp>
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     uint64_t notify_counter_addr = static_cast<uint64_t>(args[1]);

@@ -16,7 +16,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"  // Register-based communication
 #include "common/pmu_profiling.h"
-#include "pto2_dispatch_payload.h"
+#include "dispatch_payload.h"
 #include "runtime.h"
 
 /**

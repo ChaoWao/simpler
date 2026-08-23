@@ -14,7 +14,7 @@ OMP: Hint This means that multiple copies of the OpenMP runtime have been linked
 --- FAIL: example:a2a3/... (dev0, attempt 1) ---
 ```
 
-Exit code of the spawned worker is `134` (SIGABRT). The failure happens during golden `import`, so no DeviceRunner, no `pto_runtime_c_api.cpp`, no aicpu/aicore thread ever executes.
+Exit code of the spawned worker is `134` (SIGABRT). The failure happens during golden `import`, so no DeviceRunner, no `runtime_c_api.cpp`, no aicpu/aicore thread ever executes.
 
 ## Root Cause
 

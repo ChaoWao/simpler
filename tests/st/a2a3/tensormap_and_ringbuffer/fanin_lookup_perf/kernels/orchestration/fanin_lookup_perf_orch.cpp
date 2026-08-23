@@ -30,7 +30,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 static constexpr int32_t MAX_PRODUCERS = 64;
 static constexpr int32_t MAX_CONSUMERS = 64;
@@ -56,7 +56,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     bool use_real_kernels = orch_args.scalar(2) != 0;
     if (producer_count < 1 || producer_count > MAX_PRODUCERS || consumer_count < 1 || consumer_count > MAX_CONSUMERS) {
         rt_report_fatal(
-            PTO2_ERROR_INVALID_ARGS,
+            SIMPLER_ERROR_INVALID_ARGS,
             "producer_count=%d consumer_count=%d exceed supported range producers=[1, %d] consumers=[1, %d]",
             producer_count, consumer_count, MAX_PRODUCERS, MAX_CONSUMERS
         );

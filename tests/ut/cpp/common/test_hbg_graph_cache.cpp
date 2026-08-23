@@ -25,7 +25,7 @@
 #include "graph_cache.h"
 #include "graph_execution.h"
 #include "runtime_status/error_names.h"
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 namespace {
 
@@ -629,9 +629,9 @@ TEST(GraphExecutionActivationState, PrepareBeforeExternalReadyActivatesAtMeet) {
 }
 
 TEST(GraphExecutionErrors, ReadyQueueOverflowHasTriageText) {
-    EXPECT_STREQ(error_name(PTO2_ERROR_READY_QUEUE_OVERFLOW), "READY_QUEUE_OVERFLOW");
-    EXPECT_STRNE(error_desc(PTO2_ERROR_READY_QUEUE_OVERFLOW), "");
-    EXPECT_STRNE(error_hint(PTO2_ERROR_READY_QUEUE_OVERFLOW), "");
+    EXPECT_STREQ(error_name(SIMPLER_ERROR_READY_QUEUE_OVERFLOW), "READY_QUEUE_OVERFLOW");
+    EXPECT_STRNE(error_desc(SIMPLER_ERROR_READY_QUEUE_OVERFLOW), "");
+    EXPECT_STRNE(error_hint(SIMPLER_ERROR_READY_QUEUE_OVERFLOW), "");
 }
 
 TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
@@ -655,7 +655,7 @@ TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
     scheduler.push_ready_routed(&graph_slots[1]);
     scheduler.push_ready_routed(&graph_slots[2]);
 
-    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), PTO2_ERROR_READY_QUEUE_OVERFLOW);
+    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
 }
 
 TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
@@ -676,7 +676,7 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
     EXPECT_TRUE(scheduler.push_graph_prepare(&graph_slots[1], 11, 3));
     EXPECT_FALSE(scheduler.push_graph_prepare(&graph_slots[2], 12, 3));
 
-    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), PTO2_ERROR_READY_QUEUE_OVERFLOW);
+    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
     EXPECT_EQ(header.sched_error_thread.load(std::memory_order_acquire), 3);
     EXPECT_EQ(header.sched_error_bitmap.load(std::memory_order_acquire), 1U << 3);
 }
@@ -688,7 +688,7 @@ TEST(GraphExecutionErrors, InvalidNodeCompletionIsReported) {
 
     const PTO2SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
 
-    EXPECT_EQ(outcome.error_code, PTO2_ERROR_INVALID_ARGS);
+    EXPECT_EQ(outcome.error_code, SIMPLER_ERROR_INVALID_ARGS);
     EXPECT_EQ(outcome.stream_tasks_completed, 0);
 }
 
@@ -715,7 +715,7 @@ TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
 
     const AsyncPollResult result = wait_list.poll_and_complete<false>(nullptr, &scheduler);
 
-    EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
+    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
     EXPECT_EQ(result.resolved, 1);
     EXPECT_EQ(result.completed, 0);
 }

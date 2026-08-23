@@ -67,7 +67,7 @@ exception you must surface the CANN device slog, which is otherwise hidden:
      --pto-session-timeout 600
    ```
 
-   (`pto_runtime_c_api.cpp` skips its own `dlog_setlevel` when
+   (`runtime_c_api.cpp` skips its own `dlog_setlevel` when
    `ASCEND_GLOBAL_LOG_LEVEL` is set, so the env value wins.)
 
 2. In the captured log, find the **first** `PrintAicpuErrorInfo` /

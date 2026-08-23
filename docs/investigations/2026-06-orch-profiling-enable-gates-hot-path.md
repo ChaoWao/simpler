@@ -56,7 +56,7 @@ gated/ungated by `SIMPLER_DFX`. Findings:
      entry via `kernel.cpp`'s `set_pmu_enabled`), so a5 was also hoisted to
      function scope for parity. This gate is **load-bearing**: `pmu_active`
      feeds `dispatch_ready_tasks(...)` and forces single-issue dispatch.
-  2. `is_dep_gen_enabled()` in `pto_orchestrator.cpp::submit_task_common` —
+  2. `is_dep_gen_enabled()` in `orchestrator.cpp::submit_task_common` —
      once per task submission.
 
 Fix applied (issue #1146): gate both, both arches, under the **existing**
@@ -91,7 +91,7 @@ The two hot-path gates plus the whole dep_gen subsystem (init / set_idx / flush)
 gated under `SIMPLER_DFX`, both arches, plus the a5 PMU gate hoisted to
 function scope to match a2a3 — no behavioral change at the default
 `SIMPLER_DFX=1`. All touched translation units (`scheduler_dispatch.cpp`,
-`pto_orchestrator.cpp`, `scheduler_cold_path.cpp`, `aicpu_executor.cpp`)
+`orchestrator.cpp`, `scheduler_cold_path.cpp`, `aicpu_executor.cpp`)
 `-fsyntax-only` clean under `SIMPLER_DFX=1` **and** `SIMPLER_DFX=0`.
 
 **Magnitude is unmeasured.** No AICPU scheduler profile was taken. "Much

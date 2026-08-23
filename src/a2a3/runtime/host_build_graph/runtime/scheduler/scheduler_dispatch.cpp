@@ -24,7 +24,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
-#include "pto_runtime2.h"
+#include "runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
@@ -38,7 +38,7 @@
 #endif
 
 // AICore materializes args[] from src_payload on the gated path using the
-// byte offsets in pto2_dispatch_payload.h (the AICore .o cannot see PTO2TaskPayload).
+// byte offsets in dispatch_payload.h (the AICore .o cannot see PTO2TaskPayload).
 // Pin those constants to the real layout here, where the struct is fully visible.
 static_assert(offsetof(PTO2TaskPayload, tensor_count) == PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
 static_assert(offsetof(PTO2TaskPayload, scalar_count) == PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
@@ -929,7 +929,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #else
                 PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*slot);
 #endif
-                if (outcome.error_code != PTO2_ERROR_NONE) {
+                if (outcome.error_code != SIMPLER_ERROR_NONE) {
                     fail_scheduler(runtime, thread_idx, outcome.error_code);
                     break;
                 }
@@ -952,7 +952,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                 thread_idx
 #endif
             );
-            if (poll_result.error_code != PTO2_ERROR_NONE) {
+            if (poll_result.error_code != SIMPLER_ERROR_NONE) {
                 fail_scheduler(runtime, thread_idx, poll_result.error_code);
                 break;
             }
@@ -976,7 +976,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #else
                     PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*dummy_batch[di]);
 #endif
-                    if (outcome.error_code != PTO2_ERROR_NONE) {
+                    if (outcome.error_code != SIMPLER_ERROR_NONE) {
                         fail_scheduler(runtime, thread_idx, outcome.error_code);
                         break;
                     }
@@ -1017,9 +1017,9 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                     "Thread %d: P resolution stall (%d/%d resolved)", thread_idx,
                     completed_tasks_.load(std::memory_order_relaxed), total
                 );
-                int32_t expected = PTO2_ERROR_NONE;
+                int32_t expected = SIMPLER_ERROR_NONE;
                 header->sched_error_code.compare_exchange_strong(
-                    expected, PTO2_ERROR_SCHEDULER_TIMEOUT, std::memory_order_acq_rel, std::memory_order_acquire
+                    expected, SIMPLER_ERROR_SCHEDULER_TIMEOUT, std::memory_order_acq_rel, std::memory_order_acquire
                 );
                 if (!completed_.exchange(true, std::memory_order_acq_rel)) {
                     emergency_shutdown(runtime);
@@ -1312,7 +1312,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     (void)sched_->activate_graph_task(*graph_slot);
                     made_progress = true;
                 } else {
-                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
+                    fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_INVALID_ARGS);
                     break;
                 }
             }
@@ -1323,7 +1323,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 const bool valid_slot = prepare_slot->task != nullptr && prepare_slot->task_kind == TaskKind::GRAPH &&
                                         prepare_slot->task->task_id.raw == prepare_task_id;
                 if (!valid_slot) {
-                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
+                    fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_INVALID_ARGS);
                     break;
                 }
 #if SIMPLER_DFX
@@ -1335,11 +1335,11 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     sched_->prepare_graph_task(*prepare_slot, GRAPH_MATERIALIZE_SLICE_NODES, &nodes_materialized);
                 if (result == GraphMaterializeResult::PENDING || result == GraphMaterializeResult::BUSY) {
                     if (!sched_->push_graph_prepare(prepare_slot, prepare_task_id, thread_idx)) {
-                        fail_scheduler(runtime, thread_idx, PTO2_ERROR_READY_QUEUE_OVERFLOW);
+                        fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
                         break;
                     }
                 } else if (result == GraphMaterializeResult::INVALID) {
-                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
+                    fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_INVALID_ARGS);
                     break;
                 }
                 if (nodes_materialized > 0 || result == GraphMaterializeResult::PREPARED) {

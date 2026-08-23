@@ -19,7 +19,7 @@
 #if defined(__CPU_SIM)
 #include <type_traits>
 #else
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 
 #include <pto/comm/async_common/async_event_impl.hpp>
 #if defined(PTO_URMA_SUPPORTED)
@@ -29,8 +29,8 @@
 
 #include "aicore_completion_mailbox_types.h"
 #include "intrinsic.h"
-#include "pto_completion_token.h"
-#include "pto_runtime_status.h"
+#include "completion_token.h"
+#include "runtime_status.h"
 
 #ifndef __aicore__
 #define __aicore__
@@ -182,7 +182,7 @@ inline __aicore__ bool submit_urma_request_once(AsyncCtx &ctx, UrmaRequestDescri
 #if defined(PTO_URMA_SUPPORTED)
     pto::comm::AsyncSession session;
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(desc.workspace, desc.remote_rank, session)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return false;
     }
 
@@ -199,7 +199,7 @@ inline __aicore__ bool submit_urma_request_once(AsyncCtx &ctx, UrmaRequestDescri
     return true;
 #else
     (void)desc;
-    pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+    pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
     return false;
 #endif
 }
@@ -210,13 +210,13 @@ inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDes
     static_assert(std::is_same_v<RawDType, typename SrcTensor::RawDType>, "URMA transfer requires matching dtypes");
 
     if (!is_flat_contiguous_1d(desc.dst) || !is_flat_contiguous_1d(desc.src)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return false;
     }
 
     const uint64_t elem_count = tensor_element_count(desc.dst);
     if (elem_count != tensor_element_count(desc.src)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return false;
     }
     const uint64_t total_bytes = elem_count * sizeof(RawDType);
@@ -227,7 +227,7 @@ inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDes
 
     const uint64_t chunk_elems = max_bytes / sizeof(RawDType);
     if (chunk_elems == 0 || (max_bytes % sizeof(RawDType)) != 0) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return false;
     }
 
@@ -269,7 +269,7 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     uint32_t idx = *ctx.completion_count;
     if (idx >= ctx.completion_capacity) {
         if (ctx.completion_error_code != nullptr) {
-            *ctx.completion_error_code = PTO2_ERROR_ASYNC_WAIT_OVERFLOW;
+            *ctx.completion_error_code = SIMPLER_ERROR_ASYNC_WAIT_OVERFLOW;
         }
         return false;
     }
@@ -314,7 +314,7 @@ inline __aicore__ bool register_urma_async_event(
 
     const uint32_t engine = static_cast<uint32_t>(event.engine);
     if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::URMA) || workspace == nullptr) {
-        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         (void)event.Wait(session);
         return false;
     }
@@ -327,7 +327,7 @@ inline __aicore__ bool register_urma_async_event(
         reinterpret_cast<uint64_t>(workspace),
     };
     if (!register_completion_condition(ctx, token)) {
-        defer_error(ctx, PTO2_ERROR_ASYNC_REGISTRATION_FAILED);
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
         (void)event.Wait(session);
         return false;
     }

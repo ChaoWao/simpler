@@ -19,7 +19,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
-#include "pto_runtime2.h"
+#include "runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
@@ -99,8 +99,8 @@ void SchedulerContext::complete_slot_task(
     if (slot_state.payload != nullptr) {
         volatile DeferredCompletionSlab *deferred_slab = &deferred_slab_per_core_[core_id][expected_reg_task_id & 1];
         int32_t slab_err = deferred_slab->error_code;
-        if (slab_err != PTO2_ERROR_NONE) {
-            int32_t expected = PTO2_ERROR_NONE;
+        if (slab_err != SIMPLER_ERROR_NONE) {
+            int32_t expected = SIMPLER_ERROR_NONE;
             sched_->sm_header->sched_error_code.compare_exchange_strong(
                 expected, slab_err, std::memory_order_acq_rel, std::memory_order_acquire
             );
@@ -110,9 +110,9 @@ void SchedulerContext::complete_slot_task(
 
         uint32_t cond_count = deferred_slab->count;
         if (cond_count > MAX_COMPLETIONS_PER_TASK) {
-            int32_t expected = PTO2_ERROR_NONE;
+            int32_t expected = SIMPLER_ERROR_NONE;
             sched_->sm_header->sched_error_code.compare_exchange_strong(
-                expected, PTO2_ERROR_ASYNC_REGISTRATION_FAILED, std::memory_order_acq_rel, std::memory_order_acquire
+                expected, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED, std::memory_order_acq_rel, std::memory_order_acquire
             );
             completed_.store(true, std::memory_order_release);
             return;

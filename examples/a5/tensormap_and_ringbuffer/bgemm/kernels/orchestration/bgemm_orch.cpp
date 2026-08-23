@@ -37,7 +37,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_GEMM_TILE 0
 #define FUNC_TILE_ADD 1

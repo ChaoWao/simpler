@@ -13,7 +13,7 @@
 #include <string.h>
 
 #include "aicpu/worker_chip_message_queue.h"
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 namespace {
 
@@ -56,7 +56,7 @@ using QueueEndpoint = WorkerChipQueueEndpoint<kInputWindow>;
 void report_queue_error(const QueueEndpoint &queue) {
     const WorkerChipQueueError &err = queue.error();
     rt_report_fatal(
-        PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue error op=%s kind=%u region=%llu msg=%s",
+        SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue error op=%s kind=%u region=%llu msg=%s",
         worker_chip_queue_op_to_string(err.op), static_cast<unsigned>(err.kind),
         static_cast<unsigned long long>(err.region_id), err.message
     );
@@ -129,7 +129,7 @@ bool release_input(QueueEndpoint &queue, const WorkerChipQueueInputHandle &input
 bool process_first_pair(QueueEndpoint &queue, ActiveRequest *active, const WorkerChipQueueInputHandle &input) {
     active[1].handle = input;
     if (!parse_input_header(input, &active[1].header) || active[0].header.request_id == 0) {
-        rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "invalid L3-L2 queue example request");
+        rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "invalid L3-L2 queue example request");
         return false;
     }
     if (!publish_aiv_output(
@@ -169,20 +169,20 @@ bool remember_input_for_pair(
         active[3].header = header;
         return true;
     }
-    rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example input window is full");
+    rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example input window is full");
     return false;
 }
 
 bool process_data_message(QueueEndpoint &queue, const WorkerChipQueueInputHandle &input, ActiveRequest *active) {
     InputHeader header{};
     if (!parse_input_header(input, &header)) {
-        rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "invalid L3-L2 queue example request");
+        rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "invalid L3-L2 queue example request");
         return false;
     }
     if (header.mode == 1) {
         if (active[0].header.request_id != 0) {
             rt_report_fatal(
-                PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example received mode=1 while a request is pending"
+                SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example received mode=1 while a request is pending"
             );
             return false;
         }
@@ -197,7 +197,7 @@ bool process_data_message(QueueEndpoint &queue, const WorkerChipQueueInputHandle
         return remember_input_for_pair(active, input, header);
     }
     rt_report_fatal(
-        PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example unexpected mode=%llu",
+        SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example unexpected mode=%llu",
         static_cast<unsigned long long>(header.mode)
     );
     return false;
@@ -208,7 +208,7 @@ bool finish_pending_inputs(QueueEndpoint &queue, ActiveRequest *active) {
         return true;
     }
     if (active[2].header.request_id == 0 || active[3].header.request_id == 0) {
-        rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example missing paired input");
+        rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example missing paired input");
         return false;
     }
     if (!publish_aiv_output(
@@ -272,13 +272,13 @@ __attribute__((visibility("default"))) void worker_chip_message_queue_orchestrat
                 return;
             }
             if (!queue.input().drained()) {
-                rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example returned before drain");
+                rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example returned before drain");
             }
             return;
         }
         if (input.opcode != WorkerChipQueueOpcode::DATA) {
             rt_report_fatal(
-                PTO2_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example unexpected input opcode=%llu",
+                SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "L3-L2 queue example unexpected input opcode=%llu",
                 static_cast<unsigned long long>(input.opcode)
             );
             return;

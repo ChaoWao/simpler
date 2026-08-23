@@ -18,7 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 #define FUNC_SIMT_SCATTER 0
 

@@ -30,7 +30,7 @@
 #include "common/unified_log.h"
 #include "runtime/rt.h"
 #include "utils/elf_build_id.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 namespace host {
 

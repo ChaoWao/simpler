@@ -39,7 +39,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
-#include "pto2_dispatch_payload.h"
+#include "dispatch_payload.h"
 #include "task_args.h"
 
 // =============================================================================

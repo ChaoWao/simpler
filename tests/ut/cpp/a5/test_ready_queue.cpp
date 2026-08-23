@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2ReadyQueue from pto_scheduler.h
+ * Unit tests for PTO2ReadyQueue from scheduler.h
  *
  * Tests the lock-free bounded MPMC queue (Vyukov design).
  *
@@ -40,7 +40,7 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 // =============================================================================
 // ReadyQueue: Single-threaded fixture (malloc-backed)

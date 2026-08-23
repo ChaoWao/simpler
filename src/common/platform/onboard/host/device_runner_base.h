@@ -71,7 +71,7 @@
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
 #include "prepare_callable_common.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "native_run_execution.h"
 
 struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out

@@ -24,7 +24,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
-#include "pto_runtime2.h"
+#include "runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
@@ -38,7 +38,7 @@
 #endif
 
 // AICore materializes args[] from src_payload on the gated path using the
-// byte offsets in pto2_dispatch_payload.h (the AICore .o cannot see PTO2TaskPayload).
+// byte offsets in dispatch_payload.h (the AICore .o cannot see PTO2TaskPayload).
 // Pin those constants to the real layout here, where the struct is fully visible.
 static_assert(offsetof(PTO2TaskPayload, tensor_count) == PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
 static_assert(offsetof(PTO2TaskPayload, scalar_count) == PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
@@ -1111,8 +1111,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 thread_idx
 #endif
             );
-            if (poll_result.error_code != PTO2_ERROR_NONE) {
-                int32_t expected = PTO2_ERROR_NONE;
+            if (poll_result.error_code != SIMPLER_ERROR_NONE) {
+                int32_t expected = SIMPLER_ERROR_NONE;
                 header->sched_error_code.compare_exchange_strong(
                     expected, poll_result.error_code, std::memory_order_acq_rel, std::memory_order_acquire
                 );

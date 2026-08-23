@@ -24,8 +24,8 @@
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
-#include "pto_runtime2.h"
-#include "pto_shared_memory.h"
+#include "runtime_core.h"
+#include "shared_memory.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
@@ -37,11 +37,11 @@
 // caller may then write companion fields (e.g. the stall detail) knowing they
 // describe the same observation that owns the latched code.
 static bool latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
-    if (header == nullptr || error_code == PTO2_ERROR_NONE) {
+    if (header == nullptr || error_code == SIMPLER_ERROR_NONE) {
         return false;
     }
     // The first error code/thread pair wins; the bitmap cumulatively records all reporting threads.
-    int32_t expected = PTO2_ERROR_NONE;
+    int32_t expected = SIMPLER_ERROR_NONE;
     bool won = header->sched_error_code.compare_exchange_strong(expected, error_code, std::memory_order_acq_rel);
     if (won) {
         header->sched_error_thread.store(thread_idx, std::memory_order_release);
@@ -59,7 +59,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
         return LoopAction::BREAK_LOOP;
     }
     int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR(
             "Thread %d: Fatal error (code=%d), sending EXIT_SIGNAL to all cores. "
             "completed_tasks=%d, total_tasks=%d",
@@ -71,7 +71,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != PTO2_ERROR_NONE) {
+    if (sched_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -100,7 +100,7 @@ SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHea
         return LoopAction::BREAK_LOOP;
     }
     int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Fatal error detected (code=%d), sending EXIT_SIGNAL to all cores", thread_idx, orch_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -108,7 +108,7 @@ SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHea
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != PTO2_ERROR_NONE) {
+    if (sched_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
@@ -439,7 +439,7 @@ int32_t SchedulerContext::handle_timeout_exit(
     );
     // Only the thread that wins the code-100 latch publishes the detail/locators,
     // keeping the host-visible sub-class consistent with the latched code.
-    if (latch_scheduler_error(header, thread_idx, PTO2_ERROR_SCHEDULER_TIMEOUT) && header != nullptr) {
+    if (latch_scheduler_error(header, thread_idx, SIMPLER_ERROR_SCHEDULER_TIMEOUT) && header != nullptr) {
         header->sched_stall_completed.store(cls.completed, std::memory_order_relaxed);
         header->sched_stall_total.store(cls.total, std::memory_order_relaxed);
         header->sched_stall_cnt_running.store(cls.cnt_running, std::memory_order_relaxed);
@@ -487,7 +487,7 @@ int32_t SchedulerContext::handle_timeout_exit(
     );
 #endif
 #endif
-    return -PTO2_ERROR_SCHEDULER_TIMEOUT;
+    return -SIMPLER_ERROR_SCHEDULER_TIMEOUT;
 }
 
 #if SIMPLER_DFX
@@ -950,7 +950,7 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
                 ac.completion_entries = &slab->entries[0];
                 ac.completion_capacity = MAX_COMPLETIONS_PER_TASK;
                 slab->count = 0;
-                slab->error_code = PTO2_ERROR_NONE;
+                slab->error_code = SIMPLER_ERROR_NONE;
                 for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
                     dp.global_context.dma_workspace[k] = get_dma_workspace_addr(k);
                 }
@@ -1092,7 +1092,7 @@ int32_t SchedulerContext::pre_handshake_init(
     // via rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level() in
     // AicpuExecutor::run(). Otherwise the cached value would still be DISABLED
     // (only the binary enable bit has been seeded by kernel.cpp at this point),
-    // and the CYCLE_COUNT_START() gate in pto_orchestrator.cpp would suppress
+    // and the CYCLE_COUNT_START() gate in orchestrator.cpp would suppress
     // all ORCH_PHASES records. Reset the cached level on disabled runs so a
     // prior enabled launch's level can't leak into the phase-record gates in
     // scheduler_dispatch (`>= SCHED_PHASES`). This runs on the leader before it
@@ -1268,7 +1268,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
             // Clear the slab once here; thereafter only the completion path re-clears
             // count (and only when a deferred task dirtied it), never per dispatch.
             slab->count = 0;
-            slab->error_code = PTO2_ERROR_NONE;
+            slab->error_code = SIMPLER_ERROR_NONE;
             for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
                 dp.global_context.dma_workspace[k] = get_dma_workspace_addr(k);
             }
@@ -1382,7 +1382,7 @@ void SchedulerContext::on_orchestration_done(
     if (sched_->sm_header) {
         orch_err = sched_->sm_header->orch_error_code.load(std::memory_order_relaxed);
     }
-    if (orch_err != PTO2_ERROR_NONE) {
+    if (orch_err != SIMPLER_ERROR_NONE) {
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
         }

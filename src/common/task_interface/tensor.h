@@ -21,7 +21,7 @@
 
 #include "assert_compat.h"
 #include "data_type.h"
-#include "pto_task_id.h"
+#include "task_id.h"
 
 /**
  * Buffer Handle
@@ -49,7 +49,7 @@ enum class TensorArgType : int32_t {
 };
 
 // `OverlapStatus` / `Segment` (overlap geometry) live in the runtime
-// pto_tensormap.h. `TensorCreateInfo` (submit-time create-info for
+// tensormap.h. `TensorCreateInfo` (submit-time create-info for
 // runtime-allocated outputs) and its materialization helpers live in the
 // runtime tensor_create_info.h. Both are runtime-only and intentionally not
 // part of the wire/host-facing ChipTensor definition.

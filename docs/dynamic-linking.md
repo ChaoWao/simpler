@@ -296,7 +296,7 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
     dlsym(handle, simpler_host_log_bind_state)(state)   first load only
     dlopen(host_runtime.so, RTLD_LOCAL)
     dlsym(handle, simpler_host_log_bind_state)(state)
-    dlsym every required export declared in pto_runtime_c_api.h, including:
+    dlsym every required export declared in runtime_c_api.h, including:
            create_device_context, destroy_device_context, simpler_init,
            get_runtime_size, get_runtime_alignment, simpler_register_callable,
            simpler_prepare_run, simpler_launch_run, simpler_poll_run,

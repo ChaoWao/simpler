@@ -672,7 +672,7 @@ TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
 
 TEST_F(OrchestratorFixture, InoutWiresCreatorAsFanin) {
     // INOUT is the only tag that pulls in the prior writer as a fanin
-    // producer -- matching L2's pto_orchestrator.cpp Step B where only
+    // producer -- matching L2's orchestrator.cpp Step B where only
     // INPUT / INOUT do tensor_map.lookup. Users who want a WaW dep on
     // the alloc-slot (so its HeapRing slab stays live while they write)
     // must tag the buffer INOUT.

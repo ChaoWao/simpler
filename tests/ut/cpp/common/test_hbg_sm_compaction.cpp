@@ -24,7 +24,7 @@
 #include <cstring>
 #include <vector>
 
-#include "pto_shared_memory.h"
+#include "shared_memory.h"
 
 namespace {
 

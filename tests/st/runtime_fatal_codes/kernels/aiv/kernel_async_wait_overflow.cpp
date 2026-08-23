@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative AIV kernel: PTO2_ERROR_ASYNC_WAIT_OVERFLOW (code 102).
+ * Negative AIV kernel: SIMPLER_ERROR_ASYNC_WAIT_OVERFLOW (code 102).
  *
  * Every dispatched task gets a valid async context (capacity =
  * MAX_COMPLETIONS_PER_TASK). Registering one condition past capacity makes
@@ -29,7 +29,7 @@
 
 #include <pto/pto-inst.hpp>
 
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 
 using namespace pto;
 

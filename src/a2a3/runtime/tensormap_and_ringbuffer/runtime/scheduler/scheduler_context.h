@@ -17,10 +17,10 @@
 #include "common/unified_log.h"
 #include "scheduler_types.h"
 
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 #include "aicore_completion_mailbox.h"
-#include "pto2_dispatch_payload.h"
+#include "dispatch_payload.h"
 
 // These macros are defined in runtime.h, but we cannot include it here
 // (it pulls in Handshake which we only forward-declare).  Mirror the
@@ -401,7 +401,7 @@ private:
     bool has_idle_in_other_threads(int32_t self_thread_idx, PTO2ResourceShape shape) const;
 
     // True if mix tasks remain in the global MIX ready queue. Approximate —
-    // PTO2ReadyQueue::size() (see pto_scheduler.h) snapshots its enqueue/dequeue
+    // PTO2ReadyQueue::size() (see scheduler.h) snapshots its enqueue/dequeue
     // positions with std::memory_order_relaxed and may interleave with concurrent
     // push/pop. A stale read here causes at most one
     // extra/missed AIC/AIV skip and self-corrects on the next loop iteration.
@@ -510,10 +510,10 @@ private:
 
     // One-glance classification of a no-progress timeout, derived from state the
     // scheduler already holds at the stall. Reduces the multi-state snapshot to a
-    // dominant PTO2_STALL_DETAIL_* sub-class plus a few locator fields, which
+    // dominant SIMPLER_STALL_DETAIL_* sub-class plus a few locator fields, which
     // handle_timeout_exit propagates to host alongside the unchanged code 100.
     struct StallClassification {
-        int32_t detail;         // PTO2_STALL_DETAIL_*
+        int32_t detail;         // SIMPLER_STALL_DETAIL_*
         int32_t cnt_running;    // tasks observed RUNNING (on a core)
         int32_t cnt_ready;      // fanin-satisfied but not dispatched
         int32_t cnt_waiting;    // still waiting on fanin

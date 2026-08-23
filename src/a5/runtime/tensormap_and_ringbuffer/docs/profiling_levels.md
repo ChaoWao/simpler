@@ -391,7 +391,7 @@ definitions to runtime headers.
 ```cpp
 #define SIMPLER_DFX 1
 #define SIMPLER_ORCH_PROFILING 1
-#include "pto_runtime2_types.h"
+#include "runtime_types.h"
 ```
 
 ---
@@ -433,7 +433,7 @@ definitions to runtime headers.
 - Macro defaults and validation: `src/common/task_interface/profiling_config.h`
 - Scheduler profiling: `../runtime/scheduler/scheduler_dispatch.cpp` and `../runtime/scheduler/scheduler_cold_path.cpp`
 - Orchestrator profiling: `../aicpu/aicpu_executor.cpp`
-- TensorMap profiling: `../runtime/pto_tensormap.h`
+- TensorMap profiling: `../runtime/tensormap.h`
 
 ---
 

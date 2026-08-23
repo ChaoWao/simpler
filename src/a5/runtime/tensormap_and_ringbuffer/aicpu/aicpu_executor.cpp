@@ -28,14 +28,14 @@
 #include "aicpu/orch_so_file.h"
 #include "callable_protocol.h"
 #include "common/kernel_args.h"
-#include "pto2_dispatch_payload.h"
+#include "dispatch_payload.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
 // Runtime headers (full struct definition for create/destroy + PTO2_SCOPE)
-#include "pto_runtime2.h"
-#include "pto_runtime2_types.h"
-#include "pto_shared_memory.h"
+#include "runtime_core.h"
+#include "runtime_types.h"
+#include "shared_memory.h"
 
 // Performance profiling headers
 #include "aicpu/chip_swimlane_collector_aicpu.h"
@@ -1034,7 +1034,7 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     }
 
     if (runtime_rc != 0) {
-        LOG_ERROR("aicpu_execute: PTO2 runtime failed with rc=%d", runtime_rc);
+        LOG_ERROR("aicpu_execute: simpler runtime failed with rc=%d", runtime_rc);
         return runtime_rc;
     }
 

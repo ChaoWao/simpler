@@ -31,8 +31,8 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "pto_orchestrator.h"
-#include "pto_shared_memory.h"
+#include "orchestrator.h"
+#include "shared_memory.h"
 
 namespace {
 

@@ -19,7 +19,7 @@
 #include <optional>
 #include <stdexcept>
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 /**
  * Fixed-capacity owner of generation-safe pipeline slot leases.

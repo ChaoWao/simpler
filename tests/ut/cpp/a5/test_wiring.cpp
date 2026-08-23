@@ -29,9 +29,9 @@
 #include <thread>
 #include <vector>
 
-#include "pto_orchestrator.h"
+#include "orchestrator.h"
 #include "utils/device_arena.h"
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 // =============================================================================
 // Fixture: sets up runtime state with shared memory and provides helpers
@@ -475,7 +475,7 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     // Need a valid fanin_spill_pool even though we don't spill
     PTO2FaninPool dummy_pool{};
     PTO2FaninSpillEntry dummy_entries[4];
-    std::atomic<int32_t> dummy_error{PTO2_ERROR_NONE};
+    std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
     task_slot.payload = &payload;
@@ -517,7 +517,7 @@ TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
     payload.fanin_inline_edges[1].set(&retain_producer, DEP_WAIT | DEP_RETAIN);
     PTO2FaninPool dummy_pool{};
     PTO2FaninSpillEntry dummy_entries[4];
-    std::atomic<int32_t> dummy_error{PTO2_ERROR_NONE};
+    std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
     task_slot.payload = &payload;
@@ -559,7 +559,7 @@ TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
     }
     PTO2FaninPool spill_pool{};
     PTO2FaninSpillEntry spill_entries[4];
-    std::atomic<int32_t> err{PTO2_ERROR_NONE};
+    std::atomic<int32_t> err{SIMPLER_ERROR_NONE};
     spill_pool.init(spill_entries, 4, &err);
     auto *e = spill_pool.alloc();
     int32_t spill_start = spill_pool.top - 1;

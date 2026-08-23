@@ -351,7 +351,7 @@ and python-version-agnostic, so it works on a2a3 / a5 and any venv layout):
 **Pick the target by where the code lives:** the host-orchestration / runtime
 entry is in `…/host/libhost_runtime.so`; the **AICPU scheduler, orchestrator,
 dispatch, drain, and early-dispatch** code (`runtime/scheduler/*`,
-`pto_orchestrator.cpp`) compiles into `…/aicpu/libaicpu_kernel.so`. Rebuild the
+`orchestrator.cpp`) compiles into `…/aicpu/libaicpu_kernel.so`. Rebuild the
 one you touched:
 
 ```bash

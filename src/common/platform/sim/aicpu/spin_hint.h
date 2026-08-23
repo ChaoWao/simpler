@@ -49,7 +49,7 @@
 #endif
 
 // Wall-clock budget (ms) of no task progress before the dispatch loop aborts
-// with PTO2_ERROR_SCHEDULER_TIMEOUT. Unlike onboard there is no STARS
+// with SIMPLER_ERROR_SCHEDULER_TIMEOUT. Unlike onboard there is no STARS
 // op-execution timeout to race here, so this keeps the full #897 distributed-init
 // / HCCL-skew headroom. A generous budget also avoids false timeouts when an
 // oversubscribed CPU-sim kernel (e.g. matmul-heavy) makes real but slow

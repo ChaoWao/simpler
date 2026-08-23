@@ -22,7 +22,7 @@
 
 #include "platform_comm/comm.h"
 #include "platform_comm/comm_context.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 #include "common/acl_hal_device.h"
 #include "common/unified_log.h"

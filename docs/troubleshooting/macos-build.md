@@ -71,7 +71,7 @@ follow. Decide per phase based on what each one needs.
 `pre-commit run` (or a `git commit` that triggers the hook) fails with:
 
 ```text
-src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_ring_buffer.h:37:10:
+src/a5/runtime/tensormap_and_ringbuffer/runtime/ring_buffer.h:37:10:
   error: 'algorithm' file not found [clang-diagnostic-error]
    37 | #include <algorithm>
       |          ^~~~~~~~~~~

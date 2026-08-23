@@ -21,8 +21,8 @@
 #include <vector>
 
 #include "graph_host_state.h"
-#include "pto_orchestrator.h"
-#include "pto_shared_memory.h"
+#include "orchestrator.h"
+#include "shared_memory.h"
 #include "task_interface/assert_compat.h"
 #include "utils/device_arena.h"
 
@@ -280,7 +280,7 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     EXPECT_TRUE(orch.fatal) << "A shell whose Definition never arrived cannot be completed";
 }
 
-// The ordinary path reports PTO2_ERROR_INVALID_ARGS for an auto scope opened
+// The ordinary path reports SIMPLER_ERROR_INVALID_ARGS for an auto scope opened
 // inside a manual one. The recording pass keeps a scope depth of its own — the
 // manual flag has to reach compute_task_fanin, which suppresses inference inside
 // a manual scope — so it has to refuse the same nesting. Accepting it would let a
@@ -380,7 +380,9 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     EXPECT_FALSE(replay.recording);
     EXPECT_FALSE(replay.task_id.is_valid());
     EXPECT_TRUE(orch.fatal);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(
+        sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED
+    );
     EXPECT_EQ(graph_host_upload_count(*graph_state), uploads_before_failure);
 }
 
@@ -414,7 +416,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     EXPECT_EQ(replay.task_id.local(), static_cast<uint32_t>(allocator.window_size() - 1));
     EXPECT_EQ(allocator.active_count(), allocator.window_size());
     EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), allocator.window_size());
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_NONE);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
 }
 
 // The constructs a predicate can present that no Definition can express. Each is

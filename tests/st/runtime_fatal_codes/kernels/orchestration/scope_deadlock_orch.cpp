@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative ST orchestration: PTO2_ERROR_SCOPE_DEADLOCK (code 1).
+ * Negative ST orchestration: SIMPLER_ERROR_SCOPE_DEADLOCK (code 1).
  *
  * Submits far more dummy tasks than the (deliberately tiny) per-ring task window
  * inside a single open scope. The orchestrator's scope-admission check
@@ -27,7 +27,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 extern "C" {
 

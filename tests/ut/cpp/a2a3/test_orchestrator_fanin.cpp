@@ -16,8 +16,8 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "pto_orchestrator.h"
-#include "pto_shared_memory.h"
+#include "orchestrator.h"
+#include "shared_memory.h"
 
 class OrchestratorFaninTest : public ::testing::Test {
 protected:
@@ -264,7 +264,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
 
     EXPECT_FALSE(blocked.task_id().is_valid());
     EXPECT_TRUE(orch.fatal);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
     EXPECT_NE(log.find("FATAL: Task Allocator Deadlock - Heap Exhausted! ring=1"), std::string::npos);
     EXPECT_NE(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
     EXPECT_NE(log.find("Heap ring 1:"), std::string::npos);
@@ -298,7 +298,7 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
 
     EXPECT_FALSE(child.task_id().is_valid());
     EXPECT_TRUE(orch.fatal);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
     EXPECT_NE(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
 }
 
@@ -333,7 +333,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
 
     EXPECT_FALSE(blocked.task_id().is_valid());
     EXPECT_TRUE(orch.fatal);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
     EXPECT_NE(log.find("No reclaim progress for ~500 ms"), std::string::npos);
     EXPECT_EQ(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
 }

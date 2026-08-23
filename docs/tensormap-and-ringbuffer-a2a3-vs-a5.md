@@ -34,12 +34,12 @@ The following 24 files are byte-identical:
 build_config.py
 docs/{SCALAR_DATA_ACCESS.md,SUBMIT_BY_CLUSTER.md,device_log_profiling.md,profiling_levels.md}
 host/{dep_gen_replay.cpp,runtime_compile_info.cpp}
-orchestration/{common.cpp,pto_arg_with_deps.h,pto_orchestration_api.h}
-runtime/{common.h,pto_async_kernel_api.h,pto_dep_compute.h,pto_orchestrator.h,
-         pto_runtime2.cpp,pto_runtime2.h,pto_shared_memory.h,pto_tensormap.h,
+orchestration/{common.cpp,arg_with_deps.h,orchestration_api.h}
+runtime/{common.h,async_kernel_api.h,dep_compute.h,orchestrator.h,
+         runtime_core.cpp,runtime_core.h,shared_memory.h,tensormap.h,
          tensor_create_info.h}
-runtime/scheduler/{pto_scheduler.cpp,scheduler_types.h}
-runtime/shared/{pto_shared_memory.cpp,pto_tensormap.cpp,runtime.cpp}
+runtime/scheduler/{scheduler.cpp,scheduler_types.h}
+runtime/shared/{shared_memory.cpp,tensormap.cpp,runtime.cpp}
 ```
 
 Byte identity is a textual result only. A shared file may still consume
@@ -53,14 +53,14 @@ behavior:
 
 | Files | Difference |
 | ----- | ---------- |
-| `common/pto_runtime_status.h`, `host/dep_gen_replay.h`, `runtime/pto_constants.h` | Path-derived include-guard macro names only |
-| `runtime/backend/sdma/sdma_completion_kernel.h`, `runtime/pto_types.h` | `#pragma once` on A2/A3 versus a path-derived include guard on A5 |
+| `common/runtime_status.h`, `host/dep_gen_replay.h`, `runtime/constants.h` | Path-derived include-guard macro names only |
+| `runtime/backend/sdma/sdma_completion_kernel.h`, `runtime/types.h` | `#pragma once` on A2/A3 versus a path-derived include guard on A5 |
 | `common/intrinsic.h` | A5 uses `s_block_idx` and `s_block_num` because the unprefixed names are compiler-reserved; getter semantics and layout are unchanged |
-| `runtime/pto2_dispatch_payload.h` | Comments follow the platform-specific `LocalContext` field names; payload semantics are unchanged |
+| `runtime/dispatch_payload.h` | Comments follow the platform-specific `LocalContext` field names; payload semantics are unchanged |
 | `runtime/aicore_completion_mailbox.h` | Path-derived include guards and comment wording only |
-| `runtime/pto_completion_token.h` | Path-derived include guards and an A2/A3-only explanatory comment |
-| `runtime/pto_runtime2_types.h` | Comments state the corresponding 72- or 108-worker capacity; the mask remains two 64-bit words on both platforms |
-| `runtime/pto_submit_types.h` | The launch accessor and backing field are named `block_num` on A2/A3 and `core_num` on A5; both represent the logical SPMD block count |
+| `runtime/completion_token.h` | Path-derived include guards and an A2/A3-only explanatory comment |
+| `runtime/runtime_types.h` | Comments state the corresponding 72- or 108-worker capacity; the mask remains two 64-bit words on both platforms |
+| `runtime/submit_types.h` | The launch accessor and backing field are named `block_num` on A2/A3 and `core_num` on A5; both represent the logical SPMD block count |
 
 The first two rows, covering five files, are the strict "compile macro only"
 subset. The `s_block_*` names are also a compile-time constraint rather than a
@@ -80,17 +80,17 @@ docs/RUNTIME_LOGIC.md
 host/runtime_maker.cpp
 runtime/aicore_completion_mailbox_types.h
 runtime/backend/sdma/sdma_completion_scheduler.h
-runtime/pto_async_wait.h
-runtime/pto_orchestrator.cpp
-runtime/pto_ring_buffer.cpp
-runtime/pto_ring_buffer.h
+runtime/async_wait.h
+runtime/orchestrator.cpp
+runtime/ring_buffer.cpp
+runtime/ring_buffer.h
 runtime/runtime.h
-runtime/scheduler/pto_scheduler.h
+runtime/scheduler/scheduler.h
 runtime/scheduler/scheduler_cold_path.cpp
 runtime/scheduler/scheduler_completion.cpp
 runtime/scheduler/scheduler_context.h
 runtime/scheduler/scheduler_dispatch.cpp
-runtime/shared/pto_runtime2_init.cpp
+runtime/shared/runtime_init.cpp
 ```
 
 A5 also has two backend files with no A2/A3 counterpart:
@@ -161,8 +161,8 @@ overhead.
 | ---- | ------------------ |
 | `aicpu/aicpu_executor.cpp` | A2/A3 invalidates `runtime->dev`, which Host DMA writes, before teardown; A5 does not require the corresponding operation |
 | `runtime/backend/sdma/sdma_completion_scheduler.h` | A2/A3 invalidates the cache line before the acquire load of the completed post ID; A5 performs the acquire load directly; retirement is a no-op on both platforms |
-| `runtime/pto_async_wait.h` | A2/A3 provides a cache-line invalidation helper for async COUNTER polling; A5 does not require it |
-| `runtime/scheduler/pto_scheduler.h` | A2/A3 invalidates the cache line before async COUNTER polling; A5 polls directly |
+| `runtime/async_wait.h` | A2/A3 provides a cache-line invalidation helper for async COUNTER polling; A5 does not require it |
+| `runtime/scheduler/scheduler.h` | A2/A3 invalidates the cache line before async COUNTER polling; A5 polls directly |
 
 ### PMU, System Counter, and DMB
 
@@ -207,9 +207,9 @@ backend operations, and CQ polling/retirement path.
 | Path stage | File | Current difference |
 | ---------- | ---- | ------------------ |
 | Request issue | `runtime/backend/urma/urma_completion_kernel.h` | Present only on A5; it invokes `TGET_ASYNC`/`TPUT_ASYNC` only when `PTO_URMA_SUPPORTED` is defined |
-| Deferred entry | `runtime/aicore_completion_mailbox_types.h`, `runtime/pto_async_kernel_api.h` | Both platforms use the same 32-byte entry and propagate `backend_cookie`; A5 additionally defines the URMA completion type |
+| Deferred entry | `runtime/aicore_completion_mailbox_types.h`, `runtime/async_kernel_api.h` | Both platforms use the same 32-byte entry and propagate `backend_cookie`; A5 additionally defines the URMA completion type |
 | FIN forwarding | `runtime/scheduler/scheduler_completion.cpp`, `runtime/aicore_completion_mailbox.h` | Both platforms carry `backend_cookie` into the same 64-byte mailbox message; A5 can populate it with URMA workspace metadata |
-| CQ polling/retirement | `runtime/backend/urma/urma_completion_scheduler.h`, `runtime/pto_async_wait.h` | A5 registers URMA operations, polls CQE owner/status, advances the CQ/WQ tail, and updates the doorbell; the scheduler header itself is not guarded by the capability macro |
+| CQ polling/retirement | `runtime/backend/urma/urma_completion_scheduler.h`, `runtime/async_wait.h` | A5 registers URMA operations, polls CQE owner/status, advances the CQ/WQ tail, and updates the doorbell; the scheduler header itself is not guarded by the capability macro |
 
 ### A2/A3 Next-Block Prefetch
 
@@ -280,9 +280,9 @@ progress.
 | File | A5-only difference introduced by PR #1575 |
 | ---- | ----------------------------------------- |
 | `runtime/pto_ring_buffer.{h,cpp}` | A5 reclaim consumers request and await exact watermark publication after 10 ms without progress and before structural classification |
-| `runtime/pto_orchestrator.cpp` | A5 TensorMap pressure requests publication from every ring after the same 10 ms no-progress interval |
-| `runtime/scheduler/{pto_scheduler.h,scheduler_dispatch.cpp}` | A5 batches non-blocking publication at K=16 and services pressure requests in productive and idle loops; A2/A3 continues to publish every local advance |
-| `runtime/shared/pto_runtime2_init.cpp` | A5 initializes, resets, and wires the publication shadow and pressure handshake |
+| `runtime/orchestrator.cpp` | A5 TensorMap pressure requests publication from every ring after the same 10 ms no-progress interval |
+| `runtime/scheduler/{scheduler.h,scheduler_dispatch.cpp}` | A5 batches non-blocking publication at K=16 and services pressure requests in productive and idle loops; A2/A3 continues to publish every local advance |
+| `runtime/shared/runtime_init.cpp` | A5 initializes, resets, and wires the publication shadow and pressure handshake |
 
 The A2/A3 result is not a correctness limitation. A local port passed targeted
 and complete non-hardware tests, but its eight workload deltas were all within

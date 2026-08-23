@@ -44,7 +44,7 @@ def test_emit_resource_failure_summary_prints_nodeid_and_annotation(capsys):
             output=(
                 "line1\n"
                 "E       RuntimeError: run_prepared failed with code 507018\n"
-                "PTO2 runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100\n"
+                "simpler runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100\n"
                 "PTO2 scheduler timeout sub_class=S1:running-stalled\n"
             ),
             duration_s=12.34,
@@ -68,7 +68,7 @@ def test_emit_resource_failure_summary_prints_nodeid_and_annotation(capsys):
     assert "hint:" not in out
     assert "line1" not in out
     assert "RuntimeError: run_prepared failed with code 507018" not in out
-    assert "PTO2 runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100" not in out
+    assert "simpler runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100" not in out
     assert "PTO2 scheduler timeout sub_class=S1:running-stalled" not in out
     assert "standalone pass" not in out
 
@@ -111,7 +111,7 @@ def test_device_poison_codes_key_on_the_host_band_not_the_latched_one():
     not: SCOPE_DEADLOCK is an orchestration bug, and treating it as a poisoned
     context turns one red test into a misleading runtime-wide skip.
 
-    The two bands are defined in src/common/worker/pto_runtime_c_api.h; the set
+    The two bands are defined in src/common/worker/runtime_c_api.h; the set
     here has to move with them, which is what this test pins.
     """
     cf = _load_root_conftest()

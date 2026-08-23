@@ -27,7 +27,7 @@ Task IDs are widened from 32-bit to 64-bit to carry the ring identity:
 task_id.raw = (ring_id << 32) | local_id
 ```
 
-`PTO2TaskId` exposes direct accessors in `src/common/task_interface/pto_task_id.h`:
+`PTO2TaskId` exposes direct accessors in `src/common/task_interface/task_id.h`:
 
 | API | Purpose |
 | --- | ------- |
@@ -48,7 +48,7 @@ Type changes:
 
 ### 4.1 PTO2RingSet (new)
 
-Bundles the three per-ring resources into a single aggregate (`pto_ring_buffer.h`):
+Bundles the three per-ring resources into a single aggregate (`ring_buffer.h`):
 
 ```cpp
 struct PTO2RingSet {

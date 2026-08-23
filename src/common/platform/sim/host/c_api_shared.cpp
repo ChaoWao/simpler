@@ -13,7 +13,7 @@
  * public C ABI surface, all written against SimDeviceRunnerBase * so the same
  * source file is linked into both arches' libhost_runtime.so (sim variant).
  *
- * Per-arch pto_runtime_c_api.cpp keeps only `create_device_context` (the one
+ * Per-arch runtime_c_api.cpp keeps only `create_device_context` (the one
  * line that requires the concrete DeviceRunner type) plus the acl/comm
  * placeholders (sim has no ACL; comm_init/barrier/destroy come from
  * src/common/platform_comm/comm_sim.cpp).
@@ -21,7 +21,7 @@
  * Mirrors the onboard pattern from PR #928.
  */
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 #include "callable.h"
 #include "call_config.h"

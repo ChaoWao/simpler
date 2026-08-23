@@ -546,7 +546,7 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.
- *  Must match PTO2ResourceShape's first three values (see pto_submit_types.h).
+ *  Must match PTO2ResourceShape's first three values (see submit_types.h).
  *  Hardcoded here rather than included to keep this header runtime-independent. */
 constexpr int CHIP_SWIMLANE_NUM_QUEUE_SHAPES = 3;
 
