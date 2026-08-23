@@ -85,64 +85,67 @@ static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
 
 static TaskOutputTensors
 submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
-    return rt->orchestrator.submit_task(mixed_kernels, args);
+    return rt->orchestrator->submit_task(mixed_kernels, args);
 }
 
 static TaskOutputTensors alloc_tensors_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
-    return rt->orchestrator.alloc_tensors(args);
+    return rt->orchestrator->alloc_tensors(args);
 }
 
 static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
-    return rt->orchestrator.submit_dummy_task(args);
+    return rt->orchestrator->submit_dummy_task(args);
 }
 
 static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args) {
     if (rt == nullptr) return GraphScopeResult{};
-    return rt->orchestrator.graph_begin(graph_key, args, rt->active_callable_hash);
+    return rt->orchestrator->graph_begin(graph_key, args, rt->active_callable_hash);
 }
 
 static bool graph_prepare_impl(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args) {
-    return rt != nullptr && rt->orchestrator.graph_prepare(recording_handle, args);
+    return rt != nullptr && rt->orchestrator->graph_prepare(recording_handle, args);
 }
 
 static void graph_abort_impl(PTO2Runtime *rt, void *recording_handle) {
-    if (rt != nullptr) rt->orchestrator.graph_abort(recording_handle);
+    if (rt != nullptr) rt->orchestrator->graph_abort(recording_handle);
 }
 
-static bool graph_end_impl(PTO2Runtime *rt) { return rt != nullptr && rt->orchestrator.graph_end(); }
+static bool graph_end_impl(PTO2Runtime *rt) { return rt != nullptr && rt->orchestrator->graph_end(); }
 
 static void graph_commit_impl(PTO2Runtime *rt) {
-    if (rt != nullptr) rt->orchestrator.graph_commit();
+    if (rt != nullptr) rt->orchestrator->graph_commit();
 }
 
 void rt_scope_begin(PTO2Runtime *rt) {
     PTO2ScopeMode mode = rt->pending_scope_mode;
     rt->pending_scope_mode = PTO2ScopeMode::AUTO;
-    rt->orchestrator.begin_scope(mode);
+    rt->orchestrator->begin_scope(mode);
 }
 
-void rt_scope_end(PTO2Runtime *rt) { rt->orchestrator.end_scope(); }
+void rt_scope_end(PTO2Runtime *rt) { rt->orchestrator->end_scope(); }
 
 void rt_orchestration_done(PTO2Runtime *rt) {
     // Host orchestration calls this runtime entry directly rather than the
     // orchestration-SO wrapper. Commit here as well so an all-Graph entry has a
     // final synchronization point for its asynchronous recording and deferred
     // outer shells even when no later non-Graph task forced an earlier commit.
-    rt->orchestrator.graph_commit();
-    rt->orchestrator.mark_done();
+    rt->orchestrator->graph_commit();
+    rt->orchestrator->mark_done();
+    // The orchestrator itself never crosses to the device, so the count of tasks
+    // it completed inline is published into the header that does.
+    rt->inline_completed_tasks = rt->orchestrator->inline_completed_tasks;
 }
 
-static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator.fatal; }
+static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator->fatal; }
 
 void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     if (fmt == nullptr || fmt[0] == '\0') {
-        rt->orchestrator.report_fatal(error_code, func, nullptr);
+        rt->orchestrator->report_fatal(error_code, func, nullptr);
     } else {
         char message[1024];
         vsnprintf(message, sizeof(message), fmt, args);
-        rt->orchestrator.report_fatal(error_code, func, "%s", message);
+        rt->orchestrator->report_fatal(error_code, func, "%s", message);
     }
     va_end(args);
 }
@@ -157,7 +160,7 @@ MAYBE_UNINITIALIZED_BEGIN
 static bool
 wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
     PTO2TaskId owner = tensor.owner_task_id;
-    PTO2OrchestratorState &orch = rt->orchestrator;
+    PTO2OrchestratorState &orch = *rt->orchestrator;
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
     // spinning on each. When the segment fills, we wait for the accumulated
@@ -324,7 +327,7 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndi
     uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
     uint64_t result = 0;
     if (!host_tensor_read(rt->tensor_access, elem_addr, &result, elem_size)) {
-        rt->orchestrator.report_fatal(
+        rt->orchestrator->report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
             "no host view for device address %#llx (%llu bytes): during host orchestration only tensors the "
             "runtime staged are readable, not runtime-created or child-memory buffers",
@@ -355,7 +358,7 @@ void set_tensor_data(
     uint64_t elem_size = get_element_size(tensor.dtype);
     uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
     if (!host_tensor_write(rt->tensor_access, elem_addr, &value, elem_size)) {
-        rt->orchestrator.report_fatal(
+        rt->orchestrator->report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
             "no writable host view for device address %#llx (%llu bytes): during host orchestration only tensors "
             "the runtime staged are writable, not runtime-created or child-memory buffers",
@@ -372,8 +375,8 @@ void set_tensor_data(
 static void scope_set_site_impl(const char *file, int line) { scope_stats_set_pending_site(file, line); }
 #endif
 
-static int32_t available_cluster_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_cluster_count; }
-static int32_t available_aiv_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_aiv_count; }
+static int32_t available_cluster_count_impl(PTO2Runtime *rt) { return rt->orchestrator->total_cluster_count; }
+static int32_t available_aiv_count_impl(PTO2Runtime *rt) { return rt->orchestrator->total_aiv_count; }
 
 static const PTO2RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
@@ -411,15 +414,10 @@ static const PTO2RuntimeOps s_runtime_ops = {
 //
 // Layout / init_data / wire / destroy live in
 // runtime/shared/pto_runtime2_init.cpp so the host build can pre-populate the
-// prebuilt arena image. The pieces below — wiring the ops table and the
-// SPMD core counts — depend on the device-side s_runtime_ops global and the
-// AICPU SchedulerContext respectively, so they remain in the AICPU build.
+// prebuilt arena image. The piece below — wiring the ops table — depends on the
+// device-side s_runtime_ops global, so it remains in the AICPU build.
 
-void runtime_finalize_after_wire(PTO2Runtime *rt, int32_t aic_count, int32_t aiv_count) {
-    rt->ops = &s_runtime_ops;
-    rt->orchestrator.total_cluster_count = aic_count;
-    rt->orchestrator.total_aiv_count = aiv_count;
-}
+void runtime_bind_ops(PTO2Runtime *rt) { rt->ops = &s_runtime_ops; }
 
 void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode) {
     if (rt) {

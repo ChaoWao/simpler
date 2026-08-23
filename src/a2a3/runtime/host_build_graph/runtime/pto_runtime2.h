@@ -34,6 +34,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include "utils/device_arena.h"
 #include "pto_runtime2_types.h"
 #include "graph_cache.h"
@@ -91,7 +93,7 @@ struct PTO2RuntimeOps {
     );
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const CoreTaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const CoreTaskArgs &args);
-    // This-run core geometry from runtime_finalize_after_wire: MIX clusters
+    // This-run core geometry latched by the host bind: MIX clusters
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
@@ -108,20 +110,19 @@ struct PTO2RuntimeOps {
 
 /**
  * Layout descriptor for the prebuilt runtime arena. Holds all sub-region
- * offsets (orchestrator / scheduler / sm_handle wrapper / runtime header /
- * AICore mailbox) plus the layout-defining capacities. Produced once on the
- * host by runtime_reserve_layout(); consumed by runtime_init_data_from_layout
- * and runtime_wire_arena_pointers.
+ * offsets (scheduler / sm_handle wrapper / runtime header / AICore mailbox)
+ * plus the layout-defining capacities. Produced once on the host by
+ * runtime_reserve_layout(); consumed by runtime_init_data_from_layout and
+ * runtime_wire_arena_pointers.
  */
 struct PTO2RuntimeArenaLayout {
     size_t off_sm_handle{0};
-    PTO2OrchestratorLayout orch;
     PTO2SchedulerLayout sched;
     size_t off_scheduler{0};
     size_t off_runtime{0};
     size_t off_mailbox{0};
-    // The arena is reserved in zones, in this order, and the offsets above land in
-    // exactly one of them:
+    // Every region in this arena is device-resident. The arena is reserved in two
+    // zones, in this order, and the offsets above land in exactly one of them:
     //
     //   device-only  sm_handle, the AICore mailbox, the scheduler state and its
     //                queue slot arrays. Reachable storage whose content is a
@@ -132,31 +133,27 @@ struct PTO2RuntimeArenaLayout {
     //                run's own content, so bind ships the whole zone as one
     //                contiguous range.
     //
-    // off_copied_end is where the shared part of the layout stops. Past it the two
-    // sides carry different tails, and neither reads the other's:
+    // Past off_copied_end the device carries one further tail the host arena does
+    // not: the shared-memory image, whose size is the submitted task count and
+    // therefore not known when this layout is built. bind grows the device region
+    // to cover it once orchestration ends.
     //
-    //   host tail    the orchestrator block. Dep-computation scratch no device code
-    //                reads, so it is neither copied nor allocated on the device.
-    //   device tail  the shared-memory image, whose size is the submitted task
-    //                count and therefore not known when this layout is built. bind
-    //                grows the device region to cover it once orchestration ends.
+    // The copied zone is padded to a PTO2_ALIGN_SIZE boundary, so that tail begins
+    // exactly at off_copied_end: the copied zone and the shared-memory image are
+    // adjacent on the device and travel as one copy.
     //
-    // The copied zone is padded to a PTO2_ALIGN_SIZE boundary, so the device tail
-    // begins exactly at off_copied_end: the copied zone and the shared-memory image
-    // are adjacent on the device and travel as one copy.
+    // The orchestrator is NOT here. It runs on the host, owns its own scratch, and
+    // no device code reads any of it — see PTO2OrchestratorState.
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
-
-    // Byte length of the device region before its shared-memory tail. The host
-    // arena is arena_size, which instead covers the orchestrator block there.
-    size_t device_bytes{0};
 
     // Cached parameters (re-used by init_data + wire stages).
     uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
     uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]{};
 
     // Total arena byte size post-commit. Used by host to size the prebuilt
-    // image buffer and as the rtMemcpy length.
+    // image buffer and as the rtMemcpy length, and requested of the device as
+    // the region length before its shared-memory tail.
     size_t arena_size{0};
 };
 
@@ -173,7 +170,11 @@ struct PTO2Runtime {
 
     // Components
     PTO2SharedMemoryHandle *sm_handle;
-    PTO2OrchestratorState orchestrator;
+    // Host-only, and by pointer so that this header stays trivially copyable:
+    // the orchestrator runs on the host and owns non-trivial scratch. Null on the
+    // device — bind drops it before the copied zone is uploaded, so no device code
+    // may dereference it.
+    PTO2OrchestratorState *orchestrator;
     // Device-only zone: the scheduler state holds no per-run content, so it is
     // addressed through the arena rather than carried inside this header.
     PTO2SchedulerState *scheduler;
@@ -189,6 +190,10 @@ struct PTO2Runtime {
 
     // Statistics
     int64_t total_cycles;
+    // Hidden alloc tasks the host orchestrator completed inline, published here by
+    // rt_orchestration_done. The device-side executor folds this into its
+    // completed_tasks_ progress counter so shutdown/profiling totals stay closed.
+    int64_t inline_completed_tasks;
     // Graph definitions are process-local host cache entries. The callable
     // identity prevents two orchestration DSOs from sharing the same key.
     uint64_t active_callable_hash;
@@ -211,16 +216,24 @@ struct PTO2Runtime {
     PTO2RuntimeArenaLayout prebuilt_layout;
 };
 
+// bind copies this header to the device as one contiguous range, so every byte
+// of it has to survive a memcpy with no fix-up. That rules out an owning or
+// otherwise non-trivial member — the orchestrator's scratch is reached through
+// a pointer for exactly this reason.
+static_assert(
+    std::is_trivially_copyable_v<PTO2Runtime> && std::is_standard_layout_v<PTO2Runtime>,
+    "PTO2Runtime is copied to the device verbatim"
+);
+
 // =============================================================================
 // Runtime Lifecycle API
 // =============================================================================
 
 /**
- * Phase 1 — declare every sub-region (sm_handle wrapper, orchestrator /
- * scheduler / tensor_map / mailbox / PTO2Runtime header) on the supplied
- * arena. Pure arithmetic; does not touch device memory and may run on host.
- * Returns the layout descriptor; caller commits/attaches the arena before
- * Phase 2/3.
+ * Phase 1 — declare every sub-region (sm_handle wrapper, scheduler / mailbox /
+ * PTO2Runtime header) on the supplied arena. Pure arithmetic; does not touch
+ * device memory and may run on host. Returns the layout descriptor; caller
+ * commits/attaches the arena before Phase 2/3.
  */
 PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size);
 PTO2RuntimeArenaLayout runtime_reserve_layout(
@@ -241,10 +254,9 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
  * Returns the PTO2Runtime* that sits at layout.off_runtime within the arena.
  * Caller must follow up with runtime_wire_arena_pointers; rt->ops and the
  * AICore-side count fields are left untouched and must be filled by the
- * AICPU at boot. Initializes the scheduler only: the orchestrator is left
- * zeroed for the host-orch path (run_host_orchestration) to initialize
- * against the host SM, since initializing it here would be overwritten and
- * is never uploaded to the device.
+ * AICPU at boot. Initializes the scheduler only: the orchestrator is a
+ * host-owned object the host-orch path (run_host_orchestration) stands up and
+ * points rt->orchestrator at, and it is never uploaded to the device.
  */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
@@ -265,32 +277,12 @@ PTO2Runtime *runtime_init_data_from_layout(
 void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt);
 
 /**
- * Phase 3b — wire the orchestrator's pointers into the host-only zone
- * (orchestrator.{scope_tasks, scope_begins, scheduler, tensor_map.*}).
- *
- * Host-only by construction: that zone is past layout.device_bytes and so is not
- * allocated on the device, which makes the addresses this writes unrepresentable
- * there. Requires rt->scheduler, so it follows runtime_wire_arena_pointers.
+ * AICPU-only Phase 4 — install the ops table, the one field the host could not
+ * know at prebuilt-image build time (s_runtime_ops is a device-side file-local
+ * global, so the host cannot resolve its device address). Call once per boot
+ * after runtime_wire_arena_pointers.
  */
-void runtime_wire_host_only_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt);
-
-/**
- * Drop the pointers Phase 3b wrote, so the runtime header can be copied to the
- * device without carrying host addresses into it. The device reads one
- * orchestrator field, inline_completed_tasks, which this leaves alone.
- *
- * Call after orchestration finishes and before the copied zone is uploaded.
- */
-void runtime_clear_host_only_pointers(PTO2Runtime *rt);
-
-/**
- * AICPU-only Phase 4 — fill in the few fields the host could not know at
- * prebuilt-image build time: the ops table (s_runtime_ops is a device-side
- * file-local global, host cannot resolve its device address) and the
- * orchestrator's core counts (depend on the executor's scheduler context).
- * Call once per boot after runtime_wire_arena_pointers.
- */
-void runtime_finalize_after_wire(PTO2Runtime *rt, int32_t aic_count, int32_t aiv_count);
+void runtime_bind_ops(PTO2Runtime *rt);
 
 /**
  * Destroy runtime. With the prebuilt-arena fast path the arena buffer is

@@ -50,8 +50,7 @@ static bool sum_ring_heap_sizes(const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], 
 
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
-    // first slot cannot false-share with whatever region sits in front of us
-    // (e.g. orchestrator tensormap heads written by the orch thread).
+    // first slot cannot false-share with whatever region sits in front of us.
     return arena.reserve(capacity * sizeof(PTO2ReadyQueueSlot), PTO2_ALIGN_SIZE);
 }
 
@@ -215,94 +214,61 @@ void PTO2SchedulerState::destroy() {
 // Orchestrator
 // =============================================================================
 
-PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(DeviceArena &arena, int32_t task_window_size) {
-    PTO2OrchestratorLayout layout{};
+bool PTO2OrchestratorState::init(
+    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler_arg
+) {
+    auto *orch = this;
+    *orch = PTO2OrchestratorState{};
+
     // scope_tasks holds every task in the open scope, so its cap is the real
     // in-flight budget = the (runtime) task window. Using the compile-time
     // PTO2_SCOPE_TASKS_CAP instead under-sized the buffer when ring_task_window
     // was enlarged past the default (premature SCOPE_TASKS_OVERFLOW) and
     // over-allocated it when shrunk. See issue #1188.
-    always_assert(task_window_size > 0);
-    layout.scope_tasks_cap = task_window_size;
-    layout.scope_stack_capacity = PTO2_MAX_SCOPE_DEPTH;
-
-    // Polling: no fanin-spill pool — producer ids are inline on the payload.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
-    const size_t seen_epoch_bytes =
-        PTO2_ALIGN_UP(static_cast<size_t>(task_window_size) * sizeof(uint32_t), PTO2_ALIGN_SIZE);
-    layout.off_fanin_seen_epoch = arena.reserve(seen_epoch_bytes, PTO2_ALIGN_SIZE);
 
-    layout.off_scope_tasks =
-        arena.reserve(static_cast<size_t>(layout.scope_tasks_cap) * sizeof(uintptr_t), alignof(PTO2TaskSlotState *));
-    layout.off_scope_begins =
-        arena.reserve(static_cast<size_t>(layout.scope_stack_capacity) * sizeof(int32_t), alignof(int32_t));
-    layout.tensor_map = PTO2TensorMap::reserve_layout_default(arena, task_window_size);
-    return layout;
-}
-
-bool PTO2OrchestratorState::init_data_from_layout(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
-    uint64_t task_window_size
-) {
-    auto *orch = this;
-    *orch = PTO2OrchestratorState{};
-
-    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_base);
     orch->gm_heap_base = gm_heap;
     orch->gm_heap_size = heap_size;
     orch->fatal = false;
+    orch->scheduler = scheduler_arg;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
-    auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_dev_base);
+    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_base);
+    auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_base);
 
     orch->ring.task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
     // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
-    // so it holds for whichever SM this orchestrator was pointed at — the host-orch
-    // path re-inits against the host mirror before orchestration. The cursors reset
-    // with the rest of the state above.
-    auto *sm_bytes = static_cast<char *>(sm_dev_base);
+    // so it holds for whichever SM this orchestrator was pointed at. The cursors
+    // reset with the rest of the state above.
+    auto *sm_bytes = static_cast<char *>(sm_base);
     const auto pools = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::mirror_extents(task_window_size));
     orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
     orch->tensor_pool = reinterpret_cast<ChipTensor *>(sm_bytes + pools.tensor_pool);
     orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
 
-    const size_t seen_epoch_bytes =
-        PTO2_ALIGN_UP(static_cast<size_t>(layout.tensor_map.task_window_size) * sizeof(uint32_t), PTO2_ALIGN_SIZE);
-    auto *seen_epoch = static_cast<uint32_t *>(arena.region_ptr(layout.off_fanin_seen_epoch));
-    memset(seen_epoch, 0, seen_epoch_bytes);
-    orch->fanin_seen_epoch = seen_epoch;
+    // Polling: no fanin-spill pool — producer ids are inline on the payload.
+    const auto window = static_cast<size_t>(task_window_size);
+    orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[window]);
+    orch->scope_tasks.reset(new (std::nothrow) PTO2TaskSlotState *[window]);
+    orch->scope_begins.reset(new (std::nothrow) int32_t[PTO2_MAX_SCOPE_DEPTH]);
+    if (orch->fanin_seen_epoch == nullptr || orch->scope_tasks == nullptr || orch->scope_begins == nullptr) {
+        LOG_ERROR("Orchestrator scratch allocation failed (task_window=%" PRIu64 ")", task_window_size);
+        return false;
+    }
+    memset(orch->fanin_seen_epoch.get(), 0, window * sizeof(uint32_t));
 
-    if (!orch->tensor_map.init_data_from_layout(layout.tensor_map, arena)) {
+    if (!orch->tensor_map.init_default(static_cast<int32_t>(task_window_size))) {
         return false;
     }
 
     orch->scope_tasks_size = 0;
-    orch->scope_tasks_capacity = layout.scope_tasks_cap;
+    orch->scope_tasks_capacity = static_cast<int32_t>(window);
     orch->scope_stack_top = -1;
-    orch->scope_stack_capacity = layout.scope_stack_capacity;
+    orch->scope_stack_capacity = PTO2_MAX_SCOPE_DEPTH;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
 
     return true;
-}
-
-void PTO2OrchestratorState::wire_arena_pointers(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler_arg
-) {
-    auto *orch = this;
-    orch->fanin_seen_epoch = static_cast<uint32_t *>(arena.region_ptr(layout.off_fanin_seen_epoch));
-    orch->tensor_map.wire_arena_pointers(layout.tensor_map, arena);
-    orch->scope_tasks = static_cast<PTO2TaskSlotState **>(arena.region_ptr(layout.off_scope_tasks));
-    orch->scope_begins = static_cast<int32_t *>(arena.region_ptr(layout.off_scope_begins));
-    orch->scheduler = scheduler_arg;
-}
-
-void PTO2OrchestratorState::destroy() {
-    auto *orch = this;
-    orch->tensor_map.destroy();
-    orch->fanin_seen_epoch = nullptr;
-    orch->scope_tasks = nullptr;
-    orch->scope_begins = nullptr;
 }
 
 void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this->scheduler = scheduler; }
@@ -350,9 +316,6 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     layout.off_runtime = arena.reserve(PTO2_ALIGN_UP(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE), PTO2_ALIGN_SIZE);
     layout.off_copied_end = arena.total_size();
 
-    layout.device_bytes = arena.total_size();
-    layout.orch = PTO2OrchestratorState::reserve_layout(arena, static_cast<int32_t>(task_window_sizes[0]));
-
     layout.arena_size = arena.total_size();
     return layout;
 }
@@ -373,12 +336,11 @@ PTO2Runtime *runtime_init_data_from_layout(
  *
  * Zeroes the PTO2Runtime header at layout.off_runtime, records the GM heap,
  * and initializes the scheduler (ready / sync / dummy / graph queues) against
- * the device SM. The orchestrator is deliberately left zeroed: the host-orch
- * path (run_host_orchestration) initializes it against the host SM once that
- * buffer exists. Initializing it here would be dead work — overwritten by that
- * re-init, and the orchestrator arena block is never uploaded to the device. Caller must follow up with
- * runtime_wire_arena_pointers. Returns the arena-resident PTO2Runtime*, or
- * nullptr on failure.
+ * the device SM. rt->orchestrator is left null: the orchestrator is a host-owned
+ * object the host-orch path (run_host_orchestration) stands up against the host
+ * SM once that buffer exists, and it is never uploaded to the device. Caller must
+ * follow up with runtime_wire_arena_pointers. Returns the arena-resident
+ * PTO2Runtime*, or nullptr on failure.
  */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
@@ -401,11 +363,10 @@ PTO2Runtime *runtime_init_data_from_layout(
 
     // Two components are deliberately not initialized here.
     //
-    // The orchestrator is initialized by the host-orch path
-    // (run_host_orchestration) against the host SM once it is allocated. Doing it
-    // here would be dead work: its arena content (tensormap + seen_epoch memset)
-    // is immediately overwritten by that re-init, and the orchestrator block is
-    // host-only anyway.
+    // The orchestrator is not in this arena at all: it is a host-owned object the
+    // host-orch path (run_host_orchestration) stands up against the host SM once
+    // that buffer is allocated, and rt->orchestrator only points at it for the
+    // duration of that pass.
     //
     // The scheduler and sm_handle live in the device-only zone, so their bytes
     // never travel; the AICPU initializes them at boot. Writing them here would
@@ -422,17 +383,10 @@ void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayou
     rt->scheduler->wire_arena_pointers(layout.sched, arena);
 }
 
-void runtime_wire_host_only_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
-    rt->orchestrator.wire_arena_pointers(layout.orch, arena, rt->scheduler);
-}
-
-void runtime_clear_host_only_pointers(PTO2Runtime *rt) { rt->orchestrator.destroy(); }
-
 void runtime_destroy(PTO2Runtime *rt, DeviceArena & /*arena*/) {
     // Arena buffer is pooled across runs by DeviceRunner — never freed here.
     if (!rt) return;
     rt->scheduler->destroy();
-    rt->orchestrator.destroy();
     rt->aicore_mailbox = nullptr;
     rt->sm_handle = nullptr;
 }

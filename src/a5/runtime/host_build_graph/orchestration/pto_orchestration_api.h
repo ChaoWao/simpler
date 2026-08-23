@@ -99,7 +99,7 @@ typedef struct PTO2RuntimeOps {
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const CoreTaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const CoreTaskArgs &args);
 
-    // This-run core geometry from runtime_finalize_after_wire: MIX clusters
+    // This-run core geometry latched by the host bind: MIX clusters
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);

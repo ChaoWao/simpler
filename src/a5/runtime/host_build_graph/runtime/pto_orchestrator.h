@@ -27,8 +27,9 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common/chip_swimlane_profiling.h"
-#include "utils/device_arena.h"
 #include "pto_ring_buffer.h"
 #include "graph_cache.h"
 #include "pto_runtime2_types.h"
@@ -40,20 +41,6 @@
 
 struct GraphHostState;
 
-/**
- * Layout descriptor produced by PTO2OrchestratorState::reserve_layout(). Holds
- * arena offsets for every sub-region the orchestrator owns (per-ring fanin
- * pools, scope arrays, plus the nested PTO2TensorMap layout).
- */
-struct PTO2OrchestratorLayout {
-    size_t off_fanin_seen_epoch;
-    size_t off_scope_tasks;
-    size_t off_scope_begins;
-    PTO2TensorMapLayout tensor_map;
-    int32_t scope_tasks_cap;
-    uint64_t scope_stack_capacity;
-};
-
 // =============================================================================
 // Orchestrator State
 // =============================================================================
@@ -62,6 +49,12 @@ struct PTO2OrchestratorLayout {
  * Orchestrator state structure (private to Orchestrator)
  *
  * Contains all state needed for task graph construction and buffer management.
+ *
+ * host_build_graph runs the orchestrator on the host and ships the shared-memory
+ * image it produces, so this whole object is host-only: it owns its scratch
+ * arrays outright and no device code reads any of them. PTO2Runtime therefore
+ * holds it by pointer — a by-value member would put non-trivially-copyable state
+ * inside the struct bind copies to the device.
  */
 struct PTO2OrchestratorState {
     // === SHARED MEMORY ACCESS ===
@@ -69,7 +62,7 @@ struct PTO2OrchestratorState {
 
     // === RING RESOURCES (single ring) ===
     PTO2RingSet ring;
-    uint32_t *fanin_seen_epoch;
+    std::unique_ptr<uint32_t[]> fanin_seen_epoch;
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
@@ -79,12 +72,12 @@ struct PTO2OrchestratorState {
     // Single contiguous buffer of task IDs, partitioned by scope level.
     // scope_begins[i] is the index into scope_tasks where scope i starts.
     // Tasks for the top scope occupy [scope_begins[top], scope_tasks_size).
-    PTO2TaskSlotState **scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
-    int32_t scope_tasks_size;         // Number of task IDs currently in the buffer
-    int32_t scope_tasks_capacity;     // Allocated capacity of scope_tasks
-    int32_t *scope_begins;            // scope_begins[i] = start index of scope i in scope_tasks
-    int32_t scope_stack_top;          // Current top of stack (-1 = no scope open)
-    uint64_t scope_stack_capacity;    // Max nesting depth (PTO2_MAX_SCOPE_DEPTH)
+    std::unique_ptr<PTO2TaskSlotState *[]> scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
+    int32_t scope_tasks_size{0};                         // Number of task IDs currently in the buffer
+    int32_t scope_tasks_capacity{0};                     // Allocated capacity of scope_tasks
+    std::unique_ptr<int32_t[]> scope_begins;             // scope_begins[i] = start index of scope i in scope_tasks
+    int32_t scope_stack_top{-1};                         // Current top of stack (-1 = no scope open)
+    uint64_t scope_stack_capacity{0};                    // Max nesting depth (PTO2_MAX_SCOPE_DEPTH)
     int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
 
     // === SCHEDULER REFERENCE ===
@@ -107,12 +100,12 @@ struct PTO2OrchestratorState {
 
     // Hidden alloc tasks complete synchronously inside the orchestrator and
     // therefore bypass the executor's normal worker-completion counter path.
-    // The executor adds this count into its completed_tasks_ progress counter
-    // after orchestration finishes so shutdown/profiling totals remain closed.
+    // rt_orchestration_done publishes this into PTO2Runtime, which is the copy
+    // the device-side executor adds into its completed_tasks_ progress counter
+    // so shutdown/profiling totals remain closed.
     int64_t inline_completed_tasks{0};
 
-    // This host-only state is cleared before the arena/shared-memory image
-    // crosses to the device.
+    // Host-only, like everything else here.
     GraphHostState *graph_host_state{nullptr};
 
     // === ARGUMENT POOLS (host-only) ===
@@ -144,29 +137,17 @@ struct PTO2OrchestratorState {
 
     // === Cold-path API (defined in pto_orchestrator.cpp) ===
 
-    // Phase 1: declare every sub-region (per-ring fanin pool, scope arrays,
-    // tensor_map sub-layout) on the supplied arena. task_window_sizes feeds
-    // the nested tensor_map layout. Returned layout is consumed by
-    // init_from_layout.
-    static PTO2OrchestratorLayout reserve_layout(DeviceArena &arena, int32_t task_window_size);
+    // Allocate the scratch arrays (fanin epoch table, scope arrays, tensor map)
+    // and bind this orchestrator to one shared-memory mirror, GM heap and
+    // scheduler. sm_base is the base of the mirror this orchestrator writes; it
+    // is dereferenced, so a host-orch pass passes its host mirror rather than a
+    // device address. task_window_size must be a power of two.
+    //
+    // Returns false when an allocation fails; the caller then has no hazard map
+    // and must not orchestrate.
+    bool
+    init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler);
 
-    // Phase 3a: write everything *except* arena-internal pointer fields.
-    // sm_dev_base is the SM device address (only stored, never dereferenced);
-    // task_window_size feeds the SM address arithmetic. Safe to call on a host
-    // arena that holds the prebuilt image.
-    bool init_data_from_layout(
-        const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
-        uint64_t task_window_size
-    );
-
-    // Phase 3b: write the arena-internal pointer fields (scope_tasks,
-    // scope_begins, tensor_map.{buckets,entry_pool,free_entry_list,
-    // task_entry_heads}, scheduler reference).
-    // Idempotent — host runs once on the image, AICPU runs once after attach.
-    void wire_arena_pointers(const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler);
-
-    // Forget pointers; arena owns the backing buffers.
-    void destroy();
     void set_scheduler(PTO2SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);

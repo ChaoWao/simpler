@@ -308,7 +308,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
 
         if (boot_ok) {
-            runtime_finalize_after_wire(rt, sched_ctx_.aic_count(), sched_ctx_.aiv_count());
+            runtime_bind_ops(rt);
             runtime->set_slot_states_ptr(nullptr);
 
             sched_ctx_.bind_runtime(rt);

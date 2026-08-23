@@ -49,7 +49,6 @@ protected:
     PTO2SharedMemoryHandle *sm_handle = nullptr;
     PTO2OrchestratorState orch{};
     PTO2SchedulerState sched{};
-    PTO2OrchestratorLayout orch_layout{};
     PTO2SchedulerLayout sched_layout{};
     std::vector<char> gm_heap;
 
@@ -58,23 +57,18 @@ protected:
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(4096 * PTO2_MAX_RING_DEPTH);
 
-        orch_layout = PTO2OrchestratorState::reserve_layout(runtime_arena, static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE));
         sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
-        ASSERT_TRUE(orch.init_data_from_layout(
-            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE
-        ));
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
         // Same order the AICPU boots in: the slot arrays are not part of the
         // uploaded image, so nothing can push until they carry their ramp.
         sched.seed_queue_slots();
-        orch.wire_arena_pointers(orch_layout, runtime_arena, &sched);
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE, &sched));
     }
 
     void TearDown() override {
-        orch.destroy();
         sched.destroy();
         runtime_arena.release();
         sm_arena.release();

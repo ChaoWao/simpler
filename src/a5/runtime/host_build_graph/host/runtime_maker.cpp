@@ -571,14 +571,17 @@ int32_t run_host_orchestration(
     std::memset(host_sm, 0, sm_segs.descriptors);
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
-    // init_data_from_layout resets the orchestrator state, so this is safe.
-    if (!rt->orchestrator.init_data_from_layout(
-            layout.orch, host_arena, host_sm, gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0]
-        )) {
-        LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
+    // Host-owned and destroyed with this frame, so rt->orchestrator is dropped on
+    // every exit — it must never outlive the object it names.
+    PTO2OrchestratorState orchestrator;
+    rt->orchestrator = &orchestrator;
+    RAIIScopeGuard orchestrator_binding([rt]() {
+        rt->orchestrator = nullptr;
+    });
+    if (!orchestrator.init(host_sm, gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0], rt->scheduler)) {
+        LOG_ERROR("host-orch: orchestrator init against host SM failed");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, rt->scheduler);
 
     // Initialize the host SM header (ring flow control) so submit_task can run.
     PTO2SharedMemoryHandle host_sm_handle;
@@ -592,7 +595,7 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: failed to allocate Graph host state");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
+    GraphHostStateBinding graph_binding(orchestrator, graph_state.get());
 
     // Install the ops table (host s_runtime_ops) and latch this run's cluster
     // counts. worker_count is published by DeviceRunner::prepare_launch_shape
@@ -603,9 +606,9 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    runtime_finalize_after_wire(
-        rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
-    );
+    runtime_bind_ops(rt);
+    orchestrator.total_cluster_count = block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM;
+    orchestrator.total_aiv_count = block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM;
     rt->mode = PTO2_MODE_EXECUTE;
     // get_tensor_data/set_tensor_data resolve buffer.addr through the host
     // views registered at staging time (runtime/host_tensor_access.h), so the
@@ -658,7 +661,7 @@ int32_t run_host_orchestration(
     // edges. Uploading it would launch the device on an incomplete graph and surface
     // the cause as whatever the device notices second, usually a scheduler timeout.
     const int32_t orch_error = pto2_sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
-    if (orch_error != PTO2_ERROR_NONE || rt->orchestrator.fatal) {
+    if (orch_error != PTO2_ERROR_NONE || orchestrator.fatal) {
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
         // noticed. A fatal with no code left to read is the only generic failure.
@@ -668,7 +671,7 @@ int32_t run_host_orchestration(
         LOG_RUNTIME_FAILURE(orch_error, PTO2_ERROR_NONE, status);
         LOG_ERROR(
             "host-orch: refusing to upload an incomplete graph after %" PRIu64 " heap bytes",
-            rt->orchestrator.ring.task_allocator.heap_used_bytes()
+            orchestrator.ring.task_allocator.heap_used_bytes()
         );
         return status;
     }
@@ -678,7 +681,7 @@ int32_t run_host_orchestration(
         char attrs[96];
         snprintf(
             attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64, total_tasks,
-            rt->orchestrator.ring.task_allocator.heap_used_bytes()
+            orchestrator.ring.task_allocator.heap_used_bytes()
         );
         record_bind_phase(HostPhaseKind::BindHostOrch, t_orch_ns, attrs);
     }
@@ -730,7 +733,7 @@ int32_t run_host_orchestration(
     // What this bind actually put in the pools. The orchestrator's cursors are the
     // exact populated extent of each one — no scan of the mirror is needed, and the
     // image ships that much rather than the worst case the mirror is dimensioned for.
-    const PTO2OrchestratorState &orch_state = rt->orchestrator;
+    const PTO2OrchestratorState &orch_state = orchestrator;
     const pto2_sm_layout::BindUsage bind_usage{
         nt,
         static_cast<uint64_t>(orch_state.fanin_pool_cursor),
@@ -790,10 +793,10 @@ int32_t run_host_orchestration(
     // graph_context into it, and compaction is what carries those slots.
     stage_graph_submissions(staged_submissions, upload_base + copied_bytes + image_bytes, arena_dev + off_submissions);
 
-    // The orchestrator has finished, so its pointers into the host-only tail have
-    // no further reader on either side — and this header is about to be copied, so
-    // leaving them would carry host addresses to the device.
-    runtime_clear_host_only_pointers(rt);
+    // The copied zone carries no host address: the orchestrator is host-only and
+    // no device code may reach host memory through the image. Its work is done, so
+    // the pointer goes early rather than at the guard's scope exit.
+    rt->orchestrator = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
     const uint64_t compacted = pto2_sm_layout::compact_live_image(
         static_cast<const char *>(host_sm), eff_task_window_sizes[0], bind_usage, upload_base + copied_bytes
@@ -1105,33 +1108,24 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     {
         char attrs[64];
-        snprintf(
-            attrs, sizeof(attrs), "bytes=%" PRIu64 " device=%" PRIu64, static_cast<uint64_t>(layout.arena_size),
-            static_cast<uint64_t>(layout.device_bytes)
-        );
+        snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, static_cast<uint64_t>(layout.arena_size));
         record_bind_phase(HostPhaseKind::BindArenaBuild, t_arena_build_ns, attrs);
     }
 
     const int64_t t_static_arena_ns = bind_now_ns();
-    // Two things this call does not ask for at full size.
-    //
-    // device_bytes, not arena_size: the host-only zone at the arena's tail is
-    // dep-computation scratch no device code reads, so reserving device memory for
-    // it would be dead space for the length of the run.
-    //
     // No pooled shared memory: hbg's shared-memory image is the tail of its own
     // runtime-arena region, so this asks for 0 and leaves that pool uncommitted.
     // The arena is asked for only up to that tail, whose size is the submitted task
     // count — run_host_orchestration grows it once it knows. The heap must exist
     // first either way: the orchestrator hands out device heap addresses as it
     // places tasks.
-    if (api->setup_static_arena(total_heap_size, /*gm_sm_size=*/0, layout.device_bytes) != 0) {
+    if (api->setup_static_arena(total_heap_size, /*gm_sm_size=*/0, layout.arena_size) != 0) {
         LOG_ERROR("Failed to setup pooled static arena");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
         char attrs[96];
-        snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, total_heap_size, layout.device_bytes);
+        snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, total_heap_size, layout.arena_size);
         record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
     }
 
@@ -1178,7 +1172,6 @@ extern "C" int bind_callable_to_runtime_impl(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime_wire_arena_pointers(host_arena, layout, rt);
-    runtime_wire_host_only_pointers(host_arena, layout, rt);
     // Stash the layout inside the PTO2Runtime image so the AICPU can recover every
     // arena-internal offset after the copy. It is written before orchestration
     // because orchestration is what performs that copy, and the runtime header is
@@ -1190,10 +1183,11 @@ extern "C" int bind_callable_to_runtime_impl(
 
     // host_build_graph host-orch: run the orchestrator on the host now, against
     // a host SM mirror, and ship the populated SM to the device. The arena
-    // (copied to the device below) carries the resulting orchestrator/scheduler
-    // state; the device boots scheduler-only. register_callable_impl guarantees
-    // host_orch_func_ptr is non-null on success (it fails the whole prepare
-    // otherwise), so this is an assertion-style guard, not a fallback path.
+    // (copied to the device below) carries the scheduler state; the orchestrator
+    // itself stays on the host, and the device boots scheduler-only.
+    // register_callable_impl guarantees host_orch_func_ptr is non-null on success
+    // (it fails the whole prepare otherwise), so this is an assertion-style
+    // guard, not a fallback path.
     if (host_orch_func_ptr == nullptr) {
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
         return PTO_RUNTIME_ERR_INTERNAL;

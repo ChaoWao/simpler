@@ -84,7 +84,7 @@ correct for the layout it was taken in, so `compact_live_image` re-takes every o
 of them against the shipped image; the copy to the device moves a field and its
 target together and leaves them all correct.
 
-### 3.1 What Ships: the Arena's Three Zones
+### 3.1 What Ships: the Arena's Two Zones
 
 Three rules decide every byte of the runtime arena:
 
@@ -97,28 +97,30 @@ Three rules decide every byte of the runtime arena:
 3. **Initialize once.** A region whose content does not differ between runs is
    established once, not re-established per bind.
 
-They partition the arena into three contiguous zones, and `runtime_reserve_layout`
+They partition the arena into two contiguous zones, and `runtime_reserve_layout`
 reserves them in this order:
 
 | Zone | Regions | Copied | Allocated on device | Written by |
 | ---- | ------- | ------ | ------------------- | ---------- |
-| copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | yes | host |
 | device-only | `sm_handle`, the completion mailbox, `PTO2SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
-| host-only | orchestrator block: `fanin_seen_epoch` / `scope_tasks` / TensorMap, ~9.3 MB | never | **no** | host, during graph construction |
+| copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | yes | host |
 
-The copied zone leads, so `bind` is a single contiguous `copy_to_device` starting
-at the arena base. Both bounds are layout fields, so no consumer infers a boundary
-from which region happens to be reserved first — `bind_callable_to_runtime_impl`
-asserts only that they are ordered and in range.
+The copied zone comes last, so `bind` is a single contiguous `copy_to_device`
+starting at `off_copied_begin` — and the device's shared-memory tail begins
+exactly where that zone ends. Both bounds are layout fields, so no consumer infers
+a boundary from which region happens to be reserved first —
+`bind_callable_to_runtime_impl` asserts only that they are ordered and in range.
 
-**Why the host-only zone comes last.** No device code dereferences a pointer into
-the orchestrator block — hbg has no device-side orchestrator, and the one
-orchestrator field the scheduler reads, `inline_completed_tasks`, is a scalar in
-the runtime header. Putting the block at the tail lets `setup_static_arena` request
-only `layout.device_bytes`, the copied + device-only prefix, so those ~9.3 MB are
-never reserved on the device at all. `runtime_wire_host_only_pointers` is therefore
-host-only, and `runtime_clear_host_only_pointers` drops those pointers before the
-copied zone is uploaded so no host address crosses the boundary.
+**Why the orchestrator is not in the arena at all.** hbg has no device-side
+orchestrator, so nothing on the device reads its state: not the `fanin_seen_epoch`
+table, not the scope arrays, not the TensorMap (~9.3 MB between them). It is
+therefore a plain host object that owns those arrays — `PTO2OrchestratorState::init`
+allocates them — and `PTO2Runtime` reaches it through a pointer that `bind` drops
+before the copied zone is uploaded, so no host address crosses the boundary. A
+`static_assert` keeps `PTO2Runtime` trivially copyable, which is what forbids
+putting an owning member back inside it. The one orchestrator value the device-side
+scheduler reads, the count of tasks completed inline during orchestration, is a
+scalar `rt_orchestration_done` publishes into the runtime header.
 
 **Why the scheduler state is device-written.** `PTO2SchedulerState` holds no
 per-run content: `sm_header` and the ring pointer derive from a pooled SM base,
