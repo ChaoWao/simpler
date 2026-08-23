@@ -58,6 +58,8 @@ std::mutex g_wait_mu;
 std::condition_variable g_wait_cv;
 bool g_wait_entered{false};
 bool g_release_wait{false};
+std::thread::id g_prepare_thread;
+std::thread::id g_finalize_thread;
 std::vector<std::string> g_events;
 
 void record_event(std::string event) {
@@ -72,6 +74,7 @@ int prepare_run(
 ) {
     EXPECT_EQ(slot_of(runtime), descriptor->pipeline_slot);
     g_complete[descriptor->pipeline_slot] = false;
+    g_prepare_thread = std::this_thread::get_id();
     record_event("prepare" + std::to_string(descriptor->pipeline_slot));
     ++g_prepare_count[descriptor->pipeline_slot];
     if (g_reject_first_prepare[descriptor->pipeline_slot] && g_prepare_count[descriptor->pipeline_slot] == 1) {
@@ -111,6 +114,7 @@ int wait_run(void *, void *runtime) {
 
 int finalize_run(void *, void *runtime) {
     const uint32_t slot = slot_of(runtime);
+    g_finalize_thread = std::this_thread::get_id();
     record_event("finalize" + std::to_string(slot));
     return g_finalize_rc[slot];
 }
@@ -131,6 +135,8 @@ void prime_worker(ChipWorker &worker) {
     g_poll_count = 0;
     g_poll_completes_after = 0;
     g_supports_successor = true;
+    g_prepare_thread = {};
+    g_finalize_thread = {};
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
         g_wait_entered = false;
@@ -375,6 +381,35 @@ TEST(ChipRunLaneTest, ResidentLifecycleLaunchesSuccessorWithoutCallerPolling) {
     complete(1);
     EXPECT_TRUE(second.wait_until(std::chrono::steady_clock::now() + std::chrono::seconds(1)));
     EXPECT_TRUE(first.done());
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, DiagnosticFinalizeStaysOnCallingThread) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+    ChipStorageTaskArgs args{};
+    CallConfig config{};
+    config.enable_dep_gen = 1;
+    config.output_prefix[0] = 'x';
+
+    const std::thread::id caller = std::this_thread::get_id();
+    ChipRun run = lane.submit(1, args, config, PipelineSlotLease{0, 0, 101}, 101, 101, nullptr, 0, true);
+    std::thread completer([] {
+        {
+            std::unique_lock<std::mutex> lk(g_wait_mu);
+            (void)g_wait_cv.wait_for(lk, std::chrono::seconds(1), [] {
+                return g_wait_entered;
+            });
+        }
+        complete(0);
+    });
+
+    EXPECT_TRUE(run.wait_until(ChipRunLane::Deadline::max()));
+    completer.join();
+    EXPECT_EQ(g_prepare_thread, caller);
+    EXPECT_EQ(g_finalize_thread, caller);
     lane.close();
     worker.finalize();
 }
