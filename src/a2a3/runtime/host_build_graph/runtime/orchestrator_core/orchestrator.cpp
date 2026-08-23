@@ -143,17 +143,15 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
 // The strong symbol from the AICPU build wins when profiling is available.
 // Also hidden to prevent HOST .so from polluting the global symbol table.
 // Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
-static uint64_t g_orch_alloc_cycle = 0;      // unified task+heap alloc
-static uint64_t g_orch_args_cycle = 0;       // param copy
-static uint64_t g_orch_lookup_cycle = 0;     // tensormap lookup + dep building
-static uint64_t g_orch_insert_cycle = 0;     // tensormap insert
-static uint64_t g_orch_fanin_cycle = 0;      // fanin list + early-return check
-static uint64_t g_orch_scope_end_cycle = 0;  // scope_end overhead
+static uint64_t g_orch_alloc_cycle = 0;   // unified task+heap alloc
+static uint64_t g_orch_args_cycle = 0;    // param copy
+static uint64_t g_orch_lookup_cycle = 0;  // tensormap lookup + dep building
+static uint64_t g_orch_insert_cycle = 0;  // tensormap insert
+static uint64_t g_orch_fanin_cycle = 0;   // fanin list + early-return check
 static int64_t g_orch_submit_count = 0;
 static uint32_t g_orch_submit_idx = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
 uint64_t g_orch_args_atomic_count = 0;
-uint64_t g_orch_scope_end_atomic_count = 0;
 // Cycle accumulation is unconditional under SIMPLER_ORCH_PROFILING (that's what
 // the flag is for) and feeds the per-sub-step `g_orch_*_cycle` cumulatives
 // printed in the cold-path log. Per-event records are a separate channel on a
@@ -1024,8 +1022,6 @@ static bool append_fanin_or_fail(
     return true;
 }
 
-static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *task_slot_state);
-
 struct PTO2PreparedTask {
     TaskId task_id = TaskId::invalid();
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
@@ -1141,7 +1137,6 @@ static bool prepare_task(
     // above (whole-graph-resident hbg never reuses a slot).
     out->slot_state->last_consumer_local_id = static_cast<int32_t>(out->task_id.local());
     // payload.fanin_count is set in submit_task_common's STEP 6.
-    scope_tasks_push(orch, out->slot_state);
 
     return true;
 }
@@ -1149,20 +1144,6 @@ static bool prepare_task(
 // =============================================================================
 // Scope Management
 // =============================================================================
-
-static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *task_slot_state) {
-    if (orch->scope_tasks_size >= orch->scope_tasks_capacity) {
-        // Capacity is the total in-flight slot budget (the runtime task window;
-        // see PTO2OrchestratorState::init) — hitting it means the ring is
-        // saturated, so no further push could succeed regardless of buffer growth.
-        orch->report_fatal(
-            SIMPLER_ERROR_SCOPE_TASKS_OVERFLOW, __FUNCTION__,
-            "scope_tasks buffer saturated at %d entries (all rings full)", orch->scope_tasks_capacity
-        );
-        return;
-    }
-    orch->scope_tasks[orch->scope_tasks_size++] = task_slot_state;
-}
 
 void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     auto *orch = this;
@@ -1194,7 +1175,7 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         }
         return;
     }
-    assert(orch->scope_stack_top < static_cast<int32_t>(orch->scope_stack_capacity - 1) && "Scope stack overflow");
+    assert(orch->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1 && "Scope stack overflow");
     if (mode == PTO2ScopeMode::AUTO && orch->in_manual_scope()) {
         report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported"
@@ -1204,7 +1185,6 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
 
     bool already_in_manual_scope = orch->in_manual_scope();
     ++orch->scope_stack_top;
-    orch->scope_begins[orch->scope_stack_top] = orch->scope_tasks_size;
     if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
@@ -1245,9 +1225,6 @@ void PTO2OrchestratorState::end_scope() {
     }
     assert(orch->scope_stack_top >= 0 && "Scope stack underflow");
 
-    // Snapshot the ring start/end BEFORE the orchestrator drains pending tasks
-    // via scheduler->on_scope_end, so the end record reflects the scope's
-    // occupancy at close, not the residual after teardown.
 #if SIMPLER_DFX
     // Gate via is_scope_stats_enabled() (see begin_scope). One collector call
     // emits the end-boundary record and tears down bookkeeping.
@@ -1265,28 +1242,10 @@ void PTO2OrchestratorState::end_scope() {
     }
 #endif
 
-#if SIMPLER_ORCH_PROFILING
-    uint64_t _se0 = get_sys_cnt_aicpu();
-#endif
-
-    bool ending_manual_scope = orch->scope_stack_top == orch->manual_begin_depth;
-    int32_t begin = orch->scope_begins[orch->scope_stack_top--];
-    int32_t count = orch->scope_tasks_size - begin;
-    if (ending_manual_scope) {
+    if (orch->scope_stack_top == orch->manual_begin_depth) {
         orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
     }
-
-    if (orch->scheduler && count > 0) {
-        orch->scheduler->on_scope_end(&orch->scope_tasks[begin], count);
-    }
-
-    // Rewind the task buffer — these entries are no longer needed
-    orch->scope_tasks_size = begin;
-
-#if SIMPLER_ORCH_PROFILING
-    uint64_t _se1 = get_sys_cnt_aicpu();
-    g_orch_scope_end_cycle += (_se1 - _se0);
-#endif
+    --orch->scope_stack_top;
 }
 
 // =============================================================================
@@ -1708,7 +1667,6 @@ bool graph_submit_outer(
     slot.total_required_subtasks = 0;
     slot.logical_block_num = 1;
     slot.task_kind = TaskKind::GRAPH;
-    scope_tasks_push(orch, &slot);
 
     task.task_id = task_id;
     std::fill(std::begin(task.kernel_id), std::end(task.kernel_id), INVALID_KERNEL_ID);
@@ -2570,8 +2528,8 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         // subtasks to retire. Running the full on_task_complete path
         // would only pay unnecessary fanout_lock / traversal overhead here.
         // The generic slot initialization done in prepare_task() is still
-        // required so scope_end can release the producer-side reference and
-        // drive the slot to CONSUMED, but worker dispatch fields are never
+        // required — a consumer reads this slot's task_attrs and completion
+        // mirror, both set below — but worker dispatch fields are never
         // observed for hidden alloc tasks.
         //
         // Flag the creator so it does NOT suppress its consumers' early-dispatch.
@@ -2620,7 +2578,6 @@ void PTO2OrchestratorState::mark_done() {
         LOG_DEBUG("=== [Orchestrator] total_tasks=%d ===", total_tasks);
     }
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
-    orch->scope_tasks_size = 0;
     orch->scope_stack_top = -1;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX
@@ -2636,21 +2593,18 @@ PTO2OrchProfilingData orchestrator_get_profiling() {
     d.lookup_cycle = g_orch_lookup_cycle;
     d.insert_cycle = g_orch_insert_cycle;
     d.fanin_cycle = g_orch_fanin_cycle;
-    d.scope_end_cycle = g_orch_scope_end_cycle;
     d.submit_count = g_orch_submit_count;
     d.fanin_wait_cycle = g_orch_fanin_wait_cycle;
     d.args_atomic_count = g_orch_args_atomic_count;
-    d.scope_end_atomic_count = g_orch_scope_end_atomic_count;
 
     // Reset
     g_orch_alloc_cycle = g_orch_args_cycle = 0;
     g_orch_lookup_cycle = g_orch_insert_cycle = 0;
-    g_orch_fanin_cycle = g_orch_scope_end_cycle = 0;
+    g_orch_fanin_cycle = 0;
     g_orch_submit_count = 0;
     g_orch_submit_idx = 0;
     g_orch_fanin_wait_cycle = 0;
     g_orch_args_atomic_count = 0;
-    g_orch_scope_end_atomic_count = 0;
     return d;
 }
 #endif

@@ -91,16 +91,17 @@ Manual scope v0 is:
 
 ### Scope State
 
-The runtime keeps two manual-scope-specific pieces of state:
+`manual_begin_depth` is the only manual-scope-specific state, and it decides whether
+the current submit is in manual mode. It is explicitly initialized in
+`PTO2OrchestratorState::init()` and reset in `mark_done()` so a reused orchestrator
+starts cleanly on the next run.
 
-- `manual_begin_depth`
-- the current scope task list (`scope_tasks[...]`)
-
-`manual_begin_depth` decides whether the current submit is in manual mode.
-`scope_tasks[...]` remains scope-lifetime bookkeeping for `scope_end()`.
-`manual_begin_depth` is explicitly initialized in `PTO2OrchestratorState::init()` and
-reset in `mark_done()` so a reused orchestrator starts cleanly on
-the next run.
+Whether a scope keeps a task list at all is runtime-specific, and manual mode does
+not change it either way. `tensormap_and_ringbuffer` keeps `scope_tasks[...]` so
+`scope_end()` can release each enclosed task's producer-side reference and let its
+slot be reclaimed. `host_build_graph` keeps no such list and has no scope-end hook:
+its ring is whole-graph-resident, so nothing is reclaimed before the run ends and a
+scope there is depth alone.
 
 The depth model treats `manual_begin_depth` as the depth where the outermost
 active manual scope began:

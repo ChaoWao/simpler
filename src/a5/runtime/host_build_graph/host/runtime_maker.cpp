@@ -610,7 +610,7 @@ int32_t run_host_orchestration(
         const PTO2OrchProfilingData prof = orchestrator_get_profiling();
         const std::pair<const char *, uint64_t> steps[] = {
             {"alloc", prof.alloc_cycle},   {"args", prof.args_cycle},   {"lookup", prof.lookup_cycle},
-            {"insert", prof.insert_cycle}, {"fanin", prof.fanin_cycle}, {"scope_end", prof.scope_end_cycle},
+            {"insert", prof.insert_cycle}, {"fanin", prof.fanin_cycle},
         };
         for (const auto &step : steps) {
             if (step.second == 0) continue;

@@ -892,12 +892,6 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    // Polling: scope-end takes no per-producer action. Under the wiring model
-    // this bumped each task's scope refcount (PTO2_FANOUT_SCOPE_BIT); reclaim now
-    // gates on completed_watermark >= last_consumer_local_id, which needs no
-    // scope reference. Kept as a no-op so the orchestrator call site is unchanged.
-    void on_scope_end(PTO2TaskSlotState ** /*task_slot_states*/, int32_t /*count*/) {}
-
     // Orch owns dependency discovery and saves the immutable fanin wire.
     // Scheduler polling only chooses which already-wired producer a consumer
     // waits on at this instant; it never recomputes producer relationships.

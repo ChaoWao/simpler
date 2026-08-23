@@ -90,11 +90,6 @@
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
-// Hard cap for the scope_tasks buffer. Equals the in-flight ring slot budget:
-// once every ring slot is in flight, no more tasks can ever be pushed regardless
-// of buffer size. scope_tasks_push fatals on overflow rather than growing the
-// buffer.
-#define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE)
 
 // Per-shape ready-queue capacity (power of two). This is a ring buffer that
 // bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task
@@ -145,7 +140,7 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * Task state enumeration
  *
  * State transitions:
- *   PENDING -> COMPLETED -> CONSUMED
+ *   PENDING -> COMPLETED
  *
  * The slot stays in PENDING from submit through "ready in queue" and "running
  * on a worker"; readiness and running-vs-idle are derived from fanin_refcount
@@ -154,12 +149,15 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * Conditions:
  *   PENDING->COMPLETED:   all subtasks finish (set by scheduler) or task is a
  *                         hidden alloc completed inline by the orchestrator
- *   COMPLETED->CONSUMED:  per-ring completed_watermark >= last_consumer_local_id
+ *
+ * COMPLETED is terminal: no slot is recycled before the run ends, so nothing
+ * advances a task past it. Consumer retirement is observed through the per-ring
+ * completed_watermark instead.
  */
 typedef enum {
     PTO2_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
     PTO2_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
-    PTO2_TASK_CONSUMED = 2    // Output fully consumed, buffers can be released
+    PTO2_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
 } PTO2TaskState;
 
 /**

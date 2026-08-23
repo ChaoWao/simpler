@@ -17,7 +17,7 @@
  * Key Features:
  * - Ring buffer based memory management (zero allocation overhead)
  * - Lazy invalidation TensorMap for dependency discovery
- * - Scope-based buffer lifecycle management
+ * - Manual scopes that bypass TensorMap discovery for explicit dependencies
  * - Per-task spinlocks for concurrent fanout updates
  * - Orchestrator-Scheduler decoupling via shared memory
  *
@@ -303,17 +303,21 @@ void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
 /**
  * Begin a new scope
  *
- * All tasks submitted within this scope will have their lifetime
- * bounded by the scope. When scope_end() is called, the scope
- * releases its reference to all enclosed tasks.
+ * submit_task requires at least one open scope. A MANUAL scope additionally makes
+ * every submit inside it bypass TensorMap discovery and take its fanin from
+ * CoreTaskArgs::set_dependencies() instead; an AUTO scope nested inside a MANUAL
+ * one is rejected. The mode is read from PTO2Runtime::pending_scope_mode, which
+ * PTO2_SCOPE sets immediately before this call.
  */
 void rt_scope_begin(PTO2Runtime *rt);
 
 /**
  * End current scope
  *
- * Releases scope reference for all tasks submitted since scope_begin().
- * Tasks whose refcount reaches zero will have their buffers released.
+ * Closes the innermost scope, and when that is the outermost MANUAL one, returns
+ * later submits to TensorMap discovery. A scope bounds no task or buffer lifetime
+ * here: the ring is whole-graph-resident, so no task slot and no heap byte is
+ * reclaimed before the run ends.
  */
 void rt_scope_end(PTO2Runtime *rt);
 

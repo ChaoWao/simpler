@@ -84,22 +84,21 @@ enum class PTO2ScopeMode : uint8_t {
  * Users must hold a named TaskOutputTensors variable and borrow via get_ref();
  * binding get_ref() on an rvalue is compile-time rejected to prevent dangling.
  *
- * LIFETIME — single-scope only:
- *   Internally this class stores pointers into the submitting task's payload
- *   (PTO2TaskPayload::tensors[]), which lives in a ring-buffer slot. After
- *   scope_end the slot becomes eligible for reuse, and a later submit will
- *   overwrite the same ChipTensor storage in place. Therefore the
- *   TaskOutputTensors instance, the const ChipTensor& returned by get_ref(), and
- *   any pointer derived from either MUST NOT outlive the PTO2_SCOPE in which
- *   submit was called — do not move/copy them to outer-scope variables, do
- *   not capture references by std::reference_wrapper or raw pointers across
- *   scope boundaries.
+ * LIFETIME — single-pass only:
+ *   Internally this class stores pointers into the submitting task's tensor
+ *   storage: the region named by PTO2TaskPayload::tensors for a plain submit, the
+ *   GraphRecording node's tensors for a submit inside a Graph body. Both belong to
+ *   one orchestration pass, which the next bind rebuilds over the same bytes.
+ *   Therefore the TaskOutputTensors instance, the const ChipTensor& returned by
+ *   get_ref(), and any pointer derived from either MUST NOT outlive the
+ *   orchestration entry that submitted the task — do not move/copy them into state
+ *   that survives the pass, and do not capture them by std::reference_wrapper or
+ *   raw pointer across that boundary.
  *
- *   This invariant is intentionally not enforced at runtime: a reused slot
- *   simply carries a different but valid owner_task_id, so checking
- *   owner_task_id cannot distinguish "still mine" from "silently aliased to
- *   an unrelated task". Misuse manifests as a wrong-tensor read with no
- *   diagnostic.
+ *   This invariant is intentionally not enforced at runtime: rebuilt storage
+ *   carries a different but valid owner_task_id, so checking owner_task_id cannot
+ *   distinguish "still mine" from "silently aliased to an unrelated task". Misuse
+ *   manifests as a wrong-tensor read with no diagnostic.
  */
 class TaskOutputTensors {
 public:
