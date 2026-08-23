@@ -346,10 +346,15 @@ static_assert(
 );
 static_assert(sizeof(ChipTensor) % alignof(uint64_t) == 0, "the tensor stride must keep the scalar pool aligned");
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
-static_assert(std::is_trivially_copyable_v<GraphExecution>);
+// The whole storage is aligned for its widest member, so one base check covers the
+// header as well as the node array that follows it.
+static_assert(
+    alignof(GraphNodeStorage) % alignof(GraphExecution) == 0,
+    "the node array's alignment must subsume the execution header's"
+);
 static_assert(sizeof(GraphTensor) <= sizeof(ChipTensor));
 
-inline size_t graph_boundary_tensor_pool_slots(uint32_t tensor_count) {
+inline constexpr size_t graph_boundary_tensor_pool_slots(uint32_t tensor_count) {
     const size_t bytes = static_cast<size_t>(tensor_count) * sizeof(GraphTensor);
     return (bytes + sizeof(ChipTensor) - 1) / sizeof(ChipTensor);
 }
@@ -406,6 +411,13 @@ inline GraphExecution *graph_execution_from_slot(PTO2TaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH_NODE ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
 }
 
+// An outer GRAPH slot's graph_context holds the shared Definition's device address
+// until graph_execution_localize replaces it with the execution, so this cast is only
+// valid after that call. What makes it safe is the boot sequence, not this slot: every
+// AICPU thread localizes a disjoint slice of the task window in classify_partition and
+// all of them barrier before runtime_init_ready_ is published, so no dispatch — and
+// therefore no caller of this function — observes an unlocalized GRAPH slot. A slot
+// whose localization failed carries nullptr.
 inline GraphExecution *graph_execution_from_outer_slot(PTO2TaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
 }
@@ -424,7 +436,9 @@ inline void graph_execution_set_state(
     GraphExecution &execution, GraphExecutionState next, std::memory_order order = std::memory_order_release
 ) {
     uint8_t observed = execution.state.load(std::memory_order_relaxed);
-    const uint8_t next_state = static_cast<uint8_t>(next);
+    // Masked, so a state added past GRAPH_EXECUTION_STATE_MASK cannot reach the
+    // readiness bit sharing this byte.
+    const uint8_t next_state = static_cast<uint8_t>(static_cast<uint8_t>(next) & GRAPH_EXECUTION_STATE_MASK);
     while (!execution.state.compare_exchange_weak(
         observed, static_cast<uint8_t>((observed & ~GRAPH_EXECUTION_STATE_MASK) | next_state), order,
         std::memory_order_relaxed
@@ -435,9 +449,9 @@ inline bool graph_execution_transition(
     GraphExecution &execution, GraphExecutionState expected_state, GraphExecutionState next_state
 ) {
     uint8_t observed = execution.state.load(std::memory_order_acquire);
+    const uint8_t desired_state = static_cast<uint8_t>(static_cast<uint8_t>(next_state) & GRAPH_EXECUTION_STATE_MASK);
     while ((observed & GRAPH_EXECUTION_STATE_MASK) == static_cast<uint8_t>(expected_state)) {
-        const uint8_t desired =
-            static_cast<uint8_t>((observed & ~GRAPH_EXECUTION_STATE_MASK) | static_cast<uint8_t>(next_state));
+        const uint8_t desired = static_cast<uint8_t>((observed & ~GRAPH_EXECUTION_STATE_MASK) | desired_state);
         if (execution.state.compare_exchange_weak(
                 observed, desired, std::memory_order_acq_rel, std::memory_order_acquire
             )) {

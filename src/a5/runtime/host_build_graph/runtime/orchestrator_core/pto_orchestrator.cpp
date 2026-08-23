@@ -1636,6 +1636,24 @@ bool graph_submit_outer(
         return false;
     }
 
+    // The argument pools hold MAX_TENSOR_ARGS ChipTensors and MAX_SCALAR_ARGS scalars
+    // per window slot, a budget no CoreTaskArgs task can exceed. A Graph boundary is
+    // GraphTaskArgs-wide, so a wide one draws more than the single slot it occupies is
+    // worth — GraphBoundaryPool.WidestBoundaryExceedsOneSlotBudget pins how much. The
+    // cursors bump through a fixed mirror whose last segment is the scalar pool, so an
+    // overdraw writes past that mirror rather than merely exhausting a quota. Test it
+    // ahead of the slot claim and decline the Graph path, which leaves the caller to
+    // replay the block as ordinary tasks.
+    const uint64_t task_window = orch->sm_header->ring.task_window_size;
+    const int32_t tensor_slots =
+        static_cast<int32_t>(graph_boundary_tensor_pool_slots(static_cast<uint32_t>(args.tensor_count())));
+    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    if (static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots > task_window * MAX_TENSOR_ARGS ||
+        static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span > task_window * MAX_SCALAR_ARGS) {
+        LOG_WARN("%s", "[GraphExecution] boundary exceeds the argument pools; using ordinary path");
+        return false;
+    }
+
     GraphPendingUpload pending;
     pending.full_key = full_key;
     pending.definition_hash = definition_hash;
@@ -1669,12 +1687,7 @@ bool graph_submit_outer(
     // Graph boundaries use the same compact argument pools as ordinary tasks. The
     // outer payload carries the invocation data; graph_context only names the
     // shared Definition until device initialization replaces it with GraphExecution.
-    const uint64_t window = ring.task_window_size;
-    const int32_t tensor_slots =
-        static_cast<int32_t>(graph_boundary_tensor_pool_slots(static_cast<uint32_t>(args.tensor_count())));
-    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
-    debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots <= window * MAX_TENSOR_ARGS);
-    debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
+    // The preflight bounds both spans, so these cursors stay inside their pools.
     payload.bind_regions(
         orch->tensor_pool + orch->tensor_pool_cursor, orch->scalar_pool + orch->scalar_pool_cursor,
         orch->fanin_pool + orch->fanin_pool_cursor

@@ -497,7 +497,7 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
             return false;
         }
         const uintptr_t storage_addr = outer_base + definition->required_heap;
-        if (storage_addr % alignof(GraphExecution) != 0) {
+        if (storage_addr % alignof(GraphNodeStorage) != 0) {
             LOG_ERROR("host-orch: Graph runtime storage address is misaligned");
             return false;
         }

@@ -125,7 +125,7 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     return image;
 }
 
-// A Definition device object exactly as upload_graph_executions builds it:
+// A Definition device object exactly as bind_graph_definitions builds it:
 // [GraphDefinitionHeader][Definition image].
 class TestDefinitionObject {
 public:
@@ -189,8 +189,20 @@ private:
 // One outer GRAPH task's heap allocation and payload, laid out as
 // graph_submit_definition sizes them. Device localization constructs the
 // execution in the heap tail and reads invocation boundaries from the payload.
+//
+// The boundary regions are sized by the same helpers graph_submit_outer reserves
+// with — the ChipTensor slot span that holds GRAPH_MAX_TENSOR_ARGS packed
+// GraphTensors, and the ARG_POOL_ALIGN-rounded scalar span — rather than by the
+// GraphTaskArgs element caps, so the fixture reserves what production reserves for
+// the widest legal boundary. They are members, not separate allocations: a payload
+// names its regions through an int32 SelfRelativePtr delta, which silently binds as
+// unbound past ±2 GiB.
 class OuterHeap {
 public:
+    static constexpr size_t TENSOR_SLOTS = graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS);
+    static constexpr size_t SCALAR_SPAN =
+        PTO2_ALIGN_UP(static_cast<size_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / sizeof(uint64_t));
+
     OuterHeap(const std::vector<std::byte> &definition_image, uint8_t fill = 0) {
         const auto *definition = reinterpret_cast<const GraphDefinition *>(definition_image.data());
         heap_bytes_ = static_cast<size_t>(definition->required_heap);
@@ -206,14 +218,25 @@ public:
     uint8_t *end() const { return storage_->bytes() + storage_->size(); }
     void *execution() const { return base() + heap_bytes_; }
 
+    // The tensor region past the packed boundary. Production reserves only the packed
+    // span rounded up to a whole slot, so a write anywhere beyond the packed bytes
+    // lands in another task's arguments on a real ring.
+    const std::byte *boundary_tail(uint32_t boundary_count) const {
+        return reinterpret_cast<const std::byte *>(boundary_tensors_.data()) + boundary_count * sizeof(GraphTensor);
+    }
+    size_t boundary_tail_bytes(uint32_t boundary_count) const {
+        return TENSOR_SLOTS * sizeof(ChipTensor) - boundary_count * sizeof(GraphTensor);
+    }
+
     GraphExecution *initialize_execution(
         const TestDefinitionObject &definition_object, uint64_t boundary_address, uint64_t boundary_scalar
-    ) const {
+    ) {
         const GraphDefinition *definition = definition_object.definition();
-        if (definition->boundary_count > boundary_tensors_.size() ||
-            definition->boundary_scalar_count > boundary_scalars_.size()) {
+        if (graph_boundary_tensor_pool_slots(definition->boundary_count) > TENSOR_SLOTS ||
+            definition->boundary_scalar_count > SCALAR_SPAN) {
             return nullptr;
         }
+        std::memset(boundary_tensors_.data(), 0, TENSOR_SLOTS * sizeof(ChipTensor));
         const GraphTensor boundary = make_test_tensor(boundary_address);
         new (boundary_tensors_.data()) GraphTensor{boundary};
         payload_.tensor_count = static_cast<int32_t>(definition->boundary_count);
@@ -229,11 +252,11 @@ public:
 private:
     size_t heap_bytes_{0};
     std::unique_ptr<AlignedStorage> storage_;
-    mutable PTO2TaskDescriptor task_{};
-    mutable PTO2TaskPayload payload_{};
-    mutable PTO2TaskSlotState slot_{};
-    mutable std::array<ChipTensor, GRAPH_MAX_TENSOR_ARGS> boundary_tensors_{};
-    mutable std::array<uint64_t, GRAPH_MAX_SCALAR_ARGS> boundary_scalars_{};
+    PTO2TaskDescriptor task_{};
+    PTO2TaskPayload payload_{};
+    PTO2TaskSlotState slot_{};
+    std::array<ChipTensor, TENSOR_SLOTS> boundary_tensors_{};
+    std::array<uint64_t, SCALAR_SPAN> boundary_scalars_{};
 };
 
 }  // namespace
@@ -307,6 +330,39 @@ TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     EXPECT_EQ(layout.tensors_offset % alignof(ChipTensor), 0U);
     EXPECT_EQ(layout.scalars_offset, layout.tensors_offset + TENSOR_ARGS * sizeof(ChipTensor));
     EXPECT_EQ(layout.total_bytes, layout.scalars_offset + SCALAR_ARGS * sizeof(uint64_t));
+}
+
+// The outer Graph payload's tensor region is counted in ChipTensor pool slots but
+// holds densely packed GraphTensor values, so the slot count must cover the packed
+// bytes and be the smallest count that does — anything larger silently overdraws the
+// shared pool, anything smaller lets localize read past the region.
+TEST(GraphBoundaryPool, TensorSlotsCoverPackedBytesMinimally) {
+    EXPECT_EQ(graph_boundary_tensor_pool_slots(0), 0U);
+    for (uint32_t count = 1; count <= GRAPH_MAX_TENSOR_ARGS; ++count) {
+        const size_t slots = graph_boundary_tensor_pool_slots(count);
+        const size_t packed = static_cast<size_t>(count) * sizeof(GraphTensor);
+        EXPECT_GE(slots * sizeof(ChipTensor), packed) << "count " << count;
+        EXPECT_LT((slots - 1) * sizeof(ChipTensor), packed) << "count " << count;
+    }
+}
+
+// A Graph boundary is GraphTaskArgs-wide while the pools budget MAX_TENSOR_ARGS /
+// MAX_SCALAR_ARGS per window slot, so the widest legal boundary draws several slots'
+// worth. graph_submit_outer's preflight exists because of that gap; pin the gap itself
+// so a cap or type-size change cannot quietly close or widen it unnoticed.
+TEST(GraphBoundaryPool, WidestBoundaryExceedsOneSlotBudget) {
+    EXPECT_GT(graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS), static_cast<size_t>(MAX_TENSOR_ARGS));
+    EXPECT_GT(
+        static_cast<size_t>(
+            PTO2_ALIGN_UP(static_cast<int32_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t))
+        ),
+        static_cast<size_t>(MAX_SCALAR_ARGS)
+    );
+    // The widest boundary that still fits one slot's tensor budget.
+    EXPECT_LE(
+        graph_boundary_tensor_pool_slots(MAX_TENSOR_ARGS * sizeof(ChipTensor) / sizeof(GraphTensor)),
+        static_cast<size_t>(MAX_TENSOR_ARGS)
+    );
 }
 
 // The pools are sized by the Definition's arg tables, so a Definition whose
@@ -662,4 +718,11 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     }
     EXPECT_EQ(execution->materialized_nodes, execution->node_count);
     EXPECT_EQ(execution->consumed_tensor_args, 2U);
+
+    // Localize and materialize read the boundary and write node arguments; neither may
+    // touch the tensor region past the packed boundary values.
+    const std::byte *tail = heap.boundary_tail(1);
+    for (size_t i = 0; i < heap.boundary_tail_bytes(1); ++i) {
+        ASSERT_EQ(tail[i], std::byte{0}) << "byte " << i << " past the packed boundary";
+    }
 }

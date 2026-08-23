@@ -24,7 +24,10 @@ GraphExecution *acquire_execution_storage(
     uint32_t scalar_arg_count
 ) {
     GraphExecutionStorageLayout layout{};
-    if (storage_addr == 0 || storage_addr % alignof(GraphExecution) != 0 ||
+    // GraphNodeStorage, not GraphExecution: the node array's alignment is the widest
+    // the storage carries, and nodes_offset only rounds up relative to this base, so
+    // an under-aligned base would leave every alignas(64) node entry misaligned.
+    if (storage_addr == 0 || storage_addr % alignof(GraphNodeStorage) != 0 ||
         !graph_execution_storage_layout(node_count, tensor_arg_count, scalar_arg_count, &layout) ||
         layout.total_bytes > storage_bytes) {
         return nullptr;
