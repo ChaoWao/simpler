@@ -21,7 +21,7 @@
 #endif
 
 #include "platform_comm/comm_context.h"
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 #include "tensor.h"
 
 template <typename T>

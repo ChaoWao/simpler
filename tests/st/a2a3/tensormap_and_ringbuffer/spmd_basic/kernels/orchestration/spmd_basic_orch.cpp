@@ -22,7 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 #define FUNC_SPMD_READ_AIC 0
 #define FUNC_SPMD_READ_AIV0 1

@@ -3,7 +3,7 @@
 ← [Device Error Codes](../device-error-codes.md)
 
 SCOPE_DEADLOCK, HEAP_RING_DEADLOCK, FLOW_CONTROL_DEADLOCK,
-DEP_POOL_OVERFLOW and TENSORMAP_OVERFLOW all mean that a runtime resource could
+FANIN_CAPACITY_EXCEEDED and TENSORMAP_OVERFLOW all mean that a runtime resource could
 not admit more graph state. The adjacent device-log line identifies the actual
 resource and determines how strong that diagnosis is:
 

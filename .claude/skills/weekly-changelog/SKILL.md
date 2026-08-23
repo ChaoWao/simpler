@@ -157,7 +157,7 @@ else is internal.
 - Pure refactors with no API/behavior change visible to users — even if the
   diff is large
 - C++ / C-API internals only platform-backend developers touch
-  (e.g. `HostApi::*`, `DeviceRunner::*`, `pto_runtime_c_api.h` symbols)
+  (e.g. `HostApi::*`, `DeviceRunner::*`, `runtime_c_api.h` symbols)
 - Compile-time macros with no external override path
 - CI / build infra fixes invisible at runtime
 - Scene-test runner / fixture-only fixes

@@ -22,8 +22,8 @@
 #include <vector>
 
 #include "graph_host_state.h"
-#include "pto_orchestrator.h"
-#include "pto_shared_memory.h"
+#include "orchestrator.h"
+#include "shared_memory.h"
 #include "utils/device_arena.h"
 
 class HbgSlotClaimTest : public ::testing::Test {

@@ -15,7 +15,7 @@
 #include <cassert>
 #include <cstddef>
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 namespace simpler::common::sim_host {
 

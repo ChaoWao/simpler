@@ -51,21 +51,21 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../common/pto_runtime_status.h"
+#include "../common/runtime_status.h"
 #include "../runtime/common.h"
 #include "../runtime/dep_gen_host_graph.h"
 #include "../runtime/graph_execution.h"
 #include "../runtime/host_tensor_access.h"
 #include "../runtime/graph_host_state.h"
 #include "../runtime/host_phase_trace.h"
-#include "../runtime/pto_orchestrator.h"
-#include "../runtime/pto_runtime2.h"
-#include "../runtime/pto_shared_memory.h"
-#include "../runtime/pto_types.h"
+#include "../runtime/orchestrator.h"
+#include "../runtime/runtime_core.h"
+#include "../runtime/shared_memory.h"
+#include "../runtime/types.h"
 #include "../runtime/runtime.h"
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
-#include "../../../../common/worker/pto_runtime_c_api.h"
+#include "../../../../common/worker/runtime_c_api.h"
 #include "callable.h"
 #include "common/host_log_binding.h"
 #include "common/log_clock.h"
@@ -83,7 +83,7 @@
 // first is a spot check on the highest one this runtime defines, so a new
 // four-digit latched code needs the ceiling raised here as well.
 static_assert(
-    PTO2_ERROR_READY_QUEUE_OVERFLOW <= PTO_RUNTIME_LATCHED_CODE_MAX &&
+    SIMPLER_ERROR_READY_QUEUE_OVERFLOW <= PTO_RUNTIME_LATCHED_CODE_MAX &&
         PTO_RUNTIME_ERR_BASE < -PTO_RUNTIME_LATCHED_CODE_MAX,
     "host-side C API codes must stay below the negation of every latched device code"
 );
@@ -133,7 +133,7 @@ static int64_t bind_now_ns() { return static_cast<int64_t>(host_phase_now_ns());
 //
 // The breakdown is LOG_TIMING lines rather than `[STRACE]` markers on purpose:
 // the marker grammar is the platform's public per-run-stage contract (see
-// pto_runtime_c_api.h and docs/dfx/host-trace.md) whose consumers key off a fixed
+// runtime_c_api.h and docs/dfx/host-trace.md) whose consumers key off a fixed
 // stage set, while everything below is host_build_graph's internal breakdown of
 // one stage. LOG_TIMING sits at the default log threshold, so these are visible
 // without a flag and at any --rounds.
@@ -599,7 +599,7 @@ int32_t run_host_orchestration(
     // Binds the orchestration .so's own framework_current_runtime, which its
     // inline rt_submit_* read. The host library links a same-named copy from
     // orchestration/common.cpp, but nothing outside the .so includes
-    // pto_orchestration_api.h, so nothing reads that one — rt_scope_* and
+    // orchestration_api.h, so nothing reads that one — rt_scope_* and
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
@@ -634,14 +634,14 @@ int32_t run_host_orchestration(
     // edges. Uploading it would launch the device on an incomplete graph and surface
     // the cause as whatever the device notices second, usually a scheduler timeout.
     const int32_t orch_error = pto2_sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
-    if (orch_error != PTO2_ERROR_NONE || orchestrator.fatal) {
+    if (orch_error != SIMPLER_ERROR_NONE || orchestrator.fatal) {
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
         // noticed. A fatal with no code left to read is the only generic failure.
-        const int32_t status = orch_error != PTO2_ERROR_NONE ?
-                                   runtime_status_from_error_codes(orch_error, PTO2_ERROR_NONE) :
+        const int32_t status = orch_error != SIMPLER_ERROR_NONE ?
+                                   runtime_status_from_error_codes(orch_error, SIMPLER_ERROR_NONE) :
                                    PTO_RUNTIME_ERR_INTERNAL;
-        LOG_RUNTIME_FAILURE(orch_error, PTO2_ERROR_NONE, status);
+        LOG_RUNTIME_FAILURE(orch_error, SIMPLER_ERROR_NONE, status);
         LOG_ERROR(
             "host-orch: refusing to upload an incomplete graph after %" PRIu64 " heap bytes",
             orchestrator.ring.task_allocator.heap_used_bytes()

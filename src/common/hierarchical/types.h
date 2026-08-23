@@ -45,7 +45,7 @@
 
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
-#include "../worker/pto_runtime_c_api.h"
+#include "../worker/runtime_c_api.h"
 
 // =============================================================================
 // TensorKey — compound key for TensorMap dependency tracking

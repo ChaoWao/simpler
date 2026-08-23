@@ -140,7 +140,7 @@
     | ---- | ---- | ------ |
     | **A — prose** | Brand mentions in docs, headings, skill descriptions, issue templates, and code comments (`# PTO Runtime2 Profiling Levels`, "the PTO Runtime consists of…") | **Fix on sight, unconditionally.** No compile risk, no contract. Say `simpler`, or name the actual component ("the AICPU orchestrator", "the `tensormap_and_ringbuffer` runtime") when that is what the sentence means. |
     | **B — internal identifiers** | `PTO2Foo` types, `pto2_*` functions, internal `PTO2_*` macros and enumerators, `pto_*.h` / `pto_runtime2*.cpp` file names | Rename **only when you are already modifying that code**, per rule 9, and finish the identifier you started (below). |
-    | **C — external contracts** | `PTO2_RING_*` and other `runtime_env` knobs (documented in `MULTI_RING.md`, set by pypto-lib / pypto-serving), `extern "C"` symbols in `pto_runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
+    | **C — external contracts** | `PTO2_RING_*` and other `runtime_env` knobs (documented in `MULTI_RING.md`, set by pypto-lib / pypto-serving), `extern "C"` symbols in `runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
 
     Two constraints make the difference between progress and churn:
 

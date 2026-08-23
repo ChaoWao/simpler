@@ -36,7 +36,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_WRITE_CONST 0
 #define FUNC_COPY_FIRST 1
@@ -60,7 +60,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     uint64_t case_id = orch_args.scalar(0);
     if (case_id != 1 && case_id != 2) {
-        rt_report_fatal(PTO2_ERROR_INVALID_ARGS, "unsupported case_id=%llu", static_cast<unsigned long long>(case_id));
+        rt_report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, "unsupported case_id=%llu", static_cast<unsigned long long>(case_id)
+        );
         return;
     }
     // case 1 => gate 0 (predicate FALSE, skip); case 2 => gate 1 (predicate TRUE, dispatch).

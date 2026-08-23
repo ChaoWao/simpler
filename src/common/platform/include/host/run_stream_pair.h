@@ -17,7 +17,7 @@
 #include <mutex>
 #include <utility>
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 /**
  * The one AICPU + AICore stream pair every run submits on.

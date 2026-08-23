@@ -18,7 +18,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_MATMUL_MX 0
 

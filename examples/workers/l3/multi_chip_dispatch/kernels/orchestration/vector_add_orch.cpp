@@ -20,7 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 extern "C" {
 

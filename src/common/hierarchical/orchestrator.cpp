@@ -1195,7 +1195,7 @@ void Orchestrator::infer_deps(
     };
 
     // Tag-driven dependency inference — mirrors L2
-    // (src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_orchestrator.cpp
+    // (src/a2a3/runtime/tensormap_and_ringbuffer/runtime/orchestrator.cpp
     //  steps B and 4):
     //   INPUT            → lookup only (RaW)
     //   INOUT            → lookup + insert (RaW + WaW)

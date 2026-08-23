@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <limits>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_NOOP_AIC 0
 #define FUNC_NOOP_AIV0 1
@@ -74,7 +74,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     default:
         rt_report_fatal(
-            PTO2_ERROR_INVALID_ARGS, "unknown validation case %llu", static_cast<unsigned long long>(case_id)
+            SIMPLER_ERROR_INVALID_ARGS, "unknown validation case %llu", static_cast<unsigned long long>(case_id)
         );
         return;
     }

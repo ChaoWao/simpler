@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative ST orchestration: PTO2_ERROR_REQUIRE_SYNC_START_INVALID (code 7).
+ * Negative ST orchestration: SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID (code 7).
  *
  * Submits one SPMD AIV task that asks for require_sync_start with a block_num
  * far larger than the available cores. A sync-start launch needs every block
@@ -22,14 +22,14 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_NOOP_KERNEL 0
 
 // PTO2LaunchSpec spells the SPMD block-count setter differently per arch
 // (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
-// one fixture compiles on both; keyed off the arch's pto_types.h include guard,
-// which pto_orchestration_api.h pulls in transitively.
+// one fixture compiles on both; keyed off the arch's types.h include guard,
+// which orchestration_api.h pulls in transitively.
 static inline void set_block_count(CoreTaskArgs &args, int16_t n) {
 #if defined(SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_)
     args.launch_spec.set_core_num(n);

@@ -30,7 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 // SPMD parallelism count is spelled set_block_num on a2a3 and set_core_num on
 // a5; pick whichever the launch spec exposes so this example builds on both.

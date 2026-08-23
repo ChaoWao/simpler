@@ -24,7 +24,7 @@
 
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_ADD 0
 #define FUNC_ADD_SCALAR_INPLACE 1

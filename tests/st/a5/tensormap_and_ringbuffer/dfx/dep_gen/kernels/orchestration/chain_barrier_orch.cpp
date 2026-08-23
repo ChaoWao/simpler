@@ -31,7 +31,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_WRITE_CONST 0
 #define FUNC_COPY_FIRST 1
@@ -57,7 +57,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint64_t n_raw = orch_args.scalar(0);
     int32_t n = static_cast<int32_t>(n_raw);
     if (n < 1 || n > MAX_PRODUCERS) {
-        rt_report_fatal(PTO2_ERROR_INVALID_ARGS, "chain_barrier_orch: invalid n=%d", n);
+        rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "chain_barrier_orch: invalid n=%d", n);
         return;
     }
 

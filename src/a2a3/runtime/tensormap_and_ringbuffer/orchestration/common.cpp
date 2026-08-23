@@ -182,9 +182,9 @@ AssertionError::AssertionError(const char *condition, const char *file, int line
 
 [[noreturn]] void assert_impl(const char *condition, const char *file, int line) {
     // Use unified_log_error directly rather than the LOG_ERROR macro: that macro
-    // lives in pto_orchestration_api.h and expands to
+    // lives in orchestration_api.h and expands to
     // current_runtime()->ops->log_error, but the ops table's definition pulls in
-    // pto_types.h (Arg → __aicore__-only to_u64), which the AICore build of this
+    // types.h (Arg → __aicore__-only to_u64), which the AICore build of this
     // TU cannot compile. unified_log_error reaches the same sink without that
     // dependency.
     unified_log_error(__FUNCTION__, "\n========================================");

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2TaskAllocator from pto_ring_buffer.h
+ * Unit tests for PTO2TaskAllocator from ring_buffer.h
  *
  * Tests ring buffer allocation, heap bump logic, wrap-around, alignment,
  * task window flow control, and heap_available semantics.
@@ -43,7 +43,7 @@
 #include <set>
 #include <vector>
 
-#include "pto_ring_buffer.h"
+#include "ring_buffer.h"
 
 // =============================================================================
 // Helpers
@@ -78,7 +78,7 @@ protected:
     alignas(64) uint8_t heap_buf[HEAP_SIZE]{};
     std::atomic<int32_t> current_index{0};
     std::atomic<int32_t> last_alive{0};
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2TaskAllocator allocator{};
 
     void SetUp() override {
@@ -86,7 +86,7 @@ protected:
         std::memset(heap_buf, 0, sizeof(heap_buf));
         current_index.store(0);
         last_alive.store(0);
-        error_code.store(PTO2_ERROR_NONE);
+        error_code.store(SIMPLER_ERROR_NONE);
         allocator.init(descriptors.data(), WINDOW_SIZE, &current_index, &last_alive, heap_buf, HEAP_SIZE, &error_code);
     }
 };
@@ -418,13 +418,13 @@ TEST_F(TaskAllocatorTest, AllocExactlyHeapSize) {
 
     auto r2 = allocator.alloc(64);
     EXPECT_TRUE(r2.failed()) << "No space after full allocation";
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
 }
 
 TEST_F(TaskAllocatorTest, AllocLargerThanHeap) {
     auto r = allocator.alloc(HEAP_SIZE * 2);
     EXPECT_TRUE(r.failed()) << "Cannot allocate more than heap size";
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
 }
 
 TEST_F(TaskAllocatorTest, TaskWindowSaturates) {
@@ -437,7 +437,7 @@ TEST_F(TaskAllocatorTest, TaskWindowSaturates) {
 
     auto overflow = allocator.alloc(0);
     EXPECT_TRUE(overflow.failed());
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_FLOW_CONTROL_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK);
 }
 
 // Task IDs grow monotonically as int32_t. Near INT32_MAX, the same

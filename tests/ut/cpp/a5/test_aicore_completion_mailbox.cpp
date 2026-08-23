@@ -24,8 +24,8 @@
 #include <vector>
 
 #include "aicore_completion_mailbox.h"
-#include "pto_async_wait.h"
-#include "scheduler/pto_scheduler.h"
+#include "async_wait.h"
+#include "scheduler/scheduler.h"
 
 namespace {
 
@@ -55,11 +55,11 @@ TEST(A5AICoreCompletionMailbox, PushConditionThenDrainCreatesEntry) {
         mb->try_push_condition(token, kAddr, /*expected=*/7, /*engine=*/COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER)
     );
 
-    int32_t err = PTO2_ERROR_NONE;
+    int32_t err = SIMPLER_ERROR_NONE;
     AsyncWaitList::DrainCompletionSink sink{};
     int32_t drained = wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err);
     EXPECT_EQ(drained, 1);
-    EXPECT_EQ(err, PTO2_ERROR_NONE);
+    EXPECT_EQ(err, SIMPLER_ERROR_NONE);
 
     ASSERT_EQ(wait_list.count, 1);
     EXPECT_EQ(wait_list.entries[0].task_token.raw, token.raw);
@@ -82,10 +82,10 @@ TEST(A5AICoreCompletionMailbox, PushNormalDoneCreatesEntryReadyToComplete) {
     uint64_t slot_addr = reinterpret_cast<uint64_t>(&dummy_slot);
     ASSERT_TRUE(mb->try_push_normal_done(token, slot_addr));
 
-    int32_t err = PTO2_ERROR_NONE;
+    int32_t err = SIMPLER_ERROR_NONE;
     AsyncWaitList::DrainCompletionSink sink{};
     ASSERT_EQ(wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err), 1);
-    EXPECT_EQ(err, PTO2_ERROR_NONE);
+    EXPECT_EQ(err, SIMPLER_ERROR_NONE);
 
     ASSERT_EQ(wait_list.count, 1);
     EXPECT_EQ(wait_list.entries[0].task_token.raw, token.raw);
@@ -113,10 +113,10 @@ TEST(A5AICoreCompletionMailbox, NormalDoneAttachesToExistingEntry) {
     uint64_t slot_addr = reinterpret_cast<uint64_t>(&dummy_slot);
     ASSERT_TRUE(mb->try_push_normal_done(token, slot_addr));
 
-    int32_t err = PTO2_ERROR_NONE;
+    int32_t err = SIMPLER_ERROR_NONE;
     AsyncWaitList::DrainCompletionSink sink{};
     ASSERT_EQ(wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err), 1);
-    EXPECT_EQ(err, PTO2_ERROR_NONE);
+    EXPECT_EQ(err, SIMPLER_ERROR_NONE);
 
     EXPECT_TRUE(wait_list.entries[0].normal_done);
     EXPECT_EQ(reinterpret_cast<uint64_t>(wait_list.entries[0].slot_state), slot_addr);
@@ -144,10 +144,10 @@ TEST(A5AICoreCompletionMailbox, ConditionAttachesToExistingEntry) {
         token, kAddr2, kPostId, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_SDMA_EVENT_RECORD
     ));
 
-    int32_t err = PTO2_ERROR_NONE;
+    int32_t err = SIMPLER_ERROR_NONE;
     AsyncWaitList::DrainCompletionSink sink{};
     ASSERT_EQ(wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err), 2);
-    EXPECT_EQ(err, PTO2_ERROR_NONE);
+    EXPECT_EQ(err, SIMPLER_ERROR_NONE);
 
     ASSERT_EQ(wait_list.entries[0].condition_count, 2);
     EXPECT_EQ(reinterpret_cast<uint64_t>(wait_list.entries[0].conditions[0].counter_addr), kAddr1);
@@ -292,10 +292,10 @@ TEST(A5AICoreCompletionMailbox, ProducerInterleavedWithDrain) {
     });
     std::thread drainer([&]() {
         while (!drainer_stop.load(std::memory_order_acquire)) {
-            int32_t err = PTO2_ERROR_NONE;
+            int32_t err = SIMPLER_ERROR_NONE;
             AsyncWaitList::DrainCompletionSink sink{};
             (void)wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err);
-            ASSERT_EQ(err, PTO2_ERROR_NONE);
+            ASSERT_EQ(err, SIMPLER_ERROR_NONE);
             std::this_thread::yield();
         }
     });
@@ -308,7 +308,7 @@ TEST(A5AICoreCompletionMailbox, ProducerInterleavedWithDrain) {
     drainer.join();
     // Final drain pass to consume any in-flight messages the drainer left
     // after it observed the stop flag.
-    int32_t err = PTO2_ERROR_NONE;
+    int32_t err = SIMPLER_ERROR_NONE;
     AsyncWaitList::DrainCompletionSink sink{};
     (void)wait_list.drain_aicore_completion_mailbox_locked(mb, sink, err);
 

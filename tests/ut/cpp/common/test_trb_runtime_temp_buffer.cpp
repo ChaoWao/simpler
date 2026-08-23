@@ -29,12 +29,12 @@
 
 #include "arg_direction.h"
 #include "common/host_api.h"
-#include "pto_runtime_status.h"
-#include "pto_runtime2_types.h"
-#include "pto_shared_memory.h"
+#include "runtime_status.h"
+#include "runtime_types.h"
+#include "shared_memory.h"
 #include "runtime.h"
 #include "task_args.h"
-#include "worker/pto_runtime_c_api.h"
+#include "worker/runtime_c_api.h"
 
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
@@ -300,9 +300,9 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionCopiesRuntimeStatus) {
     ASSERT_EQ(bind_runtime(runtime, api_, args, signature, 1), 0);
     auto *header = static_cast<PTO2SharedMemoryHeader *>(runtime.get_gm_sm_ptr());
     ASSERT_NE(header, nullptr);
-    header->orch_error_code.store(PTO2_ERROR_EXPLICIT_ORCH_FATAL, std::memory_order_relaxed);
+    header->orch_error_code.store(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, std::memory_order_relaxed);
 
-    EXPECT_EQ(validate_runtime_impl(&runtime, &api_, -1), -PTO2_ERROR_EXPLICIT_ORCH_FATAL);
+    EXPECT_EQ(validate_runtime_impl(&runtime, &api_, -1), -SIMPLER_ERROR_EXPLICIT_ORCH_FATAL);
     EXPECT_EQ(fake_.copy_from_count, 1);
 }
 

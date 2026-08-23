@@ -75,7 +75,7 @@ Before a wait slot is used, the runtime verifies:
 - the descriptor's full task ID matches the tensor's owner/producer ID.
 
 The full-ID check prevents a masked ring-slot lookup from aliasing an unused or
-different task. A failure latches `PTO2_ERROR_INVALID_ARGS` and the run returns
+different task. A failure latches `SIMPLER_ERROR_INVALID_ARGS` and the run returns
 status `-5`; reads return zero and writes stop only after that fatal status is
 recorded.
 

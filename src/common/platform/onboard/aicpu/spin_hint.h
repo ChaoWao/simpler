@@ -26,7 +26,7 @@
 #define SPIN_WAIT_HINT() ((void)0)
 
 // Wall-clock budget (ms) of no task progress before the dispatch loop aborts
-// with PTO2_ERROR_SCHEDULER_TIMEOUT. On real hardware this must sit *below* the
+// with SIMPLER_ERROR_SCHEDULER_TIMEOUT. On real hardware this must sit *below* the
 // STARS AICore op-execution timeout (PLATFORM_OP_EXECUTE_TIMEOUT_US, 45 s)
 // so the AICPU detects the hang and flushes its diagnostics (args dump,
 // in-flight partial output) before STARS reaps the op and poisons the

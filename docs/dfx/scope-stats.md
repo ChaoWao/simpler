@@ -230,7 +230,7 @@ platform/shared/host/scope_stats_collector.cpp
     buffers off the device, reconciles counters, writes
     scope_stats/scope_stats.jsonl.
 
-runtime (pto_orchestrator.cpp, pto_scheduler.h)
+runtime (orchestrator.cpp, scheduler.h)
     Calls platform APIs at instrumentation points, passing extracted
     values (ring_id, task head/tail, heap head/tail, dep-pool top/tail, ...)
     as plain integers. No scope_stats source files live in the runtime directory.

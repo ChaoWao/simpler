@@ -11,7 +11,7 @@
 
 /**
  * Minimal no-op AIV kernel. Used by require_sync_start_orch.cpp: that case
- * latches PTO2_ERROR_REQUIRE_SYNC_START_INVALID (code 7) at submit time, before
+ * latches SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID (code 7) at submit time, before
  * any task is dispatched, so this body never actually runs — it only needs to
  * exist as a valid child callable for the kernel-submit path.
  */

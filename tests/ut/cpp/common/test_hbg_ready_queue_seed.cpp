@@ -21,7 +21,7 @@
 #include <cstring>
 #include <vector>
 
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 namespace {
 

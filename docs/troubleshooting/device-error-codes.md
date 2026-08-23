@@ -9,7 +9,7 @@ code usually blames, and how to chase each family down.
 The `error hint:` line that sent you here is the second of a pair:
 
 ```text
-[ERROR] PTO2 runtime failed: orch_error_code=1 sched_error_code=0 runtime_status=-1
+[ERROR] simpler runtime failed: orch_error_code=1 sched_error_code=0 runtime_status=-1
 [ERROR] error detail: orch_error_code=1 SCOPE_DEADLOCK - tasks submitted in one scope ...
 [ERROR] error hint: raise ring_task_window (PTO2_RING_TASK_WINDOW) or split the scope ...
 ```
@@ -54,7 +54,7 @@ The tables on this page cover the codes the *device* latches, which reach you as
 allocation that failed, an H2D that did not complete, a `dlopen` that found
 nothing — never borrows a number from that range: it reports
 `PTO_RUNTIME_ERR_INTERNAL` (`-1000`) or another `PTO_RUNTIME_ERR_*` code below it
-(`src/common/worker/pto_runtime_c_api.h`).
+(`src/common/worker/runtime_c_api.h`).
 
 So `failed with code -1000` means **look for the preceding host log line**, not
 for a mechanism on this page — nothing was latched on the device, and no
@@ -87,7 +87,7 @@ layer to go looking in, which is what these columns are for.
 | 1 | SCOPE_DEADLOCK | orchestration |
 | 2 | HEAP_RING_DEADLOCK | orchestration / config |
 | 3 | FLOW_CONTROL_DEADLOCK | orchestration |
-| 4 | DEP_POOL_OVERFLOW | orchestration / config |
+| 4 | FANIN_CAPACITY_EXCEEDED | orchestration / config |
 | 5 | INVALID_ARGS | orchestration |
 | 6 | *(retired — reported as 4)* | — |
 | 7 | REQUIRE_SYNC_START_INVALID | orchestration |
@@ -182,7 +182,7 @@ looks like, and the shape to copy when you suspect one:
 | 8 | `get_tensor_data()` on the output of a `while(true)` kernel | `tensor_wait_timeout_orch.cpp` |
 | 9 | `rt_report_fatal(...)` plus post-fatal API calls, to prove they no-op | `explicit_fatal_orch.cpp` |
 | 100/S1 | An AIC kernel that spins forever | `aicore_hang_orch.cpp` + `kernels/aic/kernel_hang.cpp` |
-| 101 | Kernel defers `PTO2_ERROR_ASYNC_COMPLETION_INVALID` into the slab directly | `kernels/aiv/kernel_async_completion_invalid.cpp` |
+| 101 | Kernel defers `SIMPLER_ERROR_ASYNC_COMPLETION_INVALID` into the slab directly | `kernels/aiv/kernel_async_completion_invalid.cpp` |
 | 102 | Kernel registers `MAX_COMPLETIONS_PER_TASK + 1` conditions | `kernels/aiv/kernel_async_wait_overflow.cpp` |
 
 ## Adding or changing a code
@@ -194,7 +194,7 @@ enforces coverage. Edit those and the log carries the new code correctly:
 | ---- | ----- |
 | runtime code names / descriptions / hints | `src/common/runtime_status/error_names.h` |
 | host-side CANN names / descriptions / hints | `src/common/platform/include/host/acl_error_names.h` |
-| `SCHEDULER_TIMEOUT` sub-class labels | `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/pto_runtime_status.h` |
+| `SCHEDULER_TIMEOUT` sub-class labels | `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/runtime_status.h` |
 | completeness test | `tests/ut/cpp/common/test_error_code_names.cpp` |
 
 **This page does not need updating for a new code** — deliberately. The tables
@@ -204,7 +204,7 @@ time, so there is nothing to drift out of sync.
 
 ## References
 
-- Code definitions: `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/pto_runtime_status.h`
+- Code definitions: `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/runtime_status.h`
 - Host print site: `.../host/runtime_maker.cpp` (`validate_runtime_impl`)
 - Sub-class logic: `.../runtime/scheduler/scheduler_cold_path.cpp` (`classify_stall_reason`)
 - End-to-end negative tests: `tests/st/runtime_fatal_codes/`

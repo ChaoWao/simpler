@@ -47,7 +47,7 @@
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
 #include "platform_comm/comm.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "task_args.h"
 #include "utils/elf_build_id.h"
 // `runtime.h` (pulled in via `device_runner_helpers.h` in the base header)

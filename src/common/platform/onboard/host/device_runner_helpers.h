@@ -34,7 +34,7 @@
 
 #include "common/kernel_args.h"  // arch-specific KernelArgs layout
 #include "host/memory_allocator.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "runtime.h"
 
 /**

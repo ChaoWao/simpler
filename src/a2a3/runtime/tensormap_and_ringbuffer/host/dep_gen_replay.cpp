@@ -20,7 +20,7 @@
  *
  *   ORACLE pass (read-only contract):
  *     Drives `compute_task_fanin` (the same template the device orchestrator
- *     uses in pto_orchestrator.cpp:submit_task) against `tm_oracle`. Its emit
+ *     uses in orchestrator.cpp:submit_task) against `tm_oracle`. Its emit
  *     fires with (PTO2TaskId, DepFlags) — the canonical (producer, WAIT/RETAIN)
  *     mapping the runtime would have wired, OR-accumulated per producer. This
  *     pass IS the contract, and any future change to `compute_task_fanin`
@@ -41,7 +41,7 @@
  * `compute_task_fanin`'s producers or edge flags trips this gate immediately and
  * knows to mirror the change in the annot pass.
  *
- * STEP 1 (explicit_deps) is emitted at the call site (per pto_dep_compute.h's
+ * STEP 1 (explicit_deps) is emitted at the call site (per dep_compute.h's
  * "kept at call site" note); both passes run the same explicit-deps loop, so
  * the comparison covers it too.
  *
@@ -71,9 +71,9 @@
 #include "common/dep_gen.h"
 #include "common/unified_log.h"
 #include "data_type.h"
-#include "pto_dep_compute.h"
-#include "pto_task_id.h"
-#include "pto_tensormap.h"
+#include "dep_compute.h"
+#include "task_id.h"
+#include "tensormap.h"
 #include "tensor.h"
 
 namespace {
@@ -419,7 +419,7 @@ bool write_deps_json(
 
 // ---------------------------------------------------------------------------
 // Annot pass — mirrors compute_task_fanin step-by-step against tm_annot.
-// Must stay bit-equivalent to pto_dep_compute.h::compute_task_fanin in terms
+// Must stay bit-equivalent to dep_compute.h::compute_task_fanin in terms
 // of which producer IDs are emitted (the differential check enforces this).
 // ---------------------------------------------------------------------------
 

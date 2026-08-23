@@ -35,7 +35,7 @@
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "host/profiling_copy.h"
-#include "../../../worker/pto_runtime_c_api.h"
+#include "../../../worker/runtime_c_api.h"
 
 // =============================================================================
 // ChipSwimlaneCollector Implementation

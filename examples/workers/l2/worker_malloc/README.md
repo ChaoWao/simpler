@@ -46,5 +46,5 @@ Same for `a5sim` / `a5`.
 If you see `rtMalloc failed: 107002` on `a2a3` / `a5` (but the same example
 passes on `a2a3sim` / `a5sim`), the per-thread `rtSetDevice` is not happening
 during `Worker.init()` — see `simpler_init` in
-`src/{arch}/platform/onboard/host/pto_runtime_c_api.cpp` and confirm it
+`src/{arch}/platform/onboard/host/runtime_c_api.cpp` and confirm it
 forwards to `DeviceRunner::attach_current_thread`.

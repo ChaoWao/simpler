@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2SchedulerState from pto_scheduler.h
+ * Unit tests for PTO2SchedulerState from scheduler.h
  *
  * Tests task state transitions, fanin/fanout logic, subtask completion.
  */
@@ -22,7 +22,7 @@
 
 #include "utils/device_arena.h"
 #include "scheduler/scheduler_types.h"
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 TEST(SyncStartDrainAttemptTest, LateAckCannotSatisfyNextAttemptBarrier) {
     std::atomic<uint64_t> ack_tokens[3]{};

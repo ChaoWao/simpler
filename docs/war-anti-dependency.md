@@ -22,7 +22,7 @@ generator does not create this edge for a pure `INPUT` reader.
 ## Why the runtime does not track this automatically
 
 The automatic dep-gen in
-[`pto_dep_compute.h`](../src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_dep_compute.h)
+[`dep_compute.h`](../src/a5/runtime/tensormap_and_ringbuffer/runtime/dep_compute.h)
 tracks the two hazards that a producer-keyed map answers in O(1):
 
 - **RAW** (read-after-write): an `INPUT`/`INOUT` looks up the current writer
@@ -84,7 +84,7 @@ rt_submit_aic_task(FUNC_WRITE_X, w_args);
 
 `add_dep` is the convenience layer over the primitive
 `CoreTaskArgs::set_dependencies(ptr, count)`; both are documented in
-[`pto_arg_with_deps.h`](../src/a5/runtime/tensormap_and_ringbuffer/orchestration/pto_arg_with_deps.h).
+[`arg_with_deps.h`](../src/a5/runtime/tensormap_and_ringbuffer/orchestration/arg_with_deps.h).
 Multiple readers each contribute one `add_dep(reader.task_id())` on the writer
 and still run in parallel with each other — only the writer waits.
 
@@ -94,7 +94,7 @@ graph, so a "writer depends on reader" edge places no constraint on it. Its
 only channel for discovering in-flight readers is buffer-keyed: it looks up
 `X`'s producer in the TensorMap and waits for that producer *and its
 consumers* (`wait_for_tensor_ready` with `wait_for_consumers=true`, see
-[`pto_runtime2.cpp`](../src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_runtime2.cpp)).
+[`runtime_core.cpp`](../src/a5/runtime/tensormap_and_ringbuffer/runtime/runtime_core.cpp)).
 `add_dep` writes no TensorMap entry for `X` and does not touch that producer's
 fanout, so a reader wired only through `add_dep` is not in the set
 `set_tensor_data` waits on. If a buffer that a reader touches may later be
@@ -109,7 +109,7 @@ the tensormap), and it preserves read parallelism. Use **Option A (`INOUT`)**
 only when the tensor is semantically read-modify-write anyway, or when the
 reader must be visible to the host-side `set_tensor_data` WAR guard (see the
 `set_tensor_data` note in
-[`pto_orchestration_api.h`](../src/a5/runtime/tensormap_and_ringbuffer/orchestration/pto_orchestration_api.h)).
+[`orchestration_api.h`](../src/a5/runtime/tensormap_and_ringbuffer/orchestration/orchestration_api.h)).
 
 | Concern | Option A: `INOUT` | Option B: `add_dep` |
 | ------- | ----------------- | ------------------- |

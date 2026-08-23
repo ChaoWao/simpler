@@ -46,7 +46,7 @@
 // This header must NEVER (re)define SPIN_WAIT_HINT once a translation unit
 // already has it. It is pulled — via each DFX DataHeader — into always-on
 // scheduler / orchestrator / aicore TUs that already got the platform's
-// sched_yield() definition (from inner_kernel.h / pto_runtime2_types.h). An
+// sched_yield() definition (from inner_kernel.h / runtime_types.h). An
 // unguarded `#define SPIN_WAIT_HINT() ((void)0)` here would clobber that on
 // include order, turning those TUs' yielding spins into busy spins and starving
 // the AICore threads (sim scheduler no-progress timeout). So: reuse whatever the

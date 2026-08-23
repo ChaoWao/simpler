@@ -16,7 +16,7 @@
 #include <cstdio>
 #include <string>
 
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 [[noreturn]] void assert_impl(const char *, const char *, int) { throw "assert_impl"; }
 
 namespace {
@@ -38,7 +38,7 @@ struct FakeRuntime {
     int get_calls = 0;
     int set_calls = 0;
     int report_fatal_calls = 0;
-    int32_t last_fatal_code = PTO2_ERROR_NONE;
+    int32_t last_fatal_code = SIMPLER_ERROR_NONE;
     std::string last_fatal_func;
     std::string last_fatal_message;
 };
@@ -168,11 +168,11 @@ TEST(A5Fatal, ExplicitFatalRoutesThroughOps) {
     runtime.ops = &kFakeOps;
     RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
 
-    rt_report_fatal(PTO2_ERROR_EXPLICIT_ORCH_FATAL, "boom %d", 7);
+    rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "boom %d", 7);
 
     EXPECT_TRUE(runtime.fatal);
     EXPECT_EQ(runtime.report_fatal_calls, 1);
-    EXPECT_EQ(runtime.last_fatal_code, PTO2_ERROR_EXPLICIT_ORCH_FATAL);
+    EXPECT_EQ(runtime.last_fatal_code, SIMPLER_ERROR_EXPLICIT_ORCH_FATAL);
     EXPECT_EQ(runtime.last_fatal_message, "boom 7");
     EXPECT_FALSE(runtime.last_fatal_func.empty());
 
@@ -221,6 +221,6 @@ TEST(A5Fatal, AllocTensorConvenienceReportsInvalidArgsInsteadOfAsserting) {
     auto alloc_from_array = static_cast<TaskOutputTensors (*)(const TensorCreateInfo[], uint32_t)>(&alloc_tensors);
     EXPECT_TRUE(alloc_from_array(create_infos.data(), static_cast<uint32_t>(create_infos.size())).empty());
     EXPECT_EQ(runtime.report_fatal_calls, 1);
-    EXPECT_EQ(runtime.last_fatal_code, PTO2_ERROR_INVALID_ARGS);
+    EXPECT_EQ(runtime.last_fatal_code, SIMPLER_ERROR_INVALID_ARGS);
     EXPECT_EQ(runtime.alloc_calls, 0);
 }

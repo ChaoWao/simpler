@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative ST orchestration: PTO2_ERROR_FLOW_CONTROL_DEADLOCK (code 3).
+ * Negative ST orchestration: SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK (code 3).
  *
  * Scope depth maps to ring index via min(scope_depth, PTO2_MAX_RING_DEPTH - 1),
  * so every scope nested at depth >= 3 lands on the SAME ring (ring 3). Nest well
@@ -26,7 +26,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 static constexpr int32_t DEPTH = 8;      // > PTO2_MAX_RING_DEPTH so depths 3..7 share ring 3
 static constexpr int32_t PER_LEVEL = 3;  // < window so no single scope trips SCOPE_DEADLOCK

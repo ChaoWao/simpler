@@ -31,7 +31,7 @@
 
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
-#include "../../../../common/worker/pto_runtime_c_api.h"
+#include "../../../../common/worker/runtime_c_api.h"
 
 namespace {
 

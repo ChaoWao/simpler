@@ -53,7 +53,7 @@ The simpler runtime consists of **three separate programs** that communicate thr
 
 - `DeviceRunner`: Handle-based device context manager (one per `ChipWorker`)
 - `MemoryAllocator`: Device tensor memory management
-- `pto_runtime_c_api.h`: Pure C API for `ChipWorker` bindings (`src/common/worker/pto_runtime_c_api.h`)
+- `runtime_c_api.h`: Pure C API for `ChipWorker` bindings (`src/common/worker/runtime_c_api.h`)
 - Compiled to shared library (.so) at runtime
 
 **Key Responsibilities:**
@@ -113,7 +113,7 @@ runner.drain_execution(*launched.active);            // child progress path owns
 runner.finalize();
 ```
 
-### Layer 2: C API (`src/common/worker/pto_runtime_c_api.h`)
+### Layer 2: C API (`src/common/worker/runtime_c_api.h`)
 
 ```c
 // _task_interface owns this process's SimplerHostLogState. Python seeds its

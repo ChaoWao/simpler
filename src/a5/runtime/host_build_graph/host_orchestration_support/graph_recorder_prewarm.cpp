@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 extern "C" __attribute__((visibility("default"))) void framework_prewarm_graph_recorders() {
     (void)rt_graph_async_recording().prewarm();

@@ -13,7 +13,7 @@
 
 #include <array>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_LOG_SQRT 0
 #define FUNC_MATMUL 1

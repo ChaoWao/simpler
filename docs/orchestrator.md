@@ -801,7 +801,7 @@ if (ps_state != TaskState::COMPLETED) live_fanins++;   // wait only if not yet d
 
 ### Tag semantics for write-after-write
 
-`infer_deps` mirrors L2 (`pto_orchestrator.cpp` Step B): only `INPUT`
+`infer_deps` mirrors L2 (`orchestrator.cpp` Step B): only `INPUT`
 and `INOUT` do a tensormap lookup. `OUTPUT` and `OUTPUT_EXISTING`
 are pure inserts — the latter is the way users signal "skip the
 lookup even though I'm writing a pre-existing buffer".

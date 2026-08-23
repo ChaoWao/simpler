@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative AIV kernel: PTO2_ERROR_ASYNC_COMPLETION_INVALID (code 101).
+ * Negative AIV kernel: SIMPLER_ERROR_ASYNC_COMPLETION_INVALID (code 101).
  *
  * Defers an ASYNC_COMPLETION_INVALID directly into the deferred slab — the same
  * channel the SDMA backend uses when it sees a non-SDMA engine. The AICPU FIN
@@ -29,12 +29,12 @@
 
 #include <pto/pto-inst.hpp>
 
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 
 using namespace pto;
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     AsyncCtx ctx = get_async_ctx(args);
-    pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+    pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
     pto2::detail::defer_flush(ctx);
 }

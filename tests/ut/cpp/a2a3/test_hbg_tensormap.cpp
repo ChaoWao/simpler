@@ -24,7 +24,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "pto_tensormap.h"
+#include "tensormap.h"
 
 namespace {
 

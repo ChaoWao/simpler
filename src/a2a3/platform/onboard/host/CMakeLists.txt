@@ -59,7 +59,7 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/memory_allocator.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/profiling_copy.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/pto_runtime_c_api.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime_c_api.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/platform_compile_info.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/host_regs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/chip_swimlane_collector.cpp"

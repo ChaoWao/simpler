@@ -21,7 +21,7 @@
 
 #include <cstdint>
 
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 
 /**
  * Whether this build can honor `contract`.

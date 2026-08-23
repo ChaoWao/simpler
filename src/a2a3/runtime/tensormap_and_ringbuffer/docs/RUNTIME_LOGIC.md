@@ -341,7 +341,7 @@ This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each t
 
 **Layer 3 — Back-Pressure on Pool Exhaustion** (blocking):
 
-Before STEP 4 inserts a task's outputs, `ensure_tensormap_capacity` checks the free list + bump region against the task's needed entry count. If short, it reclaims retired entries across all rings and blocks until reclaim frees enough entries. Progress is measured by entries actually freed, not by watermark movement — a ring can retire zero-output tasks, advancing `last_task_alive` without freeing any entry. A pool that frees nothing for a 500 ms wall-clock timeout is a genuine deadlock: it latches `PTO2_ERROR_TENSORMAP_OVERFLOW` and unwinds, matching the task allocator and fanin spill pool.
+Before STEP 4 inserts a task's outputs, `ensure_tensormap_capacity` checks the free list + bump region against the task's needed entry count. If short, it reclaims retired entries across all rings and blocks until reclaim frees enough entries. Progress is measured by entries actually freed, not by watermark movement — a ring can retire zero-output tasks, advancing `last_task_alive` without freeing any entry. A pool that frees nothing for a 500 ms wall-clock timeout is a genuine deadlock: it latches `SIMPLER_ERROR_TENSORMAP_OVERFLOW` and unwinds, matching the task allocator and fanin spill pool.
 
 This forms a back-pressure mechanism analogous to the Task Ring's flow control.
 
@@ -820,7 +820,7 @@ capacity because no task execution/reclaim happens during graph build.
 
 ## 11. PTO2 Orchestration API
 
-The orchestration API is defined in `pto_orchestration_api.h`. Orchestration code depends only on this header.
+The orchestration API is defined in `orchestration_api.h`. Orchestration code depends only on this header.
 
 ### 11.1 Core API
 

@@ -56,7 +56,7 @@ body:
       label: Location
       description: File path(s) and line number(s)
       placeholder: |
-        - `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_scheduler.cpp:142`
+        - `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/scheduler.cpp:142`
       render: markdown
     validations:
       required: true

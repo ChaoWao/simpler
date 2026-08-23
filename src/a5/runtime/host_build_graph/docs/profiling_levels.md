@@ -340,7 +340,7 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
 The stage's *duration* is already published as the `chip.run.bind` `[STRACE]`
 marker, so the marker and this breakdown are a total and its parts rather than two
 spellings of one number. The parts are not markers themselves: the marker grammar
-is the platform's public per-run-stage contract (see `pto_runtime_c_api.h` and
+is the platform's public per-run-stage contract (see `runtime_c_api.h` and
 [docs/dfx/host-trace.md](../../../../../docs/dfx/host-trace.md)), whose consumers
 key off a fixed stage set, and a runtime's internal breakdown of one stage does
 not belong in it.
@@ -535,7 +535,7 @@ definitions to runtime headers.
 ```cpp
 #define SIMPLER_DFX 1
 #define SIMPLER_ORCH_PROFILING 1
-#include "pto_runtime2_types.h"
+#include "runtime_types.h"
 ```
 
 ---
@@ -579,7 +579,7 @@ definitions to runtime headers.
 - Macro defaults and validation: `src/common/task_interface/profiling_config.h`
 - Scheduler profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_dispatch.cpp` and `scheduler_cold_path.cpp`
 - Orchestrator profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp`
-- TensorMap profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_tensormap.h`
+- TensorMap profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/tensormap.h`
 
 ---
 

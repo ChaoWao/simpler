@@ -18,8 +18,8 @@
 #include "runtime.h"
 
 #include "common/unified_log.h"
-#include "pto_runtime2_types.h"
-#include "pto_shared_memory.h"
+#include "runtime_types.h"
+#include "shared_memory.h"
 
 // =============================================================================
 // Constructor

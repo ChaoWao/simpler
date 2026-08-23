@@ -18,7 +18,7 @@
 #include "common/unified_log.h"
 #include "common/platform_config.h"
 #include "common/acl_hal_device.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "runtime/rt.h"
 #include "ascend_hal.h"  // CANN HAL API definitions
 #include <dlfcn.h>

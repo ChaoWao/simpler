@@ -169,7 +169,7 @@ extern "C" void pto_cpu_sim_acquire_device(int device_id) {
 
 /** Release and destroy the context for device_id.
  *
- * Safety: the caller (finalize_device in pto_runtime_c_api.cpp) must ensure
+ * Safety: the caller (finalize_device in runtime_c_api.cpp) must ensure
  * that all DeviceRunner worker threads for this device have been joined
  * before calling this function. This is guaranteed by DeviceRunner::finalize()
  * which joins all threads before returning.

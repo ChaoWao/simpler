@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for host_build_graph's PTO2TaskAllocator (pto_ring_buffer.h).
+ * Unit tests for host_build_graph's PTO2TaskAllocator (ring_buffer.h).
  *
  * host_build_graph is whole-graph-resident: the device runs only after the host
  * has built the whole graph, so neither the task ring nor the graph heap is ever
@@ -35,7 +35,7 @@
 #include <cstring>
 #include <set>
 
-#include "pto_ring_buffer.h"
+#include "ring_buffer.h"
 #include "task_interface/assert_compat.h"
 
 class HbgTaskAllocatorTest : public ::testing::Test {
@@ -45,13 +45,13 @@ protected:
 
     alignas(64) uint8_t heap_buf[HEAP_SIZE]{};
     std::atomic<int32_t> current_index{0};
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2TaskAllocator allocator{};
 
     void SetUp() override {
         std::memset(heap_buf, 0, sizeof(heap_buf));
         current_index.store(0);
-        error_code.store(PTO2_ERROR_NONE);
+        error_code.store(SIMPLER_ERROR_NONE);
         allocator.init(WINDOW_SIZE, &current_index, heap_buf, HEAP_SIZE, &error_code);
     }
 };
@@ -158,7 +158,7 @@ TEST_F(HbgTaskAllocatorTest, ConsumedBytesAreNotReclaimed) {
 
     auto r = allocator.alloc(128);
     EXPECT_TRUE(r.failed()) << "No wrap-around: the heap does not recycle mid-run";
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
 }
 
 // =============================================================================
@@ -173,13 +173,13 @@ TEST_F(HbgTaskAllocatorTest, AllocExactlyHeapSize) {
 
     auto r2 = allocator.alloc(64);
     EXPECT_TRUE(r2.failed()) << "No space after full allocation";
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
 }
 
 TEST_F(HbgTaskAllocatorTest, AllocLargerThanHeap) {
     auto r = allocator.alloc(HEAP_SIZE * 2);
     EXPECT_TRUE(r.failed()) << "Cannot allocate more than heap size";
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_HEAP_RING_DEADLOCK);
 }
 
 TEST_F(HbgTaskAllocatorTest, TaskWindowSaturates) {
@@ -193,7 +193,7 @@ TEST_F(HbgTaskAllocatorTest, TaskWindowSaturates) {
 
     auto overflow = allocator.alloc(0);
     EXPECT_TRUE(overflow.failed());
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_FLOW_CONTROL_DEADLOCK);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK);
     EXPECT_EQ(allocator.active_count(), WINDOW_SIZE);
     EXPECT_EQ(current_index.load(), WINDOW_SIZE) << "A rejected allocation must not publish a new task";
 }
@@ -215,11 +215,11 @@ TEST_F(HbgTaskAllocatorTest, FailedHeapAllocLeavesStateUnchanged) {
 // Once a fatal is latched, alloc() short-circuits without overwriting the first
 // error code — the caller propagates the original cause.
 TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsAlloc) {
-    error_code.store(PTO2_ERROR_INVALID_ARGS);
+    error_code.store(SIMPLER_ERROR_INVALID_ARGS);
 
     auto r = allocator.alloc(64);
     EXPECT_TRUE(r.failed());
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_INVALID_ARGS) << "The first error code must survive";
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_INVALID_ARGS) << "The first error code must survive";
     EXPECT_EQ(allocator.heap_top(), 0u);
     EXPECT_EQ(allocator.active_count(), 0);
 }
@@ -265,11 +265,11 @@ TEST_F(HbgTaskAllocatorTest, ReserveDeferredHeapFailsWithoutMutatingState) {
     EXPECT_FALSE(allocator.reserve_deferred_heap(static_cast<int32_t>(HEAP_SIZE), &base, &end));
     EXPECT_EQ(allocator.heap_top(), top_before);
     EXPECT_EQ(base, nullptr);
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_NONE) << "A rejected reservation is not a fatal";
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_NONE) << "A rejected reservation is not a fatal";
 }
 
 TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsReserveDeferredHeap) {
-    error_code.store(PTO2_ERROR_INVALID_ARGS);
+    error_code.store(SIMPLER_ERROR_INVALID_ARGS);
 
     void *base = nullptr;
     void *end = nullptr;

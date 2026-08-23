@@ -22,7 +22,7 @@
 
 #include "backend/sdma/sdma_completion_kernel.h"
 #include "platform_comm/comm_context.h"
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 #include "tensor.h"
 
 using namespace pto;

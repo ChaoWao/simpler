@@ -43,7 +43,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_WRITE_CONST 0
 #define FUNC_COPY_FIRST 1
@@ -166,7 +166,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             rt_submit_aic_task(FUNC_COPY_FIRST, args);
         }
     } else {
-        rt_report_fatal(PTO2_ERROR_INVALID_ARGS, "unsupported case_id=%llu", static_cast<unsigned long long>(case_id));
+        rt_report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, "unsupported case_id=%llu", static_cast<unsigned long long>(case_id)
+        );
     }
 }
 

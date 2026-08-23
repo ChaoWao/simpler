@@ -16,7 +16,7 @@
 
 #include "common/core_type.h"
 #include "common/platform_config.h"
-#include "pto_runtime2_types.h"
+#include "runtime_types.h"
 #include "spin_hint.h"
 
 // host_build_graph host-orch build: PTO2Runtime embeds PTO2SchedulerState by

@@ -10,7 +10,7 @@
  */
 
 /**
- * Negative ST orchestration: PTO2_ERROR_INVALID_ARGS (code 5).
+ * Negative ST orchestration: SIMPLER_ERROR_INVALID_ARGS (code 5).
  *
  * Builds an Arg that fails its own validation (set_dependencies with a null
  * pointer but a non-zero count records an error on the Arg) and submits it.
@@ -20,7 +20,7 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 extern "C" {
 

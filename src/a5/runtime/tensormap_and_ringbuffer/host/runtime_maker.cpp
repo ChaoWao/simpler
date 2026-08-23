@@ -41,13 +41,13 @@
 #include <string>
 #include <vector>
 
-#include "../common/pto_runtime_status.h"
-#include "../runtime/pto_runtime2.h"
-#include "../runtime/pto_shared_memory.h"
+#include "../common/runtime_status.h"
+#include "../runtime/runtime_core.h"
+#include "../runtime/shared_memory.h"
 #include "../runtime/runtime.h"
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
-#include "../../../../common/worker/pto_runtime_c_api.h"
+#include "../../../../common/worker/runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/strace.h"
@@ -69,7 +69,7 @@ static_assert(
 // first is a spot check on the highest one this runtime defines, so a new
 // four-digit latched code needs the ceiling raised here as well.
 static_assert(
-    PTO2_ERROR_ASYNC_REGISTRATION_FAILED <= PTO_RUNTIME_LATCHED_CODE_MAX &&
+    SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED <= PTO_RUNTIME_LATCHED_CODE_MAX &&
         PTO_RUNTIME_ERR_BASE < -PTO_RUNTIME_LATCHED_CODE_MAX,
     "host-side C API codes must stay below the negation of every latched device code"
 );
@@ -1032,7 +1032,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         // A scheduler no-progress timeout (code 100) carries a device-classified
         // sub-reason + locators so the failure line is self-diagnosing without a
         // device-log dive. The full stall snapshot stays in the device log / plog.
-        if (sched_error_code == PTO2_ERROR_SCHEDULER_TIMEOUT) {
+        if (sched_error_code == SIMPLER_ERROR_SCHEDULER_TIMEOUT) {
             int32_t detail = host_header.sched_stall_detail.load(std::memory_order_acquire);
             LOG_ERROR(
                 "PTO2 scheduler timeout sub_class=%s (detail=%d) completed=%d/%d running=%d ready=%d waiting=%d "

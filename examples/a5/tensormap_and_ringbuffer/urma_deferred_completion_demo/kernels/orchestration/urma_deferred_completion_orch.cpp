@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "platform_comm/comm_context.h"
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 extern "C" {
 

@@ -12,7 +12,7 @@
  * Host-side weak stubs for AICPU-only scope-stats symbols.
  *
  * host_build_graph runs the orchestrator on the host (host-orch-first), so the
- * orchestrator core (pto_orchestrator.cpp / pto_runtime2.cpp) is compiled into
+ * orchestrator core (orchestrator.cpp / runtime_core.cpp) is compiled into
  * libhost_runtime.so, which is dlopen'd RTLD_LOCAL and must therefore resolve
  * all of its symbols. The scope-stats collector is AICPU-only (defined in
  * common/platform/.../aicpu) and is NOT linked into the host library. It records
@@ -22,7 +22,7 @@
  * Marked weak + hidden so they never leak into the global dynamic symbol table
  * (RTLD_LOCAL keeps them library-local anyway) and never shadow the AICPU
  * library's strong definitions, mirroring the weak-stub pattern in
- * pto_orchestrator.cpp.
+ * orchestrator.cpp.
  */
 
 #include "aicpu/scope_stats_collector_aicpu.h"

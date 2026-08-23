@@ -11,8 +11,8 @@
 
 #include <cstdint>
 
-#include "pto_arg_with_deps.h"      // NOLINT(build/include_subdir)
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "arg_with_deps.h"      // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 #define FUNC_SPMD_MIX_AIC 0
 #define FUNC_SPMD_MIX_AIV0 1

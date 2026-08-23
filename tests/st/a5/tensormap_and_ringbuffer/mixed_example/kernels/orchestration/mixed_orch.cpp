@@ -26,7 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 // Mixed-task kernels (args offset matches param position in mixed param list)
 #define FUNC_MATMUL 0  // AIC: reads args[0..2]

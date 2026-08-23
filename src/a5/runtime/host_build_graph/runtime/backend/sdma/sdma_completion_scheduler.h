@@ -16,8 +16,8 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
-#include "pto_completion_token.h"
-#include "pto_runtime_status.h"
+#include "completion_token.h"
+#include "runtime_status.h"
 
 // PTO-ISA stores the latest completed post ID as a monotonic uint64_t in one
 // cache-line-sized record per queue. The completion type keeps its historical
@@ -25,13 +25,13 @@
 // backend_cookie and must not clear or otherwise retire the shared record.
 inline CompletionPollResult poll_sdma_post_done_record(uint64_t record_addr, uint64_t expected_post_id) {
     if (record_addr == 0 || expected_post_id == 0) {
-        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+        return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
     volatile uint64_t *record = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(record_addr));
     uint64_t completed_post_id = __atomic_load_n(record, __ATOMIC_ACQUIRE);
     return {
         completed_post_id >= expected_post_id ? CompletionPollState::READY : CompletionPollState::PENDING,
-        PTO2_ERROR_NONE
+        SIMPLER_ERROR_NONE
     };
 }
 

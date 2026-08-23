@@ -19,7 +19,7 @@
 #include "call_config.h"
 #include "common/host_api.h"
 #include "native_run_execution.h"
-#include "pto_runtime_c_api.h"
+#include "runtime_c_api.h"
 #include "runtime.h"
 
 /** Internal phase of the caller-owned opaque native-run storage. */

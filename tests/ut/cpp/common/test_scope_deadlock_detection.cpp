@@ -14,7 +14,7 @@
 #include <atomic>
 #include <string>
 
-#include "pto_ring_buffer.h"
+#include "ring_buffer.h"
 
 // CMake compiles this source against both the a2a3 and a5 runtime objects.
 namespace {
@@ -36,7 +36,7 @@ void make_head_match_old_structural_predicate(
 
 TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     PTO2DepListEntry entries[POOL_CAPACITY]{};
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
@@ -61,14 +61,14 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     std::string log = testing::internal::GetCapturedStderr();
 
     EXPECT_FALSE(available);
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
     EXPECT_NE(log.find("cannot reclaim space after ~500 ms"), std::string::npos);
     EXPECT_EQ(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
 }
 
 TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     PTO2DepListEntry entries[POOL_CAPACITY]{};
-    std::atomic<int32_t> error_code{PTO2_ERROR_NONE};
+    std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
     PTO2DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
@@ -91,6 +91,6 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     std::string log = testing::internal::GetCapturedStderr();
 
     EXPECT_FALSE(available);
-    EXPECT_EQ(error_code.load(), PTO2_ERROR_DEP_POOL_OVERFLOW);
+    EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
     EXPECT_NE(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
 }

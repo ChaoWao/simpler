@@ -29,7 +29,7 @@
 #include <thread>
 #include <vector>
 #include "utils/device_arena.h"
-#include "scheduler/pto_scheduler.h"
+#include "scheduler/scheduler.h"
 
 class TaskStateTest : public ::testing::Test {
 protected:

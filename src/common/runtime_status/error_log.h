@@ -27,7 +27,7 @@
  * The meaning goes on the lines *after* it, never inside it.
  *
  * Kept separate from error_names.h so that header stays free of any logging dependency
- * and can be unit-tested on its own. Include the runtime's pto_runtime_status.h first.
+ * and can be unit-tested on its own. Include the runtime's runtime_status.h first.
  */
 
 #ifndef SRC_COMMON_RUNTIME_STATUS_ERROR_LOG_H_
@@ -41,24 +41,24 @@
 // Reports a non-zero runtime_status: the codes, then their meaning and triage hint. A code
 // this build does not know about is left un-annotated rather than mislabeled -- a bare number
 // beats a neighbouring code's text.
-#define LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, runtime_status)                                      \
-    do {                                                                                                            \
-        const int32_t rtf_orch_ = (orch_error_code);                                                                \
-        const int32_t rtf_sched_ = (sched_error_code);                                                              \
-        LOG_ERROR(                                                                                                  \
-            "PTO2 runtime failed: orch_error_code=%d sched_error_code=%d runtime_status=%d", rtf_orch_, rtf_sched_, \
-            (runtime_status)                                                                                        \
-        );                                                                                                          \
-        const int32_t rtf_code_ = latched_error_code(rtf_orch_, rtf_sched_);                                        \
-        if (rtf_code_ != PTO2_ERROR_NONE && error_desc(rtf_code_)[0] != '\0') {                                     \
-            LOG_ERROR(                                                                                              \
-                "error detail: %s=%d %s - %s", latched_error_field(rtf_orch_, rtf_sched_), rtf_code_,               \
-                error_name(rtf_code_), error_desc(rtf_code_)                                                        \
-            );                                                                                                      \
-            if (error_hint(rtf_code_)[0] != '\0') {                                                                 \
-                LOG_ERROR("error hint: %s. See docs/troubleshooting/device-error-codes.md", error_hint(rtf_code_)); \
-            }                                                                                                       \
-        }                                                                                                           \
+#define LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, runtime_status)                                         \
+    do {                                                                                                               \
+        const int32_t rtf_orch_ = (orch_error_code);                                                                   \
+        const int32_t rtf_sched_ = (sched_error_code);                                                                 \
+        LOG_ERROR(                                                                                                     \
+            "simpler runtime failed: orch_error_code=%d sched_error_code=%d runtime_status=%d", rtf_orch_, rtf_sched_, \
+            (runtime_status)                                                                                           \
+        );                                                                                                             \
+        const int32_t rtf_code_ = latched_error_code(rtf_orch_, rtf_sched_);                                           \
+        if (rtf_code_ != SIMPLER_ERROR_NONE && error_desc(rtf_code_)[0] != '\0') {                                     \
+            LOG_ERROR(                                                                                                 \
+                "error detail: %s=%d %s - %s", latched_error_field(rtf_orch_, rtf_sched_), rtf_code_,                  \
+                error_name(rtf_code_), error_desc(rtf_code_)                                                           \
+            );                                                                                                         \
+            if (error_hint(rtf_code_)[0] != '\0') {                                                                    \
+                LOG_ERROR("error hint: %s. See docs/troubleshooting/device-error-codes.md", error_hint(rtf_code_));    \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
 
 #endif  // SRC_COMMON_RUNTIME_STATUS_ERROR_LOG_H_

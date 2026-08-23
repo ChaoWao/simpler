@@ -26,8 +26,8 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "pto_orchestrator.h"
-#include "pto_shared_memory.h"
+#include "orchestrator.h"
+#include "shared_memory.h"
 
 class GraphActivationTest : public ::testing::Test {
 protected:
@@ -155,9 +155,9 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
 #endif
     };
 
-    EXPECT_EQ(complete_in_state(GraphExecutionState::MATERIALIZING), PTO2_ERROR_NONE);
-    EXPECT_EQ(complete_in_state(GraphExecutionState::PREPARED), PTO2_ERROR_NONE);
-    EXPECT_EQ(complete_in_state(GraphExecutionState::ACTIVE), PTO2_ERROR_NONE);
-    EXPECT_EQ(complete_in_state(GraphExecutionState::SUBMITTED), PTO2_ERROR_INVALID_ARGS);
-    EXPECT_EQ(complete_in_state(GraphExecutionState::COMPLETED), PTO2_ERROR_INVALID_ARGS);
+    EXPECT_EQ(complete_in_state(GraphExecutionState::MATERIALIZING), SIMPLER_ERROR_NONE);
+    EXPECT_EQ(complete_in_state(GraphExecutionState::PREPARED), SIMPLER_ERROR_NONE);
+    EXPECT_EQ(complete_in_state(GraphExecutionState::ACTIVE), SIMPLER_ERROR_NONE);
+    EXPECT_EQ(complete_in_state(GraphExecutionState::SUBMITTED), SIMPLER_ERROR_INVALID_ARGS);
+    EXPECT_EQ(complete_in_state(GraphExecutionState::COMPLETED), SIMPLER_ERROR_INVALID_ARGS);
 }

@@ -18,7 +18,7 @@ One case, `ringbuffer_stress`, sized to hurt:
 
 | `runtime_env` key | Value here | Note |
 | ----------------- | ---------- | ---- |
-| `ring_task_window` | 64 | Default is 16384 (`PTO2_TASK_WINDOW_SIZE`, `src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_runtime2_types.h`) — **256× smaller** |
+| `ring_task_window` | 64 | Default is 16384 (`PTO2_TASK_WINDOW_SIZE`, `src/a5/runtime/tensormap_and_ringbuffer/runtime/runtime_types.h`) — **256× smaller** |
 | `ring_heap` | 4 MiB | bytes per ring |
 | `ring_dep_pool` | 256 | |
 
