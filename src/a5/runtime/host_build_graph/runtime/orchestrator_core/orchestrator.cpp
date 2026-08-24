@@ -805,6 +805,99 @@ T *graph_image_section(std::vector<std::byte> *image, uint32_t offset) {
     return offset == 0 ? nullptr : reinterpret_cast<T *>(image->data() + offset);
 }
 
+// Exact transitive reduction of the recorded DAG, as a projection for the
+// packed image only: the recording itself (and therefore deps.json) keeps the
+// as-constructed edge set. An edge p->i is a transitive shortcut when p is
+// already an ancestor of i through another producer of i — i.e. p sits in the
+// ancestor closure that another kept edge of row i contributes. HBG edges
+// carry ordering only (node slots are never reclaimed mid-run), so
+// reachability is the whole behavior contract and dropping shortcuts
+// preserves it. Nodes arrive in topological order (the CSR fill rejects
+// producer >= consumer), so one forward pass finalizes each producer's
+// ancestor closure before any later row consumes it.
+//
+// Returns false only on allocation failure, leaving the recording untouched;
+// callers then fall back to packing the unreduced edge set.
+struct GraphReducedEdges {
+    std::vector<uint32_t> rows;  // (node_count + 1) offsets into producers
+    std::vector<uint16_t> producers;
+};
+
+bool graph_reduce_transitive_edges(const GraphRecording &recording, GraphReducedEdges *out) {
+    const size_t node_count = recording.node_count;
+    if (node_count == 0 || node_count > GRAPH_MAX_NODES) return false;
+
+    const size_t words_per_row = (node_count + 63) / 64;
+    // Two bitmaps per node: `ancestors` holds the node's ancestor closure over
+    // the reduced graph (kept edges only), `keep` the direct producers that
+    // survive. Separate because the closure contains transitive ancestors that
+    // are not direct edges. 1024-node cap = 2 x 128 KiB scratch, sized to the
+    // actual row count below that.
+    std::vector<uint64_t> ancestors_storage;
+    std::vector<uint64_t> keep_storage;
+    try {
+        ancestors_storage.assign(words_per_row * node_count, 0);
+        keep_storage.assign(words_per_row * node_count, 0);
+        out->rows.assign(node_count + 1, 0);
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+    auto ancestors = [words_per_row, &ancestors_storage](size_t i) {
+        return ancestors_storage.data() + i * words_per_row;
+    };
+    auto keep_row = [words_per_row, &keep_storage](size_t i) {
+        return keep_storage.data() + i * words_per_row;
+    };
+
+    // Single forward pass. When row i is processed, every producer p < i has
+    // its final ancestor closure (all its producers are earlier), so the
+    // shortcut test reads exact reachability over the reduced graph. Within a
+    // row, entries are visited in reverse recording order so the deepest
+    // producer is kept first and its closure (which contains the row's
+    // transitive shortcuts) marks them for the drop test; an edge whose
+    // producer is already in the row's accumulated closure is dropped. Kept
+    // producers are appended after the row's decisions, in recording order, to
+    // keep each row contiguous.
+    try {
+        out->producers.reserve(recording.internal_fanins.size());
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+    for (size_t i = 0; i < node_count; ++i) {
+        const GraphRecordedNode &node = recording.nodes[i];
+        if (node.fanin_offset > recording.internal_fanins.size() ||
+            node.fanin_count > recording.internal_fanins.size() - node.fanin_offset) {
+            return false;
+        }
+        for (uint32_t f = node.fanin_count; f-- > 0;) {
+            const size_t producer = recording.internal_fanins[node.fanin_offset + f];
+            if (producer >= node_count || producer == i) return false;
+            // record_submit dedups a row's producers, so a repeat cannot occur;
+            // the keep bit would be idempotent anyway.
+
+            if (ancestors(i)[producer / 64] & (1ULL << (producer % 64))) {
+                continue;  // shortcut: p already reachable via a kept edge of this row
+            }
+            keep_row(i)[producer / 64] |= 1ULL << (producer % 64);
+            const uint64_t *producer_ancestors = ancestors(producer);
+            for (size_t w = 0; w < words_per_row; ++w)
+                ancestors(i)[w] |= producer_ancestors[w];
+            ancestors(i)[producer / 64] |= 1ULL << (producer % 64);
+        }
+        // Emit kept producers in recording order so a row's entries keep their
+        // relative order from the recording.
+        for (uint32_t f = 0; f < node.fanin_count; ++f) {
+            const size_t producer = recording.internal_fanins[node.fanin_offset + f];
+            if (keep_row(i)[producer / 64] & (1ULL << (producer % 64))) {
+                out->producers.push_back(static_cast<uint16_t>(producer));
+            }
+        }
+        out->rows[i + 1] = static_cast<uint32_t>(out->producers.size());
+    }
+    out->rows[0] = 0;
+    return true;
+}
+
 bool graph_build_definition(const GraphRecording &recording, std::vector<std::byte> *image) {
     if (image == nullptr || recording.unsupported || recording.node_count == 0 ||
         recording.node_count > GRAPH_MAX_NODES || recording.boundary_tensors().empty() ||
@@ -816,7 +909,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
 
     size_t total_tensors = 0;
     size_t total_scalars = 0;
-    size_t total_fanins = 0;
+    size_t raw_fanins = 0;
     size_t root_count = 0;
     size_t predicate_count = 0;
     // node_count, not nodes.size(): the array keeps the slots a longer body left behind,
@@ -824,7 +917,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     for (size_t node = 0; node < recording.node_count; ++node) {
         const GraphRecordedNode &source = recording.nodes[node];
         if (source.tensors.size() > UINT32_MAX - total_tensors || source.scalar_count > UINT32_MAX - total_scalars ||
-            source.fanin_count > UINT32_MAX - total_fanins ||
+            source.fanin_count > UINT32_MAX - raw_fanins ||
             source.tensor_source_offset > recording.tensor_sources.size() ||
             source.tensors.size() > recording.tensor_sources.size() - source.tensor_source_offset ||
             source.scalar_offset > recording.scalars.size() ||
@@ -837,11 +930,18 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         }
         total_tensors += source.tensors.size();
         total_scalars += source.scalar_count;
-        total_fanins += source.fanin_count;
+        raw_fanins += source.fanin_count;
         root_count += source.fanin_count == 0 ? 1 : 0;
         predicate_count += source.predicate_index >= 0 ? 1 : 0;
     }
     if (predicate_count > UINT16_MAX) return false;
+
+    // Reduce before any count or layout consumes the edge set: every array the
+    // image carries (fanin/fanout CSR, edge_count) must describe the same
+    // reduced graph or bind_graph_topology rejects the image on the device.
+    GraphReducedEdges reduced{};
+    bool have_reduced = graph_reduce_transitive_edges(recording, &reduced);
+    const size_t total_fanins = have_reduced ? reduced.producers.size() : raw_fanins;
 
     GraphDefinition definition{};
     definition.full_key = recording.full_key;
@@ -921,11 +1021,20 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         required_heap += output_bytes;
 
         if (source.fanin_count == 0) roots[root_cursor++] = static_cast<uint16_t>(i);
-        for (uint32_t f = 0; f < source.fanin_count; ++f) {
-            const size_t producer = recording.internal_fanins[source.fanin_offset + f];
-            if (producer >= i) return false;
-            fanin_indices[fanin_cursor++] = static_cast<uint16_t>(producer);
-            fanout_offsets[producer + 1]++;
+        if (have_reduced) {
+            for (uint32_t e = reduced.rows[i]; e < reduced.rows[i + 1]; ++e) {
+                const uint16_t producer = reduced.producers[e];
+                if (producer >= i) return false;
+                fanin_indices[fanin_cursor++] = producer;
+                fanout_offsets[producer + 1]++;
+            }
+        } else {
+            for (uint32_t f = 0; f < source.fanin_count; ++f) {
+                const size_t producer = recording.internal_fanins[source.fanin_offset + f];
+                if (producer >= i) return false;
+                fanin_indices[fanin_cursor++] = static_cast<uint16_t>(producer);
+                fanout_offsets[producer + 1]++;
+            }
         }
         fanin_offsets[i + 1] = static_cast<uint32_t>(fanin_cursor);
 

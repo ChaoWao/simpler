@@ -937,6 +937,26 @@ target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+add_a2a3_hbg_runtime_test(test_hbg_graph_reduction common/test_hbg_graph_reduction.cpp)
+target_sources(test_hbg_graph_reduction PRIVATE
+    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
+    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
+    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
+    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
+add_a5_hbg_runtime_test(test_a5_hbg_graph_reduction common/test_hbg_graph_reduction.cpp)
+target_sources(test_a5_hbg_graph_reduction PRIVATE
+    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
+    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a5_hbg_runtime_test(test_a5_hbg_graph_async_submit common/test_hbg_graph_async_submit.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_slot_claim common/test_hbg_slot_claim.cpp)
 target_sources(test_a5_hbg_slot_claim PRIVATE
