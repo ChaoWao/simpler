@@ -83,8 +83,8 @@ struct OrchestratorState {
     int32_t scope_tasks_capacity;     // Allocated capacity of scope_tasks
     int32_t *scope_begins;            // scope_begins[i] = start index of scope i in scope_tasks
     int32_t scope_stack_top;          // Current top of stack (-1 = no scope open)
-    uint64_t scope_stack_capacity;    // Max nesting depth (PTO2_MAX_SCOPE_DEPTH)
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    uint64_t scope_stack_capacity;    // Max nesting depth (CHIP_MAX_SCOPE_DEPTH)
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     // === SCHEDULER STATE ACCESS ===
     // Same runtime-arena scheduler object; Orch-side wiring mutates dep_pool
@@ -177,7 +177,7 @@ struct OrchestratorState {
     void mark_dep_pool_position(ChipTaskSlotState &slot_state);
     void wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
-    void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
+    void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);

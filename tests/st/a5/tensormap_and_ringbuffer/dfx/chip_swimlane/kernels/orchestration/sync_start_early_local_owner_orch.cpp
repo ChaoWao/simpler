@@ -132,7 +132,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     }
 
-    rt_scope_begin(PTO2ScopeMode::MANUAL);
+    rt_scope_begin(ScopeMode::MANUAL);
     TaskId producer = use_pending ? submit_aiv_blocker(output, blocker_count) : submit_producer(output);
     if (use_pending && (!wait_for_blockers_started(output, blocker_count) || !wait_for_scheduler_loop_fence())) return;
     submit_consumer(output, producer, consumer_blocks);

@@ -339,7 +339,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
 }
 
 // Regression for issue #1188: scope_tasks_cap must equal the real in-flight budget
-// (sum of the runtime per-ring windows), not the compile-time PTO2_SCOPE_TASKS_CAP.
+// (sum of the runtime per-ring windows), not the compile-time CHIP_SCOPE_TASKS_CAP.
 // reserve_layout only computes offsets, so no commit()/backing is needed here.
 TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
     auto cap_for = [](const int32_t windows[CHIP_MAX_RING_DEPTH]) {
@@ -355,7 +355,7 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = PTO2_TASK_WINDOW_SIZE;
     EXPECT_EQ(cap_for(windows), PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
-    EXPECT_EQ(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
+    EXPECT_EQ(cap_for(windows), CHIP_SCOPE_TASKS_CAP);
 
     // Shrunk window: cap shrinks to the real budget (no over-allocation).
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
@@ -368,5 +368,5 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = big;
     EXPECT_EQ(cap_for(windows), big * CHIP_MAX_RING_DEPTH);
-    EXPECT_GT(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
+    EXPECT_GT(cap_for(windows), CHIP_SCOPE_TASKS_CAP);
 }

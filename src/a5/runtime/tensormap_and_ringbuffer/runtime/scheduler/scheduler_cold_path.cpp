@@ -1164,7 +1164,7 @@ int32_t SchedulerContext::pre_handshake_init(
         int64_t task_count = 0;
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             int32_t ring_tasks = header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
-            if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) task_count += ring_tasks;
+            if (ring_tasks > 0 && ring_tasks <= CHIP_SCOPE_TASKS_CAP) task_count += ring_tasks;
         }
         total_tasks_ = static_cast<int32_t>(task_count);
     } else {

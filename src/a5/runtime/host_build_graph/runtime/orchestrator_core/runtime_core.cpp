@@ -124,8 +124,8 @@ static void graph_commit_impl(RuntimeContext *rt) {
 }
 
 void rt_scope_begin(RuntimeContext *rt) {
-    PTO2ScopeMode mode = rt->pending_scope_mode;
-    rt->pending_scope_mode = PTO2ScopeMode::AUTO;
+    ScopeMode mode = rt->pending_scope_mode;
+    rt->pending_scope_mode = ScopeMode::AUTO;
     rt->orchestrator->begin_scope(mode);
 }
 

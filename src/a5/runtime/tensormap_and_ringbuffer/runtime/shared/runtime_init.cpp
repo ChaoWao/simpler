@@ -322,7 +322,7 @@ OrchestratorLayout OrchestratorState::reserve_layout(
     OrchestratorLayout layout{};
     // scope_tasks holds every task in the open scope across all rings, so its cap
     // is the real in-flight budget = sum of the (runtime) per-ring windows. Using
-    // the compile-time PTO2_SCOPE_TASKS_CAP instead under-sized the buffer when
+    // the compile-time CHIP_SCOPE_TASKS_CAP instead under-sized the buffer when
     // ring_task_window was enlarged past the default (premature SCOPE_TASKS_OVERFLOW)
     // and over-allocated it when shrunk. See issue #1188.
     //
@@ -336,7 +336,7 @@ OrchestratorLayout OrchestratorState::reserve_layout(
     }
     always_assert(scope_tasks_cap <= std::numeric_limits<int32_t>::max());
     layout.scope_tasks_cap = static_cast<int32_t>(scope_tasks_cap);
-    layout.scope_stack_capacity = PTO2_MAX_SCOPE_DEPTH;
+    layout.scope_stack_capacity = CHIP_MAX_SCOPE_DEPTH;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         layout.dep_pool_capacities[r] = dep_pool_capacities[r];
     }
@@ -426,7 +426,7 @@ bool OrchestratorState::init_data_from_layout(
     orch->scope_tasks_capacity = layout.scope_tasks_cap;
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 
     return true;
 }
@@ -485,7 +485,7 @@ bool OrchestratorState::reset_for_reuse(
     orch->scope_tasks_capacity = layout.scope_tasks_cap;
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     orch->total_cluster_count = 0;
     orch->total_aiv_count = 0;
 #if SIMPLER_DFX
@@ -664,7 +664,7 @@ bool runtime_reset_for_reuse(DeviceArena &arena, const RuntimeArenaLayout &layou
 
     rt->scheduler.set_publication_batching_enabled(false);
 
-    rt->pending_scope_mode = PTO2ScopeMode::AUTO;
+    rt->pending_scope_mode = ScopeMode::AUTO;
     rt->total_cycles = 0;
     rt->gm_heap_owned = false;
 

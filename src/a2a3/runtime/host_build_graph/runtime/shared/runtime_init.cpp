@@ -238,7 +238,7 @@ bool OrchestratorState::init(
     }
 
     orch->scope_stack_top = -1;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 
     return true;
 }

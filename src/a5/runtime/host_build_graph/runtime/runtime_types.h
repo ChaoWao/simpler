@@ -118,7 +118,7 @@ inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
 inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HEAP_VIRTUAL_BASE;
 
 // Scope management
-#define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
+#define CHIP_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
 
 // Per-shape ready-queue capacity (power of two). This is a ring buffer that
 // bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task

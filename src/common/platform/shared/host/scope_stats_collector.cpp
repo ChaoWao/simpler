@@ -277,7 +277,7 @@ int ScopeStatsCollector::write_jsonl(const std::string &output_dir) {
     std::string task_window_max;
     std::string heap_max;
     std::string dep_pool_max;
-    for (int r = 0; r < PTO2_SCOPE_STATS_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < SCOPE_STATS_MAX_RING_DEPTH; r++) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%s%d", r == 0 ? "" : ", ", hdr->task_window_cap[r]);
         task_window_max += buf;

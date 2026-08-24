@@ -34,13 +34,13 @@ extern "C" void framework_bind_runtime(RuntimeContext *rt) { g_bound_runtime = r
 
 struct FakeRuntime {
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode = PTO2ScopeMode::AUTO;
+    ScopeMode pending_scope_mode = ScopeMode::AUTO;
     bool fatal = false;
     int submit_calls = 0;
     int alloc_calls = 0;
     int scope_begin_calls = 0;
     int scope_end_calls = 0;
-    PTO2ScopeMode last_scope_mode = PTO2ScopeMode::AUTO;
+    ScopeMode last_scope_mode = ScopeMode::AUTO;
     int get_calls = 0;
     int set_calls = 0;
     int report_fatal_calls = 0;
@@ -193,22 +193,22 @@ TEST(A2A3Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     runtime.ops = &kFakeOps;
     RuntimeBindingGuard bind(reinterpret_cast<RuntimeContext *>(&runtime));
 
-    runtime.pending_scope_mode = PTO2ScopeMode::MANUAL;
+    runtime.pending_scope_mode = ScopeMode::MANUAL;
 
     {
         SIMPLER_SCOPE_GUARD();
         EXPECT_EQ(runtime.scope_begin_calls, 1);
         EXPECT_EQ(runtime.scope_end_calls, 0);
-        EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::AUTO);
+        EXPECT_EQ(runtime.last_scope_mode, ScopeMode::AUTO);
     }
 
     EXPECT_EQ(runtime.scope_end_calls, 1);
 
     {
-        SIMPLER_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
+        SIMPLER_SCOPE_GUARD(ScopeMode::MANUAL);
         EXPECT_EQ(runtime.scope_begin_calls, 2);
         EXPECT_EQ(runtime.scope_end_calls, 1);
-        EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::MANUAL);
+        EXPECT_EQ(runtime.last_scope_mode, ScopeMode::MANUAL);
     }
 
     EXPECT_EQ(runtime.scope_end_calls, 2);

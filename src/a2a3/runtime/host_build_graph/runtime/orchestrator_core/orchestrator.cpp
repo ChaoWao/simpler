@@ -449,7 +449,7 @@ struct GraphRecording {
     // the manual-scope flag still has to follow the body: a manual scope
     // suppresses inference on the ring, so it must suppress it here too.
     int32_t scope_stack_top{-1};
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
 
@@ -718,7 +718,7 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     recording.next_virtual_offset = 0;
     recording.unsupported = false;
     recording.scope_stack_top = -1;
-    recording.manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    recording.manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     // clear() keeps each array's capacity, which is the point: after the first recording
     // on this thread the arrays are already as large as this workload's bodies need.
     // nodes is deliberately not cleared: see GraphRecording::node_count.
@@ -1339,7 +1339,7 @@ static bool prepare_task(
 // Scope Management
 // =============================================================================
 
-void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
+void OrchestratorState::begin_scope(ScopeMode mode) {
     auto *orch = this;
     if (orch->fatal) {
         return;
@@ -1357,20 +1357,20 @@ void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         // body that ordinary submission refuses. The push still happens so
         // end_scope stays balanced -- the recording is doomed either way, since
         // graph_commit turns an unsupported recording into SIMPLER_ERROR_INVALID_ARGS.
-        if (recording->scope_stack_top >= PTO2_MAX_SCOPE_DEPTH - 1 ||
-            (mode == PTO2ScopeMode::AUTO && recording->in_manual_scope())) {
+        if (recording->scope_stack_top >= CHIP_MAX_SCOPE_DEPTH - 1 ||
+            (mode == ScopeMode::AUTO && recording->in_manual_scope())) {
             recording->unsupported = true;
         }
-        if (recording->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1) {
+        if (recording->scope_stack_top < CHIP_MAX_SCOPE_DEPTH - 1) {
             ++recording->scope_stack_top;
-            if (mode == PTO2ScopeMode::MANUAL && !recording->in_manual_scope()) {
+            if (mode == ScopeMode::MANUAL && !recording->in_manual_scope()) {
                 recording->manual_begin_depth = recording->scope_stack_top;
             }
         }
         return;
     }
-    assert(orch->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1 && "Scope stack overflow");
-    if (mode == PTO2ScopeMode::AUTO && orch->in_manual_scope()) {
+    assert(orch->scope_stack_top < CHIP_MAX_SCOPE_DEPTH - 1 && "Scope stack overflow");
+    if (mode == ScopeMode::AUTO && orch->in_manual_scope()) {
         report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported"
         );
@@ -1379,7 +1379,7 @@ void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
 
     bool already_in_manual_scope = orch->in_manual_scope();
     ++orch->scope_stack_top;
-    if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
+    if (mode == ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
 }
@@ -1394,7 +1394,7 @@ void OrchestratorState::end_scope() {
     if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
         if (recording->scope_stack_top >= 0) {
             if (recording->manual_begin_depth == recording->scope_stack_top) {
-                recording->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+                recording->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
             }
             --recording->scope_stack_top;
         }
@@ -1403,7 +1403,7 @@ void OrchestratorState::end_scope() {
     assert(orch->scope_stack_top >= 0 && "Scope stack underflow");
 
     if (orch->scope_stack_top == orch->manual_begin_depth) {
-        orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+        orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     }
     --orch->scope_stack_top;
 }
@@ -2781,7 +2781,7 @@ void OrchestratorState::mark_done() {
     }
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_stack_top = -1;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX
     g_orch_submit_idx = 0;
 #endif

@@ -108,7 +108,7 @@ typedef struct RuntimeOps {
  */
 struct RuntimeContext {
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode;
+    ScopeMode pending_scope_mode;
 };
 
 // =============================================================================
@@ -208,7 +208,7 @@ static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
     return rt->ops->submit_dummy_task(rt, args);
 }
 
-static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
+static inline void rt_scope_begin(ScopeMode mode = ScopeMode::AUTO) {
     RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
@@ -335,7 +335,7 @@ static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, con
 class ScopeGuard {
 public:
     explicit ScopeGuard(
-        PTO2ScopeMode mode = PTO2ScopeMode::AUTO, const char *file = __builtin_FILE(), int line = __builtin_LINE()
+        ScopeMode mode = ScopeMode::AUTO, const char *file = __builtin_FILE(), int line = __builtin_LINE()
     ) :
         rt_(current_runtime()) {
         if (!rt_->ops->is_fatal(rt_)) {

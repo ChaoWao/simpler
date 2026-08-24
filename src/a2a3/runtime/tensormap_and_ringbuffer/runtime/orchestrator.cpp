@@ -684,13 +684,13 @@ static void scope_tasks_push(OrchestratorState *orch, ChipTaskSlotState *task_sl
     orch->scope_tasks[orch->scope_tasks_size++] = task_slot_state;
 }
 
-void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
+void OrchestratorState::begin_scope(ScopeMode mode) {
     auto *orch = this;
     if (orch->fatal) {
         return;
     }
     assert(orch->scope_stack_top < static_cast<int32_t>(orch->scope_stack_capacity - 1) && "Scope stack overflow");
-    if (mode == PTO2ScopeMode::AUTO && orch->in_manual_scope()) {
+    if (mode == ScopeMode::AUTO && orch->in_manual_scope()) {
         report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported"
         );
@@ -700,7 +700,7 @@ void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     bool already_in_manual_scope = orch->in_manual_scope();
     ++orch->scope_stack_top;
     orch->scope_begins[orch->scope_stack_top] = orch->scope_tasks_size;
-    if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
+    if (mode == ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
 #if SIMPLER_DFX
@@ -759,7 +759,7 @@ void OrchestratorState::end_scope() {
     int32_t begin = orch->scope_begins[orch->scope_stack_top--];
     int32_t count = orch->scope_tasks_size - begin;
     if (ending_manual_scope) {
-        orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+        orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     }
 
     if (orch->scheduler && count > 0) {
@@ -1383,7 +1383,7 @@ void OrchestratorState::mark_done() {
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_tasks_size = 0;
     orch->scope_stack_top = -1;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX
     g_orch_submit_idx = 0;
 #endif

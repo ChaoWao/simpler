@@ -66,7 +66,7 @@ enum class CompletionType : int32_t {
 // Task Output ChipTensors (return value from submit)
 // =============================================================================
 
-enum class PTO2ScopeMode : uint8_t {
+enum class ScopeMode : uint8_t {
     AUTO = 0,
     MANUAL = 1,
 };

@@ -75,7 +75,7 @@ struct OrchestratorState {
     // one to be open; it bounds no task or buffer lifetime, so there is no
     // per-scope task list to walk at scope end.
     int32_t scope_stack_top{-1};  // Current top of stack (-1 = no scope open)
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     // === SCHEDULER REFERENCE ===
     // Note: In simulated mode, orchestrator and scheduler share address space
@@ -143,7 +143,7 @@ struct OrchestratorState {
 
     void set_scheduler(SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
-    void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
+    void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);

@@ -319,8 +319,8 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    orch.begin_scope(PTO2ScopeMode::MANUAL);
-    orch.begin_scope(PTO2ScopeMode::AUTO);
+    orch.begin_scope(ScopeMode::MANUAL);
+    orch.begin_scope(ScopeMode::AUTO);
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);

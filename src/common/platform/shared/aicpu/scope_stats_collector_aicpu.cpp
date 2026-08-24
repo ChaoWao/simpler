@@ -43,7 +43,7 @@ static int s_orch_thread_idx = -1;  // set via scope_stats_aicpu_set_orch_thread
 // Fed by the runtime via scope_stats_note_heap_wrap at each wrap; used to unroll
 // the boundary-sampled wrapping offsets into monotonic values (see
 // unroll_heap_offset). Reset in set_platform_scope_stats_base.
-static uint64_t s_heap_wraps[PTO2_SCOPE_STATS_MAX_RING_DEPTH][2] = {};
+static uint64_t s_heap_wraps[SCOPE_STATS_MAX_RING_DEPTH][2] = {};
 
 static constexpr uint64_t kScopeStatsQueueBackpressureWaitCycles = PLATFORM_DFX_BACKPRESSURE_TIMEOUT_CYCLES;
 
@@ -52,11 +52,11 @@ namespace {
 const char *s_pending_site_file = nullptr;
 int32_t s_pending_site_line = 0;
 
-const char *s_scope_site_file[PTO2_SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
-int32_t s_scope_site_line[PTO2_SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
+const char *s_scope_site_file[SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
+int32_t s_scope_site_line[SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
 // Ring id of each open scope, recorded at scope_stats_begin. Lets a heap-wrap
 // report (which carries no ring id) be attributed to the current scope's ring.
-int s_scope_ring[PTO2_SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
+int s_scope_ring[SCOPE_STATS_MAX_SCOPE_DEPTH] = {};
 
 inline const char *basename_of(const char *path) {
     if (!path) return "(unknown)";
@@ -160,7 +160,7 @@ void switch_buffer() { ScopeStatsEngine::switch_buffer(scope_stats_context(), s_
 // scope_alloc, high-water) is an exact subtraction regardless of wrap count.
 inline uint64_t unroll_heap_offset(uint64_t offset, int ring_id, int side) {
     if (s_scope_stats_header == nullptr) return offset;
-    if (ring_id < 0 || ring_id >= PTO2_SCOPE_STATS_MAX_RING_DEPTH) return offset;
+    if (ring_id < 0 || ring_id >= SCOPE_STATS_MAX_RING_DEPTH) return offset;
     return offset + s_heap_wraps[ring_id][side] * s_scope_stats_header->heap_cap[ring_id];
 }
 
@@ -285,7 +285,7 @@ extern "C" void scope_stats_begin(
     int32_t dep_pool_end, int32_t tensormap_used
 ) {
     if (!scope_stats_enabled) return;
-    if (scope_stats_depth + 1 >= PTO2_SCOPE_STATS_MAX_SCOPE_DEPTH) return;
+    if (scope_stats_depth + 1 >= SCOPE_STATS_MAX_SCOPE_DEPTH) return;
     int32_t d = ++scope_stats_depth;
     s_scope_site_file[d] = s_pending_site_file;
     s_scope_site_line[d] = s_pending_site_line;
@@ -331,7 +331,7 @@ extern "C" void scope_stats_on_fatal() {
 extern "C" void
 scope_stats_set_ring_capacity(int ring_id, int32_t window_cap, uint64_t heap_cap, int32_t dep_pool_cap) {
     if (!s_scope_stats_header) return;
-    if (ring_id < 0 || ring_id >= PTO2_SCOPE_STATS_MAX_RING_DEPTH) return;
+    if (ring_id < 0 || ring_id >= SCOPE_STATS_MAX_RING_DEPTH) return;
     s_scope_stats_header->task_window_cap[ring_id] = window_cap;
     s_scope_stats_header->heap_cap[ring_id] = heap_cap;
     s_scope_stats_header->dep_pool_cap[ring_id] = dep_pool_cap;
@@ -347,6 +347,6 @@ extern "C" void scope_stats_note_heap_wrap(int side) {
     if (scope_stats_depth < 0) return;  // wrap outside any scope — unattributable
     if (side != SCOPE_STATS_HEAP_SIDE_ALLOC && side != SCOPE_STATS_HEAP_SIDE_RECLAIM) return;
     int ring_id = s_scope_ring[scope_stats_depth];
-    if (ring_id < 0 || ring_id >= PTO2_SCOPE_STATS_MAX_RING_DEPTH) return;
+    if (ring_id < 0 || ring_id >= SCOPE_STATS_MAX_RING_DEPTH) return;
     s_heap_wraps[ring_id][side] += 1;
 }
