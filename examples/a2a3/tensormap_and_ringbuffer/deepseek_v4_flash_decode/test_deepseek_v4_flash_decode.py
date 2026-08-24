@@ -38,7 +38,6 @@ test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
 See README.md for provenance pins and the regeneration recipe.
 """
 
-import pytest
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
@@ -581,7 +580,6 @@ def _decode_fwd_orch_fn(orch, callables, task_args, config):
             orch.submit_next_level(callables.decode_fwd, args, config, worker=rank)
 
 
-@pytest.mark.resource_last
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
 class TestDeepseekV4FlashDecode(SceneTestCase):
     CALLABLE = {

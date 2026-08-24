@@ -43,8 +43,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 from simpler_setup import SceneTestCase, scene_test
 from simpler_setup.goldens.deepseek_v4_flash_decode import N_RANKS, generate_inputs
 
@@ -96,7 +94,6 @@ def _host_build_graph_callable():
     return callable_config
 
 
-@pytest.mark.resource_last
 @scene_test(level=3, runtime="host_build_graph")
 class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
     """DSv4 FLASH EP2/TP2 decode with the orchestration built on the host."""
