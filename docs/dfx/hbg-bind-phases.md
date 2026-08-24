@@ -28,8 +28,8 @@ line per segment per bind at `LOG_TIMING`:
 | `args` | staging the caller's host tensors and mapping them for host access |
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
 | `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
-| `graph_upload` | uploading the Definition objects and binding every Graph task to the one with its key |
-| `arena_h2d` | the one H2D of the bind: the arena's copied zone and the shared-memory image |
+| `graph_upload` | one H2D of the block holding every Definition object, and binding each Graph task to the one with its key. The recorders built the objects in that block's host staging during `host_orch`, so this segment writes their headers and copies in only what did not fit |
+| `arena_h2d` | one H2D of the arena's copied zone and the shared-memory image |
 | `host_view_close` | unmapping the host views taken in `args` |
 
 The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
@@ -142,13 +142,22 @@ two-bind log that is 18 lines where 20 exist, with nothing to say a segment went
 missing.
 
 Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
-own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=` and
-`submissions=` on `graph_upload`, and `arena_h2d`'s itemized upload. Group the
+own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=`,
+`submissions=` and `spilled=` on `graph_upload`, and `arena_h2d`'s itemized upload.
+Group the
 lines into binds — `arena_h2d` is the last segment of a bind, so it closes one —
 then sum the control-plane segments **within each bind** and take the minimum of
 those sums. Never sum
 minima taken across binds; that total belongs to no bind and can point the wrong
 way (see below).
+
+**`spilled=` should be 0 on every bind but the first.** It counts the Definition
+objects the recorders could not build inside the retained staging, which
+`graph_upload` then has to copy in. The first bind of a process has nothing
+retained and so spills all of them; a later bind that still spills means the run's
+Definitions outgrew the high-water mark the previous one left, and the copies are
+back. It is not spelled `copied=` on purpose: on `arena_h2d` that name means a
+zone, not a count.
 
 **A segment's `bytes=` is what that segment itself copied, so no copy is counted
 twice.** `graph_upload` counts the Definition objects it uploads, which are all it

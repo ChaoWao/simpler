@@ -18,9 +18,11 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include "graph_execution.h"
 #include "graph_host_state.h"
 #include "orchestrator.h"
 #include "shared_memory.h"
@@ -36,8 +38,12 @@ protected:
     PTO2SchedulerLayout sched_layout{};
     GraphHostStatePtr graph_state;
     std::vector<char> gm_heap;
+    // Stands in for a bind's retained staging: the Definition objects are built
+    // in here rather than in a buffer of their own.
+    std::vector<std::byte> definition_staging;
 
     static constexpr size_t HEAP_BYTES = 64 * 1024;
+    static constexpr size_t STAGING_BYTES = 256 * 1024;
 
     void SetUp() override {
         sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
@@ -51,7 +57,13 @@ protected:
         sched.wire_arena_pointers(sched_layout, runtime_arena);
         ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE, &sched));
 
-        graph_state = make_graph_host_state();
+        definition_staging.assign(STAGING_BYTES, std::byte{0});
+        GraphDefinitionArena arena{};
+        arena.base = definition_staging.data();
+        arena.capacity = definition_staging.size();
+        arena.object_prefix_bytes = sizeof(GraphDefinitionHeader);
+        arena.object_align = GRAPH_DEFINITION_OBJECT_ALIGN;
+        graph_state = make_graph_host_state(arena);
         ASSERT_NE(graph_state, nullptr);
         orch.graph_host_state = graph_state.get();
     }

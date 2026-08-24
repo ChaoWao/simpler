@@ -51,17 +51,29 @@ struct HostApiOps {
     // {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size);
-    // Runner-owned Graph Definition storage, keyed by the Definition's content
-    // identity (full_key, content_hash, total_bytes folded into one key by the
-    // caller). Grow-only retention: one block per key, reused while capacity
-    // fits, a growth request replaces the entry, all blocks released at Worker
-    // finalization. `alignment` must be a power of two. Lets every submission
-    // of one run reference a single device-resident Definition instead of each
+    // Runner-owned Graph Definition storage: one device block per pipeline slot
+    // holding every Definition object of a run end to end, plus the host block
+    // the caller assembles them in before the single H2D that ships them.
+    // `staging_out` receives the host block, `device_out` the device one; the
+    // caller owns the layout inside both and the offsets it hands to the device
+    // are its own. Grow-only retention: a request that fits the retained
+    // capacity reuses it, a larger one replaces it, both are released at Worker
+    // finalization. `alignment` must be a power of two, and the device block is
+    // aligned to it and zeroed when (re)allocated, so a region no upload has
+    // covered reads as zero rather than as a stale object. Lets every
+    // submission of one run reference a device-resident Definition instead of
     // carrying a full copy. Execution storage needs no counterpart here — it is
-    // the tail of the outer Graph task's own heap allocation.
-    void *(*acquire_graph_definition_buffer)(
-        void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
+    // the tail of the outer Graph task's own heap allocation. Returns 0 on
+    // success.
+    int (*acquire_graph_definition_block)(
+        void *runner_ctx, uint32_t pipeline_slot, size_t bytes, size_t alignment, void **device_out, void **staging_out
     );
+    // The retained host staging block as it stands, without allocating or growing:
+    // {nullptr, 0} until a run has acquired one. A bind reads it before
+    // orchestration so its recorders can build their Definition objects straight
+    // into it — the run's total is not known until every recording has ended, so
+    // the capacity on offer is whatever the previous bind left behind.
+    void (*get_graph_definition_staging)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     // Commit the three pooled regions (GM heap, runtime shared memory, and
     // prebuilt runtime arena) of the arena bank selected by this run, as three
     // independent device allocations. `runtime_arena_size == 0` skips the
@@ -158,9 +170,19 @@ public:
     void set_retained_temp_buffer(void *addr, size_t size) const {
         ops_->set_retained_temp_buffer(runner_ctx_, pipeline_slot_, addr, size);
     }
-    void *acquire_graph_definition_buffer(uint64_t key, size_t bytes, size_t alignment) const {
-        if (ops_->acquire_graph_definition_buffer == nullptr) return nullptr;
-        return ops_->acquire_graph_definition_buffer(runner_ctx_, pipeline_slot_, key, bytes, alignment);
+    int acquire_graph_definition_block(size_t bytes, size_t alignment, void **device_out, void **staging_out) const {
+        if (ops_->acquire_graph_definition_block == nullptr) return -1;
+        return ops_->acquire_graph_definition_block(
+            runner_ctx_, pipeline_slot_, bytes, alignment, device_out, staging_out
+        );
+    }
+    void get_graph_definition_staging(void **addr, size_t *size) const {
+        if (ops_->get_graph_definition_staging == nullptr) {
+            if (addr != nullptr) *addr = nullptr;
+            if (size != nullptr) *size = 0;
+            return;
+        }
+        ops_->get_graph_definition_staging(runner_ctx_, pipeline_slot_, addr, size);
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);

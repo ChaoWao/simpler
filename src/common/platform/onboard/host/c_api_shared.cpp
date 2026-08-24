@@ -156,16 +156,25 @@ static void set_retained_temp_buffer(void *runner_ctx, uint32_t pipeline_slot, v
     } catch (...) {}
 }
 
-static void *acquire_graph_definition_buffer(
-    void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
+static int acquire_graph_definition_block(
+    void *runner_ctx, uint32_t pipeline_slot, size_t bytes, size_t alignment, void **device_out, void **staging_out
 ) {
-    if (runner_ctx == nullptr) return nullptr;
+    if (runner_ctx == nullptr) return -1;
     try {
         return static_cast<DeviceRunnerBase *>(runner_ctx)
-            ->acquire_graph_definition_buffer(pipeline_slot, key, bytes, alignment);
+            ->acquire_graph_definition_block(pipeline_slot, bytes, alignment, device_out, staging_out);
     } catch (...) {
-        return nullptr;
+        return -1;
     }
+}
+
+static void get_graph_definition_staging(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size) {
+    if (addr != nullptr) *addr = nullptr;
+    if (size != nullptr) *size = 0;
+    if (runner_ctx == nullptr) return;
+    try {
+        static_cast<DeviceRunnerBase *>(runner_ctx)->get_graph_definition_staging(pipeline_slot, addr, size);
+    } catch (...) {}
 }
 
 static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void *callable) {
@@ -281,7 +290,8 @@ static const HostApiOps g_host_api_ops = {
     .device_memset = device_memset,
     .get_retained_temp_buffer = get_retained_temp_buffer,
     .set_retained_temp_buffer = set_retained_temp_buffer,
-    .acquire_graph_definition_buffer = acquire_graph_definition_buffer,
+    .acquire_graph_definition_block = acquire_graph_definition_block,
+    .get_graph_definition_staging = get_graph_definition_staging,
     .setup_static_arena = setup_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,

@@ -147,6 +147,15 @@ struct GraphDefinitionHeader {
 
 static_assert(std::is_standard_layout_v<GraphDefinitionHeader>);
 
+// Every Definition object is [GraphDefinitionHeader][Definition image], aligned to
+// this and padded to a multiple of it. A Definition section is reached as an offset
+// from the image base, and the widest one may ask for max_align_t, so this is what
+// an image base has to carry; the header in front preserves it because its own size
+// is a multiple of it. Both the recorder that claims room for an object and the
+// upload that packs them share the value.
+inline constexpr size_t GRAPH_DEFINITION_OBJECT_ALIGN = alignof(std::max_align_t);
+static_assert(sizeof(GraphDefinitionHeader) % GRAPH_DEFINITION_OBJECT_ALIGN == 0);
+
 struct GraphDefinition {
     uint64_t full_key;
     uint64_t content_hash;

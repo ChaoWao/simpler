@@ -206,7 +206,7 @@ enum class HostOrchPhase : uint32_t {
     Prepare = 13,          // prepare_task: one alloc_tensors slot
     RecordNode = 14,       // graph_record_submit_node: one recorded Graph node
     GraphSubmit = 15,      // graph_submit_definition: one outer GRAPH task
-    BuildDefinition = 16,  // graph_build_definition: nodes compacted into the image
+    BuildDefinition = 16,  // graph_layout_definition + graph_fill_definition: one image
     GraphBegin = 17,       // graph_begin: the whole entry, GraphSubmit nested inside
     RecordingWait = 18,    // graph_commit's wait for the last recorder to finish
     GraphCommit = 19,      // graph_commit: the wait plus back-patching every shell
@@ -500,8 +500,21 @@ struct GraphInflightRecording {
     void set_status(GraphRecordingStatus next) { recording_status.store(next, std::memory_order_release); }
 };
 
+// One published Definition image. It lives in the run's arena at `object_offset`
+// — an offset, not an address, so the arena can be reallocated between
+// publication and upload — unless the arena had no room, in which case `spill`
+// holds the image and `object_offset` is GRAPH_NO_OBJECT_OFFSET.
+struct GraphDefinitionRecord {
+    size_t object_offset{GRAPH_NO_OBJECT_OFFSET};
+    size_t bytes{0};
+    std::vector<std::byte> spill;
+};
+
 struct GraphHostState {
-    std::unordered_map<uint64_t, std::vector<std::byte>> definitions;
+    explicit GraphHostState(const GraphDefinitionArena &arena) :
+        arena(arena) {}
+
+    std::unordered_map<uint64_t, GraphDefinitionRecord> definitions;
     // Recordings in flight, at most one per Graph key. Several record at once,
     // each on its own thread; graph_commit drains and finalizes all of them.
     std::unordered_map<uint64_t, std::unique_ptr<GraphInflightRecording>> inflight;
@@ -511,6 +524,36 @@ struct GraphHostState {
     // Mirrors inflight.size() so orchestration completion answers the common
     // "nothing is recording" case without taking recording_mutex.
     std::atomic<size_t> inflight_count{0};
+    // Fixed for the run: recorder threads hold addresses inside it, so it must
+    // not move while any of them is filling an image.
+    GraphDefinitionArena arena;
+    std::atomic<size_t> arena_cursor{0};
+
+    // Claim room for one object of `image_bytes`, padded so the next object
+    // starts aligned too. Returns the object offset, or nullopt when the run has
+    // outgrown the retained arena — the caller then builds into its own buffer.
+    // Several recording threads reserve at once and a losing exchange retries
+    // rather than advancing the cursor past the capacity, so an object that does
+    // not fit costs the run its own slot and no one else's.
+    std::optional<size_t> reserve_object(size_t image_bytes) {
+        if (arena.base == nullptr || arena.object_align == 0) return std::nullopt;
+        if (image_bytes > SIZE_MAX - arena.object_prefix_bytes) return std::nullopt;
+        const size_t object_bytes = arena.object_prefix_bytes + image_bytes;
+        if (object_bytes > SIZE_MAX - (arena.object_align - 1)) return std::nullopt;
+        const size_t claimed = (object_bytes + arena.object_align - 1) & ~(arena.object_align - 1);
+        size_t offset = arena_cursor.load(std::memory_order_relaxed);
+        while (true) {
+            if (claimed > arena.capacity - offset) return std::nullopt;
+            if (arena_cursor.compare_exchange_weak(
+                    offset, offset + claimed, std::memory_order_acq_rel, std::memory_order_relaxed
+                )) {
+                return offset;
+            }
+        }
+    }
+
+    // Where an object's image starts, for a record the arena holds.
+    std::byte *image_at(size_t object_offset) const { return arena.base + object_offset + arena.object_prefix_bytes; }
 
     // Definitions this run can still admit: published plus in flight, against
     // the per-worker cache limit.
@@ -801,17 +844,20 @@ bool graph_layout_section(size_t count, size_t *cursor, uint32_t *offset) {
 }
 
 template <typename T>
-T *graph_image_section(std::vector<std::byte> *image, uint32_t offset) {
-    return offset == 0 ? nullptr : reinterpret_cast<T *>(image->data() + offset);
+T *graph_image_section(std::byte *image, uint32_t offset) {
+    return offset == 0 ? nullptr : reinterpret_cast<T *>(image + offset);
 }
 
-bool graph_build_definition(const GraphRecording &recording, std::vector<std::byte> *image) {
-    if (image == nullptr || recording.unsupported || recording.node_count == 0 ||
-        recording.node_count > GRAPH_MAX_NODES || recording.boundary_tensors().empty() ||
-        recording.boundary_tensors().size() > UINT16_MAX ||
+// Counts, section offsets and total_bytes for the image this recording produces,
+// settled without writing any of it so the destination can be claimed at the
+// exact size. required_heap and content_hash come from the fill, which is the
+// pass that walks the nodes in order.
+std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &recording) {
+    if (recording.unsupported || recording.node_count == 0 || recording.node_count > GRAPH_MAX_NODES ||
+        recording.boundary_tensors().empty() || recording.boundary_tensors().size() > UINT16_MAX ||
         recording.boundary_tensors().size() != recording.boundary_types().size() ||
         recording.boundary_args() == nullptr) {
-        return false;
+        return std::nullopt;
     }
 
     size_t total_tensors = 0;
@@ -833,7 +879,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
             source.scalar_count > recording.scalar_sources.size() - source.scalar_offset ||
             source.fanin_offset > recording.internal_fanins.size() ||
             source.fanin_count > recording.internal_fanins.size() - source.fanin_offset) {
-            return false;
+            return std::nullopt;
         }
         total_tensors += source.tensors.size();
         total_scalars += source.scalar_count;
@@ -841,7 +887,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         root_count += source.fanin_count == 0 ? 1 : 0;
         predicate_count += source.predicate_index >= 0 ? 1 : 0;
     }
-    if (predicate_count > UINT16_MAX) return false;
+    if (predicate_count > UINT16_MAX) return std::nullopt;
 
     GraphDefinition definition{};
     definition.full_key = recording.full_key;
@@ -859,7 +905,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
             &execution_storage_bytes
         ) ||
         execution_storage_bytes > UINT32_MAX) {
-        return false;
+        return std::nullopt;
     }
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
 
@@ -879,15 +925,34 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
             recording.boundary_tensors().size(), &image_bytes, &definition.off_boundary_signatures
         ) ||
         !graph_layout_section<GraphPredicate>(predicate_count, &image_bytes, &definition.off_predicates)) {
-        return false;
+        return std::nullopt;
     }
     definition.total_bytes = static_cast<uint32_t>(image_bytes);
-    // Zero-filled, not merely sized: the alignment slack between sections is inside
-    // the hashed range, so the content hash identifies two structurally identical
-    // Definitions only while that slack is a fixed value. A reserve-and-fill that
-    // left it uninitialized would still verify on the device — same bytes, same
-    // hash — while giving equal Definitions unequal hashes.
-    image->assign(image_bytes, std::byte{0});
+    return definition;
+}
+
+// Write the image of `recording` at `image`, which must be graph_layout_definition's
+// total_bytes and aligned for every section type it laid out. `definition` is that
+// layout; the fill settles required_heap and content_hash and writes the header.
+//
+// Zero-filled first, not merely sized: the alignment slack between sections is
+// inside the hashed range, so the content hash identifies two structurally
+// identical Definitions only while that slack is a fixed value. Reusing a region
+// a previous run wrote, or filling one left uninitialized, would still verify on
+// the device — same bytes, same hash — while giving equal Definitions unequal
+// hashes.
+bool graph_fill_definition(const GraphRecording &recording, GraphDefinition definition, std::byte *image) {
+    if (image == nullptr) return false;
+    always_assert(
+        reinterpret_cast<uintptr_t>(image) % GRAPH_DEFINITION_OBJECT_ALIGN == 0 &&
+        "a Definition image base must carry the alignment its section offsets assume"
+    );
+    std::memset(image, 0, definition.total_bytes);
+    const size_t total_tensors = definition.tensor_arg_count;
+    const size_t total_scalars = definition.scalar_arg_count;
+    const size_t total_fanins = definition.edge_count;
+    const size_t root_count = definition.root_count;
+    const size_t predicate_count = definition.predicate_count;
     auto *fanout_offsets = graph_image_section<uint32_t>(image, definition.off_fanout_offsets);
     auto *fanout_indices = graph_image_section<uint16_t>(image, definition.off_fanout_indices);
     auto *fanin_offsets = graph_image_section<uint32_t>(image, definition.off_fanin_offsets);
@@ -1006,21 +1071,36 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         }
         signatures[i] = graph_boundary_signature(tensor, recording.boundary_types()[i], alias_rep);
     }
-    std::memcpy(image->data(), &definition, sizeof(definition));
-    definition.content_hash = graph_definition_content_hash(image->data(), image->size());
-    std::memcpy(image->data(), &definition, sizeof(definition));
+    std::memcpy(image, &definition, sizeof(definition));
+    definition.content_hash = graph_definition_content_hash(image, definition.total_bytes);
+    std::memcpy(image, &definition, sizeof(definition));
     return true;
 }
 
-const GraphDefinition *graph_definition(const std::vector<std::byte> &image) {
-    if (image.size() < sizeof(GraphDefinition)) return nullptr;
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(image.data());
-    return definition->total_bytes == image.size() ? definition : nullptr;
+// The image at `data`, once it is a Definition of exactly `bytes`. Rejects a
+// region whose own total_bytes disagrees, which is what makes a record's
+// bookkeeping and the bytes it points at one fact rather than two.
+const GraphDefinition *graph_definition(const std::byte *data, size_t bytes) {
+    if (data == nullptr || bytes < sizeof(GraphDefinition)) return nullptr;
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(data);
+    return definition->total_bytes == bytes ? definition : nullptr;
+}
+
+// Where a published record's image is: in the arena at its object offset, or in
+// the buffer it spilled to.
+const GraphDefinition *graph_record_definition(const GraphHostState &state, const GraphDefinitionRecord &record) {
+    if (record.object_offset == GRAPH_NO_OBJECT_OFFSET) {
+        return graph_definition(record.spill.data(), record.spill.size());
+    }
+    if (state.arena.base == nullptr) return nullptr;
+    return graph_definition(state.image_at(record.object_offset), record.bytes);
 }
 
 }  // namespace
 
-GraphHostStatePtr make_graph_host_state() { return GraphHostStatePtr{new (std::nothrow) GraphHostState{}}; }
+GraphHostStatePtr make_graph_host_state(const GraphDefinitionArena &arena) {
+    return GraphHostStatePtr{new (std::nothrow) GraphHostState{arena}};
+}
 
 void GraphHostStateDeleter::operator()(GraphHostState *state) const noexcept { delete state; }
 
@@ -1033,14 +1113,20 @@ std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t i
     return GraphHostUpload{upload.outer_slot, upload.full_key, upload.definition_hash};
 }
 
+size_t graph_host_arena_used(const GraphHostState &state) { return state.arena_cursor.load(std::memory_order_acquire); }
+
 GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
     GraphHostDefinitionList list;
     list.entries.reserve(state.definitions.size());
-    for (auto &[key, image] : state.definitions) {
-        const GraphDefinition *header = graph_definition(image);
-        if (header != nullptr && header->total_bytes == image.size()) {
-            list.entries.push_back(GraphHostDefinition{key, image.data(), image.size()});
-        }
+    for (const auto &[key, record] : state.definitions) {
+        if (graph_record_definition(state, record) == nullptr) continue;
+        const bool spilled = record.object_offset == GRAPH_NO_OBJECT_OFFSET;
+        list.entries.push_back(
+            GraphHostDefinition{
+                key, record.object_offset, spilled ? record.spill.data() : nullptr,
+                spilled ? record.spill.size() : record.bytes
+            }
+        );
     }
     return list;
 }
@@ -1820,10 +1906,9 @@ bool graph_submit_outer(
 }
 
 bool graph_submit_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
-    const GraphTaskArgs &args, TaskId *submitted_id
+    PTO2OrchestratorState *orch, GraphHostState *state, const GraphDefinition *definition, const GraphTaskArgs &args,
+    TaskId *submitted_id
 ) {
-    const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
         definition->execution_storage_bytes == 0 ||
         definition->required_heap > UINT64_MAX - definition->execution_storage_bytes) {
@@ -1848,8 +1933,9 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
     for (GraphPendingUpload &pending : state->pending_uploads) {
         if (!pending.deferred_heap) continue;
         auto definition_it = state->definitions.find(pending.full_key);
-        const GraphDefinition *definition =
-            definition_it == state->definitions.end() ? nullptr : graph_definition(definition_it->second);
+        const GraphDefinition *definition = definition_it == state->definitions.end() ?
+                                                nullptr :
+                                                graph_record_definition(*state, definition_it->second);
         if (definition == nullptr || definition->execution_storage_bytes == 0 ||
             definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
             pending.outer_slot == nullptr || pending.outer_slot->task == nullptr ||
@@ -2180,7 +2266,9 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
     if (definition_it != state->definitions.end()) {
         TaskId submitted = TaskId::invalid();
         ORCH_PHASE_START();
-        if (graph_submit_definition(orch, state, definition_it->second, args, &submitted)) {
+        if (graph_submit_definition(
+                orch, state, graph_record_definition(*state, definition_it->second), args, &submitted
+            )) {
             result.execute_block = false;
             result.task_id = submitted;
             ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
@@ -2339,13 +2427,29 @@ bool PTO2OrchestratorState::graph_end() {
     GraphInflightRecording *entry = g_active_graph_entry;
     if (state == nullptr || recording == nullptr || entry == nullptr) return false;
 
-    std::vector<std::byte> definition;
     ORCH_PHASE_START();
-    const bool built = graph_build_definition(*recording, &definition);
+    std::optional<GraphDefinition> layout = graph_layout_definition(*recording);
+    // The claim is what decides where this thread writes, so it precedes the fill
+    // and never moves the arena: a Definition the retained capacity cannot hold is
+    // built in a buffer of its own and copied at upload instead, which keeps the
+    // run correct while the next one's arena is sized for it.
+    GraphDefinitionRecord record;
+    std::byte *image = nullptr;
+    if (layout.has_value()) {
+        record.bytes = layout->total_bytes;
+        if (std::optional<size_t> offset = state->reserve_object(layout->total_bytes); offset.has_value()) {
+            record.object_offset = *offset;
+            image = state->image_at(*offset);
+        } else {
+            record.spill.assign(layout->total_bytes, std::byte{0});
+            image = record.spill.data();
+        }
+    }
+    const bool built = layout.has_value() && graph_fill_definition(*recording, *layout, image);
     if (built) {
         ORCH_PHASE_END(HostOrchPhase::BuildDefinition, recording->node_count);
     }
-    const GraphDefinition *header = built ? graph_definition(definition) : nullptr;
+    const GraphDefinition *header = built ? graph_record_definition(*state, record) : nullptr;
     if (header == nullptr) {
         debug_assert(false && "The recorded Graph contains a construct that Graph Execution does not support");
         LOG_WARN("%s", "[GraphExecution] asynchronous recording produced an unsupported Graph");
@@ -2362,7 +2466,7 @@ bool PTO2OrchestratorState::graph_end() {
         if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
             entry->set_status(GraphRecordingStatus::FAILED);
         } else {
-            state->definitions.emplace(header->full_key, std::move(definition));
+            state->definitions.emplace(header->full_key, std::move(record));
             entry->set_status(GraphRecordingStatus::READY);
         }
         ready = entry->status() == GraphRecordingStatus::READY;
@@ -2408,7 +2512,7 @@ void PTO2OrchestratorState::graph_commit_inner() {
     for (const auto &[key, entry] : drained) {
         auto definition_it = state->definitions.find(key);
         if (entry->status() == GraphRecordingStatus::READY && definition_it != state->definitions.end() &&
-            graph_definition(definition_it->second) != nullptr) {
+            graph_record_definition(*state, definition_it->second) != nullptr) {
             continue;
         }
         if (!failed) failed_key = key;

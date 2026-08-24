@@ -144,8 +144,10 @@ public:
     int device_memset(void *dev_ptr, int value, std::size_t bytes);
     void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, std::size_t *size);
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, std::size_t size);
-    void *
-    acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, std::size_t bytes, std::size_t alignment);
+    int acquire_graph_definition_block(
+        uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment, void **device_out, void **staging_out
+    );
+    void get_graph_definition_staging(uint32_t pipeline_slot, void **addr, std::size_t *size);
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -968,16 +970,16 @@ protected:
      * @return 0 on success, first nonzero rc encountered otherwise.
      */
     int finalize_common();
-    void release_graph_definition_buffers();
+    void release_graph_definition_blocks();
 
     /**
-     * Drop the retained graph-definition buffers without freeing them.
+     * Drop the retained graph-definition blocks without freeing the device side.
      *
-     * The fatal counterpart of release_graph_definition_buffers(): a force reset
-     * has already invalidated every allocation, so only the host-side map is
-     * cleared.
+     * The fatal counterpart of release_graph_definition_blocks(): a force reset
+     * has already invalidated every device allocation, so only the host-side
+     * bookkeeping and staging are dropped.
      */
-    void abandon_graph_definition_buffers();
+    void abandon_graph_definition_blocks();
 
     /**
      * Clear host-side ownership after a fatal device failure without issuing
@@ -1133,19 +1135,21 @@ protected:
     // the grow/pack logic lives in trb bind.
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
-    // One retained device block: the raw allocation plus the aligned address
-    // handed out. Backs the Graph Definition cache below.
-    struct RetainedGraphBuffer {
+    // Graph Definition storage, one retained block per pipeline slot — see
+    // HostApi acquire_graph_definition_block. `staging` is the host block the
+    // run's Definition objects are packed into and stays allocated across runs,
+    // so a bind neither acquires nor returns host memory for them; the device
+    // side is the raw allocation plus the aligned address handed out. One block
+    // per slot rather than one per Definition: every Definition of a run is
+    // packed end to end and shipped by a single H2D, and every submission
+    // references the device-resident copy of its own Definition.
+    struct RetainedGraphBlock {
         void *allocation{nullptr};
         void *aligned_addr{nullptr};
         std::size_t capacity{0};
+        std::vector<std::byte> staging;
     };
-    // Graph Definition storage, one retained block per (pipeline slot,
-    // definition key) — see HostApi acquire_graph_definition_buffer. Keyed by
-    // content identity rather than occurrence: every submission of one run
-    // references the same device-resident Definition.
-    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphBuffer>;
-    std::array<GraphDefinitionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_definition_buffers_{};
+    std::array<RetainedGraphBlock, PTO_PIPELINE_MAX_DEPTH> graph_definition_blocks_{};
 
     // One independently committed set of the three pooled device regions. A
     // run reaches its set through the arena bank its lease selects, so

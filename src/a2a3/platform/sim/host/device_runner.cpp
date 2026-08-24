@@ -812,7 +812,7 @@ int DeviceRunner::finalize() {
     release_callable_state();
 
     unload_executor_binaries();
-    release_graph_definition_buffers();
+    release_graph_definition_blocks();
 
     // Release the three per-Worker pooled arenas. Must precede mem_alloc_.finalize()
     // so the arenas free through the still-live allocator, not after it.

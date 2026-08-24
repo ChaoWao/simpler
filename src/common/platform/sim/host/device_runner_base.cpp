@@ -374,46 +374,62 @@ void SimDeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void 
     retained_temp_sizes_[pipeline_slot] = size;
 }
 
-void *SimDeviceRunnerBase::acquire_graph_definition_buffer(
-    uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
+int SimDeviceRunnerBase::acquire_graph_definition_block(
+    uint32_t pipeline_slot, size_t bytes, size_t alignment, void **device_out, void **staging_out
 ) {
-    if (pipeline_slot >= graph_definition_buffers_.size() || bytes == 0 || alignment == 0 ||
+    if (device_out == nullptr || staging_out == nullptr) return -1;
+    *device_out = nullptr;
+    *staging_out = nullptr;
+    if (pipeline_slot >= graph_definition_blocks_.size() || bytes == 0 || alignment == 0 ||
         (alignment & (alignment - 1)) != 0 || bytes > SIZE_MAX - (alignment - 1)) {
-        return nullptr;
+        return -1;
     }
-    RetainedGraphBuffer &buffer = graph_definition_buffers_[pipeline_slot][key];
-    if (buffer.aligned_addr != nullptr && buffer.capacity >= bytes &&
-        reinterpret_cast<uintptr_t>(buffer.aligned_addr) % alignment == 0) {
-        return buffer.aligned_addr;
+    RetainedGraphBlock &block = graph_definition_blocks_[pipeline_slot];
+    if (block.aligned_addr == nullptr || block.capacity < bytes ||
+        reinterpret_cast<uintptr_t>(block.aligned_addr) % alignment != 0) {
+        const size_t allocation_bytes = bytes + alignment - 1;
+        void *allocation = mem_alloc_.alloc(allocation_bytes);
+        if (allocation == nullptr) return -1;
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(allocation);
+        if (raw > UINTPTR_MAX - (alignment - 1)) {
+            mem_alloc_.free(allocation);
+            return -1;
+        }
+        void *aligned_addr = reinterpret_cast<void *>((raw + alignment - 1) & ~(alignment - 1));
+        if (device_memset(aligned_addr, 0, bytes) != 0) {
+            mem_alloc_.free(allocation);
+            return -1;
+        }
+        if (block.allocation != nullptr && mem_alloc_.free(block.allocation) != 0) {
+            mem_alloc_.free(allocation);
+            return -1;
+        }
+        block.allocation = allocation;
+        block.aligned_addr = aligned_addr;
+        block.capacity = bytes;
     }
-
-    const size_t allocation_bytes = bytes + alignment - 1;
-    void *allocation = mem_alloc_.alloc(allocation_bytes);
-    if (allocation == nullptr) return nullptr;
-    const uintptr_t raw = reinterpret_cast<uintptr_t>(allocation);
-    if (raw > UINTPTR_MAX - (alignment - 1)) {
-        mem_alloc_.free(allocation);
-        return nullptr;
-    }
-    void *aligned_addr = reinterpret_cast<void *>((raw + alignment - 1) & ~(alignment - 1));
-    if (device_memset(aligned_addr, 0, bytes) != 0) {
-        mem_alloc_.free(allocation);
-        return nullptr;
-    }
-    if (buffer.allocation != nullptr && mem_alloc_.free(buffer.allocation) != 0) {
-        mem_alloc_.free(allocation);
-        return nullptr;
-    }
-    buffer = RetainedGraphBuffer{allocation, aligned_addr, bytes};
-    return aligned_addr;
+    // Grow-only and never shrunk, so a steady-state bind assembles its objects
+    // in host memory it neither acquires nor returns.
+    if (block.staging.size() < bytes) block.staging.resize(bytes);
+    *device_out = block.aligned_addr;
+    *staging_out = block.staging.data();
+    return 0;
 }
 
-void SimDeviceRunnerBase::release_graph_definition_buffers() {
-    for (GraphDefinitionBufferMap &by_key : graph_definition_buffers_) {
-        for (auto &entry : by_key) {
-            if (entry.second.allocation != nullptr) mem_alloc_.free(entry.second.allocation);
-        }
-        by_key.clear();
+void SimDeviceRunnerBase::get_graph_definition_staging(uint32_t pipeline_slot, void **addr, size_t *size) {
+    if (addr != nullptr) *addr = nullptr;
+    if (size != nullptr) *size = 0;
+    if (pipeline_slot >= graph_definition_blocks_.size()) return;
+    RetainedGraphBlock &block = graph_definition_blocks_[pipeline_slot];
+    if (block.staging.empty()) return;
+    if (addr != nullptr) *addr = block.staging.data();
+    if (size != nullptr) *size = block.staging.size();
+}
+
+void SimDeviceRunnerBase::release_graph_definition_blocks() {
+    for (RetainedGraphBlock &block : graph_definition_blocks_) {
+        if (block.allocation != nullptr) mem_alloc_.free(block.allocation);
+        block = RetainedGraphBlock{};
     }
 }
 
