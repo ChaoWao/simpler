@@ -33,19 +33,19 @@ constexpr uint64_t CAPACITY = 8;
 class SlotsRegion {
 public:
     explicit SlotsRegion(uint8_t fill) :
-        storage_(CAPACITY * sizeof(PTO2ReadyQueueSlot)) {
+        storage_(CAPACITY * sizeof(ChipReadyQueueSlot)) {
         std::memset(storage_.data(), fill, storage_.size());
     }
 
-    PTO2ReadyQueueSlot *slots() { return reinterpret_cast<PTO2ReadyQueueSlot *>(storage_.data()); }
+    ChipReadyQueueSlot *slots() { return reinterpret_cast<ChipReadyQueueSlot *>(storage_.data()); }
 
 private:
     std::vector<std::byte> storage_;
 };
 
-// PTO2ReadyQueue holds atomics and so is neither copyable nor movable: the caller
+// ChipReadyQueue holds atomics and so is neither copyable nor movable: the caller
 // owns the storage and this only fills it, exactly as the arena path does.
-void make_queue(PTO2ReadyQueue *queue, SlotsRegion &region) {
+void make_queue(ChipReadyQueue *queue, SlotsRegion &region) {
     ready_queue_init_data_from_layout(queue, CAPACITY);
     queue->slots = region.slots();
 }
@@ -64,7 +64,7 @@ ChipTaskSlotState *fake_slot_state(size_t i) {
 // signal. One push then succeeds and the rest report full.
 TEST(HbgReadyQueueSeed, ZeroedSlotsReportFullAfterOnePush) {
     SlotsRegion region(0x00);
-    PTO2ReadyQueue queue{};
+    ChipReadyQueue queue{};
     make_queue(&queue, region);
 
     EXPECT_TRUE(queue.push(fake_slot_state(0)));
@@ -74,7 +74,7 @@ TEST(HbgReadyQueueSeed, ZeroedSlotsReportFullAfterOnePush) {
 
 TEST(HbgReadyQueueSeed, SeededSlotsAcceptCapacityPushes) {
     SlotsRegion region(0xAA);
-    PTO2ReadyQueue queue{};
+    ChipReadyQueue queue{};
     make_queue(&queue, region);
 
     queue.seed_slots();
@@ -96,7 +96,7 @@ TEST(HbgReadyQueueSeed, SeededSlotsAcceptCapacityPushes) {
 // work across laps with no re-seed.
 TEST(HbgReadyQueueSeed, DrainedQueueWrapsWithoutReseeding) {
     SlotsRegion region(0xAA);
-    PTO2ReadyQueue queue{};
+    ChipReadyQueue queue{};
     make_queue(&queue, region);
     queue.seed_slots();
 
@@ -116,7 +116,7 @@ TEST(HbgReadyQueueSeed, DrainedQueueWrapsWithoutReseeding) {
 // mid-lap by an earlier run rather than assuming a drained predecessor.
 TEST(HbgReadyQueueSeed, ReseedRecoversAPartiallyUsedRegion) {
     SlotsRegion region(0xAA);
-    PTO2ReadyQueue queue{};
+    ChipReadyQueue queue{};
     make_queue(&queue, region);
     queue.seed_slots();
     ASSERT_TRUE(queue.push(fake_slot_state(0)));

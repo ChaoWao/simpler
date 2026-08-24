@@ -150,7 +150,7 @@ uninitialized queue.
 slot's sequence tracks the position it serves, and `pop` releases a slot with
 exactly the value the next lap's `push` expects. A drained queue is therefore
 already an empty queue, which is why `tensormap_and_ringbuffer` can leave
-`PTO2ReadyQueue::reset_for_reuse()` empty and never touch the positions. hbg
+`ChipReadyQueue::reset_for_reuse()` empty and never touch the positions. hbg
 re-establishes both on every attach today because the queue *headers* are reset
 per bind; the combination to avoid is resetting the positions while leaving the
 sequences mid-lap, which makes `push` read a sequence above its position and spin

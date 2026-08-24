@@ -125,7 +125,7 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 // simultaneously ready in any one queue. Overflow on the ready/sync/dummy queues
 // latches SIMPLER_ERROR_READY_QUEUE_OVERFLOW (safe-fail), so it must exceed the
 // worst-case ready burst with margin.
-#define PTO2_READY_QUEUE_SIZE 8192
+#define CHIP_READY_QUEUE_SIZE 8192
 
 // Cross-thread early-dispatch work queue (power of two)
 #define PTO2_EARLY_DISPATCH_QUEUE_SIZE 64

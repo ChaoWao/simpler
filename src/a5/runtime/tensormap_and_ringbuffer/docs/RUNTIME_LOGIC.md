@@ -581,7 +581,7 @@ After these phases, the scheduler updates profiling headers and checks for termi
 
 Ready queues use a lock-free bounded MPMC (Vyukov) design:
 
-- One `PTO2ReadyQueue` per resource shape — 3 shapes (`NUM_RESOURCE_SHAPES`): `MIX`
+- One `ChipReadyQueue` per resource shape — 3 shapes (`NUM_RESOURCE_SHAPES`): `MIX`
   (AIC+AIV cluster), `AIC`, `AIV`. Alongside `ready_queues[]` there is a per-shape
   `ready_sync_queues[]` (sync_start Tier-0) and the speculative `early_dispatch_queues[]` /
   `early_sync_start_queue` — see §8.6 for the full source × tier model.

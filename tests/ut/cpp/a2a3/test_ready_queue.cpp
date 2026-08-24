@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2ReadyQueue from scheduler.h
+ * Unit tests for ChipReadyQueue from scheduler.h
  *
  * Tests the lock-free bounded MPMC queue (Vyukov design).
  *
@@ -50,7 +50,7 @@ class ReadyQueueTest : public ::testing::Test {
 protected:
     static constexpr uint64_t CAPACITY = 16;  // Power of 2
 
-    PTO2ReadyQueue queue;
+    ChipReadyQueue queue;
     DeviceArena arena;
 
     void SetUp() override {
@@ -244,7 +244,7 @@ TEST_F(ReadyQueueTest, SizeAccuracy) {
 class ReadyQueueBoundaryTest : public ::testing::Test {
 protected:
     static constexpr uint64_t QUEUE_CAP = 8;  // Small for boundary testing
-    PTO2ReadyQueue queue{};
+    ChipReadyQueue queue{};
     ChipTaskSlotState dummy[8]{};
 
     DeviceArena arena;
@@ -345,7 +345,7 @@ struct MPMCConfig {
 class ReadyQueueMPMCTest : public ::testing::TestWithParam<MPMCConfig> {
 protected:
     static constexpr uint64_t CAPACITY = 1024;
-    PTO2ReadyQueue queue;
+    ChipReadyQueue queue;
 
     DeviceArena arena;
 

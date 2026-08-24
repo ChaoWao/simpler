@@ -57,7 +57,7 @@
 /**
  * Per-slot entry: sequence counter for ABA safety + task payload
  */
-struct PTO2ReadyQueueSlot {
+struct ChipReadyQueueSlot {
     std::atomic<int64_t> sequence;
     ChipTaskSlotState *slot_state;
     uint64_t task_id_snapshot;  // generation tag for early-dispatch queue entries
@@ -73,8 +73,8 @@ struct PTO2ReadyQueueSlot {
  * - CAS contention is split: producers only touch enqueue_pos,
  *   consumers only touch dequeue_pos
  */
-struct alignas(64) PTO2ReadyQueue {
-    PTO2ReadyQueueSlot *slots;
+struct alignas(64) ChipReadyQueue {
+    ChipReadyQueueSlot *slots;
     uint64_t capacity;
     uint64_t mask;        // capacity - 1
     char _pad0[64 - 24];  // Pad to own cache line
@@ -97,7 +97,7 @@ struct alignas(64) PTO2ReadyQueue {
 
     bool push_tagged(ChipTaskSlotState *slot_state, uint64_t task_id_snapshot) {
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         while (true) {
             pos = enqueue_pos.load(std::memory_order_relaxed);
             slot = &slots[pos & mask];
@@ -137,7 +137,7 @@ struct alignas(64) PTO2ReadyQueue {
             pos = enqueue_pos.load(std::memory_order_relaxed);
             bool ready = true;
             for (int i = 0; i < count; i++) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + i);
                 if (diff < 0) {
@@ -159,7 +159,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             slot->slot_state = items[i];
             slot->task_id_snapshot = task_id_snapshots == nullptr ? 0 : task_id_snapshots[i];
             slot->sequence.store(static_cast<int64_t>(pos + i + 1), std::memory_order_release);
@@ -170,7 +170,7 @@ struct alignas(64) PTO2ReadyQueue {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool push(ChipTaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
         bool contended = false;
         uint32_t atomic_ops = 0;
@@ -219,7 +219,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         while (true) {
             pos = dequeue_pos.load(std::memory_order_relaxed);
             slot = &slots[pos & mask];
@@ -252,7 +252,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
         bool contended = false;
         uint32_t atomic_ops = 0;
@@ -301,7 +301,7 @@ struct alignas(64) PTO2ReadyQueue {
             pos = dequeue_pos.load(std::memory_order_relaxed);
             count = 0;
             while (count < max_count) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + count) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + count) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + count + 1);
                 if (diff == 0) {
@@ -324,7 +324,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             out[i] = slot->slot_state;
             if (task_id_snapshots != nullptr) task_id_snapshots[i] = slot->task_id_snapshot;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
@@ -344,7 +344,7 @@ struct alignas(64) PTO2ReadyQueue {
             atomic_ops++;  // dequeue_pos.load
             count = 0;
             while (count < max_count) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + count) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + count) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + count + 1);
                 atomic_ops++;  // sequence.load
@@ -377,7 +377,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             out[i] = slot->slot_state;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
             atomic_ops++;  // sequence.store
@@ -392,7 +392,7 @@ struct alignas(64) PTO2ReadyQueue {
 };
 
 // Cold-path ready queue operations (defined in scheduler.cpp). Declared
-// as non-member so PTO2ReadyQueue stays a POD-like struct with cache-line
+// as non-member so ChipReadyQueue stays a POD-like struct with cache-line
 // alignment. Storage is owned by the caller-supplied arena.
 //   reserve_layout: declare the slots[] region on the arena (must precede commit)
 //   init_data_from_layout: initialize sequence counters and queue metadata
@@ -404,10 +404,10 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity);
 // arena.region_ptr(slots_off) only to address the slot array for writes;
 // does NOT store the pointer in `queue->slots`. Call
 // `ready_queue_wire_arena_pointers` afterwards to set the field itself.
-bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
+bool ready_queue_init_data_from_layout(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
 // Stores queue->slots = arena.region_ptr(slots_off). Idempotent.
-void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off);
-void ready_queue_destroy(PTO2ReadyQueue *queue);
+void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off);
+void ready_queue_destroy(ChipReadyQueue *queue);
 
 /**
  * Statistics returned by mixed-task completion processing
@@ -528,18 +528,18 @@ struct SchedulerState {
     std::atomic<uint32_t> publication_ack_mask;
 
     // Ready queues remain global (scheduling is ring-agnostic)
-    PTO2ReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
+    ChipReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
     // reusing the same per-shape dispatch_shape machinery (fits-local inline vs
     // stop-the-world drain, per-core MIX placement, head-start spacing).
-    PTO2ReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
+    ChipReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
 
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
-    PTO2ReadyQueue dummy_ready_queue;
+    ChipReadyQueue dummy_ready_queue;
 
     alignas(64) AsyncWaitList async_wait_list;
 
@@ -766,11 +766,11 @@ struct SchedulerState {
         uint32_t token{0};
     };
     EarlyDispatchDoorbell early_dispatch_doorbell_table[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
-    PTO2ReadyQueue early_dispatch_queues[NUM_RESOURCE_SHAPES];
+    ChipReadyQueue early_dispatch_queues[NUM_RESOURCE_SHAPES];
     // Shape-agnostic sync_start candidates require an all-or-nothing owner
     // decision. The owner stages locally when one tracker can hold the complete
     // cohort and falls back to the generation-tagged global drain otherwise.
-    PTO2ReadyQueue early_sync_start_queue;
+    ChipReadyQueue early_sync_start_queue;
 
     static inline void ring_one_doorbell(uint64_t reg_addr, uint32_t token) {
         volatile uint64_t *dmb = reinterpret_cast<volatile uint64_t *>(get_reg_ptr(reg_addr, RegId::DATA_MAIN_BASE));
@@ -1107,13 +1107,13 @@ struct SchedulerState {
     }
 #endif
 
-    int get_ready_tasks_batch(PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
+        ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);

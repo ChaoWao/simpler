@@ -94,7 +94,7 @@ bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, Resour
 }
 
 int SchedulerContext::pop_ready_tasks_batch(
-    PTO2ReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+    ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
 ) {
 #if SIMPLER_DFX
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -308,7 +308,7 @@ int SchedulerContext::prepare_block_for_dispatch(
 }
 
 void SchedulerContext::dispatch_shape(
-    int32_t thread_idx, PTO2ReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
+    int32_t thread_idx, ChipReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
     CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
 ) {
 #if SIMPLER_SCHED_PROFILING
@@ -942,7 +942,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     //
     // CHIP_SWIMLANE_NUM_QUEUE_SHAPES (3) matches NUM_RESOURCE_SHAPES: AIC/AIV/MIX.
     //
-    // **Hot-path cost discipline.** Shared depth (PTO2ReadyQueue::size) is two
+    // **Hot-path cost discipline.** Shared depth (ChipReadyQueue::size) is two
     // atomic relaxed loads against cache lines that all peer sched threads also
     // write to (enqueue_pos and dequeue_pos bounce on every push + every pop).
     // With both phases emitting per iter that's cross-core loads × thousands of
@@ -959,7 +959,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     bool iter_shared_sampled = false;
     auto get_or_sample_shared = [&]() -> const int16_t * {
         if (!iter_shared_sampled) {
-            // Clamp to int16_t max before narrowing. PTO2_PROF_READYQUEUE_SIZE
+            // Clamp to int16_t max before narrowing. CHIP_PROF_READYQUEUE_SIZE
             // is in the low thousands today but could grow with platform
             // scaling — without clamp, sizes above 32767 wrap to negatives
             // and silently corrupt the snapshot.

@@ -84,7 +84,7 @@
 #define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH)
 
 // Ready queue
-#define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
+#define CHIP_READY_QUEUE_SIZE 65536  // Per-shape queue size
 
 // Cross-thread early-dispatch candidate queue (power of two). A single wide
 // producer can publish more candidates than there are physical cores, so the

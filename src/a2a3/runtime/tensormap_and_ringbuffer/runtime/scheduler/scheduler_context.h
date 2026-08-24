@@ -249,7 +249,7 @@ private:
     }
 
     int pop_ready_tasks_batch(
-        PTO2ReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+        ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
     );
 
     void build_payload(
@@ -335,7 +335,7 @@ private:
     );
 
     void dispatch_shape(
-        int32_t thread_idx, PTO2ReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
+        int32_t thread_idx, ChipReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
         CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
     );
 
@@ -401,7 +401,7 @@ private:
     bool has_idle_in_other_threads(int32_t self_thread_idx, ResourceShape shape) const;
 
     // True if mix tasks remain in the global MIX ready queue. Approximate —
-    // PTO2ReadyQueue::size() (see scheduler.h) snapshots its enqueue/dequeue
+    // ChipReadyQueue::size() (see scheduler.h) snapshots its enqueue/dequeue
     // positions with std::memory_order_relaxed and may interleave with concurrent
     // push/pop. A stale read here causes at most one
     // extra/missed AIC/AIV skip and self-corrects on the next loop iteration.

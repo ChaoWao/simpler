@@ -1,10 +1,10 @@
-# 2026-07 — Removing PTO2LocalReadyBuffer exposed a missing dcci in EP dispatch
+# 2026-07 — Removing LocalReadyBuffer exposed a missing dcci in EP dispatch
 
 ## Status
 
 **RESOLVED** in PR #1245. Root cause was a latent kernel bug (dispatch never
 flushed `recv_count_out` to HBM), unmasked by the dispatch-timing change from
-removing `PTO2LocalReadyBuffer`. Fixed by a one-line `dcci` in the example
+removing `LocalReadyBuffer`. Fixed by a one-line `dcci` in the example
 kernel; the local-buffer removal itself is correct. Onboard a2a3 3/3 pass after
 the fix. See "Fix" below.
 
@@ -110,7 +110,7 @@ because they go out through `TSTORE` (a real vector→GM write). `recv_count_out
 sits in cache; whether the downstream `local_expert` task's AICore sees it in
 HBM depended on incidental timing.
 
-Removing `PTO2LocalReadyBuffer` changed AICPU dispatch timing enough that
+Removing `LocalReadyBuffer` changed AICPU dispatch timing enough that
 local_expert now reads `recv_count_out` before dispatch's cached scalar store
 lands in HBM → every expert runs 0 rows → recv_y all-zero → combine faithfully
 pushes zeros → routed_y all-zero. Baseline timing happened to let the store

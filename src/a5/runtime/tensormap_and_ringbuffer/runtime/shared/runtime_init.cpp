@@ -52,13 +52,13 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
     // first slot cannot false-share with whatever region sits in front of us
     // (e.g. orchestrator tensormap heads written by the orch thread).
-    return arena.reserve(capacity * sizeof(PTO2ReadyQueueSlot), PTO2_ALIGN_SIZE);
+    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), PTO2_ALIGN_SIZE);
 }
 
-bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity) {
+bool ready_queue_init_data_from_layout(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity) {
     // Address the slots region for data writes without storing the pointer in
     // queue->slots — that field is set by ready_queue_wire_arena_pointers.
-    auto *slots_arena = static_cast<PTO2ReadyQueueSlot *>(arena.region_ptr(slots_off));
+    auto *slots_arena = static_cast<ChipReadyQueueSlot *>(arena.region_ptr(slots_off));
     queue->capacity = capacity;
     queue->mask = capacity - 1;
     queue->enqueue_pos.store(0, std::memory_order_relaxed);
@@ -72,11 +72,11 @@ bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena
     return true;
 }
 
-void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
-    queue->slots = static_cast<PTO2ReadyQueueSlot *>(arena.region_ptr(slots_off));
+void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
+    queue->slots = static_cast<ChipReadyQueueSlot *>(arena.region_ptr(slots_off));
 }
 
-void ready_queue_destroy(PTO2ReadyQueue *queue) {
+void ready_queue_destroy(ChipReadyQueue *queue) {
     // Arena owns the slots[] buffer; just forget the pointer.
     queue->slots = nullptr;
 }
@@ -137,18 +137,18 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena, int32_t dep_p
 SchedulerLayout
 SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]) {
     SchedulerLayout layout{};
-    layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
+    layout.ready_queue_capacity = CHIP_READY_QUEUE_SIZE;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         layout.dep_pool_capacities[r] = dep_pool_capacities[r];
     }
 
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
-    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }

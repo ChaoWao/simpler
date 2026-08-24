@@ -638,7 +638,7 @@ TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
     SharedMemoryHeader header{};
     SchedulerState scheduler{};
     scheduler.sm_header = &header;
-    PTO2ReadyQueueSlot queue_slots[2]{};
+    ChipReadyQueueSlot queue_slots[2]{};
     queue_slots[0].sequence.store(0, std::memory_order_relaxed);
     queue_slots[1].sequence.store(1, std::memory_order_relaxed);
     scheduler.graph_ready_queue.slots = queue_slots;
@@ -662,7 +662,7 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
     SharedMemoryHeader header{};
     SchedulerState scheduler{};
     scheduler.sm_header = &header;
-    PTO2ReadyQueueSlot queue_slots[2]{};
+    ChipReadyQueueSlot queue_slots[2]{};
     queue_slots[0].sequence.store(0, std::memory_order_relaxed);
     queue_slots[1].sequence.store(1, std::memory_order_relaxed);
     scheduler.graph_prepare_queue.slots = queue_slots;

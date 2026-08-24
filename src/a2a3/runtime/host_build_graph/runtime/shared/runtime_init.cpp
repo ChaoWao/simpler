@@ -36,13 +36,13 @@
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
     // first slot cannot false-share with whatever region sits in front of us.
-    return arena.reserve(capacity * sizeof(PTO2ReadyQueueSlot), PTO2_ALIGN_SIZE);
+    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), PTO2_ALIGN_SIZE);
 }
 
 // Initialize the queue header only. slots[] carries the sequence ramp push
 // compares against, but it lives past the uploaded range and is seeded on the
 // device by SchedulerState::seed_queue_slots(), so nothing writes it here.
-void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity) {
+void ready_queue_init_data_from_layout(ChipReadyQueue *queue, uint64_t capacity) {
     queue->capacity = capacity;
     queue->mask = capacity - 1;
     queue->enqueue_pos.store(0, std::memory_order_relaxed);
@@ -50,11 +50,11 @@ void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity)
     queue->max_occupancy.store(0, std::memory_order_relaxed);
 }
 
-void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
-    queue->slots = static_cast<PTO2ReadyQueueSlot *>(arena.region_ptr(slots_off));
+void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
+    queue->slots = static_cast<ChipReadyQueueSlot *>(arena.region_ptr(slots_off));
 }
 
-void ready_queue_destroy(PTO2ReadyQueue *queue) {
+void ready_queue_destroy(ChipReadyQueue *queue) {
     // Arena owns the slots[] buffer; just forget the pointer.
     queue->slots = nullptr;
 }
@@ -80,9 +80,9 @@ void SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
 SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     SchedulerLayout layout{};
-    layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
+    layout.ready_queue_capacity = CHIP_READY_QUEUE_SIZE;
 
-    // Fixed-capacity early-dispatch queues first, then the PTO2_READY_QUEUE_SIZE
+    // Fixed-capacity early-dispatch queues first, then the CHIP_READY_QUEUE_SIZE
     // ones. The big nine are the arena's last reservations so that the bytes bind
     // uploads stay one contiguous range no matter how much of them is in use.
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
@@ -90,14 +90,14 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     }
     layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
-    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
     // the payload and readiness is via completion_flags.
     return layout;
