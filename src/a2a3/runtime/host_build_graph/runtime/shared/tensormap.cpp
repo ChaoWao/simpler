@@ -105,6 +105,22 @@ bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t
     return true;
 }
 
+void PTO2TensorMap::reset() {
+    always_assert(buckets != nullptr && entry_pool != nullptr && task_entry_heads != nullptr);
+
+    for (int32_t i = 0; i < num_buckets; i++) {
+        buckets[i] = nullptr;
+    }
+    for (int32_t i = 0; i < task_window_size; i++) {
+        task_entry_heads[i] = nullptr;
+    }
+    // Entries are reached only through a bucket chain, and every chain is now empty, so
+    // the pool needs nothing: the next new_entry() bump-allocates from index 0 and puts
+    // the slot into the unlinked state, exactly as after init().
+    next_entry_idx = 0;
+    free_num = 0;
+}
+
 bool PTO2TensorMap::init_default(int32_t new_task_window_size) {
     return init(PTO2_TENSORMAP_NUM_BUCKETS, PTO2_TENSORMAP_POOL_SIZE, new_task_window_size);
 }

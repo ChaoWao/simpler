@@ -362,7 +362,42 @@ struct GraphRecordedNode {
     // Index into the recording's predicates, or -1 when the node carries none.
     int32_t predicate_index{-1};
     ArgsDumpTaskMetadata dump_metadata;
+
+    // Restore the state a fresh node has, without giving up `tensors`'s buffer -- which is
+    // the point of reusing a slot. A reused slot that keeps any field of the previous body
+    // records a Definition that body never had, and predicate_index and dump_metadata are
+    // written only on the paths that have one, so neither can be left to the fill.
+    //
+    // Field by field rather than `*this = GraphRecordedNode{}`: the latter is immune to
+    // fields added later, but it costs a second write of the whole struct on every node
+    // and measured 350-700 us per bind on dsv4's 1679 nodes. The static_assert below is
+    // the cheap half of that guarantee -- adding a field breaks the build here, which is
+    // where the reader is told to extend this function.
+    void reset() {
+        kernel_ids = {};
+        active_mask = {};
+        task_attrs = {};
+        logical_block_num = 1;
+        total_required_subtasks = 0;
+        total_output_size = 0;
+        record_packed_base = 0;
+        tensor_source_offset = 0;
+        scalar_offset = 0;
+        scalar_count = 0;
+        fanin_offset = 0;
+        fanin_count = 0;
+        predicate_index = -1;
+        dump_metadata = {};
+    }
 };
+
+// reset() above lists this struct's fields by hand, and a field it forgets is carried
+// from the previous body into the next recording -- silently, as a Definition that body
+// never had. Adding a field changes this size, so the build stops here instead.
+static_assert(
+    sizeof(GraphRecordedNode) == 120, "GraphRecordedNode gained or lost a field: extend reset() to match, then "
+                                      "update this size"
+);
 
 // One recorded node's scratch output window. reserve_heap_scratch is a pure bump
 // and a node stores the aligned size it advanced by, so consecutive windows abut:
@@ -375,19 +410,38 @@ struct GraphRecordedOutputRange {
     uint32_t node_index;
 };
 
+// The Graph boundary as the submitting thread captured it, deep-copied because the
+// caller only lends its arguments for the duration of the submit call. It anchors
+// boundary scalar sources while the main thread submits outer shells from later
+// invocation arguments, and later same-key submissions compare against it under
+// recording_mutex — so it belongs to the in-flight entry, not to the recorder's
+// storage, which the submitting thread must never touch.
+struct GraphBoundary {
+    const GraphTaskArgs *args{nullptr};
+    int32_t scalar_count{0};
+    std::vector<ChipTensor> tensors;
+    std::vector<TensorArgType> types;
+};
+
+// Storage for one recorded body, owned by the recorder thread and reset per
+// recording rather than allocated per recording — see recorder_recording().
 struct GraphRecording {
     uint64_t full_key{0};
     int32_t start_local_task_id{0};
     uint64_t next_virtual_offset{0};
-    // Worker-owned deep copy of the first Graph boundary. It stays valid from
-    // graph_prepare through graph_end and anchors boundary scalar sources while
-    // the main thread submits outer shells from later invocation arguments.
-    const GraphTaskArgs *boundary_args{nullptr};
-    int32_t boundary_scalar_count{0};
+    // The in-flight entry's boundary copy, bound at graph_prepare and valid until
+    // graph_end/graph_abort. Not owned here: the submitting thread reads it for
+    // boundary matching while this thread records.
+    const GraphBoundary *boundary{nullptr};
     bool unsupported{false};
-    std::vector<ChipTensor> boundary_tensors;
-    std::vector<TensorArgType> boundary_types;
     std::vector<GraphRecordedNode> nodes;
+    // How many of `nodes` this recording has filled. The array itself is never cleared:
+    // each slot's `tensors` is the one allocation a recorded node makes, and a node
+    // carries at most CORE_MAX_TENSOR_ARGS of them, so a slot's buffer is bounded at
+    // 32 x sizeof(ChipTensor) = 4 KB and a thread's retained node storage at
+    // GRAPH_MAX_NODES x 4 KB. Keeping them costs that bound once; clearing them costs
+    // one allocation per node per recording, forever.
+    size_t node_count{0};
     // Flat per-node arrays, indexed by the ranges on GraphRecordedNode. Held
     // here rather than on each node so recording a graph pays a handful of
     // amortized growths instead of one allocation per node per array.
@@ -399,8 +453,8 @@ struct GraphRecording {
     // Indexed by GraphRecordedNode::predicate_index; only predicated nodes
     // contribute an entry.
     std::vector<GraphRecordedPredicate> predicates;
-    // Hazard state for the recorded body, owned per recording because several
-    // graphs record at once, each on its own thread.
+    // Hazard state for the recorded body, owned per recorder thread because
+    // several graphs record at once, each on its own thread.
     //
     // The ordinary submit path reads a task's producers out of orch->tensor_map
     // (compute_task_fanin, STEP 3) and publishes the task's writes back into it
@@ -423,6 +477,11 @@ struct GraphRecording {
     int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
+
+    const GraphTaskArgs *boundary_args() const { return boundary == nullptr ? nullptr : boundary->args; }
+    int32_t boundary_scalar_count() const { return boundary == nullptr ? 0 : boundary->scalar_count; }
+    const std::vector<ChipTensor> &boundary_tensors() const { return boundary->tensors; }
+    const std::vector<TensorArgType> &boundary_types() const { return boundary->types; }
 };
 
 struct GraphPendingUpload {
@@ -438,9 +497,14 @@ enum class GraphRecordingStatus : uint8_t { RECORDING = 0, READY = 1, FAILED = 2
 // unique_ptr, so a rehash of the owning map never moves one: the recording
 // thread is handed this address at graph_begin and dereferences it without
 // taking recording_mutex.
+//
+// The entry carries the boundary and the status, not the recorded body: the body's
+// storage belongs to the recorder thread that will fill it (recorder_recording()), so
+// nothing here is sized by the graph.
 struct GraphInflightRecording {
     uint64_t full_key{0};
-    std::unique_ptr<GraphRecording> recording;
+    int32_t start_local_task_id{0};
+    GraphBoundary boundary;
     // Atomic because graph_prepare reads it on the recording thread without
     // taking recording_mutex, by design: acquiring the mutex there lets a
     // main-thread burst of same-key submissions starve the thread before it can
@@ -515,15 +579,15 @@ bool graph_tensor_exact(const ChipTensor &lhs, const ChipTensor &rhs) {
 bool graph_tensor_from_boundary(
     const GraphRecording &recording, const ChipTensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
-    for (size_t i = 0; i < recording.boundary_tensors.size(); ++i) {
-        if (!graph_tensor_exact(tensor, recording.boundary_tensors[i])) continue;
+    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
+        if (!graph_tensor_exact(tensor, recording.boundary_tensors()[i])) continue;
         source->source = GraphRecordedTensorSource::BOUNDARY_EXACT;
         source->source_index = i;
         source->packed_offset = 0;
         return true;
     }
-    for (size_t i = 0; i < recording.boundary_tensors.size(); ++i) {
-        const ChipTensor &boundary = recording.boundary_tensors[i];
+    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
+        const ChipTensor &boundary = recording.boundary_tensors()[i];
         if (tensor.buffer.addr != boundary.buffer.addr || tensor.buffer.size != boundary.buffer.size ||
             tensor.start_offset < boundary.start_offset) {
             continue;
@@ -539,19 +603,19 @@ bool graph_tensor_from_boundary(
 template <typename ArgT>
 GraphRecordedScalarSourceRef
 graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t scalar_index) {
-    if (recording.boundary_args == nullptr) return {};
+    if (recording.boundary_args() == nullptr) return {};
     // Identity, not type: an internal node's Arg and the boundary Arg have
     // different capacities, so compare the addresses through void.
-    if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args) &&
-        scalar_index < recording.boundary_args->scalar_count()) {
+    if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args()) &&
+        scalar_index < recording.boundary_args()->scalar_count()) {
         return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(scalar_index)};
     }
 
     const void *source = args.scalar_source(scalar_index);
     const void *invalidated_source = args.invalidated_scalar_source(scalar_index);
     if (source == nullptr && invalidated_source == nullptr) return {};
-    for (int32_t i = 0; i < recording.boundary_args->scalar_count(); ++i) {
-        const void *boundary_source = static_cast<const void *>(&recording.boundary_args->scalar(i));
+    for (int32_t i = 0; i < recording.boundary_args()->scalar_count(); ++i) {
+        const void *boundary_source = static_cast<const void *>(&recording.boundary_args()->scalar(i));
         if (source == boundary_source) {
             return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(i)};
         }
@@ -574,14 +638,79 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 
 // Stand the recording's hazard map up on its own allocation. Failure is
-// reported to the caller, which is still before the outer shell is submitted and
-// so can still take the ordinary path, rather than producing a Definition with
-// inferred edges missing.
+// reported to the caller, which abandons the recording rather than producing a
+// Definition with inferred edges missing.
 bool graph_recording_init_tensor_map(GraphRecording &recording) {
     if (!recording.tensor_map.init(PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
         return false;
     }
     recording.tensor_map_ready = true;
+    return true;
+}
+
+// The recorder thread's own storage for the body it is recording, and the reason none
+// of this is allocated per recording.
+//
+// A recorder thread outlives the bind that first used it: the pool parks
+// kPrewarmedWorkerCount threads at callable registration and keeps them across runs
+// (GraphAsyncRecordingState in orchestration_api.h). Its storage now does too. What a
+// recording needs is a hazard map of 2.17 MB and seven flat arrays; standing those up
+// per recording made the first touch of every page a minor fault, and paid it again on
+// every bind because the memory went back to the kernel in between — with the
+// allocation itself sitting on the submitting thread inside graph_begin, between two
+// outer shells. Held per thread instead, the pages fault once in the process's life and
+// a recording starts by resetting what is already resident.
+//
+// This retains no content across recordings: reset() clears every array and empties the
+// map. Only the pages stay.
+//
+// Safe as a thread_local because a thread records one body at a time: graph_prepare
+// refuses to bind while this thread already has a recording active, so a Graph nested
+// inside a recorded body takes the ordinary path rather than claiming this storage
+// twice.
+GraphRecording &recorder_recording() {
+    static thread_local GraphRecording storage;
+    return storage;
+}
+
+// Drop this thread's recording's view of an in-flight entry's boundary. Called where a
+// recording ends, because the entry does not outlive graph_commit while the storage does.
+void unbind_recorder_boundary() {
+    if (g_active_graph_recording != nullptr) g_active_graph_recording->boundary = nullptr;
+}
+
+// Bind this thread's storage to one in-flight entry and empty it. Returns false when the
+// hazard map cannot be stood up, which is only reachable on the thread's first recording.
+bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecording &entry) {
+    // A body over GRAPH_MAX_NODES is abandoned, but it still grew every array to its real
+    // size while it ran. Handing that to the next recording would retain storage for a
+    // Definition that can never be published, unbounded, for the process's life -- so an
+    // over-cap recording gives its storage back instead of passing it on. This is what
+    // makes the bound documented on GraphRecording::node_count true rather than nominal.
+    if (recording.nodes.size() > GRAPH_MAX_NODES) {
+        recording = GraphRecording{};
+    }
+    if (!recording.tensor_map_ready && !graph_recording_init_tensor_map(recording)) {
+        return false;
+    }
+    recording.tensor_map.reset();
+    recording.full_key = entry.full_key;
+    recording.start_local_task_id = entry.start_local_task_id;
+    recording.boundary = &entry.boundary;
+    recording.next_virtual_offset = 0;
+    recording.unsupported = false;
+    recording.scope_stack_top = -1;
+    recording.manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    // clear() keeps each array's capacity, which is the point: after the first recording
+    // on this thread the arrays are already as large as this workload's bodies need.
+    // nodes is deliberately not cleared: see GraphRecording::node_count.
+    recording.node_count = 0;
+    recording.tensor_sources.clear();
+    recording.scalars.clear();
+    recording.scalar_sources.clear();
+    recording.internal_fanins.clear();
+    recording.output_ranges.clear();
+    recording.predicates.clear();
     return true;
 }
 
@@ -692,10 +821,11 @@ T *graph_image_section(std::vector<std::byte> *image, uint32_t offset) {
 }
 
 bool graph_build_definition(const GraphRecording &recording, std::vector<std::byte> *image) {
-    if (image == nullptr || recording.unsupported || recording.nodes.empty() ||
-        recording.nodes.size() > GRAPH_MAX_NODES || recording.boundary_tensors.empty() ||
-        recording.boundary_tensors.size() > UINT16_MAX ||
-        recording.boundary_tensors.size() != recording.boundary_types.size() || recording.boundary_args == nullptr) {
+    if (image == nullptr || recording.unsupported || recording.node_count == 0 ||
+        recording.node_count > GRAPH_MAX_NODES || recording.boundary_tensors().empty() ||
+        recording.boundary_tensors().size() > UINT16_MAX ||
+        recording.boundary_tensors().size() != recording.boundary_types().size() ||
+        recording.boundary_args() == nullptr) {
         return false;
     }
 
@@ -704,7 +834,10 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     size_t total_fanins = 0;
     size_t root_count = 0;
     size_t predicate_count = 0;
-    for (const GraphRecordedNode &source : recording.nodes) {
+    // node_count, not nodes.size(): the array keeps the slots a longer body left behind,
+    // and those are not part of this recording.
+    for (size_t node = 0; node < recording.node_count; ++node) {
+        const GraphRecordedNode &source = recording.nodes[node];
         if (source.tensors.size() > UINT32_MAX - total_tensors || source.scalar_count > UINT32_MAX - total_scalars ||
             source.fanin_count > UINT32_MAX - total_fanins ||
             source.tensor_source_offset > recording.tensor_sources.size() ||
@@ -727,11 +860,11 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
 
     GraphDefinition definition{};
     definition.full_key = recording.full_key;
-    definition.task_count = static_cast<uint32_t>(recording.nodes.size());
+    definition.task_count = static_cast<uint32_t>(recording.node_count);
     definition.edge_count = static_cast<uint32_t>(total_fanins);
     definition.root_count = static_cast<uint32_t>(root_count);
-    definition.boundary_count = static_cast<uint32_t>(recording.boundary_tensors.size());
-    definition.boundary_scalar_count = static_cast<uint32_t>(recording.boundary_scalar_count);
+    definition.boundary_count = static_cast<uint32_t>(recording.boundary_tensors().size());
+    definition.boundary_scalar_count = static_cast<uint32_t>(recording.boundary_scalar_count());
     definition.tensor_arg_count = static_cast<uint32_t>(total_tensors);
     definition.scalar_arg_count = static_cast<uint32_t>(total_scalars);
     definition.predicate_count = static_cast<uint32_t>(predicate_count);
@@ -746,19 +879,19 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
 
     size_t image_bytes = sizeof(GraphDefinition);
-    if (!graph_layout_section<uint32_t>(recording.nodes.size() + 1, &image_bytes, &definition.off_fanout_offsets) ||
+    if (!graph_layout_section<uint32_t>(recording.node_count + 1, &image_bytes, &definition.off_fanout_offsets) ||
         !graph_layout_section<uint16_t>(total_fanins, &image_bytes, &definition.off_fanout_indices) ||
-        !graph_layout_section<uint32_t>(recording.nodes.size() + 1, &image_bytes, &definition.off_fanin_offsets) ||
+        !graph_layout_section<uint32_t>(recording.node_count + 1, &image_bytes, &definition.off_fanin_offsets) ||
         !graph_layout_section<uint16_t>(total_fanins, &image_bytes, &definition.off_fanin_indices) ||
         !graph_layout_section<uint16_t>(root_count, &image_bytes, &definition.off_root_indices) ||
-        !graph_layout_section<uint64_t>(recording.nodes.size(), &image_bytes, &definition.off_node_offsets) ||
-        !graph_layout_section<GraphNodeDefinition>(recording.nodes.size(), &image_bytes, &definition.off_nodes) ||
+        !graph_layout_section<uint64_t>(recording.node_count, &image_bytes, &definition.off_node_offsets) ||
+        !graph_layout_section<GraphNodeDefinition>(recording.node_count, &image_bytes, &definition.off_nodes) ||
         !graph_layout_section<GraphTensor>(total_tensors, &image_bytes, &definition.off_tensors) ||
         !graph_layout_section<GraphTensorSourceRef>(total_tensors, &image_bytes, &definition.off_tensor_sources) ||
         !graph_layout_section<uint64_t>(total_scalars, &image_bytes, &definition.off_scalars) ||
         !graph_layout_section<GraphScalarSourceRef>(total_scalars, &image_bytes, &definition.off_scalar_sources) ||
         !graph_layout_section<GraphBoundarySignature>(
-            recording.boundary_tensors.size(), &image_bytes, &definition.off_boundary_signatures
+            recording.boundary_tensors().size(), &image_bytes, &definition.off_boundary_signatures
         ) ||
         !graph_layout_section<GraphPredicate>(predicate_count, &image_bytes, &definition.off_predicates)) {
         return false;
@@ -790,7 +923,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     size_t root_cursor = 0;
     size_t predicate_cursor = 0;
     fanin_offsets[0] = 0;
-    for (size_t i = 0; i < recording.nodes.size(); ++i) {
+    for (size_t i = 0; i < recording.node_count; ++i) {
         const GraphRecordedNode &source = recording.nodes[i];
         if (source.total_output_size > static_cast<size_t>(INT32_MAX) ||
             source.tensors.size() > static_cast<size_t>(INT32_MAX) ||
@@ -852,7 +985,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
                 graph_pack_scalar_source(recording.scalar_sources[source.scalar_offset + scalar_index]);
             if (!packed_source.has_value() ||
                 (packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) &&
-                 packed_source->source_index >= recording.boundary_args->scalar_count())) {
+                 packed_source->source_index >= recording.boundary_args()->scalar_count())) {
                 return false;
             }
             scalar_sources[scalar_cursor] = *packed_source;
@@ -866,27 +999,27 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         return false;
     }
     definition.required_heap = required_heap;
-    for (size_t i = 0; i < recording.nodes.size(); ++i)
+    for (size_t i = 0; i < recording.node_count; ++i)
         fanout_offsets[i + 1] += fanout_offsets[i];
-    std::vector<uint32_t> cursors(fanout_offsets, fanout_offsets + recording.nodes.size());
-    for (size_t consumer = 0; consumer < recording.nodes.size(); ++consumer) {
+    std::vector<uint32_t> cursors(fanout_offsets, fanout_offsets + recording.node_count);
+    for (size_t consumer = 0; consumer < recording.node_count; ++consumer) {
         for (uint32_t f = fanin_offsets[consumer]; f < fanin_offsets[consumer + 1]; ++f) {
             const size_t producer = fanin_indices[f];
             fanout_indices[cursors[producer]++] = static_cast<uint16_t>(consumer);
         }
     }
-    for (size_t i = 0; i < recording.boundary_tensors.size(); ++i) {
-        const ChipTensor &tensor = recording.boundary_tensors[i];
+    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
+        const ChipTensor &tensor = recording.boundary_tensors()[i];
         if (tensor.ndims > MAX_TENSOR_DIMS) return false;
         uint16_t alias_rep = static_cast<uint16_t>(i);
         for (size_t j = 0; j < i; ++j) {
-            if (recording.boundary_tensors[j].buffer.addr == tensor.buffer.addr &&
-                recording.boundary_tensors[j].buffer.size == tensor.buffer.size) {
+            if (recording.boundary_tensors()[j].buffer.addr == tensor.buffer.addr &&
+                recording.boundary_tensors()[j].buffer.size == tensor.buffer.size) {
                 alias_rep = static_cast<uint16_t>(j);
                 break;
             }
         }
-        signatures[i] = graph_boundary_signature(tensor, recording.boundary_types[i], alias_rep);
+        signatures[i] = graph_boundary_signature(tensor, recording.boundary_types()[i], alias_rep);
     }
     std::memcpy(image->data(), &definition, sizeof(definition));
     definition.content_hash = graph_definition_content_hash(image->data(), image->size());
@@ -1531,19 +1664,19 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
     return true;
 }
 
-bool graph_recording_boundary_matches(const GraphRecording &recording, const GraphTaskArgs &args) {
-    if (args.scalar_count() != recording.boundary_scalar_count || args.explicit_dep_count() != 0 ||
-        args.tensor_count() != static_cast<int32_t>(recording.boundary_tensors.size()) ||
-        recording.boundary_tensors.size() != recording.boundary_types.size()) {
+bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &args) {
+    if (args.scalar_count() != boundary.scalar_count || args.explicit_dep_count() != 0 ||
+        args.tensor_count() != static_cast<int32_t>(boundary.tensors.size()) ||
+        boundary.tensors.size() != boundary.types.size()) {
         return false;
     }
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
-        const ChipTensor &expected = recording.boundary_tensors[static_cast<size_t>(i)];
+        const ChipTensor &expected = boundary.tensors[static_cast<size_t>(i)];
         const ChipTensor &actual = args.tensor(i).ref();
         if (actual.ndims > MAX_TENSOR_DIMS || actual.buffer.size != expected.buffer.size ||
             actual.ndims != expected.ndims || actual.dtype != expected.dtype ||
-            args.tag(i) != recording.boundary_types[static_cast<size_t>(i)] ||
-            actual.manual_dep != expected.manual_dep || actual.is_contiguous != expected.is_contiguous ||
+            args.tag(i) != boundary.types[static_cast<size_t>(i)] || actual.manual_dep != expected.manual_dep ||
+            actual.is_contiguous != expected.is_contiguous ||
             !std::equal(
                 std::begin(actual.shapes), std::begin(actual.shapes) + actual.ndims, std::begin(expected.shapes)
             ) ||
@@ -1555,7 +1688,7 @@ bool graph_recording_boundary_matches(const GraphRecording &recording, const Gra
         uint16_t expected_alias = static_cast<uint16_t>(i);
         uint16_t actual_alias = static_cast<uint16_t>(i);
         for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &expected_other = recording.boundary_tensors[static_cast<size_t>(j)];
+            const ChipTensor &expected_other = boundary.tensors[static_cast<size_t>(j)];
             if (expected_other.buffer.addr == expected.buffer.addr &&
                 expected_other.buffer.size == expected.buffer.size) {
                 expected_alias = static_cast<uint16_t>(j);
@@ -1810,7 +1943,7 @@ TaskOutputTensors graph_record_submit_node(
     TaskOutputTensors result;
     GraphRecording &recording = *active_graph_recording(orch);
 
-    const size_t node_index = recording.nodes.size();
+    const size_t node_index = recording.node_count;
     // A recorded node's index equals its local task id minus the recording
     // baseline, so its synthetic id keeps classification and explicit-dep
     // arithmetic identical to the ordinary path.
@@ -1833,7 +1966,15 @@ TaskOutputTensors graph_record_submit_node(
     const uintptr_t packed_base_addr = GRAPH_RECORD_VIRTUAL_BASE + recording.next_virtual_offset;
     recording.next_virtual_offset += aligned_output;
 
-    GraphRecordedNode node;
+    // The node is filled in place, in the slot it will keep. Reusing the slot is what
+    // keeps its `tensors` buffer across recordings; reset() puts the rest of the slot
+    // back to a fresh node's state. Growing `nodes` moves the slots, but a slot's
+    // borrowed output addresses live in that heap buffer and a move only transfers its
+    // pointer, so they stay valid -- the same reason the old push_back(std::move(node))
+    // was sound.
+    if (node_index >= recording.nodes.size()) recording.nodes.emplace_back();
+    GraphRecordedNode &node = recording.nodes[node_index];
+    node.reset();
     node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIC)] = aic_kernel_id;
     node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIV0)] = aiv0_kernel_id;
     node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIV1)] = aiv1_kernel_id;
@@ -1861,7 +2002,12 @@ TaskOutputTensors graph_record_submit_node(
     // the caller's ChipTensor; outputs materialize from the create-info onto the
     // scratch buffer and carry this node's owner id.
     const int32_t tensor_count = args.tensor_count();
-    node.tensors.resize(static_cast<size_t>(tensor_count));
+    // assign(), not resize(): a reused slot's elements would otherwise keep whatever the
+    // previous body left in the fields the fill does not reach. ChipTensor::init_from
+    // writes strides only up to the new tensor's ndims, so a narrower tensor in the same
+    // slot would inherit the wider one's trailing strides. Value-initializing every
+    // element is what resize() did on a freshly allocated vector, and it keeps the buffer.
+    node.tensors.assign(static_cast<size_t>(tensor_count), ChipTensor{});
     for (int32_t i = 0; i < tensor_count; ++i) {
         ChipTensor &slot_tensor = node.tensors[static_cast<size_t>(i)];
         if (args.tag(i) != TensorArgType::OUTPUT) {
@@ -2017,7 +2163,8 @@ TaskOutputTensors graph_record_submit_node(
         }
         if (dep_index < 0) {
             const bool represented_by_boundary = std::any_of(
-                recording.boundary_tensors.begin(), recording.boundary_tensors.end(), [dep](const ChipTensor &tensor) {
+                recording.boundary_tensors().begin(), recording.boundary_tensors().end(),
+                [dep](const ChipTensor &tensor) {
                     return tensor.owner_task_id == dep;
                 }
             );
@@ -2038,7 +2185,10 @@ TaskOutputTensors graph_record_submit_node(
         always_assert(recording.output_ranges.empty() || recording.output_ranges.back().end <= begin);
         recording.output_ranges.push_back({begin, end, static_cast<uint32_t>(node_index)});
     }
-    recording.nodes.push_back(std::move(node));
+    // Published last, as push_back(std::move(node)) used to be: until this advances, the
+    // slot is not part of the recording, so nothing that scans the recorded nodes can see
+    // the node being built.
+    recording.node_count = node_index + 1;
     ORCH_PHASE_END(HostOrchPhase::RecordNode, task_id.raw);
     return result;
 }
@@ -2095,12 +2245,11 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
 
     // This key is already recording: publish another zero-heap shell against it.
     // A recording that ended has its Definition in the cache, so reaching here
-    // with no recording object means the recording failed and this key is spent.
+    // with a spent status means the recording failed and this key is spent.
     auto inflight_it = state->inflight.find(full_key);
     if (inflight_it != state->inflight.end()) {
         GraphInflightRecording &entry = *inflight_it->second;
-        if (entry.status() != GraphRecordingStatus::RECORDING || entry.recording == nullptr ||
-            !graph_recording_boundary_matches(*entry.recording, args)) {
+        if (entry.status() != GraphRecordingStatus::RECORDING || !graph_boundary_matches(entry.boundary, args)) {
             return result;
         }
         TaskId submitted = TaskId::invalid();
@@ -2131,23 +2280,20 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
         return result;
     }
 
-    auto recording = std::make_unique<GraphRecording>();
-    recording->full_key = full_key;
-    recording->start_local_task_id = orch->task_allocator.active_count();
-    if (!graph_recording_init_tensor_map(*recording)) {
-        LOG_WARN("[GraphExecution] recording hazard map allocation failed; using ordinary path");
-        return result;
-    }
-    recording->boundary_scalar_count = args.scalar_count();
-    recording->boundary_tensors.reserve(static_cast<size_t>(args.tensor_count()));
-    recording->boundary_types.reserve(static_cast<size_t>(args.tensor_count()));
-    for (int32_t i = 0; i < args.tensor_count(); ++i) {
-        recording->boundary_tensors.push_back(args.tensor(i).ref());
-        recording->boundary_types.push_back(args.tag(i));
-    }
+    // Only the boundary is captured here. The recorded body's storage belongs to the
+    // recorder thread that picks the job up (bound at graph_prepare), so this path
+    // allocates the boundary copy and nothing else — a megabyte-scale hazard map stood
+    // up here would sit on the submitting thread, between two outer shells.
     auto entry = std::make_unique<GraphInflightRecording>();
     entry->full_key = full_key;
-    entry->recording = std::move(recording);
+    entry->start_local_task_id = orch->task_allocator.active_count();
+    entry->boundary.scalar_count = args.scalar_count();
+    entry->boundary.tensors.reserve(static_cast<size_t>(args.tensor_count()));
+    entry->boundary.types.reserve(static_cast<size_t>(args.tensor_count()));
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        entry->boundary.tensors.push_back(args.tensor(i).ref());
+        entry->boundary.types.push_back(args.tag(i));
+    }
     GraphInflightRecording *entry_ptr = entry.get();
     state->inflight.emplace(full_key, std::move(entry));
     state->inflight_count.store(state->inflight.size(), std::memory_order_release);
@@ -2185,23 +2331,31 @@ bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTas
     // fields it binds below. Taking that mutex here lets the main thread's
     // same-key submit burst starve prepare and collapse the intended overlap, so
     // the status read goes through the atomic instead.
-    if (entry->status() != GraphRecordingStatus::RECORDING || entry->recording == nullptr) {
+    if (entry->status() != GraphRecordingStatus::RECORDING) {
         return false;
     }
-    // The recording was created from this very boundary at graph_begin, and the
-    // handle names that recording rather than being searched for, so a mismatch
-    // here is unreachable. The comparison walks up to 128 ChipTensor descriptors on
-    // the thread whose start-up latency this path exists to keep short, so it is an
-    // assertion: debug builds still catch a boundary that stopped matching, release
-    // builds compile it out.
+    // The entry was created from this very boundary at graph_begin, and the handle names
+    // that entry rather than being searched for, so a mismatch here is unreachable. The
+    // comparison walks up to 128 ChipTensor descriptors on the thread whose start-up
+    // latency this path exists to keep short, so it is an assertion: debug builds still
+    // catch a boundary that stopped matching, release builds compile it out.
     debug_assert(
-        graph_recording_boundary_matches(*entry->recording, args) &&
-        "the recording thread's boundary copy must match the boundary graph_begin recorded"
+        graph_boundary_matches(entry->boundary, args) &&
+        "the entry's boundary copy must match the boundary graph_begin recorded"
     );
+    // This thread's own storage, emptied rather than allocated -- see
+    // recorder_recording(). Failure is reachable only on this thread's first recording,
+    // where the hazard map is stood up; the caller then aborts the recording, and the
+    // outer shell it already submitted replays nothing.
+    GraphRecording &recording = recorder_recording();
+    if (!graph_recording_reset(recording, *entry)) {
+        LOG_WARN("%s", "[GraphExecution] recording hazard map allocation failed; recording abandoned");
+        return false;
+    }
     args.anchor_scalar_sources();
-    entry->recording->boundary_args = &args;
+    entry->boundary.args = &args;
     g_active_graph_entry = entry;
-    g_active_graph_recording = entry->recording.get();
+    g_active_graph_recording = &recording;
     g_active_graph_owner = state;
     return true;
 }
@@ -2212,9 +2366,14 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
     if (state == nullptr || entry == nullptr) return;
     {
         std::scoped_lock lock(state->recording_mutex);
-        entry->recording.reset();
         entry->set_status(GraphRecordingStatus::FAILED);
     }
+    // The storage outlives the entry it was bound to, and graph_commit destroys the
+    // entries, so leaving the pointer behind parks a stale one in thread_local state for
+    // the rest of the process. The next graph_prepare rebinds before anything reads it,
+    // which is why this is hygiene rather than a fix -- but boundary_tensors() does not
+    // null-check, so a future reader outside a recording would follow it.
+    unbind_recorder_boundary();
     g_active_graph_entry = nullptr;
     g_active_graph_recording = nullptr;
     g_active_graph_owner = nullptr;
@@ -2233,7 +2392,7 @@ bool PTO2OrchestratorState::graph_end() {
     ORCH_PHASE_START();
     const bool built = graph_build_definition(*recording, &definition);
     if (built) {
-        ORCH_PHASE_END(HostOrchPhase::BuildDefinition, recording->nodes.size());
+        ORCH_PHASE_END(HostOrchPhase::BuildDefinition, recording->node_count);
     }
     const GraphDefinition *header = built ? graph_definition(definition) : nullptr;
     if (header == nullptr) {
@@ -2256,8 +2415,8 @@ bool PTO2OrchestratorState::graph_end() {
             entry->set_status(GraphRecordingStatus::READY);
         }
         ready = entry->status() == GraphRecordingStatus::READY;
-        entry->recording.reset();
     }
+    unbind_recorder_boundary();
     g_active_graph_entry = nullptr;
     g_active_graph_recording = nullptr;
     g_active_graph_owner = nullptr;

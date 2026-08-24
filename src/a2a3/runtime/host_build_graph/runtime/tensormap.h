@@ -445,6 +445,22 @@ struct PTO2TensorMap {
     bool init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size);
 
     /**
+     * Empty an already-initialized map without touching its allocations.
+     *
+     * Same post-state as init(): every bucket and task-chain head null, both pool
+     * cursors at zero, the entry pool left to init-on-write. Costs
+     * O(num_buckets + task_window_size) stores against pages that are already
+     * resident, where init() pays the allocation and the first touch of each. A
+     * caller that records one body after another on the same map uses this.
+     *
+     * Keeps the bucket count and task window init() reserved. Taking a new window
+     * here would have to be checked against the reserved length rather than the
+     * current one, and nothing tracks the reserved length once a smaller window has
+     * been set -- so the sizes stay init()'s and this takes no argument.
+     */
+    void reset();
+
+    /**
      * Same as init() with default sizes (PTO2_TENSORMAP_NUM_BUCKETS,
      * PTO2_TENSORMAP_POOL_SIZE).
      */

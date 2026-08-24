@@ -117,6 +117,56 @@ TEST_F(HbgTensorMapTest, PoolOccupancyOnlyGrows) {
     }
 }
 
+// A recorder thread empties its map between bodies instead of allocating a new one, so
+// reset() must leave it indistinguishable from a freshly init'd map: nothing found, the
+// whole pool free, and the next body's inserts starting from entry 0. A leftover bucket
+// chain here would give the next Definition a producer the body never had.
+TEST_F(HbgTensorMapTest, ResetLeavesTheMapAsFreshlyInitialized) {
+    ChipTensor t = make_test_tensor(0x1000, 256);
+    for (int32_t i = 0; i < 8; i++) {
+        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), TaskId::make(0, i));
+    }
+    tmap.insert(t, TaskId::make(0, 9));
+    ASSERT_EQ(tmap.current_used(), 9);
+
+    tmap.reset();
+
+    EXPECT_EQ(tmap.current_used(), 0);
+    EXPECT_EQ(tmap.valid_count(), 0);
+    EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
+    EXPECT_EQ(tmap.pool_capacity(), POOL_SIZE);
+    TestLookupResult after_reset;
+    run_lookup(tmap, t, after_reset);
+    EXPECT_EQ(after_reset.count, 0);
+
+    // And it is usable, not merely empty: the second body's producer is the only one a
+    // lookup can reach.
+    tmap.insert(t, TaskId::make(0, 3));
+    EXPECT_EQ(tmap.current_used(), 1);
+    TestLookupResult second_body;
+    run_lookup(tmap, t, second_body);
+    ASSERT_EQ(second_body.count, 1);
+    EXPECT_EQ(second_body.entries[0].entry->producer_task_id, TaskId::make(0, 3));
+}
+
+// Reset is reachable any number of times, including on a map that was never inserted
+// into, and does not depend on the task window having been narrowed or widened -- it
+// keeps the sizes init() reserved.
+TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
+    tmap.reset();
+    tmap.reset();
+    EXPECT_EQ(tmap.pool_capacity(), POOL_SIZE);
+    EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
+
+    // A task id that aliases slot 0 still lands in a working chain after two resets.
+    ChipTensor t = make_test_tensor(0x2000, 128);
+    tmap.insert(t, TaskId::make(0, WINDOW_SIZE));
+    TestLookupResult result;
+    run_lookup(tmap, t, result);
+    ASSERT_EQ(result.count, 1);
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make(0, WINDOW_SIZE));
+}
+
 // Filling the pool drives free_entries() to zero. No device-completion watermark
 // can free it, so ensure_tensormap_capacity() must fail immediately instead of
 // waiting for asynchronous reclaim that HBG does not have.
