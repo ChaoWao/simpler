@@ -450,7 +450,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         task.packed_buffer_end = reinterpret_cast<void *>(outer_base + node_offset + output_bytes);
 
         slot.reset_for_reuse();
-        slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+        slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
         slot.bind_buffers(&payload, &task);
         slot.active_mask = ActiveMask(source.active_mask);
         slot.task_attrs = TaskAttrs(source.task_attrs);

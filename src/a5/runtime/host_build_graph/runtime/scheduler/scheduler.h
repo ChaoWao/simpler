@@ -902,7 +902,7 @@ struct SchedulerState {
         for (uint32_t edge = begin; edge < end; ++edge) {
             const uint16_t producer_index = execution.fanin_indices[edge];
             const ChipTaskSlotState &producer = execution.node_at(producer_index).slot;
-            if (producer.task_state.load(std::memory_order_acquire) != PTO2_TASK_COMPLETED) {
+            if (producer.task_state.load(std::memory_order_acquire) != CHIP_TASK_COMPLETED) {
                 return static_cast<int32_t>(producer_index);
             }
         }

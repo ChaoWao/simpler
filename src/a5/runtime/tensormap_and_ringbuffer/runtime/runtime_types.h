@@ -135,10 +135,10 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  *   COMPLETED->CONSUMED:  fanout_refcount == fanout_count && state == COMPLETED
  */
 typedef enum {
-    PTO2_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
-    PTO2_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
-    PTO2_TASK_CONSUMED = 2    // Output fully consumed, buffers can be released
-} PTO2TaskState;
+    CHIP_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
+    CHIP_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
+    CHIP_TASK_CONSUMED = 2    // Output fully consumed, buffers can be released
+} ChipTaskState;
 
 /**
  * Result of a unified task allocation.
@@ -458,18 +458,18 @@ static_assert(
 // task pinned by any open scope on that ring.
 static constexpr uint32_t PTO2_FANOUT_SCOPE_BIT = 0x80000000u;
 
-enum PTO2TaskLifecycleFlag : uint8_t {
-    PTO2_LIFECYCLE_FLAGS_NONE = 0,
-    PTO2_READY_CLAIMED = 1U << 0,
-    PTO2_COMPLETION_DONE = 1U << 1,
+enum TaskLifecycleFlag : uint8_t {
+    LIFECYCLE_FLAGS_NONE = 0,
+    READY_CLAIMED = 1U << 0,
+    COMPLETION_DONE = 1U << 1,
     // Deferred-completion discriminator packed into lifecycle_flags so the
     // slot remains 64B. Call sites use mark_any_subtask_deferred() and
     // has_any_subtask_deferred().
-    PTO2_SUBTASK_DEFERRED = 1U << 2,
-    PTO2_DISPATCH_PROPAGATED = 1U << 3,
+    SUBTASK_DEFERRED = 1U << 2,
+    DISPATCH_PROPAGATED = 1U << 3,
 };
 
-static_assert((PTO2_DISPATCH_PROPAGATED & (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED)) == 0);
+static_assert((DISPATCH_PROPAGATED & (READY_CLAIMED | COMPLETION_DONE | SUBTASK_DEFERRED)) == 0);
 
 struct alignas(64) ChipTaskSlotState {
     // Fanout lock + list (accessed together under lock in on_task_complete)
@@ -479,7 +479,7 @@ struct alignas(64) ChipTaskSlotState {
     PTO2DepListEntry *fanout_head;  // Pointer to first fanout entry (nullptr = empty)
 
     // Task state (completion, consumed check, ready check)
-    std::atomic<PTO2TaskState> task_state;  // PENDING/COMPLETED/CONSUMED
+    std::atomic<ChipTaskState> task_state;  // PENDING/COMPLETED/CONSUMED
 
     // Fanin (accessed together in release_fanin_and_check_ready)
     std::atomic<int32_t> fanin_refcount;  // Dynamic: counts completed producers
@@ -509,7 +509,7 @@ struct alignas(64) ChipTaskSlotState {
     TaskAttrs task_attrs{};
     // Concurrent lifecycle updates preserve unrelated bits. Slot reuse clears
     // the byte only after the previous task lifetime is quiescent.
-    std::atomic<uint8_t> lifecycle_flags{PTO2_LIFECYCLE_FLAGS_NONE};
+    std::atomic<uint8_t> lifecycle_flags{LIFECYCLE_FLAGS_NONE};
     int32_t dep_pool_mark{0};  // Dep pool top after Orch-side wiring
 
     std::atomic<int16_t> completed_subtasks{0};  // Each core completion increments by 1
@@ -558,23 +558,22 @@ struct alignas(64) ChipTaskSlotState {
     // Lock-free callers use this as a fast-path hint. A false result is
     // rechecked by try_mark_dispatch_propagated() while holding fanout_lock.
     bool has_dispatch_propagated() const {
-        return (lifecycle_flags.load(std::memory_order_acquire) & PTO2_DISPATCH_PROPAGATED) != 0;
+        return (lifecycle_flags.load(std::memory_order_acquire) & DISPATCH_PROPAGATED) != 0;
     }
 
     // The propagation owner holds fanout_lock through its fanout snapshot, so
     // wiring can classify late edges exactly once.
     bool try_mark_dispatch_propagated() {
-        return (lifecycle_flags.fetch_or(PTO2_DISPATCH_PROPAGATED, std::memory_order_acq_rel) &
-                PTO2_DISPATCH_PROPAGATED) == 0;
+        return (lifecycle_flags.fetch_or(DISPATCH_PROPAGATED, std::memory_order_acq_rel) & DISPATCH_PROPAGATED) == 0;
     }
 
     void mark_completed() {
-        task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
-        lifecycle_flags.fetch_or(PTO2_COMPLETION_DONE, std::memory_order_release);
+        task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
+        lifecycle_flags.fetch_or(COMPLETION_DONE, std::memory_order_release);
     }
 
     bool is_completion_flag_set() const {
-        return (lifecycle_flags.load(std::memory_order_acquire) & PTO2_COMPLETION_DONE) != 0;
+        return (lifecycle_flags.load(std::memory_order_acquire) & COMPLETION_DONE) != 0;
     }
 
     // Set by any subtask FIN that pushed deferred-completion CONDITIONs to the
@@ -582,10 +581,10 @@ struct alignas(64) ChipTaskSlotState {
     // needs MPSC-deferred completion or can complete inline on this thread. The
     // release write is sequenced before on_subtask_complete's acq_rel fetch_add;
     // the acquire read by the last subtask observes all earlier writes.
-    void mark_any_subtask_deferred() { lifecycle_flags.fetch_or(PTO2_SUBTASK_DEFERRED, std::memory_order_release); }
+    void mark_any_subtask_deferred() { lifecycle_flags.fetch_or(SUBTASK_DEFERRED, std::memory_order_release); }
 
     bool has_any_subtask_deferred() const {
-        return (lifecycle_flags.load(std::memory_order_acquire) & PTO2_SUBTASK_DEFERRED) != 0;
+        return (lifecycle_flags.load(std::memory_order_acquire) & SUBTASK_DEFERRED) != 0;
     }
 
     /**
@@ -607,7 +606,7 @@ struct alignas(64) ChipTaskSlotState {
         fanout_refcount.store(0, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
-        lifecycle_flags.store(PTO2_LIFECYCLE_FLAGS_NONE, std::memory_order_relaxed);
+        lifecycle_flags.store(LIFECYCLE_FLAGS_NONE, std::memory_order_relaxed);
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // Payload early-dispatch fields are initialized by TaskPayload::init

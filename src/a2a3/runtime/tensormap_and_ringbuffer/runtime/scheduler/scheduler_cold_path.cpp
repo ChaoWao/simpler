@@ -238,14 +238,14 @@ void SchedulerContext::log_stall_diagnostics(
             int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
             for (int32_t si = ring_task_start; si < ring_task_count; si++) {
                 ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
-                PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
+                ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
                 int32_t rc = slot_state.fanin_refcount.load(std::memory_order_relaxed);
                 int32_t fi = slot_state.fanin_count;
                 int32_t kid_aic = slot_state.task->kernel_id[0];
                 int32_t kid_aiv0 = slot_state.task->kernel_id[1];
                 int32_t kid_aiv1 = slot_state.task->kernel_id[2];
                 int64_t task_id = static_cast<int64_t>(slot_state.task->task_id.raw);
-                if (st >= PTO2_TASK_COMPLETED) continue;
+                if (st >= CHIP_TASK_COMPLETED) continue;
                 // task_state has no intermediate ready/running value — it
                 // stays PENDING until the worker stores COMPLETED. Classify
                 // by the ground truth instead: a slot is RUNNING iff some
@@ -374,8 +374,8 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
         int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
         for (int32_t si = ring_task_start; si < ring_task_count; si++) {
             ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
-            PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
-            if (st >= PTO2_TASK_COMPLETED) continue;
+            ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
+            if (st >= CHIP_TASK_COMPLETED) continue;
             // Same ground truth as log_stall_diagnostics: task_state stays PENDING
             // until COMPLETED, so RUNNING is read from core ownership, not the slot.
             int32_t run_core = -1;

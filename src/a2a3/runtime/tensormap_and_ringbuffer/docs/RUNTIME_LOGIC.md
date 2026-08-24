@@ -403,7 +403,7 @@ When `OrchestratorState::submit_task` processes parameters:
       └──────────────────── slot recycled ◄───────────────────────────┘
 ```
 
-In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
+In the scheduler's `task_state[]` array (`std::atomic<ChipTaskState>`):
 
 - **0 (PENDING)**: slot is allocated and remains PENDING through "waiting on
   producers", "queued in ready queue", and "dispatched to a worker"; ready vs

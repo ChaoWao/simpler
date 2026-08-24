@@ -184,10 +184,10 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * completed_watermark instead.
  */
 typedef enum {
-    PTO2_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
-    PTO2_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
-    PTO2_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
-} PTO2TaskState;
+    CHIP_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
+    CHIP_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
+    CHIP_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
+} ChipTaskState;
 
 /**
  * Result of a unified task allocation.
@@ -554,7 +554,7 @@ struct alignas(64) ChipTaskSlotState {
     // Host-visible completion mirror. PENDING at submit; COMPLETED at
     // on_mixed_task_complete. Read by the host completion-wait / deadlock
     // detector / cold-path dump; the device readiness path uses completion_flags.
-    std::atomic<PTO2TaskState> task_state;
+    std::atomic<ChipTaskState> task_state;
 
     // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
     // Self-relative, so the SM image needs no pointer fix-up on its way to the
@@ -624,7 +624,7 @@ struct alignas(64) ChipTaskSlotState {
     // (completion_flags[slot]) is published by the scheduler's
     // on_mixed_task_complete; this store makes the same fact visible to the
     // host completion-wait / deadlock detector.
-    void mark_completed() { task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release); }
+    void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
 
     void mark_any_subtask_deferred() { any_subtask_deferred.store(true, std::memory_order_release); }
 

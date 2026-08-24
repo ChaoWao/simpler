@@ -33,7 +33,7 @@ addr null-check → TensorMap lookup → spin-wait producer COMPLETED → comput
 
 - **addr null-check**: `buffer.addr == 0` means unallocated — log error, return 0
 - **TensorMap lookup**: find producer task by `buffer.addr`
-- **spin-wait**: wait until producer `task_state >= PTO2_TASK_COMPLETED`
+- **spin-wait**: wait until producer `task_state >= CHIP_TASK_COMPLETED`
 - **No producer** (lookup callback never fires): skip waiting, read immediately
 
 ### 3.2 set_tensor_data Flow

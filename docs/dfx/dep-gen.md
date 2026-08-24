@@ -11,7 +11,7 @@ the record entirely. The device hot path no longer carries fanout;
 When it existed, each producer task carried its own
 `ChipSwimlaneAicpuTaskRecord.fanout[]`, populated by the AICPU scheduler at the
 moment it wired a downstream consumer. If a producer had already finished and
-transitioned to `PTO2_TASK_COMPLETED` by the time a later submit wanted to
+transitioned to `CHIP_TASK_COMPLETED` by the time a later submit wanted to
 register a dependency on it, the consumer's edge had nowhere to go — the
 record was sealed, the slot was closed, and the edge was silently dropped.
 This was not a bug in fanout itself; fanout is "successors known at runtime",

@@ -144,8 +144,8 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         // task_state is written at submit (reset_for_reuse skips it): PENDING for a
         // dispatchable task, COMPLETED for a pre-completed hidden-alloc. Either way a
         // real enum, never poison.
-        const PTO2TaskState state = st.task_state.load(std::memory_order_relaxed);
-        EXPECT_TRUE(state == PTO2_TASK_PENDING || state == PTO2_TASK_COMPLETED);
+        const ChipTaskState state = st.task_state.load(std::memory_order_relaxed);
+        EXPECT_TRUE(state == CHIP_TASK_PENDING || state == CHIP_TASK_COMPLETED);
         // Completion flag is written to a real 0/1 (pending vs pre-completed), not a
         // poison byte (0xAA).
         const uint8_t cflag = ring.completion_flags[slot].load(std::memory_order_relaxed);
@@ -158,7 +158,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         // predicate.op is a dispatch-time field, read only for tasks the device
         // actually dispatches. submit_task_common writes it (NONE when unset); a
         // pre-completed hidden-alloc is never dispatched, so it does not.
-        if (state == PTO2_TASK_PENDING) {
+        if (state == CHIP_TASK_PENDING) {
             EXPECT_LE(static_cast<uint8_t>(pl.predicate.op), static_cast<uint8_t>(PredicateOp::LE));
         }
     }

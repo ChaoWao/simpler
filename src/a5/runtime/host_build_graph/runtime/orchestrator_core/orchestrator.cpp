@@ -1319,7 +1319,7 @@ static bool prepare_task(
     // task_state is set to PENDING here as the orchestrator populates the slot
     // (host_build_graph does not recycle slots at runtime, so there is no
     // post-CONSUMED reset path).
-    out->slot_state->task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+    out->slot_state->task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     out->slot_state->total_required_subtasks = static_cast<int16_t>(total_required_subtasks);
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
@@ -1820,7 +1820,7 @@ bool graph_submit_outer(
     );
     orch->tensor_pool_cursor += tensor_slots;
     orch->scalar_pool_cursor += scalar_span;
-    slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+    slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     slot.last_consumer_local_id = static_cast<int32_t>(task_id.local());
     slot.active_mask = ActiveMask{};
     slot.task_attrs = TaskAttrs{};

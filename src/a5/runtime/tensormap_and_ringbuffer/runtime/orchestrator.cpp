@@ -344,7 +344,7 @@ static bool append_fanin_or_fail(
     // explicit) always wins, independent of the order they are reached in.
     prod_state->lock_fanout();
     bool gone = prod_state->task == nullptr || prod_state->task->task_id.local() != producer_task_id.local() ||
-                prod_state->task_state.load(std::memory_order_acquire) == PTO2_TASK_CONSUMED;
+                prod_state->task_state.load(std::memory_order_acquire) == CHIP_TASK_CONSUMED;
     bool already_seen = !gone && fanin_builder->mark_seen(prod_ring, prod_slot);
     bool claim = !gone && !already_seen;
     int32_t fanout_now = -1;
@@ -412,7 +412,7 @@ static bool all_claimed_fanin_completed(const PTO2FaninBuilder &fanin_builder) {
     // dispatch, so it is treated as satisfied here.
     return fanin_builder.for_each([](ChipTaskSlotState *producer, DepFlags flags) -> bool {
         if (!dep_has_wait(flags)) return true;
-        return producer != nullptr && producer->task_state.load(std::memory_order_acquire) >= PTO2_TASK_COMPLETED;
+        return producer != nullptr && producer->task_state.load(std::memory_order_acquire) >= CHIP_TASK_COMPLETED;
     });
 }
 
@@ -455,7 +455,7 @@ void OrchestratorState::wire_fanin_task(ChipTaskSlotState &slot_state, int32_t w
             if (!early_disqualified && !producer->task_attrs.allow_early_resolve()) {
                 early_disqualified = true;
             }
-            if (pstate >= PTO2_TASK_COMPLETED) {
+            if (pstate >= CHIP_TASK_COMPLETED) {
                 completed_fanin++;
             } else {
                 producer->fanout_head = rss.dep_pool.prepend(producer->fanout_head, &slot_state);
@@ -639,7 +639,7 @@ static bool prepare_task(
     //   ring_id
     // task_state left as CONSUMED by eager reset (safe for stale wait_for_tensor
     // observers); set to PENDING here when orchestrator actually reuses the slot.
-    out->slot_state->task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+    out->slot_state->task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     int16_t block_num = args.launch_spec.core_num();
     out->slot_state->total_required_subtasks =
         static_cast<int16_t>(block_num * __builtin_popcount(active_mask.core_mask()));

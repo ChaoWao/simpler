@@ -81,7 +81,7 @@ protected:
     }
 
     void init_slot(
-        ChipTaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
+        ChipTaskSlotState &slot, ChipTaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
     ) {
         memset(&slot, 0, sizeof(slot));
         slot.task_state.store(state);
@@ -102,7 +102,7 @@ protected:
     }
 
     void init_ring_slot(
-        SharedMemoryRingHeader &ring, int32_t task_id, PTO2TaskState state, uint8_t ring_id, uint32_t fanout_count = 1,
+        SharedMemoryRingHeader &ring, int32_t task_id, ChipTaskState state, uint8_t ring_id, uint32_t fanout_count = 1,
         uint32_t fanout_refcount = 1
     ) {
         ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(task_id);
@@ -123,7 +123,7 @@ protected:
         slot.completed_subtasks.store(0, std::memory_order_relaxed);
         slot.total_required_subtasks = 1;
         slot.logical_block_num = 1;
-        slot.lifecycle_flags.store(PTO2_COMPLETION_DONE, std::memory_order_relaxed);
+        slot.lifecycle_flags.store(COMPLETION_DONE, std::memory_order_relaxed);
         slot.payload = &payload;
         slot.task = &task;
     }
@@ -139,7 +139,7 @@ protected:
         sched.advance_pending_mask.store(0, std::memory_order_release);
 
         for (int32_t task_id = 0; task_id < current_task_index; task_id++) {
-            PTO2TaskState state = task_id < blocked_task_id ? PTO2_TASK_CONSUMED : PTO2_TASK_COMPLETED;
+            ChipTaskState state = task_id < blocked_task_id ? CHIP_TASK_CONSUMED : CHIP_TASK_COMPLETED;
             init_ring_slot(ring, task_id, state, static_cast<uint8_t>(ring_id));
         }
     }
@@ -152,8 +152,8 @@ protected:
         ring_sched.last_task_alive = head_task_id;
         ring_sched.advance_lock.store(0, std::memory_order_release);
         sched.advance_pending_mask.store(0, std::memory_order_release);
-        init_ring_slot(ring, head_task_id, PTO2_TASK_COMPLETED, static_cast<uint8_t>(ring_id));
-        init_ring_slot(ring, head_task_id + 1, PTO2_TASK_COMPLETED, static_cast<uint8_t>(ring_id), 1, 0);
+        init_ring_slot(ring, head_task_id, CHIP_TASK_COMPLETED, static_cast<uint8_t>(ring_id));
+        init_ring_slot(ring, head_task_id + 1, CHIP_TASK_COMPLETED, static_cast<uint8_t>(ring_id), 1, 0);
     }
 };
 
@@ -168,8 +168,8 @@ TEST_F(SchedulerStateTest, UnvalidatedWiringPublishesEveryAdvance) {
 
     EXPECT_FALSE(ring_sched.publication_batching_enabled);
     ring.fc.current_task_index.store(2, std::memory_order_release);
-    init_ring_slot(ring, 0, PTO2_TASK_CONSUMED, ring_id);
-    init_ring_slot(ring, 1, PTO2_TASK_PENDING, ring_id);
+    init_ring_slot(ring, 0, CHIP_TASK_CONSUMED, ring_id);
+    init_ring_slot(ring, 1, CHIP_TASK_PENDING, ring_id);
 
     ring_sched.advance_ring_pointers();
 
@@ -179,20 +179,20 @@ TEST_F(SchedulerStateTest, UnvalidatedWiringPublishesEveryAdvance) {
 
 TEST_F(SchedulerStateTest, ConsumedNotReady) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_COMPLETED, 1, 2);
+    init_slot(slot, CHIP_TASK_COMPLETED, 1, 2);
     slot.fanout_refcount.store(1);  // 1 != 2
 
     sched.check_and_handle_consumed(slot);
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_COMPLETED);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_COMPLETED);
 }
 
 TEST_F(SchedulerStateTest, ConsumedTransition) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_COMPLETED, 1, 2);
+    init_slot(slot, CHIP_TASK_COMPLETED, 1, 2);
     slot.fanout_refcount.store(2);  // matches fanout_count
 
     sched.check_and_handle_consumed(slot);
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
@@ -217,28 +217,28 @@ TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
     unlocker.join();
 
     EXPECT_TRUE(sched.drain_pending_ring_advances());
-    EXPECT_EQ(head.task_state.load(std::memory_order_acquire), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(head.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1)
         << "a CONSUMED ring head must not remain pinned after advance_lock contention clears";
 }
 
 TEST_F(SchedulerStateTest, ConsumedNotCompletedState) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.fanout_refcount.store(1);
 
     sched.check_and_handle_consumed(slot);
     // CAS fails because state is PENDING, not COMPLETED
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_PENDING);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_PENDING);
 }
 
 TEST_F(SchedulerStateTest, ConsumedIdempotent) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_CONSUMED, 1, 1);
+    init_slot(slot, CHIP_TASK_CONSUMED, 1, 1);
     slot.fanout_refcount.store(1);
 
     sched.check_and_handle_consumed(slot);
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances) {
@@ -254,7 +254,7 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances)
     ring_sched.advance_lock.store(1, std::memory_order_release);
     sched.check_and_handle_consumed(head);
 
-    EXPECT_EQ(head.task_state.load(std::memory_order_acquire), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(head.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id);
     EXPECT_NE(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
 
@@ -335,7 +335,7 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadIdleDrainStress) {
 
 TEST_F(SchedulerStateTest, ReleaseProducerIncrements) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_COMPLETED, 1, 3);
+    init_slot(slot, CHIP_TASK_COMPLETED, 1, 3);
 
     sched.release_producer(slot);
     EXPECT_EQ(slot.fanout_refcount.load(), 1);
@@ -346,11 +346,11 @@ TEST_F(SchedulerStateTest, ReleaseProducerIncrements) {
 
 TEST_F(SchedulerStateTest, ReleaseProducerTriggersConsumed) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_COMPLETED, 1, 2);
+    init_slot(slot, CHIP_TASK_COMPLETED, 1, 2);
     slot.fanout_refcount.store(1);  // One away
 
     sched.release_producer(slot);
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 // =============================================================================
@@ -359,7 +359,7 @@ TEST_F(SchedulerStateTest, ReleaseProducerTriggersConsumed) {
 
 TEST_F(SchedulerStateTest, SubtaskCompleteSingle) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 1;
     slot.completed_subtasks.store(0);
 
@@ -368,7 +368,7 @@ TEST_F(SchedulerStateTest, SubtaskCompleteSingle) {
 
 TEST_F(SchedulerStateTest, SubtaskCompleteMultiBlock) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 6;  // 3 cores * 2 blocks
     slot.completed_subtasks.store(0);
 
@@ -388,7 +388,7 @@ TEST_F(SchedulerStateTest, ScopeEndBatchRelease) {
     ChipTaskSlotState *ptrs[N];
 
     for (int i = 0; i < N; i++) {
-        init_slot(slots[i], PTO2_TASK_COMPLETED, 1, 2);
+        init_slot(slots[i], CHIP_TASK_COMPLETED, 1, 2);
         ptrs[i] = &slots[i];
     }
 
@@ -409,8 +409,8 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
     alignas(64) ChipTaskSlotState slot_a, slot_b;
     // fanin_count = 1 so a single release_fanin_and_check_ready call drives each
     // slot to ready (new_refcount 0->1 == fanin_count) and enqueues it.
-    init_slot(slot_a, PTO2_TASK_PENDING, 1, 1);
-    init_slot(slot_b, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot_a, CHIP_TASK_PENDING, 1, 1);
+    init_slot(slot_b, CHIP_TASK_PENDING, 1, 1);
 
     // Route both slots into the global ready queue via the src API.
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_a));
@@ -427,7 +427,7 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
 
 TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.task_attrs.set_sync_start();
 
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot));

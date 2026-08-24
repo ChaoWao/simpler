@@ -236,7 +236,7 @@ void SchedulerContext::log_stall_diagnostics(
         submitted_in_ring += ring_task_count;
         for (int32_t si = 0; si < ring_task_count; si++) {
             ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
-            PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
+            ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
             // fanin ids vs the ring completion_flags (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
@@ -252,7 +252,7 @@ void SchedulerContext::log_stall_diagnostics(
             int32_t kid_aiv0 = slot_state.task->kernel_id[1];
             int32_t kid_aiv1 = slot_state.task->kernel_id[2];
             int64_t task_id = static_cast<int64_t>(slot_state.task->task_id.raw);
-            if (st >= PTO2_TASK_COMPLETED) continue;
+            if (st >= CHIP_TASK_COMPLETED) continue;
             // task_state has no intermediate ready/running value — it
             // stays PENDING until the worker stores COMPLETED. Classify
             // by the ground truth instead: a slot is RUNNING iff some

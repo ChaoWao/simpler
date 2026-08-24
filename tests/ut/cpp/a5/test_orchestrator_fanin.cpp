@@ -219,7 +219,7 @@ TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
         sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local());
     // COMPLETED but not consumed (the open scope still pins it): the consumer takes
     // the all-completed fast path.
-    producer_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    producer_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     int32_t rc_before = producer_slot.fanout_refcount.load();
 
     TaskId deps[] = {producer.task_id()};
@@ -249,7 +249,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     auto &ring = sm_handle->header->rings[1];
     auto &first_slot = ring.get_slot_state_by_task_id(static_cast<int32_t>(first.task_id().local()));
     orch.end_scope();
-    first_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    first_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     sched.check_and_handle_consumed(first_slot);
     ASSERT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1);
 

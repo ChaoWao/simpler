@@ -413,7 +413,7 @@ When `OrchestratorState::submit_task` processes parameters:
       └──────────────────── slot recycled ◄───────────────────────────┘
 ```
 
-In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
+In the scheduler's `task_state[]` array (`std::atomic<ChipTaskState>`):
 
 - **0 (PENDING)**: slot is allocated and remains PENDING through "waiting on
   producers", "queued in ready queue", and "dispatched to a worker"; ready vs
@@ -715,7 +715,7 @@ Producer-side `propagate_dispatch_fanin` no-ops until the producer is **fully pu
 prepare/publish makes payload + low-32 dispatch tokens visible. Early queue entries carry a
 `task_id_snapshot` generation tag (#1336) so recycled slots cannot revive stale candidates.
 
-Wiring and propagation serialize under `fanout_lock` with `PTO2_DISPATCH_PROPAGATED` so
+Wiring and propagation serialize under `fanout_lock` with `DISPATCH_PROPAGATED` so
 late-wired consumers still receive exactly one early-candidate contribution per eligible
 edge (#1405).
 

@@ -752,7 +752,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     // values only the device side wrote.
     for (int32_t i = 0; i < execution->node_count; ++i) {
         const GraphNodeStorage &node = execution->node_at(i);
-        ASSERT_EQ(node.slot.task_state.load(std::memory_order_relaxed), PTO2_TASK_PENDING);
+        ASSERT_EQ(node.slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_PENDING);
         ASSERT_EQ(node.slot.task_kind, TaskKind::GRAPH_NODE);
         ASSERT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
         ASSERT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);

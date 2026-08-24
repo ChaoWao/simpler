@@ -504,7 +504,7 @@ struct SchedulerState {
 
             while (last_task_alive < current_task_index) {
                 ChipTaskSlotState &slot_state = ring->get_slot_state_by_task_id(last_task_alive);
-                if (slot_state.task_state.load(std::memory_order_acquire) != PTO2_TASK_CONSUMED) {
+                if (slot_state.task_state.load(std::memory_order_acquire) != CHIP_TASK_CONSUMED) {
                     break;
                 }
                 last_task_alive++;
@@ -640,8 +640,8 @@ struct SchedulerState {
     bool try_claim_ready_once(ChipTaskSlotState &slot_state) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         for (;;) {
-            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
-            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
+            if ((flags & READY_CLAIMED) != 0) return false;
+            uint8_t desired_flags = flags | READY_CLAIMED;
             if (slot_state.lifecycle_flags.compare_exchange_weak(
                     flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
@@ -662,9 +662,9 @@ struct SchedulerState {
         bool became_consumed = false;
         slot_state.lock_fanout();
         if (slot_state.fanout_refcount.load(std::memory_order_acquire) == slot_state.fanout_count) {
-            PTO2TaskState expected = PTO2_TASK_COMPLETED;
+            ChipTaskState expected = CHIP_TASK_COMPLETED;
             became_consumed = slot_state.task_state.compare_exchange_strong(
-                expected, PTO2_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
+                expected, CHIP_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
             );
         }
         slot_state.unlock_fanout();
@@ -698,9 +698,9 @@ struct SchedulerState {
         uint32_t rc = slot_state.fanout_refcount.load(std::memory_order_acquire);
         atomic_count += 1;  // fanout_refcount.load (fanout_count is a plain read under lock)
         if (rc == fc) {
-            PTO2TaskState expected = PTO2_TASK_COMPLETED;
+            ChipTaskState expected = CHIP_TASK_COMPLETED;
             became_consumed = slot_state.task_state.compare_exchange_strong(
-                expected, PTO2_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
+                expected, CHIP_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
             );
             atomic_count += 1;  // CAS
         }
@@ -1050,8 +1050,8 @@ struct SchedulerState {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         atomic_count += 1;
         for (;;) {
-            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
-            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
+            if ((flags & READY_CLAIMED) != 0) return false;
+            uint8_t desired_flags = flags | READY_CLAIMED;
             if (slot_state.lifecycle_flags.compare_exchange_weak(
                     flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
