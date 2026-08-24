@@ -56,7 +56,6 @@
 #include "tensor.h"
 
 #if SIMPLER_DFX
-#include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
 #endif
 
@@ -92,12 +91,6 @@ dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
     uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
 ) {}
-
-// Scope_stats enable gate, queried via the same predicate idiom as
-// dep_gen_host_graph_enabled above. The AICPU collector links the strong definition;
-// host builds fall back to this weak `false`. Gating here still skips the
-// cross-agent occupancy reads that feed the sample when scope_stats is disabled.
-extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
 
 // AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
 // route_ready_once path transitively ODR-uses the early-dispatch doorbell inline
@@ -268,14 +261,6 @@ static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) 
 static void
 orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
     int32_t latched_code = orch_mark_fatal(orch, error_code);
-
-#if SIMPLER_DFX
-    // Flush the current scope's peaks BEFORE the FATAL log line, so the
-    // diagnostic context (which pool/window filled up) appears right next to
-    // the failure reason. on_fatal is latched, so duplicate fatals from
-    // different layers don't print multiple stats lines.
-    scope_stats_on_fatal();
-#endif
 
     if (fmt == nullptr || fmt[0] == '\0') {
         if (latched_code != SIMPLER_ERROR_NONE && latched_code != error_code) {
@@ -1188,23 +1173,6 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
-#if SIMPLER_DFX
-    // Gate via is_scope_stats_enabled() (weak-false in host builds) BEFORE the
-    // collector call: when disabled we pay nothing. Sample the current ring's
-    // task/heap start-end and tensormap usage at the scope boundary.
-    if (is_scope_stats_enabled()) {
-        uint8_t ring_id = 0;
-        auto &alloc = orch->task_allocator;
-        // Polling: no dep_pool to report (readiness is via completion_flags).
-        int32_t dep_pool_tail = 0;
-        int32_t dep_pool_top = 0;
-        // Both rings are forward-only here, so their reclaim ends stay at 0.
-        scope_stats_begin(
-            ring_id, /*task_start=*/0, alloc.task_head(), /*heap_start=*/0, alloc.heap_top(), dep_pool_tail,
-            dep_pool_top, orch->tensor_map.current_used()
-        );
-    }
-#endif
 }
 
 void PTO2OrchestratorState::end_scope() {
@@ -1224,23 +1192,6 @@ void PTO2OrchestratorState::end_scope() {
         return;
     }
     assert(orch->scope_stack_top >= 0 && "Scope stack underflow");
-
-#if SIMPLER_DFX
-    // Gate via is_scope_stats_enabled() (see begin_scope). One collector call
-    // emits the end-boundary record and tears down bookkeeping.
-    if (is_scope_stats_enabled()) {
-        uint8_t ring_id = 0;
-        auto &alloc = orch->task_allocator;
-        // Polling: no dep_pool to report (readiness is via completion_flags).
-        int32_t dep_pool_tail = 0;
-        int32_t dep_pool_top = 0;
-        // Both rings are forward-only here, so their reclaim ends stay at 0.
-        scope_stats_end(
-            ring_id, /*task_start=*/0, alloc.task_head(), /*heap_start=*/0, alloc.heap_top(), dep_pool_tail,
-            dep_pool_top, orch->tensor_map.current_used()
-        );
-    }
-#endif
 
     if (orch->scope_stack_top == orch->manual_begin_depth) {
         orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;

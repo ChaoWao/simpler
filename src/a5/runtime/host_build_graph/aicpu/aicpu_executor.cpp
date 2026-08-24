@@ -34,7 +34,6 @@
 
 // Performance profiling headers
 #include "aicpu/chip_swimlane_collector_aicpu.h"
-#include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/unified_log.h"

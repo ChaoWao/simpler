@@ -21,11 +21,6 @@
 #include <stdlib.h>
 #include "common/unified_log.h"
 
-#if SIMPLER_DFX
-// Weak fallbacks for host/UT builds that don't link the scope_stats collector.
-extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
-#endif
-
 // =============================================================================
 // Scheduler Profiling Counters
 // =============================================================================
