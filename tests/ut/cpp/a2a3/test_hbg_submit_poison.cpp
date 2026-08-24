@@ -173,7 +173,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     EXPECT_EQ(root_pl.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::FLOAT32));
     EXPECT_NE(root_desc.packed_buffer_base, POISON_PTR);
     EXPECT_NE(root_desc.packed_buffer_base, nullptr);
-    EXPECT_EQ(root_desc.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)], 0);
+    EXPECT_EQ(root_desc.kernel_id[static_cast<int>(SubtaskSlot::AIV0)], 0);
 
     // The consumer's fanin is written: two duplicate deps dedupe to one.
     const TaskPayload &cons_pl = ring.task_payloads[ring.get_slot_by_task_id(consumer.task_id().local())];

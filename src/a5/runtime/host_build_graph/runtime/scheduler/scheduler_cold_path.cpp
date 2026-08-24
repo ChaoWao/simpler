@@ -384,13 +384,13 @@ int32_t SchedulerContext::handle_timeout_exit(
         // Capture the in-flight kernels' partial output before signalling the
         // cores to exit, so the dump reflects the live stuck state.
         if (is_dump_args_enabled()) {
-            dump_running_task_outputs<PTO2_SUBTASK_SLOT_COUNT>(
+            dump_running_task_outputs<SUBTASK_SLOT_COUNT>(
                 thread_idx, cores_total_num_,
                 [this](int32_t cid) {
                     return core_exec_states_[cid].running_slot_state;
                 },
                 [](ActiveMask active_mask, int raw_subtask_id) {
-                    return active_mask.subtask_active(static_cast<PTO2SubtaskSlot>(raw_subtask_id));
+                    return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
                 },
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);
@@ -958,7 +958,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // live on a later line).
     for (int32_t core_id = 0; core_id < RUNTIME_MAX_WORKER; core_id++) {
         for (int32_t buf = 0; buf < 2; buf++) {
-            PTO2DispatchPayload &dp = payload_per_core_[core_id][buf];
+            DispatchPayload &dp = payload_per_core_[core_id][buf];
             AsyncCtx &ac = dp.local_context.async_ctx;
             volatile DeferredCompletionSlab *slab = &deferred_slab_per_core_[core_id][buf];
             ac.completion_count = &slab->count;

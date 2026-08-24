@@ -62,7 +62,7 @@ protected:
         memset(&node, 0, sizeof(GraphNodeStorage));
         node.slot.task_state.store(state);
         node.slot.graph_node_index = node_index;
-        node.slot.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+        node.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         node.slot.task_kind = TaskKind::KERNEL;
         node.slot.total_required_subtasks = 1;
         node.slot.logical_block_num = 1;

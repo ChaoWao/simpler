@@ -84,7 +84,7 @@ SlotTransition SchedulerContext::decide_slot_transition(
 
 // Complete one slot's task: subtask counting, mixed completion, deferred release, profiling.
 void SchedulerContext::complete_slot_task(
-    ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
+    ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] SubtaskSlot subslot,
     [[maybe_unused]] int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
     ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX
@@ -178,10 +178,10 @@ void SchedulerContext::complete_slot_task(
     if (task_complete && !defer_completion_to_consumer) {
 #if SIMPLER_DFX
         if (is_dump_args_enabled()) {
-            dump_args_for_task<PTO2_SUBTASK_SLOT_COUNT>(
+            dump_args_for_task<SUBTASK_SLOT_COUNT>(
                 thread_idx, slot_state, ArgsDumpStage::AFTER_COMPLETION,
                 [](ActiveMask active_mask, int raw_subtask_id) {
-                    return active_mask.subtask_active(static_cast<PTO2SubtaskSlot>(raw_subtask_id));
+                    return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
                 },
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);

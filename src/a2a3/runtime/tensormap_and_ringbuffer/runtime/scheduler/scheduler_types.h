@@ -100,8 +100,8 @@ struct alignas(64) CoreExecState {
     int32_t running_reg_task_id;            // offset 24: register task ID (AICPU_TASK_INVALID = idle)
     int32_t pending_reg_task_id;            // offset 28: pending register task ID (AICPU_TASK_INVALID = none)
     uint32_t dispatch_seq;                  // offset 32: monotonic dispatch counter
-    PTO2SubtaskSlot running_subslot;        // offset 36: which subtask slot is running
-    PTO2SubtaskSlot pending_subslot;        // offset 37: which subtask slot is pending
+    SubtaskSlot running_subslot;            // offset 36: which subtask slot is running
+    SubtaskSlot pending_subslot;            // offset 37: which subtask slot is pending
     uint8_t pad0_[2];                       // offset 38: alignment padding
     // Precomputed COND register pointer; resolved once in handshake so the
     // hot completion poll does a single volatile load instead of recomputing
@@ -346,13 +346,13 @@ public:
     // slot) or the mask is empty.
     MixPlacement classify_mix_cluster(int32_t cluster_offset, uint8_t core_mask) const {
         BitStates used;
-        if (core_mask & PTO2_SUBTASK_MASK_AIC) {
+        if (core_mask & SUBTASK_MASK_AIC) {
             used |= BitStates::bit(cluster_offset);
         }
-        if (core_mask & PTO2_SUBTASK_MASK_AIV0) {
+        if (core_mask & SUBTASK_MASK_AIV0) {
             used |= BitStates::bit(cluster_offset + 1);
         }
-        if (core_mask & PTO2_SUBTASK_MASK_AIV1) {
+        if (core_mask & SUBTASK_MASK_AIV1) {
             used |= BitStates::bit(cluster_offset + 2);
         }
         if (!used.has_value() || (pending_occupied_ & used).has_value()) {
@@ -392,9 +392,9 @@ public:
     // Cores of `cluster_offset` named by core_mask.
     BitStates mix_used_cores(int32_t cluster_offset, uint8_t core_mask) const {
         BitStates used;
-        if (core_mask & PTO2_SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
-        if (core_mask & PTO2_SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
-        if (core_mask & PTO2_SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
+        if (core_mask & SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
+        if (core_mask & SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
+        if (core_mask & SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
         return used;
     }
 

@@ -12,7 +12,7 @@ AICPU filling `args[]` for ready tasks and offloads only gated ones.
 ## Question
 
 The tmr dispatch handoff writes the kernel `args[]` (tensor GM pointers +
-scalar values) into the per-core `PTO2DispatchPayload` on the AICPU. For
+scalar values) into the per-core `DispatchPayload` on the AICPU. For
 gated (`not_ready` / early-dispatch) tasks we already offload that fill to
 the AICore — it does it during its doorbell wait, off the AICPU dispatch
 path (see the folded-gate `src_payload` design in the dispatch cold-write
@@ -25,7 +25,7 @@ Natural follow-on: why not offload the fill for **all** tasks and take the
 
 An experiment build (not merged) that:
 
-- Adds a separate `gated` flag to `PTO2DispatchPayload` — with all tasks
+- Adds a separate `gated` flag to `DispatchPayload` — with all tasks
   filling from source, `src_payload` is always non-zero and can no longer
   double as the gate flag (the shipped design folds `not_ready` into
   `src_payload == 0`).

@@ -106,7 +106,7 @@ static constexpr int32_t PAYLOAD_LOCAL_CONTEXT_INDEX = SPMD_LOCAL_CONTEXT_INDEX;
 static constexpr int32_t PAYLOAD_GLOBAL_CONTEXT_INDEX = SPMD_GLOBAL_CONTEXT_INDEX;
 
 /**
- * Per-core global context, stored in PTO2DispatchPayload.
+ * Per-core global context, stored in DispatchPayload.
  * Initialized once at runtime startup (init_global_context) based on each
  * core's cluster position.  Never modified after initialization.
  */
@@ -140,7 +140,7 @@ struct AsyncCtx {
 };
 
 /**
- * Per-dispatch local context, stored in PTO2DispatchPayload.
+ * Per-dispatch local context, stored in DispatchPayload.
  * Written by build_payload() before each dispatch. Different blocks of the
  * same task receive different block_idx values but the same block_num.
  *

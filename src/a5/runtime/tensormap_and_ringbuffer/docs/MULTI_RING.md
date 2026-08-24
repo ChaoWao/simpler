@@ -168,7 +168,7 @@ bool entry_valid(const ChipTensorMapEntry& e) {
 | `DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
 | `TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
 | `ChipReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
-| `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
+| `DispatchPayload` | Built per-dispatch, no ring state needed |
 
 ## 5. Reclamation
 

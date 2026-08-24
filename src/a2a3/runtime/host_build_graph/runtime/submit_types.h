@@ -25,12 +25,12 @@ inline constexpr int32_t INVALID_KERNEL_ID = -1;
 /**
  * Subtask slot count: AIC, AIV0, AIV1
  */
-inline constexpr int32_t PTO2_SUBTASK_SLOT_COUNT = 3;
+inline constexpr int32_t SUBTASK_SLOT_COUNT = 3;
 
 /**
  * Subtask slot indices
  */
-enum class PTO2SubtaskSlot : uint8_t {
+enum class SubtaskSlot : uint8_t {
     AIC = 0,
     AIV0 = 1,
     AIV1 = 2,
@@ -39,9 +39,9 @@ enum class PTO2SubtaskSlot : uint8_t {
 /**
  * Subtask mask bits (for ActiveMask)
  */
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIC = (1u << 0);   // 0x1
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIV0 = (1u << 1);  // 0x2
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIV1 = (1u << 2);  // 0x4
+inline constexpr uint8_t SUBTASK_MASK_AIC = (1u << 0);   // 0x1
+inline constexpr uint8_t SUBTASK_MASK_AIV0 = (1u << 1);  // 0x2
+inline constexpr uint8_t SUBTASK_MASK_AIV1 = (1u << 2);  // 0x4
 
 // Dispatch-predicate comparison operator. The scheduler evaluates the predicate
 // at the dispatch point — the task is ready (fanin satisfied), so the predicate
@@ -132,7 +132,7 @@ public:
 
     uint8_t raw() const { return raw_; }
 
-    bool subtask_active(PTO2SubtaskSlot slot) const { return (raw_ & (1u << static_cast<uint8_t>(slot))) != 0; }
+    bool subtask_active(SubtaskSlot slot) const { return (raw_ & (1u << static_cast<uint8_t>(slot))) != 0; }
 
     uint8_t core_mask() const { return raw_ & 0x07u; }
 
@@ -141,7 +141,7 @@ public:
         if (cmask == 0) return ResourceShape::DUMMY;
         int bit_count = __builtin_popcount(cmask);
         if (bit_count >= 2) return ResourceShape::MIX;
-        if (cmask & PTO2_SUBTASK_MASK_AIC) return ResourceShape::AIC;
+        if (cmask & SUBTASK_MASK_AIC) return ResourceShape::AIC;
         return ResourceShape::AIV;
     }
 
@@ -244,9 +244,9 @@ struct MixedKernels {
 
     ActiveMask to_active_mask() const {
         uint8_t mask = 0;
-        if (aic_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIC;
-        if (aiv0_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIV0;
-        if (aiv1_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIV1;
+        if (aic_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIC;
+        if (aiv0_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIV0;
+        if (aiv1_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIV1;
         return ActiveMask(mask);
     }
 };

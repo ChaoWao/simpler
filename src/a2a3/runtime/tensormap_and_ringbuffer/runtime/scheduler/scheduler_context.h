@@ -154,7 +154,7 @@ private:
 
     // Per-core dispatch payload storage: dual-buffer for pipelining.
     // buf_idx = reg_task_id & 1; adjacent dispatches alternate automatically.
-    PTO2DispatchPayload payload_per_core_[RUNTIME_MAX_WORKER][2];
+    DispatchPayload payload_per_core_[RUNTIME_MAX_WORKER][2];
 
     // Per-core deferred-completion software registration storage.  This has
     // the same runtime lifetime as payload_per_core_, but is kept out of the
@@ -233,16 +233,16 @@ private:
 
     static const char *shape_name(ResourceShape shape);
 
-    // Lower-case rendering of PTO2SubtaskSlot, used by dispatch and stall logs.
+    // Lower-case rendering of SubtaskSlot, used by dispatch and stall logs.
     // Kept lower-case to match the `kernels=[aic:N aiv0:N aiv1:N]` field
     // convention already established in the stall log family.
-    static inline const char *subslot_name(PTO2SubtaskSlot s) {
+    static inline const char *subslot_name(SubtaskSlot s) {
         switch (s) {
-        case PTO2SubtaskSlot::AIC:
+        case SubtaskSlot::AIC:
             return "aic";
-        case PTO2SubtaskSlot::AIV0:
+        case SubtaskSlot::AIV0:
             return "aiv0";
-        case PTO2SubtaskSlot::AIV1:
+        case SubtaskSlot::AIV1:
             return "aiv1";
         }
         return "?";
@@ -253,8 +253,8 @@ private:
     );
 
     void build_payload(
-        PTO2DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-        int32_t block_idx, bool force_gate
+        DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, SubtaskSlot subslot, int32_t block_idx,
+        bool force_gate
     );
 
     // Batched-dispatch primitives. prepare_* builds the payload and per-core
@@ -275,8 +275,8 @@ private:
     };
 
     PublishHandle prepare_subtask_to_core(
-        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-        bool to_pending, int32_t block_idx, bool force_gate
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, SubtaskSlot subslot, bool to_pending,
+        int32_t block_idx, bool force_gate
     );
 
     // `thread_idx` is the publishing Scheduler thread's index, used to select the
@@ -432,7 +432,7 @@ private:
     );
 
     void complete_slot_task(
-        ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
+        ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, SubtaskSlot subslot, int32_t thread_idx,
         int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
         ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX

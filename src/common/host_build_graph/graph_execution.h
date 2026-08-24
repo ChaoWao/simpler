@@ -93,7 +93,7 @@ struct GraphPredicate {
 };
 
 struct GraphNodeDefinition {
-    int32_t kernel_id[PTO2_SUBTASK_SLOT_COUNT];
+    int32_t kernel_id[SUBTASK_SLOT_COUNT];
     uint8_t active_mask;
     uint8_t task_attrs;
     int16_t logical_block_num;

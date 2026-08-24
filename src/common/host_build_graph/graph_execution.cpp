@@ -96,7 +96,7 @@ bool bind_graph_topology(GraphExecution &execution) {
     }
 
     uint64_t required_heap = 0;
-    constexpr uint8_t VALID_ACTIVE_MASK = (1U << PTO2_SUBTASK_SLOT_COUNT) - 1U;
+    constexpr uint8_t VALID_ACTIVE_MASK = (1U << SUBTASK_SLOT_COUNT) - 1U;
     for (uint32_t i = 0; i < definition.task_count; ++i) {
         const GraphNodeDefinition &node = nodes[i];
         if (node_offsets[i] != required_heap || node.total_output_size < 0 || node.tensor_count < 0 ||
@@ -109,7 +109,7 @@ bool bind_graph_topology(GraphExecution &execution) {
             node.total_required_subtasks < 0) {
             return false;
         }
-        for (int32_t slot = 0; slot < PTO2_SUBTASK_SLOT_COUNT; ++slot) {
+        for (int32_t slot = 0; slot < SUBTASK_SLOT_COUNT; ++slot) {
             const bool active = (node.active_mask & (1U << slot)) != 0;
             if (active != (node.kernel_id[slot] != INVALID_KERNEL_ID)) return false;
         }
@@ -444,7 +444,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         const GraphNodeDefinition &source = nodes[i];
         const uint64_t node_offset = node_offsets[i];
         const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), PTO2_ALIGN_SIZE);
-        for (int k = 0; k < PTO2_SUBTASK_SLOT_COUNT; ++k)
+        for (int k = 0; k < SUBTASK_SLOT_COUNT; ++k)
             task.kernel_id[k] = source.kernel_id[k];
         task.packed_buffer_base = reinterpret_cast<void *>(outer_base + node_offset);
         task.packed_buffer_end = reinterpret_cast<void *>(outer_base + node_offset + output_bytes);

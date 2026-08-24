@@ -220,7 +220,7 @@ struct TaskDescriptor {
     TaskId task_id;  // raw: (ring_id << 32) | local_id
 
     // Per-slot kernel IDs (INVALID_KERNEL_ID = inactive)
-    int32_t kernel_id[PTO2_SUBTASK_SLOT_COUNT];
+    int32_t kernel_id[SUBTASK_SLOT_COUNT];
 
     // Packed output buffer (all outputs packed into single contiguous buffer)
     void *packed_buffer_base;  // Start of packed buffer in GM Heap

@@ -1023,9 +1023,9 @@ static TaskOutputTensors submit_task_common(
     // evicted by TensorMap lookup/insert cache pressure.
     __builtin_prefetch(&task, 1, 1);
     task.task_id = task_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = aic_kernel_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = aiv0_kernel_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = aiv1_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIC)] = aic_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
     task.packed_buffer_base = prepared.alloc_result.packed_base;
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
@@ -1176,13 +1176,13 @@ TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kerne
 
     // Normalize single-AIV tasks: if only aiv1 is set (no aic, no aiv0), move
     // it to the aiv0 slot.  This guarantees the dispatch path can always use
-    // PTO2SubtaskSlot::AIV0 for single-AIV shapes without inspecting active_mask.
+    // SubtaskSlot::AIV0 for single-AIV shapes without inspecting active_mask.
     // Mixed tasks (AIC+AIV) keep their original AIV identity so the correct
     // hardware channel (AIV0→AIC vs AIV1→AIC) is used at dispatch time.
     MixedKernels normalized = mixed_kernels;
-    bool has_aic = active_mask.has_mask(PTO2_SUBTASK_MASK_AIC);
-    bool has_aiv0 = active_mask.has_mask(PTO2_SUBTASK_MASK_AIV0);
-    bool has_aiv1 = active_mask.has_mask(PTO2_SUBTASK_MASK_AIV1);
+    bool has_aic = active_mask.has_mask(SUBTASK_MASK_AIC);
+    bool has_aiv0 = active_mask.has_mask(SUBTASK_MASK_AIV0);
+    bool has_aiv1 = active_mask.has_mask(SUBTASK_MASK_AIV1);
     if (!has_aic && has_aiv1 && !has_aiv0) {
         normalized.aiv0_kernel_id = normalized.aiv1_kernel_id;
         normalized.aiv1_kernel_id = INVALID_KERNEL_ID;
@@ -1313,9 +1313,9 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
 #endif
 
     task.task_id = prepared.task_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
     task.packed_buffer_base = prepared.alloc_result.packed_base;
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 

@@ -99,7 +99,7 @@ inline void dump_args_for_task(
     GetFunctionBinAddrFn get_function_bin_addr, const ArgsDumpTaskMetadata *task_metadata = nullptr
 ) {
     // The record's func_ids[] must hold every active subtask's id. MaxSubtaskSlots
-    // is PTO2_SUBTASK_SLOT_COUNT at every call site, so this ties the record array
+    // is SUBTASK_SLOT_COUNT at every call site, so this ties the record array
     // size (platform layer) to the runtime subtask cap and catches any drift.
     static_assert(MaxSubtaskSlots <= ARGS_DUMP_MAX_FUNC_IDS, "ARGS_DUMP_MAX_FUNC_IDS must cover MaxSubtaskSlots");
     const auto &pl = *slot_state.payload;

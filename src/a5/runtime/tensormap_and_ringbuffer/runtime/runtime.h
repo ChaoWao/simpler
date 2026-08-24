@@ -20,7 +20,7 @@
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
- * Task dispatch uses a per-core PTO2DispatchPayload written by the scheduler.
+ * Task dispatch uses a per-core DispatchPayload written by the scheduler.
  * At dispatch time, build_payload() copies tensor pointers and scalars from
  * the task payload into the per-core args[], populates SPMD context, then
  * signals AICore via DATA_MAIN_BASE.
@@ -72,7 +72,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * 2. AICPU publishes the task pointer and opens the register window with DATA_MAIN_BASE=IDLE
  * 3. AICore observes window-open, reports initial idle state, and reads the task pointer
  * 4. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
- * 5. Task Execution: AICore reads the cached PTO2DispatchPayload and executes
+ * 5. Task Execution: AICore reads the cached DispatchPayload and executes
  * 6. Task Completion: AICore writes FIN to COND; AICPU observes completion
  * 7. Shutdown: AICPU writes the exit signal to DATA_MAIN_BASE; AICore exits
  *
@@ -105,7 +105,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
 struct Handshake {
     volatile uint32_t aicpu_ready;  // Legacy layout field; unused by the current handshake
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
-    volatile uint64_t task;         // PTO2DispatchPayload* published before register window-open
+    volatile uint64_t task;         // DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
     volatile uint32_t physical_core_id;  // Physical core ID (reported by AICore with aicore_done)
 } __attribute__((aligned(64)));
@@ -133,7 +133,7 @@ struct TensorLease {
 /**
  * Task structure - Compatibility stub for platform layer
  *
- * RT2 uses PTO2DispatchPayload instead of Task for task dispatch.
+ * RT2 uses DispatchPayload instead of Task for task dispatch.
  * This stub exists only for API compatibility with device_runner.cpp.
  * Since get_task_count() returns 0, this struct is never actually used.
  */
@@ -322,7 +322,7 @@ public:
     /** @deprecated Task count is now in PTO2 shared memory */
     int get_task_count() const { return 0; }
 
-    /** @deprecated RT2 uses PTO2DispatchPayload, not Task. Always returns nullptr. */
+    /** @deprecated RT2 uses DispatchPayload, not Task. Always returns nullptr. */
     Task *get_task(int) { return nullptr; }
 
     // =========================================================================

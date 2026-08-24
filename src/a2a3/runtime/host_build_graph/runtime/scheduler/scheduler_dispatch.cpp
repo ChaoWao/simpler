@@ -120,7 +120,7 @@ int SchedulerContext::pop_ready_tasks_batch(
 }
 
 void SchedulerContext::build_payload(
-    PTO2DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot, int32_t block_idx,
+    DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, SubtaskSlot subslot, int32_t block_idx,
     bool force_gate
 ) {
     int32_t slot_idx = static_cast<int32_t>(subslot);
@@ -168,7 +168,7 @@ void SchedulerContext::build_payload(
 }
 
 SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
-    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot, bool to_pending,
+    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, SubtaskSlot subslot, bool to_pending,
     int32_t block_idx, bool force_gate
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -186,7 +186,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
     }
 
     uint32_t buf_idx = reg_task_id & 1u;
-    PTO2DispatchPayload &payload = payload_per_core_[core_id][buf_idx];
+    DispatchPayload &payload = payload_per_core_[core_id][buf_idx];
     // The deferred_slab is NOT reset here: it is init-cleared once and the
     // completion path re-clears count only after a task actually recorded a
     // deferred completion (count > 0), which is rare. A non-deferred task never
@@ -246,10 +246,10 @@ int SchedulerContext::prepare_block_for_dispatch(
 ) {
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
-        dump_args_for_task<PTO2_SUBTASK_SLOT_COUNT>(
+        dump_args_for_task<SUBTASK_SLOT_COUNT>(
             thread_idx, slot_state, ArgsDumpStage::BEFORE_DISPATCH,
             [](ActiveMask active_mask, int raw_subtask_id) {
-                return active_mask.subtask_active(static_cast<PTO2SubtaskSlot>(raw_subtask_id));
+                return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
             },
             [this](int32_t func_id) {
                 return get_function_bin_addr(func_id);
@@ -267,24 +267,24 @@ int SchedulerContext::prepare_block_for_dispatch(
         // (promoted on completion). Gated sync_start staging relies on this — it passes
         // to_pending=true so every busy core opts into a pending slot; the non-zero
         // src_payload gate keeps the whole cohort waiting for the rendezvous.
-        if (cmask & PTO2_SUBTASK_MASK_AIC) {
+        if (cmask & SUBTASK_MASK_AIC) {
             bool p = to_pending && !tracker.is_aic_core_idle(core_offset);
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aic_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIC, p, block_idx,
+                thread_idx, tracker.get_aic_core_offset(core_offset), slot_state, SubtaskSlot::AIC, p, block_idx,
                 force_gate
             );
         }
-        if (cmask & PTO2_SUBTASK_MASK_AIV0) {
+        if (cmask & SUBTASK_MASK_AIV0) {
             bool p = to_pending && !tracker.is_aiv0_core_idle(core_offset);
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aiv0_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV0, p, block_idx,
+                thread_idx, tracker.get_aiv0_core_offset(core_offset), slot_state, SubtaskSlot::AIV0, p, block_idx,
                 force_gate
             );
         }
-        if (cmask & PTO2_SUBTASK_MASK_AIV1) {
+        if (cmask & SUBTASK_MASK_AIV1) {
             bool p = to_pending && !tracker.is_aiv1_core_idle(core_offset);
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aiv1_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV1, p, block_idx,
+                thread_idx, tracker.get_aiv1_core_offset(core_offset), slot_state, SubtaskSlot::AIV1, p, block_idx,
                 force_gate
             );
         }
@@ -294,7 +294,7 @@ int SchedulerContext::prepare_block_for_dispatch(
         return n;
     } else if (shape == ResourceShape::AIC) {
         out_handles[0] = prepare_subtask_to_core(
-            thread_idx, core_offset, slot_state, PTO2SubtaskSlot::AIC, to_pending, block_idx, force_gate
+            thread_idx, core_offset, slot_state, SubtaskSlot::AIC, to_pending, block_idx, force_gate
         );
 #if SIMPLER_DFX
         sched_chip_swimlane_[thread_idx].phase_dispatch_count += 1;
@@ -302,7 +302,7 @@ int SchedulerContext::prepare_block_for_dispatch(
         return 1;
     } else {
         out_handles[0] = prepare_subtask_to_core(
-            thread_idx, core_offset, slot_state, PTO2SubtaskSlot::AIV0, to_pending, block_idx, force_gate
+            thread_idx, core_offset, slot_state, SubtaskSlot::AIV0, to_pending, block_idx, force_gate
         );
 #if SIMPLER_DFX
         sched_chip_swimlane_[thread_idx].phase_dispatch_count += 1;

@@ -110,7 +110,7 @@ static constexpr int32_t PAYLOAD_LOCAL_CONTEXT_INDEX = SPMD_LOCAL_CONTEXT_INDEX;
 static constexpr int32_t PAYLOAD_GLOBAL_CONTEXT_INDEX = SPMD_GLOBAL_CONTEXT_INDEX;
 
 /**
- * Per-core global context, stored in PTO2DispatchPayload.
+ * Per-core global context, stored in DispatchPayload.
  * Initialized during scheduler cold start from each core's cluster position
  * and the resident per-device async-DMA config. Stable for that scheduler
  * instance; unavailable workspace slots remain zero.
@@ -150,7 +150,7 @@ struct AsyncCtx {
 };
 
 /**
- * Per-dispatch local context, stored in PTO2DispatchPayload.
+ * Per-dispatch local context, stored in DispatchPayload.
  * Written by build_payload() before each dispatch. Different blocks of the
  * same task receive different s_block_idx values but the same s_block_num.
  *

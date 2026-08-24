@@ -13,7 +13,7 @@
  * @file dispatch_payload.h
  * @brief Per-core dispatch payload for AICore kernel execution
  *
- * PTO2DispatchPayload holds the kernel function address, a per-core args[]
+ * DispatchPayload holds the kernel function address, a per-core args[]
  * array, and embedded SPMD context (LocalContext + GlobalContext).  AICPU
  * maintains a static array of these (one per core).
  *
@@ -43,8 +43,8 @@
 #include "intrinsic.h"
 
 /** Max dispatch arguments: 16 scalars + up to 32 tensor pointers + ext params */
-#ifndef PTO2_DISPATCH_MAX_ARGS
-#define PTO2_DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + PTO2_EXT_PARAMS_COUNT)
+#ifndef DISPATCH_MAX_ARGS
+#define DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + PTO2_EXT_PARAMS_COUNT)
 #endif
 
 #ifndef PTO2_ALIGN_UP
@@ -83,7 +83,7 @@ constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
  * The struct is cache-line aligned to prevent false sharing across
  * concurrently dispatched cores.
  */
-struct alignas(64) PTO2DispatchPayload {
+struct alignas(64) DispatchPayload {
     // === Cache line 0 (64B): control block, the only line written per dispatch ===
     // function_bin_addr, local_context.{block_idx,block_num,async_ctx.task_token}
     // and src_payload are the per-dispatch writes; async_ctx's slab pointers +
@@ -111,7 +111,7 @@ struct alignas(64) PTO2DispatchPayload {
      *  = &local_context, [SPMD_GLOBAL_CONTEXT_INDEX] = &global_context (both prefilled
      *  once at init). On the gated path the AICPU leaves [0..num_args) unwritten and
      *  the idle AICore fills them from src_payload during its gate wait. */
-    uint64_t args[PTO2_DISPATCH_MAX_ARGS];
+    uint64_t args[DISPATCH_MAX_ARGS];
 
     /** Per-core global context: sub_block_id (AIV lane identity) plus optional
      *  async-DMA workspace addresses. Cold: written during scheduler init, never
@@ -127,6 +127,6 @@ struct alignas(64) PTO2DispatchPayload {
     );
 };
 
-static_assert(sizeof(PTO2DispatchPayload) == 512, "PTO2DispatchPayload hardware ABI size drift");
-static_assert(offsetof(PTO2DispatchPayload, args) == 64, "args[] must start at cache line 1 (control block = CL0)");
-static_assert(offsetof(PTO2DispatchPayload, src_payload) < 64, "src_payload (gate) must live on the CL0 control block");
+static_assert(sizeof(DispatchPayload) == 512, "DispatchPayload hardware ABI size drift");
+static_assert(offsetof(DispatchPayload, args) == 64, "args[] must start at cache line 1 (control block = CL0)");
+static_assert(offsetof(DispatchPayload, src_payload) < 64, "src_payload (gate) must live on the CL0 control block");

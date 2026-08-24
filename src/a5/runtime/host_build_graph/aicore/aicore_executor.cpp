@@ -27,13 +27,13 @@
 typedef void (*UnifiedKernelFunc)(__gm__ int64_t *);
 
 /**
- * Execute task from PTO2DispatchPayload.
+ * Execute task from DispatchPayload.
  *
  * Reads function_bin_addr and args from the dispatch payload.
  *
- * @param payload Pointer to PTO2DispatchPayload in global memory
+ * @param payload Pointer to DispatchPayload in global memory
  */
-__aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2DispatchPayload *payload) {
+__aicore__ __attribute__((always_inline)) static void execute_task(__gm__ DispatchPayload *payload) {
     if (payload == nullptr || payload->function_bin_addr == 0) {
         return;
     }
@@ -49,7 +49,7 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * Implements the AICPU-AICore register-based dispatch protocol:
  * 1. Report physical core ID and core type, signal aicore_done (no AICPU wait)
  * 2. Wait for the AICPU to open our register window (DATA_MAIN_BASE != 0)
- * 3. Cache per-core PTO2DispatchPayload pointer from my_hank->task
+ * 3. Cache per-core DispatchPayload pointer from my_hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
  * AICore reports on launch; the AICPU writes &s_payload_per_core[i] to
@@ -101,7 +101,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // above cannot clobber it) and before opening the window; dcci to read its
     // fresh value here.
     dcci(my_hank, SINGLE_CACHE_LINE);
-    __gm__ PTO2DispatchPayload *payload = reinterpret_cast<__gm__ PTO2DispatchPayload *>(my_hank->task);
+    __gm__ DispatchPayload *payload = reinterpret_cast<__gm__ DispatchPayload *>(my_hank->task);
 
     uint32_t enable_profiling_flag = get_aicore_profiling_flag();
     bool chip_swimlane_enabled = SIMPLER_GET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
@@ -166,7 +166,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             uint32_t task_id = reg_val;  // Decode: register holds task_id directly
 
             // Select dual-buffer slot: same bit as AICPU used when writing payload
-            __gm__ PTO2DispatchPayload *exec_payload = payload + (task_id & 1u);
+            __gm__ DispatchPayload *exec_payload = payload + (task_id & 1u);
 
             // Invalidate payload buffer (AICPU updates its content each dispatch)
             dcci(exec_payload, ENTIRE_DATA_CACHE);

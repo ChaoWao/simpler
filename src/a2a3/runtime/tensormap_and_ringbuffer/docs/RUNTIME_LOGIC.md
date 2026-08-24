@@ -557,7 +557,7 @@ Each scheduler thread runs a tight loop with two main phases:
 - Service each source (normal ready ▸ speculative early) in occupancy order — `sync_start`
   Tier-0 ▸ MIX ▸ AIC/AIV, idle ▸ pending — popping from the matching shape-based ready queue
   (lock-free MPMC Vyukov queue, one per resource shape)
-- Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
+- Build `DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
 - Write task pointer to `Handshake.task`, signal AICore via register `DATA_MAIN_BASE`
 
 After these phases, the scheduler updates profiling headers and checks for termination (all tasks completed and orchestrator done).
@@ -725,7 +725,7 @@ Each AICore worker has a `Handshake` struct in shared memory:
 
 | Field | Direction | Purpose |
 | ----- | --------- | ------- |
-| `task` | AICPU→AICore | Pointer to `PTO2DispatchPayload` |
+| `task` | AICPU→AICore | Pointer to `DispatchPayload` |
 | `control` | AICPU→AICore | 0=normal, 1=shutdown |
 | `perf_records_addr` | AICPU→AICore | Performance buffer address |
 
@@ -748,7 +748,7 @@ Instead of polling a shared-memory status flag, the production protocol uses har
 4. Execute kernel function via `func_id_to_addr` lookup
 5. Write FIN to `COND`
 
-### 9.3 PTO2DispatchPayload
+### 9.3 DispatchPayload
 
 Built by the scheduler from `TaskDescriptor`:
 
@@ -778,7 +778,7 @@ Built by the scheduler from `TaskDescriptor`:
    and stores it in `Runtime.dev.func_id_to_addr_[child_func_id(i)]`.
 4. When dispatching, the scheduler reads `func_id_to_addr_[fid]`, casts to
    `const CoreCallable*`, reads `resolved_addr_`, and copies that into
-   `PTO2DispatchPayload.function_bin_addr`.
+   `DispatchPayload.function_bin_addr`.
 
 ### 10.2 Orchestration SO Loading
 

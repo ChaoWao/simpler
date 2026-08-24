@@ -77,7 +77,7 @@ enum class ArgsDumpKind : uint8_t {
 };
 
 // Max kernel ids a record carries: one per active subtask of a task (its mix
-// membership). Must equal the runtime's PTO2_SUBTASK_SLOT_COUNT (1C2V => 3);
+// membership). Must equal the runtime's SUBTASK_SLOT_COUNT (1C2V => 3);
 // can't reference it here (platform layer doesn't include the tmap+ring runtime
 // header), so a static_assert in dump_args_for_task ties the two together.
 constexpr uint8_t ARGS_DUMP_MAX_FUNC_IDS = 3;
