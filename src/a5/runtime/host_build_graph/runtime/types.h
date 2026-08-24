@@ -15,7 +15,7 @@
  * - TaskOutputTensors: Return value from submit containing materialized output ChipTensors
  * - Arg: Aggregated argument container for pto_submit_task API
  *
- * ChipTensor descriptor types (ChipTensor, PTOBufferHandle, TensorCreateInfo) are
+ * simpler::hbg::Tensor descriptor types (simpler::hbg::Tensor, PTOBufferHandle, TensorCreateInfo) are
  * defined in tensor.h.
  *
  * This header is independent of orch_build_graph_runtime.h to allow inclusion from runtime.h
@@ -78,7 +78,7 @@ enum class ScopeMode : uint8_t {
  * Only runtime-created outputs are stored here, indexed in add_output order.
  *
  * The underlying storage is uninitialized; only output_count elements are
- * valid after submit returns.  This avoids default-constructing ChipTensor[]
+ * valid after submit returns.  This avoids default-constructing simpler::hbg::Tensor[]
  * on the hot path (2 KB of unnecessary zeroing per submit).
  *
  * Users must hold a named TaskOutputTensors variable and borrow via get_ref();
@@ -89,7 +89,7 @@ enum class ScopeMode : uint8_t {
  *   storage: the region named by TaskPayload::tensors for a plain submit, the
  *   GraphRecording node's tensors for a submit inside a Graph body. Both belong to
  *   one orchestration pass, which the next bind rebuilds over the same bytes.
- *   Therefore the TaskOutputTensors instance, the const ChipTensor& returned by
+ *   Therefore the TaskOutputTensors instance, the const simpler::hbg::Tensor& returned by
  *   get_ref(), and any pointer derived from either MUST NOT outlive the
  *   orchestration entry that submitted the task — do not move/copy them into state
  *   that survives the pass, and do not capture them by std::reference_wrapper or
@@ -110,14 +110,14 @@ public:
     uint32_t size() const { return output_count_; }
 
     /// Borrow a materialized output tensor by index (lvalue only).
-    const ChipTensor &get_ref(uint32_t index) const & {
+    const simpler::hbg::Tensor &get_ref(uint32_t index) const & {
         always_assert(index < output_count_);
         return *tensors_[index];
     }
-    const ChipTensor &get_ref(uint32_t index) const && = delete;
+    const simpler::hbg::Tensor &get_ref(uint32_t index) const && = delete;
 
-    /// Runtime-internal: append one materialized output ChipTensor.
-    void materialize_output(const ChipTensor &tensor) {
+    /// Runtime-internal: append one materialized output simpler::hbg::Tensor.
+    void materialize_output(const simpler::hbg::Tensor &tensor) {
         always_assert(output_count_ < MAX_TENSOR_ARGS);
         tensors_[output_count_++] = &tensor;
     }
@@ -131,7 +131,7 @@ private:
     uint32_t output_count_;
     // Upper bound: a task cannot have more outputs than total tensor args
     // (every OUTPUT/OUTPUT_EXISTING slot is one of the Arg's tensor slots).
-    const ChipTensor *tensors_[MAX_TENSOR_ARGS];
+    const simpler::hbg::Tensor *tensors_[MAX_TENSOR_ARGS];
 };
 
 using TaskSubmitResult = TaskOutputTensors;
@@ -143,7 +143,7 @@ using TaskSubmitResult = TaskOutputTensors;
 // TensorArgType is defined in tensor.h (included via task_args.h above)
 
 /**
- * Tagged reference to a single Arg slot — either a ChipTensor* or a
+ * Tagged reference to a single Arg slot — either a simpler::hbg::Tensor* or a
  * TensorCreateInfo*. The active member is determined by the slot's
  * TensorArgType tag (OUTPUT → create_info, else → tensor pointer).
  *
@@ -154,7 +154,7 @@ using TaskSubmitResult = TaskOutputTensors;
  */
 class TensorRef {
     union {
-        const ChipTensor *ptr_;
+        const simpler::hbg::Tensor *ptr_;
         const TensorCreateInfo *create_info_;
     };
 
@@ -166,7 +166,7 @@ public:
     TensorRef &operator=(const TensorRef &) = delete;
     TensorRef &operator=(TensorRef &&) = delete;
 
-    TensorRef &operator=(const ChipTensor *p) {
+    TensorRef &operator=(const simpler::hbg::Tensor *p) {
         ptr_ = p;
         return *this;
     }
@@ -175,9 +175,9 @@ public:
         return *this;
     }
 
-    const ChipTensor &ref() const { return *ptr_; }
+    const simpler::hbg::Tensor &ref() const { return *ptr_; }
     const TensorCreateInfo &create_info() const { return *create_info_; }
-    bool refers_to(const ChipTensor *t) const { return ptr_ == t; }
+    bool refers_to(const simpler::hbg::Tensor *t) const { return ptr_ == t; }
     bool refers_to(const TensorCreateInfo *ci) const { return create_info_ == ci; }
 };
 
@@ -185,24 +185,24 @@ public:
  * Aggregated argument container for pto_submit_task
  *
  * Inherits storage from TaskArgsTpl<TensorRef, uint64_t, MAX_TENSOR_ARGS, MAX_SCALAR_ARGS, TensorArgType>.
- * Each tensor slot stores a TensorRef union (ChipTensor* or TensorCreateInfo)
+ * Each tensor slot stores a TensorRef union (simpler::hbg::Tensor* or TensorCreateInfo)
  * discriminated by the corresponding tag().
  * ChipTensors are dispatched first in kernel args, followed by scalars.
  *
  * Output arguments follow two distinct ownership models:
  * - add_output(const TensorCreateInfo&): OUTPUT — runtime allocates buffer
- *   and materializes a new ChipTensor, returned via TaskOutputTensors.
- * - add_inout(const ChipTensor&): INOUT — reuses an existing ChipTensor as the write target.
+ *   and materializes a new simpler::hbg::Tensor, returned via TaskOutputTensors.
+ * - add_inout(const simpler::hbg::Tensor&): INOUT — reuses an existing simpler::hbg::Tensor as the write target.
  *
  * Example:
- *   ChipTensor x = make_tensor_external(dev_a, shapes, 2);
+ *   simpler::hbg::Tensor x = simpler::hbg::make_tensor_external(dev_a, shapes, 2);
  *   TensorCreateInfo ci(shapes, 2);  // must outlive submit
  *   Arg args;
  *   args.add_input(x);
  *   args.add_output(ci);
  *   args.add_scalar(some_value);
  *   TaskOutputTensors outs = rt_submit_aic_task(kernel_id, args);
- *   const ChipTensor& y = outs.get_ref(0);
+ *   const simpler::hbg::Tensor& y = outs.get_ref(0);
  */
 
 // Operand of a dispatch predicate (L0 layer): locates one element of a tensor —
@@ -210,7 +210,7 @@ public:
 // must outlive submit; its buffer must be allocated by then, and its producer must
 // be a dependency of the predicated task so the value is current at dispatch.
 struct CorePredicateOperand {
-    const ChipTensor *tensor{nullptr};
+    const simpler::hbg::Tensor *tensor{nullptr};
     uint32_t ndims{0};
     uint32_t indices[MAX_TENSOR_DIMS]{};
 };
@@ -318,7 +318,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         );
         static_assert(
             (is_supported_dump_arg_v<Args> && ...),
-            "dump: all arguments must be ChipTensor, TensorCreateInfo, or scalar lvalues"
+            "dump: all arguments must be simpler::hbg::Tensor, TensorCreateInfo, or scalar lvalues"
         );
         if constexpr (sizeof...(Args) == 0) {
             mark_all_dump_args();
@@ -347,7 +347,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         ((tensors_[tensor_count_] = &args, tags_[tensor_count_] = TensorArgType::INPUT, tensor_count_++), ...);
     }
 
-    /// Batch add outputs — all ChipTensor or all TensorCreateInfo:
+    /// Batch add outputs — all simpler::hbg::Tensor or all TensorCreateInfo:
     ///   add_output(ci1, ci2)         — runtime allocates buffers (OUTPUT)
     ///   add_output(t1, t2)           — write-only existing tensors (OUTPUT_EXISTING)
     template <typename... Args>
@@ -563,7 +563,7 @@ private:
 #if SIMPLER_DFX
     template <typename T>
     static constexpr bool is_supported_dump_arg_v =
-        std::is_same_v<std::decay_t<T>, ChipTensor> || std::is_same_v<std::decay_t<T>, TensorCreateInfo> ||
+        std::is_same_v<std::decay_t<T>, simpler::hbg::Tensor> || std::is_same_v<std::decay_t<T>, TensorCreateInfo> ||
         is_supported_scalar_arg_v<T>;
 #endif
 
@@ -607,7 +607,7 @@ private:
         dump_arg_selection_.mark_all(tensor_count_, scalar_count_);
     }
 
-    void mark_dump_arg(const ChipTensor &tensor) {
+    void mark_dump_arg(const simpler::hbg::Tensor &tensor) {
         for (int32_t i = 0; i < tensor_count_; i++) {
             if (tags_[i] != TensorArgType::OUTPUT && tensors_[i].refers_to(&tensor)) {
                 dump_arg_selection_.mark_index(i);
@@ -649,12 +649,15 @@ private:
         );
         if constexpr (is_output) {
             static_assert(
-                (std::is_same_v<std::decay_t<Args>, ChipTensor> && ...) ||
+                (std::is_same_v<std::decay_t<Args>, simpler::hbg::Tensor> && ...) ||
                     (std::is_same_v<std::decay_t<Args>, TensorCreateInfo> && ...),
-                "add_output: all arguments must be the same type (all ChipTensor or all TensorCreateInfo)"
+                "add_output: all arguments must be the same type (all simpler::hbg::Tensor or all TensorCreateInfo)"
             );
         } else {
-            static_assert((std::is_same_v<std::decay_t<Args>, ChipTensor> && ...), "all arguments must be ChipTensor");
+            static_assert(
+                (std::is_same_v<std::decay_t<Args>, simpler::hbg::Tensor> && ...),
+                "all arguments must be simpler::hbg::Tensor"
+            );
         }
     }
 
@@ -696,19 +699,18 @@ inline constexpr uint32_t GRAPH_MAX_SCALAR_ARGS = 64;
 using GraphTaskArgs = Arg<GRAPH_MAX_TENSOR_ARGS, GRAPH_MAX_SCALAR_ARGS>;
 
 // ChipTaskArgs — chip-level entry-arg holding the orchestration entry's
-// already-allocated inputs (capacity matches ChipStorageTaskArgs).
+// already-allocated inputs (capacity matches simpler::hbg::EntryArgsStorage).
 // aicpu_orchestration_entry/config receive a const ChipTaskArgs&.
 struct ChipTaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
-    // Build from the executor's ChipStorageTaskArgs: each input becomes a
-    // TensorRef pointing at src's ChipTensor, so `src` must outlive this (on the
-    // executor path src is runtime->orch_args_storage_, alive for the whole run).
-    void create_from_chip_args(const ChipStorageTaskArgs &src) {
+    // Build from the runtime's entry-arg storage: each input becomes a TensorRef
+    // pointing into `src`, so `src` must outlive this (on the executor path src is
+    // runtime->orch_args_storage_, alive for the whole run).
+    void create_from_entry_storage(const simpler::hbg::EntryArgsStorage &src) {
         reset();
         for (int32_t i = 0; i < src.tensor_count(); ++i) {
-            // Entry inputs are external submit-time tensors; the entry binds them
-            // by const ChipTensor& (replacing from_tensor_arg's old version/manual_dep
-            // reset), so this invariant is what keeps that binding behavior-preserving.
-            const ChipTensor &t = src.tensor(i);
+            // Adoption left every entry input external: no producing task, no
+            // overlap version, default dependency treatment.
+            const simpler::hbg::Tensor &t = src.tensor(i);
             debug_assert(!t.manual_dep && t.version == 0);
             add_input(t);
         }

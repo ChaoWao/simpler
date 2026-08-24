@@ -16,7 +16,7 @@
 
 // Assertion macros (always_assert / debug_assert), AssertionError, and the
 // MAYBE_UNINITIALIZED diagnostics live in the shared header so the unified
-// ChipTensor (src/common/task_interface/tensor.h) can use them without depending
+// simpler::tmr::Tensor (src/common/task_interface/tensor.h) can use them without depending
 // on this runtime-specific header. assert_impl / get_stacktrace are defined in
 // orchestration/common.cpp for runtime targets.
 #include "assert_compat.h"

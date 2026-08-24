@@ -14,8 +14,6 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
-TMR_EXAMPLE = "../../tensormap_and_ringbuffer/benchmark_bgemm"
-
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
@@ -24,7 +22,7 @@ class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{TMR_EXAMPLE}/kernels/orchestration/bgemm_orch.cpp",
+            "source": "kernels/orchestration/bgemm_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
             # C is a zero-initialized accumulator: the AIV add kernel reads C
             # from GM, adds the matmul result, and stores it back across grid_k
@@ -36,14 +34,14 @@ class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
             {
                 "func_id": 0,
                 "name": "GEMM",
-                "source": f"{TMR_EXAMPLE}/kernels/aic/kernel_gemm_tile.cpp",
+                "source": "kernels/aic/kernel_gemm_tile.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
                 "name": "ADD",
-                "source": f"{TMR_EXAMPLE}/kernels/aiv/kernel_tile_add.cpp",
+                "source": "kernels/aiv/kernel_tile_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.IN],
             },

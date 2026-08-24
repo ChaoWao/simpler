@@ -129,15 +129,15 @@ AICORE inline __gm__ T_ *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T_ *local
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *indices_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *x_norm_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *w_padded_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
-    __gm__ ChipTensor *idx_padded_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
-    __gm__ ChipTensor *recv_x_out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
-    __gm__ ChipTensor *recv_w_out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
-    __gm__ ChipTensor *recv_idx_out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[6]);
-    __gm__ ChipTensor *recv_count_out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[7]);
-    __gm__ ChipTensor *scratch_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[8]);
+    __gm__ TaskTensor *indices_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *x_norm_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *w_padded_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ TaskTensor *idx_padded_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ TaskTensor *recv_x_out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ TaskTensor *recv_w_out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ TaskTensor *recv_idx_out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[6]);
+    __gm__ TaskTensor *recv_count_out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[7]);
+    __gm__ TaskTensor *scratch_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[8]);
     int nranks = static_cast<int>(args[9]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[10]);
 

@@ -1183,7 +1183,7 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     {
         ChipTaskArgs orch_l2;
-        orch_l2.create_from_chip_args(device_args);
+        orch_l2.create_from_entry_storage(runtime->get_orch_args());
         int32_t total_tasks = run_host_orchestration(
             runtime, api, tensor_access, rt, host_arena, layout, sm_size, eff_task_window_size, host_orch_func_ptr,
             orch_l2

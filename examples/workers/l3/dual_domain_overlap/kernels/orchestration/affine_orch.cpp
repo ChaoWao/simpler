@@ -21,10 +21,10 @@ __attribute__((visibility("default"))) OrchestrationConfig affine_orchestration_
 }
 
 __attribute__((visibility("default"))) void affine_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &reduce_out = orch_args.tensor(0).ref();
-    const ChipTensor &scale = orch_args.tensor(1).ref();
-    const ChipTensor &bias = orch_args.tensor(2).ref();
-    const ChipTensor &out = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &reduce_out = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &scale = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &bias = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(3).ref();
 
     CoreTaskArgs params;
     params.add_input(reduce_out);

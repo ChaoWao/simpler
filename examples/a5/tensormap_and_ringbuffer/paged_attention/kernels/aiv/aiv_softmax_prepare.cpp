@@ -44,7 +44,7 @@ using namespace pto;
 
 template <int M, int N>
 static __aicore__ void softmax_prepare_impl(
-    __gm__ ChipTensor *sij, float scale_value, __gm__ ChipTensor *pij, __gm__ ChipTensor *mij, __gm__ ChipTensor *lij
+    __gm__ TaskTensor *sij, float scale_value, __gm__ TaskTensor *pij, __gm__ TaskTensor *mij, __gm__ TaskTensor *lij
 ) {
     uint64_t valid_len = static_cast<uint64_t>(sij->shapes[1]);
     __gm__ float *sij_addr = reinterpret_cast<__gm__ float *>(sij->buffer.addr);
@@ -127,10 +127,10 @@ static __aicore__ void softmax_prepare_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *sij = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *pij = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *mij = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
-    __gm__ ChipTensor *lij = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ TaskTensor *sij = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *pij = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *mij = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ TaskTensor *lij = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
     union {
         uint64_t u;
         float f;

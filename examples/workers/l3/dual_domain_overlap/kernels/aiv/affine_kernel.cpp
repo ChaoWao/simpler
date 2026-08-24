@@ -34,10 +34,10 @@ static constexpr int kRows = 16;
 static constexpr int kCols = 16;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *reduce_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *scale_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *bias_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
-    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ TaskTensor *reduce_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *scale_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *bias_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
 
     __gm__ float *reduce = reinterpret_cast<__gm__ float *>(reduce_tensor->buffer.addr) + reduce_tensor->start_offset;
     __gm__ float *scale = reinterpret_cast<__gm__ float *>(scale_tensor->buffer.addr) + scale_tensor->start_offset;

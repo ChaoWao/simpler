@@ -43,12 +43,6 @@ from simpler_setup.pto_isa import ensure_pto_isa_root
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
-_A2A3_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "workers", "l2", "vector_add")
-# a5's ccec/pto-isa needs the qualified `pto::Stride` spelling; the l2/vector_add
-# kernel above (a2a3-only example) uses unqualified `Stride` and does not compile
-# under the a5 AICore toolchain. Use the a5-native add kernel (same out=a+b Tensor*
-# ABI) on a5.
-_A5_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "a5", "tensormap_and_ringbuffer", "vector_example")
 
 N_ROWS = 128
 N_COLS = 128
@@ -76,10 +70,11 @@ def _build_chip_callable(
 
     pto_isa_root = ensure_pto_isa_root()
     include_dirs = kc.get_orchestration_include_dirs(runtime)
-    if platform.startswith("a5"):
-        aiv_kernel = os.path.join(_A5_VECTOR_ADD, "kernels/aiv/kernel_add.cpp")
-    else:
-        aiv_kernel = os.path.join(_A2A3_VECTOR_ADD, "kernels/aiv/vector_add_kernel.cpp")
+    # The case owns its kernels: one names a single runtime's Tensor, and this helper
+    # is driven under both. They also differ by architecture — a5's ccec/pto-isa needs
+    # the qualified `pto::Stride` spelling, which the a2a3 copy does not use.
+    arch = "a5" if platform.startswith("a5") else "a2a3"
+    aiv_kernel = os.path.join(_HERE, "kernels", runtime, "aiv", f"vector_add_{arch}.cpp")
     kernel_bytes = kc.compile_incore(
         source_path=aiv_kernel,
         core_type="aiv",
@@ -93,7 +88,7 @@ def _build_chip_callable(
 
     orch_bytes = kc.compile_orchestration(
         runtime_name=runtime,
-        source_path=os.path.join(_HERE, "kernels/orchestration/task_timing_orch.cpp"),
+        source_path=os.path.join(_HERE, "kernels", runtime, "task_timing_orch.cpp"),
     )
     core_callable = CoreCallable.build(
         signature=[ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT],
@@ -283,7 +278,7 @@ def _build_mix_chip_callable(platform: str) -> ChipCallable:
     mul = CoreCallable.build(signature=sig9, binary=incore("aiv/kernel_mul.cpp", "aiv"))
 
     orch_bytes = kc.compile_orchestration(
-        runtime_name=runtime, source_path=os.path.join(_HERE, "kernels/orchestration/task_timing_orch.cpp")
+        runtime_name=runtime, source_path=os.path.join(_HERE, "kernels", runtime, "task_timing_orch.cpp")
     )
     return ChipCallable.build(
         signature=sig9,

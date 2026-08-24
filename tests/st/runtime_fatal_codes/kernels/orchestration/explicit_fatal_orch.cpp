@@ -46,7 +46,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     CoreTaskArgs alloc_args;
     (void)alloc_tensors(alloc_args);
 
-    ChipTensor dummy = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
+    simpler::tmr::Tensor dummy = simpler::tmr::make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
     uint32_t indices[1] = {0};
     (void)get_tensor_data<uint64_t>(dummy, 0, indices);
     set_tensor_data<uint64_t>(dummy, 0, indices, 1U);

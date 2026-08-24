@@ -55,23 +55,23 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_A = orch_args.tensor(0).ref();
-    const ChipTensor &ext_B = orch_args.tensor(1).ref();
-    const ChipTensor &ext_D = orch_args.tensor(2).ref();
-    const ChipTensor &ext_E = orch_args.tensor(3).ref();
-    const ChipTensor &ext_ws_aic = orch_args.tensor(4).ref();
-    const ChipTensor &ext_ws_aiv = orch_args.tensor(5).ref();
-    const ChipTensor &ext_aic_out = orch_args.tensor(6).ref();
-    const ChipTensor &ext_aiv_out = orch_args.tensor(7).ref();
+    const simpler::tmr::Tensor &ext_A = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_B = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_D = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_E = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_ws_aic = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &ext_ws_aiv = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &ext_aic_out = orch_args.tensor(6).ref();
+    const simpler::tmr::Tensor &ext_aiv_out = orch_args.tensor(7).ref();
 
     uint32_t slot_shape[1] = {TILE_ELEMS};
     uint32_t off_slot0[1] = {0};
     uint32_t off_slot1[1] = {TILE_ELEMS};
 
-    ChipTensor ws_aic_slot0 = ext_ws_aic.view(slot_shape, off_slot0);
-    ChipTensor ws_aic_slot1 = ext_ws_aic.view(slot_shape, off_slot1);
-    ChipTensor ws_aiv_slot0 = ext_ws_aiv.view(slot_shape, off_slot0);
-    ChipTensor ws_aiv_slot1 = ext_ws_aiv.view(slot_shape, off_slot1);
+    simpler::tmr::Tensor ws_aic_slot0 = ext_ws_aic.view(slot_shape, off_slot0);
+    simpler::tmr::Tensor ws_aic_slot1 = ext_ws_aic.view(slot_shape, off_slot1);
+    simpler::tmr::Tensor ws_aiv_slot0 = ext_ws_aiv.view(slot_shape, off_slot0);
+    simpler::tmr::Tensor ws_aiv_slot1 = ext_ws_aiv.view(slot_shape, off_slot1);
 
     LOG_INFO("[chained_mix_orch] launching 3-step chained MIX (AIC + AIV)");
 

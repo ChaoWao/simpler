@@ -30,21 +30,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     LOG_INFO("SPMD PA highperf: block_dim=%" PRId64, block_dim);
 
-    const ChipTensor &query = orch_args.tensor(0).ref();
-    const ChipTensor &key_cache = orch_args.tensor(1).ref();
-    const ChipTensor &value_cache = orch_args.tensor(2).ref();
-    const ChipTensor &block_table = orch_args.tensor(3).ref();
-    const ChipTensor &out = orch_args.tensor(4).ref();
-    const ChipTensor &s_gm = orch_args.tensor(5).ref();
-    const ChipTensor &p_gm = orch_args.tensor(6).ref();
-    const ChipTensor &o_tmp_gm = orch_args.tensor(7).ref();
-    const ChipTensor &go_gm = orch_args.tensor(8).ref();
-    const ChipTensor &o_core_tmp_gm = orch_args.tensor(9).ref();
-    const ChipTensor &l_gm = orch_args.tensor(10).ref();
-    const ChipTensor &gm_k16 = orch_args.tensor(11).ref();
-    const ChipTensor &gm_v16 = orch_args.tensor(12).ref();
-    const ChipTensor &tiling = orch_args.tensor(13).ref();
-    const ChipTensor &null_tensor = orch_args.tensor(14).ref();
+    const simpler::tmr::Tensor &query = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &key_cache = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &value_cache = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &block_table = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &s_gm = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &p_gm = orch_args.tensor(6).ref();
+    const simpler::tmr::Tensor &o_tmp_gm = orch_args.tensor(7).ref();
+    const simpler::tmr::Tensor &go_gm = orch_args.tensor(8).ref();
+    const simpler::tmr::Tensor &o_core_tmp_gm = orch_args.tensor(9).ref();
+    const simpler::tmr::Tensor &l_gm = orch_args.tensor(10).ref();
+    const simpler::tmr::Tensor &gm_k16 = orch_args.tensor(11).ref();
+    const simpler::tmr::Tensor &gm_v16 = orch_args.tensor(12).ref();
+    const simpler::tmr::Tensor &tiling = orch_args.tensor(13).ref();
+    const simpler::tmr::Tensor &null_tensor = orch_args.tensor(14).ref();
 
     CoreTaskArgs args;
     args.add_input(query);

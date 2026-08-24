@@ -48,7 +48,7 @@ struct TestLookupResult {
     int count = 0;
 };
 
-static void run_lookup(ChipTensorMap &tmap, const ChipTensor &tensor, TestLookupResult &out) {
+static void run_lookup(ChipTensorMap &tmap, const simpler::tmr::Tensor &tensor, TestLookupResult &out) {
     tmap.lookup(tensor, [&](ChipTensorMapEntry &e, OverlapStatus s) -> bool {
         out.entries.push_back({&e, s});
         out.count++;
@@ -56,14 +56,18 @@ static void run_lookup(ChipTensorMap &tmap, const ChipTensor &tensor, TestLookup
     });
 }
 
-static ChipTensor make_test_tensor(uint64_t addr, uint32_t shape0, uint32_t ndims = 1, int32_t version = 0) {
+static simpler::tmr::Tensor make_test_tensor(uint64_t addr, uint32_t shape0, uint32_t ndims = 1, int32_t version = 0) {
     uint32_t shapes[MAX_TENSOR_DIMS] = {shape0};
-    return make_tensor_external(reinterpret_cast<void *>(addr), shapes, ndims, DataType::FLOAT32, false, version);
+    return simpler::tmr::make_tensor_external(
+        reinterpret_cast<void *>(addr), shapes, ndims, DataType::FLOAT32, false, version
+    );
 }
 
-static ChipTensor make_test_tensor_2d(uint64_t addr, uint32_t s0, uint32_t s1, int32_t version = 0) {
+static simpler::tmr::Tensor make_test_tensor_2d(uint64_t addr, uint32_t s0, uint32_t s1, int32_t version = 0) {
     uint32_t shapes[MAX_TENSOR_DIMS] = {s0, s1};
-    return make_tensor_external(reinterpret_cast<void *>(addr), shapes, 2, DataType::FLOAT32, false, version);
+    return simpler::tmr::make_tensor_external(
+        reinterpret_cast<void *>(addr), shapes, 2, DataType::FLOAT32, false, version
+    );
 }
 
 // =============================================================================
@@ -151,7 +155,7 @@ TEST_F(TensorMapTest, HashBoundedByBucketCount) {
 // =============================================================================
 
 TEST_F(TensorMapTest, InsertThenLookupFindsProducer) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     TaskId tid = TaskId::make(0, 0);
     tmap.insert(t, tid);
 
@@ -162,15 +166,15 @@ TEST_F(TensorMapTest, InsertThenLookupFindsProducer) {
 }
 
 TEST_F(TensorMapTest, LookupEmptyReturnsZero) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     TestLookupResult result;
     run_lookup(tmap, t, result);
     EXPECT_EQ(result.count, 0);
 }
 
 TEST_F(TensorMapTest, InsertMultipleSameBuffer) {
-    ChipTensor t1 = make_test_tensor(0x1000, 256);
-    ChipTensor t2 = make_test_tensor(0x1000, 128);
+    simpler::tmr::Tensor t1 = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t2 = make_test_tensor(0x1000, 128);
     TaskId tid1 = TaskId::make(0, 0);
     TaskId tid2 = TaskId::make(0, 1);
 
@@ -184,8 +188,8 @@ TEST_F(TensorMapTest, InsertMultipleSameBuffer) {
 }
 
 TEST_F(TensorMapTest, InsertDifferentBuffersNoCollision) {
-    ChipTensor t1 = make_test_tensor(0x1000, 256);
-    ChipTensor t2 = make_test_tensor(0x2000, 256);
+    simpler::tmr::Tensor t1 = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t2 = make_test_tensor(0x2000, 256);
     tmap.insert(t1, TaskId::make(0, 0));
     tmap.insert(t2, TaskId::make(0, 1));
 
@@ -207,8 +211,8 @@ TEST_F(TensorMapTest, InsertDifferentBuffersNoCollision) {
 TEST_F(TensorMapTest, OverlapFastPathCovered) {
     // Producer output: shape [256], consumer input: shape [512]
     // Consumer covers producer -> COVERED
-    ChipTensor producer = make_test_tensor(0x1000, 256);
-    ChipTensor consumer = make_test_tensor(0x1000, 512);
+    simpler::tmr::Tensor producer = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor consumer = make_test_tensor(0x1000, 512);
     tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
@@ -220,8 +224,8 @@ TEST_F(TensorMapTest, OverlapFastPathCovered) {
 TEST_F(TensorMapTest, OverlapFastPathOther) {
     // Producer output: shape [512], consumer input: shape [256]
     // Consumer does NOT cover producer -> OTHER
-    ChipTensor producer = make_test_tensor(0x1000, 512);
-    ChipTensor consumer = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor producer = make_test_tensor(0x1000, 512);
+    simpler::tmr::Tensor consumer = make_test_tensor(0x1000, 256);
     tmap.insert(producer, TaskId::make(0, 0));
 
     TestLookupResult result;
@@ -231,7 +235,7 @@ TEST_F(TensorMapTest, OverlapFastPathOther) {
 }
 
 TEST_F(TensorMapTest, OverlapFastPathExactMatch) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
 
     TestLookupResult result;
@@ -246,14 +250,14 @@ TEST_F(TensorMapTest, OverlapFastPathExactMatch) {
 
 TEST_F(TensorMapTest, OverlapSlowPathNoOverlap) {
     // Producer writes [0..128), consumer reads [128..256) -> NO_OVERLAP
-    ChipTensor base = make_test_tensor_2d(0x1000, 256, 1);
+    simpler::tmr::Tensor base = make_test_tensor_2d(0x1000, 256, 1);
     uint32_t prod_shapes[] = {128, 1};
     uint32_t prod_offsets[] = {0, 0};
-    ChipTensor producer = base.view(prod_shapes, prod_offsets);
+    simpler::tmr::Tensor producer = base.view(prod_shapes, prod_offsets);
 
     uint32_t con_shapes[] = {128, 1};
     uint32_t con_offsets[] = {128, 0};
-    ChipTensor consumer = base.view(con_shapes, con_offsets);
+    simpler::tmr::Tensor consumer = base.view(con_shapes, con_offsets);
 
     tmap.insert(producer, TaskId::make(0, 0));
 
@@ -264,14 +268,14 @@ TEST_F(TensorMapTest, OverlapSlowPathNoOverlap) {
 
 TEST_F(TensorMapTest, OverlapSlowPathPartialOverlap) {
     // Producer writes [0..192), consumer reads [64..256) -> overlapping, OTHER
-    ChipTensor base = make_test_tensor_2d(0x1000, 256, 1);
+    simpler::tmr::Tensor base = make_test_tensor_2d(0x1000, 256, 1);
     uint32_t prod_shapes[] = {192, 1};
     uint32_t prod_offsets[] = {0, 0};
-    ChipTensor producer = base.view(prod_shapes, prod_offsets);
+    simpler::tmr::Tensor producer = base.view(prod_shapes, prod_offsets);
 
     uint32_t con_shapes[] = {192, 1};
     uint32_t con_offsets[] = {64, 0};
-    ChipTensor consumer = base.view(con_shapes, con_offsets);
+    simpler::tmr::Tensor consumer = base.view(con_shapes, con_offsets);
 
     tmap.insert(producer, TaskId::make(0, 0));
 
@@ -283,14 +287,14 @@ TEST_F(TensorMapTest, OverlapSlowPathPartialOverlap) {
 
 TEST_F(TensorMapTest, OverlapSlowPathCovered) {
     // Producer writes [64..192), consumer reads [0..256) -> consumer covers producer
-    ChipTensor base = make_test_tensor_2d(0x1000, 256, 1);
+    simpler::tmr::Tensor base = make_test_tensor_2d(0x1000, 256, 1);
     uint32_t prod_shapes[] = {128, 1};
     uint32_t prod_offsets[] = {64, 0};
-    ChipTensor producer = base.view(prod_shapes, prod_offsets);
+    simpler::tmr::Tensor producer = base.view(prod_shapes, prod_offsets);
 
     uint32_t con_shapes[] = {256, 1};
     uint32_t con_offsets[] = {0, 0};
-    ChipTensor consumer = base.view(con_shapes, con_offsets);
+    simpler::tmr::Tensor consumer = base.view(con_shapes, con_offsets);
 
     tmap.insert(producer, TaskId::make(0, 0));
 
@@ -306,8 +310,8 @@ TEST_F(TensorMapTest, OverlapSlowPathCovered) {
 
 TEST_F(TensorMapTest, VersionMismatchReturnsOther) {
     // Producer v0, consumer v1 -> always OTHER regardless of shape match
-    ChipTensor producer = make_test_tensor(0x1000, 256, 1, 0);
-    ChipTensor consumer = make_test_tensor(0x1000, 256, 1, 1);
+    simpler::tmr::Tensor producer = make_test_tensor(0x1000, 256, 1, 0);
+    simpler::tmr::Tensor consumer = make_test_tensor(0x1000, 256, 1, 1);
 
     tmap.insert(producer, TaskId::make(0, 0));
 
@@ -322,7 +326,7 @@ TEST_F(TensorMapTest, VersionMismatchReturnsOther) {
 // =============================================================================
 
 TEST_F(TensorMapTest, StaleEntriesSkippedDuringLookup) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(0, 1));
 
@@ -336,7 +340,7 @@ TEST_F(TensorMapTest, StaleEntriesSkippedDuringLookup) {
 }
 
 TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     // Ring 0, task 0 and Ring 1, task 0 -> same bucket
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(1, 0));
@@ -356,7 +360,7 @@ TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
 // =============================================================================
 
 TEST_F(TensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(0, 1));
     tmap.insert(t, TaskId::make(0, 2));
@@ -374,7 +378,7 @@ TEST_F(TensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
 }
 
 TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(1, 0));
 
@@ -389,7 +393,7 @@ TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
 }
 
 TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
     EXPECT_EQ(tmap.free_num, 0);
     EXPECT_EQ(tmap.next_entry_idx, 1);
@@ -409,7 +413,7 @@ TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
 // cleanup_retired retiring only the earlier task must free that earlier task's
 // entries alone and leave the still-live (later) task's entries intact.
 TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(0, WINDOW_SIZE));
@@ -431,7 +435,7 @@ TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
 // =============================================================================
 
 TEST_F(TensorMapTest, MultiRingIndependentLookup) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 5));
     tmap.insert(t, TaskId::make(1, 3));
     tmap.insert(t, TaskId::make(2, 7));
@@ -455,7 +459,7 @@ TEST_F(TensorMapTest, MultiRingIndependentLookup) {
 // =============================================================================
 
 TEST_F(TensorMapTest, LookupReturnsAllMatches) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     // Insert 20 entries for the same buffer (was capped at 16 before #669)
     for (int i = 0; i < 20; i++) {
         tmap.insert(t, TaskId::make(0, i));
@@ -473,19 +477,19 @@ TEST_F(TensorMapTest, LookupReturnsAllMatches) {
 TEST_F(TensorMapTest, PoolExhaustionAsserts) {
     // With pool_size=64, inserting 64 entries should work, 65th should fail
     for (int i = 0; i < POOL_SIZE; i++) {
-        ChipTensor t = make_test_tensor(0x1000 + i * 0x100, 256);
+        simpler::tmr::Tensor t = make_test_tensor(0x1000 + i * 0x100, 256);
         tmap.insert(t, TaskId::make(0, i));
     }
     EXPECT_EQ(tmap.next_entry_idx, POOL_SIZE);
     EXPECT_EQ(tmap.free_num, 0);
 
     // 65th insert should trigger always_assert (pool overflow)
-    ChipTensor overflow = make_test_tensor(0x9000, 256);
+    simpler::tmr::Tensor overflow = make_test_tensor(0x9000, 256);
     EXPECT_THROW(tmap.insert(overflow, TaskId::make(0, POOL_SIZE)), std::runtime_error);
 }
 
 TEST_F(TensorMapTest, FreeListRecycling) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     // Insert and cleanup 10 entries
     for (int i = 0; i < 10; i++) {
         tmap.insert(t, TaskId::make(0, i));
@@ -506,8 +510,8 @@ TEST_F(TensorMapTest, FreeListRecycling) {
 // =============================================================================
 
 TEST_F(TensorMapTest, PerTaskEntryListTracksMultipleOutputs) {
-    ChipTensor t1 = make_test_tensor(0x1000, 256);
-    ChipTensor t2 = make_test_tensor(0x2000, 128);
+    simpler::tmr::Tensor t1 = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t2 = make_test_tensor(0x2000, 128);
     TaskId tid = TaskId::make(0, 5);
 
     tmap.insert(t1, tid);
@@ -525,7 +529,7 @@ TEST_F(TensorMapTest, PerTaskEntryListTracksMultipleOutputs) {
 // =============================================================================
 
 TEST_F(TensorMapTest, RemoveMiddleEntryPreservesChain) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::tmr::Tensor t = make_test_tensor(0x1000, 256);
     TaskId tid0 = TaskId::make(0, 0);
     TaskId tid1 = TaskId::make(0, 1);
     TaskId tid2 = TaskId::make(0, 2);

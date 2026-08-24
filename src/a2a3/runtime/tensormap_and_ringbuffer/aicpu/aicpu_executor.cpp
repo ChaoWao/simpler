@@ -146,7 +146,7 @@ struct AicpuExecutor {
     // Default-constructed: libc-backed backend, no ctx.
     DeviceArena runtime_arena_;
 
-    // Entry-arg ChipTaskArgs built (via create_from_chip_args) from get_orch_args()
+    // Entry-arg ChipTaskArgs built (via create_from_entry_storage) from get_orch_args()
     // before scheduler init; consumed by the (*p_func)(orch_args_cached_) below.
     ChipTaskArgs orch_args_cached_;
 
@@ -562,14 +562,14 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 // Build the entry-arg once per run; both the config call below and
                 // the orchestration entry (consumed at orch_args_cached_) use it.
-                orch_args_cached_.create_from_chip_args(runtime->get_orch_args());
+                orch_args_cached_.create_from_entry_storage(runtime->get_orch_args());
 
                 // Validate arg count on every run against the registered SO.
                 if (*p_config_func != nullptr) {
                     OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
                     LOG_DEBUG("Thread %d: Config: expected_args=%d", thread_idx, cfg.expected_arg_count);
                     if (cfg.expected_arg_count > 0) {
-                        const ChipStorageTaskArgs &args_validate = runtime->get_orch_args();
+                        const simpler::tmr::EntryArgsStorage &args_validate = runtime->get_orch_args();
                         int32_t actual_arg_count = args_validate.tensor_count() + args_validate.scalar_count();
                         if (actual_arg_count < cfg.expected_arg_count) {
                             LOG_ERROR(

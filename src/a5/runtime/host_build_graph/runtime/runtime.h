@@ -16,7 +16,7 @@
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
- * - ChipTensor pair management for host-device memory tracking
+ * - simpler::hbg::Tensor pair management for host-device memory tracking
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
@@ -41,6 +41,7 @@
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
 #include "task_args.h"
+#include "tensor.h"  // EntryArgsStorage
 
 // =============================================================================
 // Configuration Macros
@@ -102,7 +103,7 @@ struct Handshake {
 } __attribute__((aligned(64)));
 
 /**
- * ChipTensor pair for tracking host-device memory mappings.
+ * simpler::hbg::Tensor pair for tracking host-device memory mappings.
  * Used for copy-back during finalize.
  */
 struct TensorPair {
@@ -183,9 +184,9 @@ public:
 private:
     // Kernel binary tracking for cleanup
 
-    void *gm_sm_ptr_;                        // GM pointer to shared memory (device)
-    void *slot_states_ptr_;                  // Pointer to ChipTaskSlotState array (scheduler-private, for profiling)
-    ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
+    void *gm_sm_ptr_;        // GM pointer to shared memory (device)
+    void *slot_states_ptr_;  // Pointer to ChipTaskSlotState array (scheduler-private, for profiling)
+    simpler::hbg::EntryArgsStorage orch_args_storage_;  // Entry args, adopted on the host
 
     // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
     // Runtime to device; AICPU reads them in the boot path to skip
@@ -242,7 +243,7 @@ public:
     // =========================================================================
 
     void *get_gm_sm_ptr() const;
-    const ChipStorageTaskArgs &get_orch_args() const;
+    const simpler::hbg::EntryArgsStorage &get_orch_args() const;
     void set_gm_sm_ptr(void *p);
     void set_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);

@@ -29,7 +29,7 @@ MixedKernels mix_kernels() {
     return kernels;
 }
 
-TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
+TaskId submit_aiv(const simpler::hbg::Tensor &output, int16_t block_num) {
     CoreTaskArgs args;
     args.add_inout(output);
     args.add_scalar(0);
@@ -38,7 +38,7 @@ TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t base, TaskId producer) {
+TaskId submit_sync_mix(const simpler::hbg::Tensor &output, int16_t block_num, int64_t base, TaskId producer) {
     CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
@@ -49,7 +49,7 @@ TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t base
     return rt_submit_task(mix_kernels(), args).task_id();
 }
 
-void submit_normal_mix(const ChipTensor &output, int16_t block_num, int64_t base, TaskId producer) {
+void submit_normal_mix(const simpler::hbg::Tensor &output, int16_t block_num, int64_t base, TaskId producer) {
     CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
@@ -69,8 +69,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &output = orch_args.tensor(0).ref();
-    const ChipTensor &layout = orch_args.tensor(1).ref();
+    const simpler::hbg::Tensor &output = orch_args.tensor(0).ref();
+    const simpler::hbg::Tensor &layout = orch_args.tensor(1).ref();
     int16_t aiv_blocks = static_cast<int16_t>(rt_available_aiv_count());
     int16_t mix_blocks = static_cast<int16_t>(rt_available_cluster_count());
 

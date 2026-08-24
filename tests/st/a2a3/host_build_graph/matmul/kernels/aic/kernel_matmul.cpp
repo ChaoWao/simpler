@@ -9,12 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Matrix multiplication kernel (AIC, submit_task / ChipTensor* ABI)
+ * Matrix multiplication kernel (AIC, submit_task / TaskTensor* ABI)
  *
  * Implements: out = src0 @ src1.  Half precision inputs, float output.
  * Single 128x128 tile.  Flow: TLOAD -> TMOV -> TMATMUL -> TSTORE.
  *
- * Args (ChipTensor*):
+ * Args (TaskTensor*):
  *   args[0] = src0 (INPUT, half)
  *   args[1] = src1 (INPUT, half)
  *   args[2] = out  (OUTPUT, float)
@@ -48,9 +48,9 @@ constexpr int K = 128;
 constexpr int N = 128;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *src0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *src1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ TaskTensor *src0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *src1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
 
     __gm__ half *src0 = reinterpret_cast<__gm__ half *>(src0_tensor->buffer.addr) + src0_tensor->start_offset;
     __gm__ half *src1 = reinterpret_cast<__gm__ half *>(src1_tensor->buffer.addr) + src1_tensor->start_offset;

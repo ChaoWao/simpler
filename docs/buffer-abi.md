@@ -30,9 +30,10 @@ forget it on.
 | ---- | ---------- | -------------- |
 | **`Buffer`** | An owned backing (POSIX shm / fork-COW / device malloc) with a canonical identity + lifecycle. Stays with the Worker that created it. | owner side (L3+) |
 | **`Tensor`** | A **self-describing task argument**: the full buffer descriptor embedded + a strided view `(byte_offset, shapes, strides, dtype)`. The wire element of `TaskArgs`. Carries no materialized address. | `simpler.buffer`, re-exported from `simpler.task_interface` |
-| **`ChipTensor`** | The materialized POD the device runtime ABI reads (address + strided view). Exists **only** at the L2 device-runtime boundary. | L2 leaf, internal |
+| **`ChipTensor`** | A task argument as it arrives at the chip runtime: a resolved address plus a strided view, and nothing else. Exists **only** at the L2 device-runtime boundary. | L2 leaf |
+| **`simpler::{hbg,tmr}::Tensor`** | One runtime's working form — a `ChipTensor`'s geometry plus what that runtime decided about it (producing task, overlap version, dependency treatment, derived caches). `Runtime::set_orch_args` adopts each argument into it, on the host. | inside one runtime |
 
-**You never build a `ChipTensor`.** Name a `Tensor` over a buffer and submit it;
+**You never build a `ChipTensor` for the L3+ submit path.** Name a `Tensor` over a buffer and submit it;
 the address is resolved on the consuming endpoint, and the C++ orchestration on
 the chip receives the resolved form.
 
@@ -54,12 +55,11 @@ Drop `buffer.addr`, add the buffer descriptor, and have the H2D staging step
 rewrite the backend tag and body (and mint a fresh identity for the device copy).
 That is self-consistent, but it charges the device for host-side fields:
 
-- **Device cost.** `sizeof(ChipTensor)` is pinned at **128 B** by
-  `static_assert(… == 128, "ChipTensor must be exactly 2 cache lines (128 bytes)")` and by
-  `TASKPAYLOAD_TENSOR_STRIDE`, which the AICPU scheduler strides the payload
-  with. A merged struct is ~192–216 B, taking `TaskPayload` from 4864 B to
-  6912–7680 B — **+42% to +58% per task slot** — because the payload embeds
-  `ChipTensor tensors[MAX_TENSOR_ARGS]` **by value** in the device task ring.
+- **Device cost.** The payload embeds its tensors **by value** in the device task
+  ring, and the AICPU scheduler strides it with `TASKPAYLOAD_TENSOR_STRIDE`, so the
+  runtime's working tensor is pinned at **128 B** (2 cache lines). A merged struct is
+  ~192–216 B, taking `TaskPayload` from 4864 B to 6912–7680 B — **+42% to +58% per
+  task slot**.
 - **Zero return for that cost.** Most of what a merge would add has no reader on
   the far side. The field-by-field split is below.
 
@@ -74,8 +74,8 @@ Both types have a member called `buffer`, and they are not the same thing: on th
 wire it is the `BufferDescriptor` that says how to find the backing, on the device
 it is the resolved `addr` + `size`. That is the whole of what materialization does.
 
-| `Tensor` (144 B, wire) | rel | `ChipTensor` (128 B, device) |
-| ---------------------- | --- | ---------------------------- |
+| `Tensor` (144 B, wire) | rel | `ChipTensor` (72 B, L2 argument) |
+| ---------------------- | --- | -------------------------------- |
 | `buffer.magic` | ⟂ | — |
 | `buffer.identity` (32 B) | ⟂ | — |
 | `buffer.backend_kind` | ⟂ | — |
@@ -87,10 +87,6 @@ it is the resolved `addr` + `size`. That is the whole of what materialization do
 | `byte_offset` (bytes) | ≈ | `start_offset` (elements) |
 | `shapes[5]` / `strides[5]` / `ndims` / `dtype` | = | `shapes[5]` / `strides[5]` / `ndims` / `dtype` |
 | `buffer.address_space` | = | `address_space` (still spelled `child_memory` until the wire flip) |
-| — | ⟂ | `owner_task_id` |
-| — | ⟂ | `version` |
-| — | ⟂ | `manual_dep` |
-| — | ⟂ | `is_contiguous`, `extent_elem_cache` |
 
 **Dead on the device** (`Tensor`-only): `magic` discriminates untrusted bytes at
 a decode boundary the device does not have. `identity` / `backend_kind` / `body`
@@ -101,12 +97,15 @@ backend, see [Backends](#backends). `access` has no device enforcement point
 
 **Meaningless before materialization** (`ChipTensor`-only): `buffer.addr` is the
 resolved address, which by definition does not exist while the argument is still
-crossing processes. `owner_task_id` / `version` / `manual_dep` are L2 OverlapMap
-state — the producing task and its dependency treatment are decided by the chip
-runtime, so an L3 builder has nothing to put there (`make_tensor_strided` fills
-`TaskId::invalid()`, `0`, `false`). `is_contiguous` and `extent_elem_cache`
-are derived from `shapes`/`strides`, cached for the AICore hot path so it can
-skip cache line 2.
+crossing processes.
+
+Neither column carries the L2 OverlapMap state — the producing task, the overlap
+version, whether dependency tracking is creator-only. Those are *decided by* the
+chip runtime, so neither an L3 builder nor an L2 caller has anything to put there;
+they live on `simpler::{hbg,tmr}::Tensor`, which `Runtime::set_orch_args` adopts
+each argument into. The same goes for `is_contiguous` and `extent_elem_cache`:
+derived from `shapes`/`strides`, and cached only where a hot path reads them per
+task.
 
 So a merged struct would carry ~70 B that the AICore never reads, in a type whose
 size is pinned at two cache lines precisely because the scheduler walks it per

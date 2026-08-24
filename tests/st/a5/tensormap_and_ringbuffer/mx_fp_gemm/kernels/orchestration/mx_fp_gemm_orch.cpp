@@ -32,11 +32,11 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_a = orch_args.tensor(0).ref();
-    const ChipTensor &ext_as = orch_args.tensor(1).ref();
-    const ChipTensor &ext_b = orch_args.tensor(2).ref();
-    const ChipTensor &ext_bs = orch_args.tensor(3).ref();
-    const ChipTensor &ext_c = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &ext_a = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_as = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_b = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_bs = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_c = orch_args.tensor(4).ref();
     const uint64_t mode = orch_args.scalar(0);
 
     LOG_INFO(

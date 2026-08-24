@@ -37,7 +37,7 @@
 #endif
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     // Keep the swimlane bars visible. Lookup-only timing uses dummy tasks, so

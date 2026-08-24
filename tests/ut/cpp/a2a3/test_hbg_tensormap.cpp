@@ -37,7 +37,7 @@ struct TestLookupResult {
     int count = 0;
 };
 
-void run_lookup(ChipTensorMap &tmap, const ChipTensor &tensor, TestLookupResult &out) {
+void run_lookup(ChipTensorMap &tmap, const simpler::hbg::Tensor &tensor, TestLookupResult &out) {
     tmap.lookup(tensor, [&](ChipTensorMapEntry &e, OverlapStatus s) -> bool {
         out.entries.push_back({&e, s});
         out.count++;
@@ -45,9 +45,9 @@ void run_lookup(ChipTensorMap &tmap, const ChipTensor &tensor, TestLookupResult 
     });
 }
 
-ChipTensor make_test_tensor(uint64_t addr, uint32_t shape0) {
+simpler::hbg::Tensor make_test_tensor(uint64_t addr, uint32_t shape0) {
     uint32_t shapes[MAX_TENSOR_DIMS] = {shape0};
-    return make_tensor_external(reinterpret_cast<void *>(addr), shapes, 1, DataType::FLOAT32, false, 0);
+    return simpler::hbg::make_tensor_external(reinterpret_cast<void *>(addr), shapes, 1, DataType::FLOAT32, false, 0);
 }
 
 class HbgTensorMapTest : public ::testing::Test {
@@ -64,7 +64,7 @@ protected:
 // Completion progress alone cannot make an older producer disappear. Direct
 // inserts remain visible until dependency computation explicitly removes one.
 TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(0, 1));
     tmap.insert(t, TaskId::make(0, 2));
@@ -85,7 +85,7 @@ TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
 // Two tasks whose local ids alias to the same task slot both keep their entries;
 // slot reuse is not retirement.
 TEST_F(HbgTensorMapTest, SlotAliasingTasksBothKeepTheirEntries) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
     // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
     tmap.insert(t, TaskId::make(0, 0));
     tmap.insert(t, TaskId::make(0, WINDOW_SIZE));
@@ -122,7 +122,7 @@ TEST_F(HbgTensorMapTest, PoolOccupancyOnlyGrows) {
 // whole pool free, and the next body's inserts starting from entry 0. A leftover bucket
 // chain here would give the next Definition a producer the body never had.
 TEST_F(HbgTensorMapTest, ResetLeavesTheMapAsFreshlyInitialized) {
-    ChipTensor t = make_test_tensor(0x1000, 256);
+    simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
     for (int32_t i = 0; i < 8; i++) {
         tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), TaskId::make(0, i));
     }
@@ -159,7 +159,7 @@ TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
     EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
 
     // A task id that aliases slot 0 still lands in a working chain after two resets.
-    ChipTensor t = make_test_tensor(0x2000, 128);
+    simpler::hbg::Tensor t = make_test_tensor(0x2000, 128);
     tmap.insert(t, TaskId::make(0, WINDOW_SIZE));
     TestLookupResult result;
     run_lookup(tmap, t, result);

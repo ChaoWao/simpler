@@ -12,11 +12,9 @@
  * TensorCreateInfo — submit-time create-info for runtime-allocated outputs.
  *
  * Runtime-only: this header (and the materialization helpers below) are NOT
- * part of the wire/host-facing ChipTensor in src/common/task_interface/tensor.h.
+ * part of the boundary simpler::tmr::Tensor in src/common/task_interface/tensor.h.
  * It carries the metadata required to materialize a fresh contiguous output:
- * dtype, ndims, shapes, manual_dep. Its 64B layout mirrors ChipTensor cache
- * line 1 so init_tensor_from_create_info() can copy the whole line with a
- * single memcpy.
+ * dtype, ndims, shapes, manual_dep.
  *
  * There is no initial-value fill. That fill ran inside the hidden alloc task
  * where nothing could race it, but it bound the AICPU orchestrator to writing
@@ -34,20 +32,14 @@
 #include "data_type.h"
 #include "tensor.h"
 
-class alignas(64) TensorCreateInfo {
+class TensorCreateInfo {
 public:
     TensorCreateInfo(
         const uint32_t shapes_in[], uint32_t ndims_in, DataType dtype_in = DataType::FLOAT32, bool manual_dep_in = false
     ) :
-        __pad0__{0, 0},
-        __pad2__(0),
-        start_offset(0),  // mirrors ChipTensor::start_offset; pre-zeroed for create-info outputs
-        version(0),
         ndims(ndims_in),
         dtype(dtype_in),
-        manual_dep(manual_dep_in),
-        is_contiguous(true),  // mirrors ChipTensor::is_contiguous; pre-set for create-info outputs
-        __pad_flags__(0) {
+        manual_dep(manual_dep_in) {
         // Bound the write below: shapes[] holds MAX_TENSOR_DIMS, and ndims_in
         // comes from user-submitted output shapes — guard before the loop so an
         // oversized rank can't overrun the fixed array.
@@ -57,7 +49,7 @@ public:
         }
     }
 
-    void copy(const TensorCreateInfo &other) { memcpy(this, &other, sizeof(other)); }
+    void copy(const TensorCreateInfo &other) { *this = other; }
 
     uint64_t buffer_size_bytes() const {
         uint64_t total = 1;
@@ -68,57 +60,35 @@ public:
     }
 
 public:
-    // --- Bytes [0, 32): TensorCreateInfo-only fields ---
-    // These occupy the same positions as ChipTensor::buffer, ChipTensor::owner_task_id,
-    // and ChipTensor::start_offset. The runtime overwrites owner metadata after the
-    // memcpy and recomputes start_offset / stride during payload materialization.
-    uint64_t __pad0__[2];   // → ChipTensor::buffer (overwritten post-memcpy)
-    uint64_t __pad2__;      // → ChipTensor::owner_task_id (overwritten post-memcpy)
-    uint64_t start_offset;  // mirrors ChipTensor::start_offset; always 0 for create-info outputs
-
-    // --- Bytes [32, 64): Matches ChipTensor cache line 1 layout ---
-    int32_t version;  // Always 0 for create-info outputs
-    uint32_t ndims;
-    DataType dtype;
-    bool manual_dep;
-    bool is_contiguous;                // Always true for create-info outputs
-    uint8_t __pad_flags__;             // → ChipTensor::address_space (always HOST for create-info outputs)
-    uint32_t shapes[MAX_TENSOR_DIMS];  // → ChipTensor::shapes
+    uint32_t ndims{0};
+    DataType dtype{DataType::FLOAT32};
+    bool manual_dep{false};
+    uint32_t shapes[MAX_TENSOR_DIMS]{};
 
     TensorCreateInfo() = default;
 };
 
-// TensorCreateInfo layout must match ChipTensor cacheline 1 for memcpy optimization
-static_assert(sizeof(TensorCreateInfo) == 64, "TensorCreateInfo must match ChipTensor cacheline 1 size (64 bytes)");
-static_assert(offsetof(TensorCreateInfo, __pad0__) == offsetof(ChipTensor, buffer));
-static_assert(offsetof(TensorCreateInfo, start_offset) == offsetof(ChipTensor, start_offset));
-static_assert(offsetof(TensorCreateInfo, version) == offsetof(ChipTensor, version));
-static_assert(offsetof(TensorCreateInfo, ndims) == offsetof(ChipTensor, ndims));
-static_assert(offsetof(TensorCreateInfo, dtype) == offsetof(ChipTensor, dtype));
-static_assert(offsetof(TensorCreateInfo, manual_dep) == offsetof(ChipTensor, manual_dep));
-static_assert(offsetof(TensorCreateInfo, is_contiguous) == offsetof(ChipTensor, is_contiguous));
-static_assert(offsetof(TensorCreateInfo, __pad_flags__) == offsetof(ChipTensor, address_space));
-static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(ChipTensor, shapes));
-
 // ============================================================================
-// Materialization helpers — operate on a ChipTensor& through its public members.
-// Factored out of ChipTensor (which now lives in the wire/host-facing common
+// Materialization helpers — operate on a simpler::tmr::Tensor& through its public members.
+// Factored out of simpler::tmr::Tensor (which now lives in the wire/host-facing common
 // header) so the create-info dependency stays runtime-only.
 // ============================================================================
 
 /// Materialize a TensorCreateInfo into `t` (fresh contiguous output).
-/// Single 64B memcpy covers cache line 1; `ci` pre-initialises start_offset (=0)
-/// and is_contiguous (=true) in its line-1 slots so they need no reset here.
-/// Cache line 2 (stride/extent) is computed from `ci.shapes` in a single reverse pass.
-inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &ci, void *addr, uint64_t buffer_size) {
+inline void
+init_tensor_from_create_info(simpler::tmr::Tensor &t, const TensorCreateInfo &ci, void *addr, uint64_t buffer_size) {
     always_assert(ci.ndims > 0 && ci.ndims <= MAX_TENSOR_DIMS);
-    memcpy(&t, &ci, 64);
     t.buffer = {reinterpret_cast<uint64_t>(addr), buffer_size};
     t.owner_task_id = TaskId::invalid();  // caller (orchestrator) overwrites with actual task_id
-    uint32_t s = 1;
-    for (int32_t i = static_cast<int32_t>(t.ndims) - 1; i >= 0; --i) {
-        t.strides[i] = s;
-        s *= t.shapes[i];
+    t.start_offset = 0;
+    t.version = 0;
+    t.ndims = ci.ndims;
+    t.dtype = ci.dtype;
+    t.manual_dep = ci.manual_dep;
+    t.is_contiguous = true;
+    t.address_space = AddressSpace::HOST;
+    for (uint32_t i = 0; i < ci.ndims; ++i) {
+        t.shapes[i] = ci.shapes[i];
     }
-    t.extent_elem_cache = s;
+    t.refresh_row_major_derived();
 }

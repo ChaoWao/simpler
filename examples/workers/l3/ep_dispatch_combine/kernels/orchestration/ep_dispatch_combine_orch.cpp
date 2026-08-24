@@ -59,17 +59,17 @@ ep_dispatch_combine_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &indices = orch_args.tensor(0).ref();
-    const ChipTensor &x_norm = orch_args.tensor(1).ref();
-    const ChipTensor &w_padded = orch_args.tensor(2).ref();
-    const ChipTensor &idx_padded = orch_args.tensor(3).ref();
-    const ChipTensor &recv_x_out = orch_args.tensor(4).ref();
-    const ChipTensor &recv_w_out = orch_args.tensor(5).ref();
-    const ChipTensor &recv_idx_out = orch_args.tensor(6).ref();
-    const ChipTensor &recv_count_out = orch_args.tensor(7).ref();
-    const ChipTensor &recv_y = orch_args.tensor(8).ref();
-    const ChipTensor &routed_y = orch_args.tensor(9).ref();
-    const ChipTensor &scratch = orch_args.tensor(10).ref();
+    const simpler::tmr::Tensor &indices = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &x_norm = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &w_padded = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &idx_padded = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &recv_x_out = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &recv_w_out = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &recv_idx_out = orch_args.tensor(6).ref();
+    const simpler::tmr::Tensor &recv_count_out = orch_args.tensor(7).ref();
+    const simpler::tmr::Tensor &recv_y = orch_args.tensor(8).ref();
+    const simpler::tmr::Tensor &routed_y = orch_args.tensor(9).ref();
+    const simpler::tmr::Tensor &scratch = orch_args.tensor(10).ref();
 
     // child 0: dispatch
     {

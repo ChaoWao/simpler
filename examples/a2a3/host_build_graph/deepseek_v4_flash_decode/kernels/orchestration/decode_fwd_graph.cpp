@@ -48,54 +48,54 @@ namespace {
 // Boundary order is positional: args.tensor(i) here and the i-th add_* call
 // at the submit site are the same slot, so the two lists must stay in step.
 void csa_attn_block(const GraphTaskArgs &args) {
-    const ChipTensor &hc_attn_fn_csa_inline700 = args.tensor(0).ref();
-    const ChipTensor &hc_attn_scale_csa_inline626 = args.tensor(1).ref();
-    const ChipTensor &hc_attn_base_csa_inline593 = args.tensor(2).ref();
-    const ChipTensor &attn_norm_w_csa_inline610 = args.tensor(3).ref();
-    const ChipTensor &wq_a_csa_inline682 = args.tensor(4).ref();
-    const ChipTensor &wq_b_csa_inline582 = args.tensor(5).ref();
-    const ChipTensor &wq_b_scale_csa_inline640 = args.tensor(6).ref();
-    const ChipTensor &wkv_csa_inline696 = args.tensor(7).ref();
-    const ChipTensor &gamma_cq_csa_inline565 = args.tensor(8).ref();
-    const ChipTensor &gamma_ckv_csa_inline728 = args.tensor(9).ref();
-    const ChipTensor &kv_cache_csa_inline730 = args.tensor(10).ref();
-    const ChipTensor &attn_sink_csa_inline727 = args.tensor(11).ref();
-    const ChipTensor &wo_a_csa_inline672 = args.tensor(12).ref();
-    const ChipTensor &wo_b_csa_inline732 = args.tensor(13).ref();
-    const ChipTensor &wo_b_scale_csa_inline733 = args.tensor(14).ref();
-    const ChipTensor &csa_cmp_wkv_csa_inline701 = args.tensor(15).ref();
-    const ChipTensor &csa_cmp_wgate_csa_inline737 = args.tensor(16).ref();
-    const ChipTensor &csa_cmp_ape_csa_inline734 = args.tensor(17).ref();
-    const ChipTensor &csa_cmp_norm_w_csa_inline738 = args.tensor(18).ref();
-    const ChipTensor &csa_compress_state_csa_inline557 = args.tensor(19).ref();
-    const ChipTensor &csa_idx_wq_b_csa_inline556 = args.tensor(20).ref();
-    const ChipTensor &csa_idx_wq_b_scale_csa_inline561 = args.tensor(21).ref();
-    const ChipTensor &csa_weights_proj_csa_inline553 = args.tensor(22).ref();
-    const ChipTensor &csa_hadamard_idx_csa_inline572 = args.tensor(23).ref();
-    const ChipTensor &csa_inner_wkv_csa_inline552 = args.tensor(24).ref();
-    const ChipTensor &csa_inner_wgate_csa_inline588 = args.tensor(25).ref();
-    const ChipTensor &csa_inner_ape_csa_inline622 = args.tensor(26).ref();
-    const ChipTensor &csa_inner_norm_w_csa_inline551 = args.tensor(27).ref();
-    const ChipTensor &csa_inner_compress_state_csa_inline550 = args.tensor(28).ref();
-    const ChipTensor &cmp_kv_csa_inline638 = args.tensor(29).ref();
-    const ChipTensor &idx_kv_cache_csa_inline548 = args.tensor(30).ref();
-    const ChipTensor &idx_kv_scale_csa_inline618 = args.tensor(31).ref();
-    const ChipTensor &compressed_freqs_cos_inline559 = args.tensor(32).ref();
-    const ChipTensor &compressed_freqs_sin_inline692 = args.tensor(33).ref();
-    const ChipTensor &csa_cmp_slot_mapping_inline719 = args.tensor(34).ref();
-    const ChipTensor &csa_idx_slot_mapping_inline600 = args.tensor(35).ref();
-    const ChipTensor &csa_inner_state_slot_mapping_inline609 = args.tensor(36).ref();
-    const ChipTensor &csa_state_slot_mapping_inline645 = args.tensor(37).ref();
-    const ChipTensor &ext_cmp_block_table = args.tensor(38).ref();
-    const ChipTensor &ext_csa_compress_state_block_table = args.tensor(39).ref();
-    const ChipTensor &ext_csa_inner_compress_state_block_table = args.tensor(40).ref();
-    const ChipTensor &ext_idx_block_table = args.tensor(41).ref();
-    const ChipTensor &ext_kv_seq_lens = args.tensor(42).ref();
-    const ChipTensor &ext_position_ids = args.tensor(43).ref();
-    const ChipTensor &hidden_inline709 = args.tensor(44).ref();
-    const ChipTensor &ori_slot_mapping_inline614 = args.tensor(45).ref();
-    const ChipTensor &swa_indices_inline636 = args.tensor(46).ref();
-    const ChipTensor &x_attn_csa_inline721 = args.tensor(47).ref();
+    const simpler::hbg::Tensor &hc_attn_fn_csa_inline700 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_attn_scale_csa_inline626 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_attn_base_csa_inline593 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &attn_norm_w_csa_inline610 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &wq_a_csa_inline682 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &wq_b_csa_inline582 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &wq_b_scale_csa_inline640 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &wkv_csa_inline696 = args.tensor(7).ref();
+    const simpler::hbg::Tensor &gamma_cq_csa_inline565 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &gamma_ckv_csa_inline728 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &kv_cache_csa_inline730 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &attn_sink_csa_inline727 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &wo_a_csa_inline672 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &wo_b_csa_inline732 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &wo_b_scale_csa_inline733 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &csa_cmp_wkv_csa_inline701 = args.tensor(15).ref();
+    const simpler::hbg::Tensor &csa_cmp_wgate_csa_inline737 = args.tensor(16).ref();
+    const simpler::hbg::Tensor &csa_cmp_ape_csa_inline734 = args.tensor(17).ref();
+    const simpler::hbg::Tensor &csa_cmp_norm_w_csa_inline738 = args.tensor(18).ref();
+    const simpler::hbg::Tensor &csa_compress_state_csa_inline557 = args.tensor(19).ref();
+    const simpler::hbg::Tensor &csa_idx_wq_b_csa_inline556 = args.tensor(20).ref();
+    const simpler::hbg::Tensor &csa_idx_wq_b_scale_csa_inline561 = args.tensor(21).ref();
+    const simpler::hbg::Tensor &csa_weights_proj_csa_inline553 = args.tensor(22).ref();
+    const simpler::hbg::Tensor &csa_hadamard_idx_csa_inline572 = args.tensor(23).ref();
+    const simpler::hbg::Tensor &csa_inner_wkv_csa_inline552 = args.tensor(24).ref();
+    const simpler::hbg::Tensor &csa_inner_wgate_csa_inline588 = args.tensor(25).ref();
+    const simpler::hbg::Tensor &csa_inner_ape_csa_inline622 = args.tensor(26).ref();
+    const simpler::hbg::Tensor &csa_inner_norm_w_csa_inline551 = args.tensor(27).ref();
+    const simpler::hbg::Tensor &csa_inner_compress_state_csa_inline550 = args.tensor(28).ref();
+    const simpler::hbg::Tensor &cmp_kv_csa_inline638 = args.tensor(29).ref();
+    const simpler::hbg::Tensor &idx_kv_cache_csa_inline548 = args.tensor(30).ref();
+    const simpler::hbg::Tensor &idx_kv_scale_csa_inline618 = args.tensor(31).ref();
+    const simpler::hbg::Tensor &compressed_freqs_cos_inline559 = args.tensor(32).ref();
+    const simpler::hbg::Tensor &compressed_freqs_sin_inline692 = args.tensor(33).ref();
+    const simpler::hbg::Tensor &csa_cmp_slot_mapping_inline719 = args.tensor(34).ref();
+    const simpler::hbg::Tensor &csa_idx_slot_mapping_inline600 = args.tensor(35).ref();
+    const simpler::hbg::Tensor &csa_inner_state_slot_mapping_inline609 = args.tensor(36).ref();
+    const simpler::hbg::Tensor &csa_state_slot_mapping_inline645 = args.tensor(37).ref();
+    const simpler::hbg::Tensor &ext_cmp_block_table = args.tensor(38).ref();
+    const simpler::hbg::Tensor &ext_csa_compress_state_block_table = args.tensor(39).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_compress_state_block_table = args.tensor(40).ref();
+    const simpler::hbg::Tensor &ext_idx_block_table = args.tensor(41).ref();
+    const simpler::hbg::Tensor &ext_kv_seq_lens = args.tensor(42).ref();
+    const simpler::hbg::Tensor &ext_position_ids = args.tensor(43).ref();
+    const simpler::hbg::Tensor &hidden_inline709 = args.tensor(44).ref();
+    const simpler::hbg::Tensor &ori_slot_mapping_inline614 = args.tensor(45).ref();
+    const simpler::hbg::Tensor &swa_indices_inline636 = args.tensor(46).ref();
+    const simpler::hbg::Tensor &x_attn_csa_inline721 = args.tensor(47).ref();
     SIMPLER_SCOPE() {
         uint32_t x_mixed_inline10524_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline10524_ci(x_mixed_inline10524_ci_shapes, 2, DataType::BFLOAT16);
@@ -135,22 +135,22 @@ void csa_attn_block(const GraphTaskArgs &args) {
             step_sin_signed_inline10441_ci, cmp_cos_inline10566_ci, cmp_sin_inline10337_ci, cmp_cos_il_inline10546_ci,
             cmp_sin_signed_inline10493_ci, x_normed_t_inline10548_ci, q_inline10537_ci, kv_inline10438_ci
         );
-        const ChipTensor &x_mixed_inline10524 = alloc_56.get_ref(0);
-        const ChipTensor &post_t_inline10558 = alloc_56.get_ref(1);
-        const ChipTensor &comb_t_inline10315 = alloc_56.get_ref(2);
-        const ChipTensor &rope_cos_t_inline10511 = alloc_56.get_ref(3);
-        const ChipTensor &rope_sin_t_inline10813 = alloc_56.get_ref(4);
-        const ChipTensor &step_cos_inline10504 = alloc_56.get_ref(5);
-        const ChipTensor &step_sin_inline10488 = alloc_56.get_ref(6);
-        const ChipTensor &step_cos_il_inline10506 = alloc_56.get_ref(7);
-        const ChipTensor &step_sin_signed_inline10441 = alloc_56.get_ref(8);
-        const ChipTensor &cmp_cos_inline10566 = alloc_56.get_ref(9);
-        const ChipTensor &cmp_sin_inline10337 = alloc_56.get_ref(10);
-        const ChipTensor &cmp_cos_il_inline10546 = alloc_56.get_ref(11);
-        const ChipTensor &cmp_sin_signed_inline10493 = alloc_56.get_ref(12);
-        const ChipTensor &x_normed_t_inline10548 = alloc_56.get_ref(13);
-        const ChipTensor &q_inline10537 = alloc_56.get_ref(14);
-        const ChipTensor &kv_inline10438 = alloc_56.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline10524 = alloc_56.get_ref(0);
+        const simpler::hbg::Tensor &post_t_inline10558 = alloc_56.get_ref(1);
+        const simpler::hbg::Tensor &comb_t_inline10315 = alloc_56.get_ref(2);
+        const simpler::hbg::Tensor &rope_cos_t_inline10511 = alloc_56.get_ref(3);
+        const simpler::hbg::Tensor &rope_sin_t_inline10813 = alloc_56.get_ref(4);
+        const simpler::hbg::Tensor &step_cos_inline10504 = alloc_56.get_ref(5);
+        const simpler::hbg::Tensor &step_sin_inline10488 = alloc_56.get_ref(6);
+        const simpler::hbg::Tensor &step_cos_il_inline10506 = alloc_56.get_ref(7);
+        const simpler::hbg::Tensor &step_sin_signed_inline10441 = alloc_56.get_ref(8);
+        const simpler::hbg::Tensor &cmp_cos_inline10566 = alloc_56.get_ref(9);
+        const simpler::hbg::Tensor &cmp_sin_inline10337 = alloc_56.get_ref(10);
+        const simpler::hbg::Tensor &cmp_cos_il_inline10546 = alloc_56.get_ref(11);
+        const simpler::hbg::Tensor &cmp_sin_signed_inline10493 = alloc_56.get_ref(12);
+        const simpler::hbg::Tensor &x_normed_t_inline10548 = alloc_56.get_ref(13);
+        const simpler::hbg::Tensor &q_inline10537 = alloc_56.get_ref(14);
+        const simpler::hbg::Tensor &kv_inline10438 = alloc_56.get_ref(15);
         uint32_t qr_inline10562_ci_shapes[2] = {8, 1024};
         TensorCreateInfo qr_inline10562_ci(qr_inline10562_ci_shapes, 2, DataType::INT8);
         uint32_t qr_scale_inline10758_ci_shapes[2] = {8, 1};
@@ -212,22 +212,22 @@ void csa_attn_block(const GraphTaskArgs &args) {
             rope_swap_idx_t_inline1970_inline10780_ci, qh_acc_gm_inline2006_inline10430_ci,
             qr_hadamard_i8_inline2038_inline10795_ci
         );
-        const ChipTensor &qr_inline10562 = alloc_57.get_ref(0);
-        const ChipTensor &qr_scale_inline10758 = alloc_57.get_ref(1);
-        const ChipTensor &cmp_out_inline10791 = alloc_57.get_ref(2);
-        const ChipTensor &cmp4_kv_proj_pad_inline1900_inline10467 = alloc_57.get_ref(3);
-        const ChipTensor &cmp4_score_proj_pad_inline1878_inline10597 = alloc_57.get_ref(4);
-        const ChipTensor &pooled_kv_inline1855_inline10468 = alloc_57.get_ref(5);
-        const ChipTensor &normed_kv_inline1835_inline10702 = alloc_57.get_ref(6);
-        const ChipTensor &idx_kv_unused_inline10869 = alloc_57.get_ref(7);
-        const ChipTensor &idx_score_unused_inline10767 = alloc_57.get_ref(8);
-        const ChipTensor &idx_topk_full_inline10769 = alloc_57.get_ref(9);
-        const ChipTensor &qr_acc_pad_inline2023_inline10773 = alloc_57.get_ref(10);
-        const ChipTensor &qr_proj_inline2001_inline10437 = alloc_57.get_ref(11);
-        const ChipTensor &qr_bf16_inline1969_inline10778 = alloc_57.get_ref(12);
-        const ChipTensor &rope_swap_idx_t_inline1970_inline10780 = alloc_57.get_ref(13);
-        const ChipTensor &qh_acc_gm_inline2006_inline10430 = alloc_57.get_ref(14);
-        const ChipTensor &qr_hadamard_i8_inline2038_inline10795 = alloc_57.get_ref(15);
+        const simpler::hbg::Tensor &qr_inline10562 = alloc_57.get_ref(0);
+        const simpler::hbg::Tensor &qr_scale_inline10758 = alloc_57.get_ref(1);
+        const simpler::hbg::Tensor &cmp_out_inline10791 = alloc_57.get_ref(2);
+        const simpler::hbg::Tensor &cmp4_kv_proj_pad_inline1900_inline10467 = alloc_57.get_ref(3);
+        const simpler::hbg::Tensor &cmp4_score_proj_pad_inline1878_inline10597 = alloc_57.get_ref(4);
+        const simpler::hbg::Tensor &pooled_kv_inline1855_inline10468 = alloc_57.get_ref(5);
+        const simpler::hbg::Tensor &normed_kv_inline1835_inline10702 = alloc_57.get_ref(6);
+        const simpler::hbg::Tensor &idx_kv_unused_inline10869 = alloc_57.get_ref(7);
+        const simpler::hbg::Tensor &idx_score_unused_inline10767 = alloc_57.get_ref(8);
+        const simpler::hbg::Tensor &idx_topk_full_inline10769 = alloc_57.get_ref(9);
+        const simpler::hbg::Tensor &qr_acc_pad_inline2023_inline10773 = alloc_57.get_ref(10);
+        const simpler::hbg::Tensor &qr_proj_inline2001_inline10437 = alloc_57.get_ref(11);
+        const simpler::hbg::Tensor &qr_bf16_inline1969_inline10778 = alloc_57.get_ref(12);
+        const simpler::hbg::Tensor &rope_swap_idx_t_inline1970_inline10780 = alloc_57.get_ref(13);
+        const simpler::hbg::Tensor &qh_acc_gm_inline2006_inline10430 = alloc_57.get_ref(14);
+        const simpler::hbg::Tensor &qr_hadamard_i8_inline2038_inline10795 = alloc_57.get_ref(15);
         uint32_t qr_hadamard_scale_dq_inline2018_inline10318_ci_shapes[2] = {512, 1};
         TensorCreateInfo qr_hadamard_scale_dq_inline2018_inline10318_ci(
             qr_hadamard_scale_dq_inline2018_inline10318_ci_shapes, 2, DataType::FLOAT32
@@ -287,22 +287,22 @@ void csa_attn_block(const GraphTaskArgs &args) {
             qk_order_inline2147_inline10861_ci, qk_wcur_inline2138_inline10348_ci,
             sparse_blk_mi_inline2120_inline10805_ci
         );
-        const ChipTensor &qr_hadamard_scale_dq_inline2018_inline10318 = alloc_58.get_ref(0);
-        const ChipTensor &weights_inline2015_inline10621 = alloc_58.get_ref(1);
-        const ChipTensor &weights_partial_inline2014_inline10666 = alloc_58.get_ref(2);
-        const ChipTensor &kv_proj_pad_inline14688 = alloc_58.get_ref(3);
-        const ChipTensor &score_proj_pad_inline14676 = alloc_58.get_ref(4);
-        const ChipTensor &pooled_kv_inline14646 = alloc_58.get_ref(5);
-        const ChipTensor &normed_kv_inline14668 = alloc_58.get_ref(6);
-        const ChipTensor &kv_final_inline14614 = alloc_58.get_ref(7);
-        const ChipTensor &gm_pipe_buffer_4 = alloc_58.get_ref(8);
-        const ChipTensor &attn_out_inline10836 = alloc_58.get_ref(9);
-        const ChipTensor &sparse_bias_inline2117_inline10858 = alloc_58.get_ref(10);
-        const ChipTensor &cmp_sparse_indices_inline2144_inline10859 = alloc_58.get_ref(11);
-        const ChipTensor &valid_block_mask_inline2160_inline10812 = alloc_58.get_ref(12);
-        const ChipTensor &qk_order_inline2147_inline10861 = alloc_58.get_ref(13);
-        const ChipTensor &qk_wcur_inline2138_inline10348 = alloc_58.get_ref(14);
-        const ChipTensor &sparse_blk_mi_inline2120_inline10805 = alloc_58.get_ref(15);
+        const simpler::hbg::Tensor &qr_hadamard_scale_dq_inline2018_inline10318 = alloc_58.get_ref(0);
+        const simpler::hbg::Tensor &weights_inline2015_inline10621 = alloc_58.get_ref(1);
+        const simpler::hbg::Tensor &weights_partial_inline2014_inline10666 = alloc_58.get_ref(2);
+        const simpler::hbg::Tensor &kv_proj_pad_inline14688 = alloc_58.get_ref(3);
+        const simpler::hbg::Tensor &score_proj_pad_inline14676 = alloc_58.get_ref(4);
+        const simpler::hbg::Tensor &pooled_kv_inline14646 = alloc_58.get_ref(5);
+        const simpler::hbg::Tensor &normed_kv_inline14668 = alloc_58.get_ref(6);
+        const simpler::hbg::Tensor &kv_final_inline14614 = alloc_58.get_ref(7);
+        const simpler::hbg::Tensor &gm_pipe_buffer_4 = alloc_58.get_ref(8);
+        const simpler::hbg::Tensor &attn_out_inline10836 = alloc_58.get_ref(9);
+        const simpler::hbg::Tensor &sparse_bias_inline2117_inline10858 = alloc_58.get_ref(10);
+        const simpler::hbg::Tensor &cmp_sparse_indices_inline2144_inline10859 = alloc_58.get_ref(11);
+        const simpler::hbg::Tensor &valid_block_mask_inline2160_inline10812 = alloc_58.get_ref(12);
+        const simpler::hbg::Tensor &qk_order_inline2147_inline10861 = alloc_58.get_ref(13);
+        const simpler::hbg::Tensor &qk_wcur_inline2138_inline10348 = alloc_58.get_ref(14);
+        const simpler::hbg::Tensor &sparse_blk_mi_inline2120_inline10805 = alloc_58.get_ref(15);
         uint32_t sparse_blk_li_inline2118_inline10891_ci_shapes[2] = {2560, 1};
         TensorCreateInfo sparse_blk_li_inline2118_inline10891_ci(
             sparse_blk_li_inline2118_inline10891_ci_shapes, 2, DataType::FLOAT32
@@ -352,36 +352,37 @@ void csa_attn_block(const GraphTaskArgs &args) {
             o_r_pad_inline2225_inline10832_ci, o_r_i8_pad_inline2082_inline10272_ci,
             act_scale_dq_inline2081_inline10852_ci, partials_inline2126_inline10317_ci
         );
-        const ChipTensor &sparse_blk_li_inline2118_inline10891 = alloc_59.get_ref(0);
-        const ChipTensor &sparse_blk_oi_inline2116_inline10892 = alloc_59.get_ref(1);
-        const ChipTensor &gm_pipe_buffer_5 = alloc_59.get_ref(2);
-        const ChipTensor &rope_cos_il_inline2100_inline10619 = alloc_59.get_ref(3);
-        const ChipTensor &rope_sin_signed_inline2192_inline10396 = alloc_59.get_ref(4);
-        const ChipTensor &rope_swap_idx_inline2169_inline10828 = alloc_59.get_ref(5);
-        const ChipTensor &o_packed_inline2242_inline10294 = alloc_59.get_ref(6);
-        const ChipTensor &o_r_pad_inline2225_inline10832 = alloc_59.get_ref(7);
-        const ChipTensor &o_r_i8_pad_inline2082_inline10272 = alloc_59.get_ref(8);
-        const ChipTensor &act_scale_dq_inline2081_inline10852 = alloc_59.get_ref(9);
-        const ChipTensor &partials_inline2126_inline10317 = alloc_59.get_ref(10);
+        const simpler::hbg::Tensor &sparse_blk_li_inline2118_inline10891 = alloc_59.get_ref(0);
+        const simpler::hbg::Tensor &sparse_blk_oi_inline2116_inline10892 = alloc_59.get_ref(1);
+        const simpler::hbg::Tensor &gm_pipe_buffer_5 = alloc_59.get_ref(2);
+        const simpler::hbg::Tensor &rope_cos_il_inline2100_inline10619 = alloc_59.get_ref(3);
+        const simpler::hbg::Tensor &rope_sin_signed_inline2192_inline10396 = alloc_59.get_ref(4);
+        const simpler::hbg::Tensor &rope_swap_idx_inline2169_inline10828 = alloc_59.get_ref(5);
+        const simpler::hbg::Tensor &o_packed_inline2242_inline10294 = alloc_59.get_ref(6);
+        const simpler::hbg::Tensor &o_r_pad_inline2225_inline10832 = alloc_59.get_ref(7);
+        const simpler::hbg::Tensor &o_r_i8_pad_inline2082_inline10272 = alloc_59.get_ref(8);
+        const simpler::hbg::Tensor &act_scale_dq_inline2081_inline10852 = alloc_59.get_ref(9);
+        const simpler::hbg::Tensor &partials_inline2126_inline10317 = alloc_59.get_ref(10);
         int64_t t_dim_inline14517 = 8;
         int64_t t_linear_inline14535 = (((t_dim_inline14517 + 15) / 16) * 16);
         uint32_t x_flat_inline14530_shapes[2] = {static_cast<uint32_t>(t_dim_inline14517), 16384};
-        ChipTensor x_flat_inline14530 = hidden_inline709.reshape(x_flat_inline14530_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14530 = hidden_inline709.reshape(x_flat_inline14530_shapes, 2);
         uint32_t hc_base_2d_inline14545_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14545 = hc_attn_base_csa_inline593.reshape(hc_base_2d_inline14545_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14545 =
+            hc_attn_base_csa_inline593.reshape(hc_base_2d_inline14545_shapes, 2);
         uint32_t inv_rms_inline14485_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14535), 1};
         TensorCreateInfo inv_rms_inline14485_ci(inv_rms_inline14485_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_60 = alloc_tensors(inv_rms_inline14485_ci);
-        const ChipTensor &inv_rms_inline14485 = alloc_60.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14485 = alloc_60.get_ref(0);
         uint32_t mixes_raw_inline14508_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14535), 32};
         TensorCreateInfo mixes_raw_inline14508_ci(mixes_raw_inline14508_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_61 = alloc_tensors(mixes_raw_inline14508_ci);
-        const ChipTensor &mixes_raw_inline14508 = alloc_61.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14508 = alloc_61.get_ref(0);
         int64_t linear_partial_rows_inline14483 = (t_linear_inline14535 * 4);
         uint32_t mixes_partials_inline14507_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14483), 32};
         TensorCreateInfo mixes_partials_inline14507_ci(mixes_partials_inline14507_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_62 = alloc_tensors(mixes_partials_inline14507_ci);
-        const ChipTensor &mixes_partials_inline14507 = alloc_62.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline14507 = alloc_62.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_3: hc_pre_rms_3
         CoreTaskArgs params_t118;
@@ -413,7 +414,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline14513_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14535), 8};
         TensorCreateInfo pre_val_store_inline14513_ci(pre_val_store_inline14513_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_63 = alloc_tensors(pre_val_store_inline14513_ci);
-        const ChipTensor &pre_val_store_inline14513 = alloc_63.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14513 = alloc_63.get_ref(0);
 
         // Spmd split_pre_post_spmd_3: split_pre_post_3
         CoreTaskArgs params_t121;
@@ -512,26 +513,28 @@ void csa_attn_block(const GraphTaskArgs &args) {
         }
         int64_t t_dim_inline1772_inline10498 = 8;
         uint32_t x_view_inline1710_inline10512_shapes[2] = {static_cast<uint32_t>(t_dim_inline1772_inline10498), 4096};
-        ChipTensor x_view_inline1710_inline10512 =
+        simpler::hbg::Tensor x_view_inline1710_inline10512 =
             x_normed_t_inline10548.reshape(x_view_inline1710_inline10512_shapes, 2);
         uint32_t rope_cos_view_inline1708_inline10576_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1772_inline10498), 64
         };
-        ChipTensor rope_cos_view_inline1708_inline10576 =
+        simpler::hbg::Tensor rope_cos_view_inline1708_inline10576 =
             rope_cos_t_inline10511.reshape(rope_cos_view_inline1708_inline10576_shapes, 2);
         uint32_t rope_sin_view_inline1696_inline10541_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1772_inline10498), 64
         };
-        ChipTensor rope_sin_view_inline1696_inline10541 =
+        simpler::hbg::Tensor rope_sin_view_inline1696_inline10541 =
             rope_sin_t_inline10813.reshape(rope_sin_view_inline1696_inline10541_shapes, 2);
         uint32_t kv_view_inline1746_inline10638_shapes[2] = {static_cast<uint32_t>(t_dim_inline1772_inline10498), 512};
-        ChipTensor kv_view_inline1746_inline10638 = kv_inline10438.reshape(kv_view_inline1746_inline10638_shapes, 2);
+        simpler::hbg::Tensor kv_view_inline1746_inline10638 =
+            kv_inline10438.reshape(kv_view_inline1746_inline10638_shapes, 2);
         uint32_t qr_view_inline1716_inline10581_shapes[2] = {static_cast<uint32_t>(t_dim_inline1772_inline10498), 1024};
-        ChipTensor qr_view_inline1716_inline10581 = qr_inline10562.reshape(qr_view_inline1716_inline10581_shapes, 2);
+        simpler::hbg::Tensor qr_view_inline1716_inline10581 =
+            qr_inline10562.reshape(qr_view_inline1716_inline10581_shapes, 2);
         uint32_t qr_scale_view_inline1722_inline10583_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1772_inline10498), 1
         };
-        ChipTensor qr_scale_view_inline1722_inline10583 =
+        simpler::hbg::Tensor qr_scale_view_inline1722_inline10583 =
             qr_scale_inline10758.reshape(qr_scale_view_inline1722_inline10583_shapes, 2);
         int64_t t_matmul_inline1739_inline10470 = std::max<int64_t>(t_dim_inline1772_inline10498, 16);
         uint32_t q_rope_cos_il_inline1745_inline10342_ci_shapes[2] = {
@@ -541,7 +544,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             q_rope_cos_il_inline1745_inline10342_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_64 = alloc_tensors(q_rope_cos_il_inline1745_inline10342_ci);
-        const ChipTensor &q_rope_cos_il_inline1745_inline10342 = alloc_64.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_cos_il_inline1745_inline10342 = alloc_64.get_ref(0);
         uint32_t q_rope_sin_signed_inline1781_inline10603_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1772_inline10498), 64
         };
@@ -549,7 +552,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             q_rope_sin_signed_inline1781_inline10603_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_65 = alloc_tensors(q_rope_sin_signed_inline1781_inline10603_ci);
-        const ChipTensor &q_rope_sin_signed_inline1781_inline10603 = alloc_65.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_sin_signed_inline1781_inline10603 = alloc_65.get_ref(0);
         uint32_t q_rope_swap_idx_inline1747_inline10863_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1772_inline10498), 64
         };
@@ -557,7 +560,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             q_rope_swap_idx_inline1747_inline10863_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_66 = alloc_tensors(q_rope_swap_idx_inline1747_inline10863_ci);
-        const ChipTensor &q_rope_swap_idx_inline1747_inline10863 = alloc_66.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_swap_idx_inline1747_inline10863 = alloc_66.get_ref(0);
 
         // Spmd q_rope_prepare_spmd_1: q_rope_prepare_1
         CoreTaskArgs params_t129;
@@ -576,7 +579,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             qr_fp32_inline1689_inline10647_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_67 = alloc_tensors(qr_fp32_inline1689_inline10647_ci);
-        const ChipTensor &qr_fp32_inline1689_inline10647 = alloc_67.get_ref(0);
+        const simpler::hbg::Tensor &qr_fp32_inline1689_inline10647 = alloc_67.get_ref(0);
         int64_t qr_partial_rows_inline1729_inline10534 = (t_matmul_inline1739_inline10470 * 2);
         uint32_t qr_partials_inline1686_inline10606_ci_shapes[2] = {
             static_cast<uint32_t>(qr_partial_rows_inline1729_inline10534), 1024
@@ -585,7 +588,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             qr_partials_inline1686_inline10606_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_68 = alloc_tensors(qr_partials_inline1686_inline10606_ci);
-        const ChipTensor &qr_partials_inline1686_inline10606 = alloc_68.get_ref(0);
+        const simpler::hbg::Tensor &qr_partials_inline1686_inline10606 = alloc_68.get_ref(0);
         uint32_t qr_i8_matmul_inline1775_inline10358_ci_shapes[2] = {
             static_cast<uint32_t>(t_matmul_inline1739_inline10470), 1024
         };
@@ -593,7 +596,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             qr_i8_matmul_inline1775_inline10358_ci_shapes, 2, DataType::INT8
         );
         TaskOutputTensors alloc_69 = alloc_tensors(qr_i8_matmul_inline1775_inline10358_ci);
-        const ChipTensor &qr_i8_matmul_inline1775_inline10358 = alloc_69.get_ref(0);
+        const simpler::hbg::Tensor &qr_i8_matmul_inline1775_inline10358 = alloc_69.get_ref(0);
 
         // Spmd qr_proj_matmul_spmd_1: qr_proj_matmul_1
         CoreTaskArgs params_t130;
@@ -633,7 +636,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             q_proj_i32_inline1756_inline10421_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_70 = alloc_tensors(q_proj_i32_inline1756_inline10421_ci);
-        const ChipTensor &q_proj_i32_inline1756_inline10421 = alloc_70.get_ref(0);
+        const simpler::hbg::Tensor &q_proj_i32_inline1756_inline10421 = alloc_70.get_ref(0);
 
         // Spmd qproj_matmul_spmd_1: qproj_matmul_1
         CoreTaskArgs params_t133;
@@ -644,7 +647,8 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t133.launch_spec.set_block_num(64);
         rt_submit_aic_task(137, params_t133);
         uint32_t q_flat_inline1694_inline10472_shapes[2] = {static_cast<uint32_t>(t_dim_inline1772_inline10498), 32768};
-        ChipTensor q_flat_inline1694_inline10472 = q_inline10537.reshape(q_flat_inline1694_inline10472_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline1694_inline10472 =
+            q_inline10537.reshape(q_flat_inline1694_inline10472_shapes, 2);
 
         // Spmd qproj_dequant_rms_nope_rope_spmd_1: qproj_dequant_rms_nope_rope_1
         CoreTaskArgs params_t134;
@@ -667,7 +671,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             kv_fp32_inline1727_inline10383_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_71 = alloc_tensors(kv_fp32_inline1727_inline10383_ci);
-        const ChipTensor &kv_fp32_inline1727_inline10383 = alloc_71.get_ref(0);
+        const simpler::hbg::Tensor &kv_fp32_inline1727_inline10383 = alloc_71.get_ref(0);
         int64_t kv_partial_rows_inline1818_inline10379 = (t_matmul_inline1739_inline10470 * 4);
         uint32_t kv_partials_inline1803_inline10377_ci_shapes[2] = {
             static_cast<uint32_t>(kv_partial_rows_inline1818_inline10379), 512
@@ -676,7 +680,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
             kv_partials_inline1803_inline10377_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_72 = alloc_tensors(kv_partials_inline1803_inline10377_ci);
-        const ChipTensor &kv_partials_inline1803_inline10377 = alloc_72.get_ref(0);
+        const simpler::hbg::Tensor &kv_partials_inline1803_inline10377 = alloc_72.get_ref(0);
 
         // Spmd kv_proj_matmul_spmd_1: kv_proj_matmul_1
         CoreTaskArgs params_t135;
@@ -713,7 +717,8 @@ void csa_attn_block(const GraphTaskArgs &args) {
         rt_submit_aiv_task(141, params_t137);
         int64_t ori_block_num_inline10486 = (int64_t)kv_cache_csa_inline730.shapes[0];
         uint32_t kv_cache_flat_inline10505_shapes[2] = {static_cast<uint32_t>((ori_block_num_inline10486 * 128)), 512};
-        ChipTensor kv_cache_flat_inline10505 = kv_cache_csa_inline730.reshape(kv_cache_flat_inline10505_shapes, 2);
+        simpler::hbg::Tensor kv_cache_flat_inline10505 =
+            kv_cache_csa_inline730.reshape(kv_cache_flat_inline10505_shapes, 2);
 
         // Spmd csa_cache_writeback_spmd: csa_cache_writeback
         CoreTaskArgs params_t138;
@@ -723,38 +728,39 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t138.launch_spec.set_block_num(1);
         rt_submit_aiv_task(142, params_t138);
         uint32_t x_normed_inline10447_shapes[3] = {4, 2, 4096};
-        ChipTensor x_normed_inline10447 = x_normed_t_inline10548.reshape(x_normed_inline10447_shapes, 3);
+        simpler::hbg::Tensor x_normed_inline10447 = x_normed_t_inline10548.reshape(x_normed_inline10447_shapes, 3);
         uint32_t position_ids_bsd_inline10328_shapes[2] = {4, 2};
-        ChipTensor position_ids_bsd_inline10328 = ext_position_ids.reshape(position_ids_bsd_inline10328_shapes, 2);
+        simpler::hbg::Tensor position_ids_bsd_inline10328 =
+            ext_position_ids.reshape(position_ids_bsd_inline10328_shapes, 2);
         uint32_t cmp_slot_mapping_bsd_inline10327_shapes[2] = {4, 2};
-        ChipTensor cmp_slot_mapping_bsd_inline10327 =
+        simpler::hbg::Tensor cmp_slot_mapping_bsd_inline10327 =
             csa_cmp_slot_mapping_inline719.reshape(cmp_slot_mapping_bsd_inline10327_shapes, 2);
         uint32_t idx_slot_mapping_bsd_inline10853_shapes[2] = {4, 2};
-        ChipTensor idx_slot_mapping_bsd_inline10853 =
+        simpler::hbg::Tensor idx_slot_mapping_bsd_inline10853 =
             csa_idx_slot_mapping_inline600.reshape(idx_slot_mapping_bsd_inline10853_shapes, 2);
         uint32_t state_slot_mapping_bsd_inline10711_shapes[2] = {4, 2};
-        ChipTensor state_slot_mapping_bsd_inline10711 =
+        simpler::hbg::Tensor state_slot_mapping_bsd_inline10711 =
             csa_state_slot_mapping_inline645.reshape(state_slot_mapping_bsd_inline10711_shapes, 2);
         uint32_t inner_state_slot_mapping_bsd_inline10611_shapes[2] = {4, 2};
-        ChipTensor inner_state_slot_mapping_bsd_inline10611 =
+        simpler::hbg::Tensor inner_state_slot_mapping_bsd_inline10611 =
             csa_inner_state_slot_mapping_inline609.reshape(inner_state_slot_mapping_bsd_inline10611_shapes, 2);
         uint32_t x_flat_inline1868_inline10741_shapes[2] = {8, 4096};
-        ChipTensor x_flat_inline1868_inline10741 =
+        simpler::hbg::Tensor x_flat_inline1868_inline10741 =
             x_normed_inline10447.reshape(x_flat_inline1868_inline10741_shapes, 2);
         int64_t compress_state_block_num_inline1857_inline10595 = (int64_t)csa_compress_state_csa_inline557.shapes[0];
         int64_t cmp_block_num_inline1877_inline10324 = (int64_t)cmp_kv_csa_inline638.shapes[0];
         uint32_t compress_state_flat_inline1881_inline10554_shapes[2] = {
             static_cast<uint32_t>((compress_state_block_num_inline1857_inline10595 * 4)), 2048
         };
-        ChipTensor compress_state_flat_inline1881_inline10554 =
+        simpler::hbg::Tensor compress_state_flat_inline1881_inline10554 =
             csa_compress_state_csa_inline557.reshape(compress_state_flat_inline1881_inline10554_shapes, 2);
         uint32_t kv_flat_inline1901_inline10417_shapes[2] = {8, 512};
-        ChipTensor kv_flat_inline1901_inline10417 =
+        simpler::hbg::Tensor kv_flat_inline1901_inline10417 =
             cmp_out_inline10791.reshape(kv_flat_inline1901_inline10417_shapes, 2);
         uint32_t cmp_kv_cache_flat_inline1870_inline10523_shapes[2] = {
             static_cast<uint32_t>((cmp_block_num_inline1877_inline10324 * 128)), 512
         };
-        ChipTensor cmp_kv_cache_flat_inline1870_inline10523 =
+        simpler::hbg::Tensor cmp_kv_cache_flat_inline1870_inline10523 =
             cmp_kv_csa_inline638.reshape(cmp_kv_cache_flat_inline1870_inline10523_shapes, 2);
 
         // Spmd kv_score_proj_spmd: kv_score_proj
@@ -783,7 +789,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t140.add_input(ext_csa_compress_state_block_table);
         rt_submit_aiv_task(144, params_t140);
         uint32_t norm_w_2d_inline1842_inline10405_shapes[2] = {1, 512};
-        ChipTensor norm_w_2d_inline1842_inline10405 =
+        simpler::hbg::Tensor norm_w_2d_inline1842_inline10405 =
             csa_cmp_norm_w_csa_inline738.reshape(norm_w_2d_inline1842_inline10405_shapes, 2);
 
         // Task 141: rmsnorm_rope_cache_write
@@ -819,7 +825,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t143.set_allow_early_resolve(true);
         TaskOutputTensors task_143_outs = rt_submit_aiv_task(147, params_t143);
         uint32_t qr_proj_flat_inline1973_inline10549_shapes[2] = {512, 128};
-        ChipTensor qr_proj_flat_inline1973_inline10549 =
+        simpler::hbg::Tensor qr_proj_flat_inline1973_inline10549 =
             qr_proj_inline2001_inline10437.reshape(qr_proj_flat_inline1973_inline10549_shapes, 2);
 
         // Task 144: qr_rope_swap_idx
@@ -857,7 +863,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t147.set_allow_early_resolve(true);
         TaskOutputTensors task_147_outs = rt_submit_aiv_task(151, params_t147);
         uint32_t x_flat_inline1958_inline10808_shapes[2] = {8, 4096};
-        ChipTensor x_flat_inline1958_inline10808 =
+        simpler::hbg::Tensor x_flat_inline1958_inline10808 =
             x_normed_inline10447.reshape(x_flat_inline1958_inline10808_shapes, 2);
 
         // Spmd weights_proj_spmd: weights_proj
@@ -879,25 +885,25 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t149.set_allow_early_resolve(true);
         TaskOutputTensors task_149_outs = rt_submit_aiv_task(153, params_t149);
         uint32_t x_flat_inline14678_shapes[2] = {8, 4096};
-        ChipTensor x_flat_inline14678 = x_normed_inline10447.reshape(x_flat_inline14678_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14678 = x_normed_inline10447.reshape(x_flat_inline14678_shapes, 2);
         int64_t compress_state_block_num_inline14682 = (int64_t)csa_inner_compress_state_csa_inline550.shapes[0];
         int64_t idx_block_num_inline14675 = (int64_t)idx_kv_cache_csa_inline548.shapes[0];
         uint32_t compress_state_flat_inline14684_shapes[2] = {
             static_cast<uint32_t>((compress_state_block_num_inline14682 * 4)), 512
         };
-        ChipTensor compress_state_flat_inline14684 =
+        simpler::hbg::Tensor compress_state_flat_inline14684 =
             csa_inner_compress_state_csa_inline550.reshape(compress_state_flat_inline14684_shapes, 2);
         uint32_t kv_flat_inline14686_shapes[2] = {8, 128};
-        ChipTensor kv_flat_inline14686 = idx_kv_unused_inline10869.reshape(kv_flat_inline14686_shapes, 2);
+        simpler::hbg::Tensor kv_flat_inline14686 = idx_kv_unused_inline10869.reshape(kv_flat_inline14686_shapes, 2);
         uint32_t idx_kv_cache_flat_inline14672_shapes[2] = {
             static_cast<uint32_t>((idx_block_num_inline14675 * 128)), 128
         };
-        ChipTensor idx_kv_cache_flat_inline14672 =
+        simpler::hbg::Tensor idx_kv_cache_flat_inline14672 =
             idx_kv_cache_csa_inline548.reshape(idx_kv_cache_flat_inline14672_shapes, 2);
         uint32_t idx_kv_scale_flat_inline14689_shapes[2] = {
             static_cast<uint32_t>((idx_block_num_inline14675 * 128)), 1
         };
-        ChipTensor idx_kv_scale_flat_inline14689 =
+        simpler::hbg::Tensor idx_kv_scale_flat_inline14689 =
             idx_kv_scale_csa_inline618.reshape(idx_kv_scale_flat_inline14689_shapes, 2);
 
         // Spmd kv_score_proj_spmd_0: kv_score_proj_0
@@ -927,7 +933,8 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t151.set_allow_early_resolve(true);
         TaskOutputTensors task_151_outs = rt_submit_aiv_task(155, params_t151);
         uint32_t norm_w_2d_inline14630_shapes[2] = {1, 128};
-        ChipTensor norm_w_2d_inline14630 = csa_inner_norm_w_csa_inline551.reshape(norm_w_2d_inline14630_shapes, 2);
+        simpler::hbg::Tensor norm_w_2d_inline14630 =
+            csa_inner_norm_w_csa_inline551.reshape(norm_w_2d_inline14630_shapes, 2);
 
         // Task 152: rmsnorm_rope
         CoreTaskArgs params_t152;
@@ -959,18 +966,18 @@ void csa_attn_block(const GraphTaskArgs &args) {
         uint32_t kv_cache_i8_flat_inline1968_inline10823_shapes[2] = {
             static_cast<uint32_t>((idx_block_num_inline1950_inline10709 * 128)), 128
         };
-        ChipTensor kv_cache_i8_flat_inline1968_inline10823 =
+        simpler::hbg::Tensor kv_cache_i8_flat_inline1968_inline10823 =
             idx_kv_cache_csa_inline548.reshape(kv_cache_i8_flat_inline1968_inline10823_shapes, 2);
         uint32_t kv_scale_flat_inline1955_inline10824_shapes[2] = {
             static_cast<uint32_t>((idx_block_num_inline1950_inline10709 * 128)), 1
         };
-        ChipTensor kv_scale_flat_inline1955_inline10824 =
+        simpler::hbg::Tensor kv_scale_flat_inline1955_inline10824 =
             idx_kv_scale_csa_inline618.reshape(kv_scale_flat_inline1955_inline10824_shapes, 2);
         uint32_t idx_block_table_flat_inline1949_inline10592_shapes[1] = {256};
-        ChipTensor idx_block_table_flat_inline1949_inline10592 =
+        simpler::hbg::Tensor idx_block_table_flat_inline1949_inline10592 =
             ext_idx_block_table.reshape(idx_block_table_flat_inline1949_inline10592_shapes, 1);
         uint32_t score_flat_inline1948_inline10368_shapes[2] = {8, 4096};
-        ChipTensor score_flat_inline1948_inline10368 =
+        simpler::hbg::Tensor score_flat_inline1948_inline10368 =
             idx_score_unused_inline10767.reshape(score_flat_inline1948_inline10368_shapes, 2);
 
         // Group score: MixedKernels (AIC + AIV lanes)
@@ -990,7 +997,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t155.set_allow_early_resolve(true);
         TaskOutputTensors task_155_outs = rt_submit_task(mixed_155, params_t155);
         uint32_t topk_idxs_flat_inline1930_inline10737_shapes[2] = {8, 4096};
-        ChipTensor topk_idxs_flat_inline1930_inline10737 =
+        simpler::hbg::Tensor topk_idxs_flat_inline1930_inline10737 =
             idx_topk_full_inline10769.reshape(topk_idxs_flat_inline1930_inline10737_shapes, 2);
 
         // Spmd topk_spmd: topk
@@ -1003,14 +1010,16 @@ void csa_attn_block(const GraphTaskArgs &args) {
         params_t156.set_allow_early_resolve(true);
         TaskOutputTensors task_156_outs = rt_submit_aiv_task(161, params_t156);
         uint32_t idx_topk_flat_inline10624_shapes[2] = {8, 4096};
-        ChipTensor idx_topk_flat_inline10624 = idx_topk_full_inline10769.reshape(idx_topk_flat_inline10624_shapes, 2);
+        simpler::hbg::Tensor idx_topk_flat_inline10624 =
+            idx_topk_full_inline10769.reshape(idx_topk_flat_inline10624_shapes, 2);
         uint32_t position_ids_t1_inline10436_shapes[2] = {8, 1};
-        ChipTensor position_ids_t1_inline10436 = ext_position_ids.reshape(position_ids_t1_inline10436_shapes, 2);
+        simpler::hbg::Tensor position_ids_t1_inline10436 =
+            ext_position_ids.reshape(position_ids_t1_inline10436_shapes, 2);
         int64_t ori_block_num_inline2165_inline10855 = (int64_t)kv_cache_csa_inline730.shapes[0];
         uint32_t ori_kv_flat_inline2164_inline10857_shapes[2] = {
             static_cast<uint32_t>((ori_block_num_inline2165_inline10855 * 128)), 512
         };
-        ChipTensor ori_kv_flat_inline2164_inline10857 =
+        simpler::hbg::Tensor ori_kv_flat_inline2164_inline10857 =
             kv_cache_csa_inline730.reshape(ori_kv_flat_inline2164_inline10857_shapes, 2);
 
         // Task 157: kv_touch
@@ -1036,10 +1045,11 @@ void csa_attn_block(const GraphTaskArgs &args) {
         uint32_t cmp_kv_flat_inline2128_inline10589_shapes[2] = {
             static_cast<uint32_t>((cmp_block_num_inline2124_inline10406 * 128)), 512
         };
-        ChipTensor cmp_kv_flat_inline2128_inline10589 =
+        simpler::hbg::Tensor cmp_kv_flat_inline2128_inline10589 =
             cmp_kv_csa_inline638.reshape(cmp_kv_flat_inline2128_inline10589_shapes, 2);
         uint32_t q_flat_inline2122_inline10889_shapes[2] = {512, 512};
-        ChipTensor q_flat_inline2122_inline10889 = q_inline10537.reshape(q_flat_inline2122_inline10889_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline2122_inline10889 =
+            q_inline10537.reshape(q_flat_inline2122_inline10889_shapes, 2);
 
         // Group qk_pv_1: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t159;
@@ -1092,7 +1102,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         TaskId proj_b_tids_inline2079_inline10609[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline2079_inline10609[__init_i] = TaskId::invalid();
-        ChipTensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
+        simpler::hbg::Tensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
         SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline2162_inline10271 = 0; g_inline2162_inline10271 < 8; g_inline2162_inline10271 += 1) {
                 int64_t row_base_o_inline2078_inline10745 = (g_inline2162_inline10271 * 8);
@@ -1203,10 +1213,10 @@ void csa_attn_block(const GraphTaskArgs &args) {
         uint32_t residual_flat_inline2261_inline10233_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline2270_inline10388), 16384
         };
-        ChipTensor residual_flat_inline2261_inline10233 =
+        simpler::hbg::Tensor residual_flat_inline2261_inline10233 =
             hidden_inline709.reshape(residual_flat_inline2261_inline10233_shapes, 2);
         uint32_t y_flat_inline2262_inline10916_shapes[2] = {static_cast<uint32_t>(t_dim_inline2270_inline10388), 16384};
-        ChipTensor y_flat_inline2262_inline10916 =
+        simpler::hbg::Tensor y_flat_inline2262_inline10916 =
             x_attn_csa_inline721.reshape(y_flat_inline2262_inline10916_shapes, 2);
 
         // Spmd hc_post_spmd_3: hc_post_3
@@ -1222,36 +1232,36 @@ void csa_attn_block(const GraphTaskArgs &args) {
 }
 
 void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
-    const ChipTensor &hc_ffn_fn_csa_inline547 = args.tensor(0).ref();
-    const ChipTensor &hc_ffn_scale_csa_inline543 = args.tensor(1).ref();
-    const ChipTensor &hc_ffn_base_csa_inline542 = args.tensor(2).ref();
-    const ChipTensor &norm_w_csa_inline656 = args.tensor(3).ref();
-    const ChipTensor &gate_w_csa_inline540 = args.tensor(4).ref();
-    const ChipTensor &gate_bias_csa_inline538 = args.tensor(5).ref();
-    const ChipTensor &tid2eid_csa_inline537 = args.tensor(6).ref();
-    const ChipTensor &routed_w1_csa_inline536 = args.tensor(7).ref();
-    const ChipTensor &routed_w1_scale_csa_inline535 = args.tensor(8).ref();
-    const ChipTensor &routed_w3_csa_inline534 = args.tensor(9).ref();
-    const ChipTensor &routed_w3_scale_csa_inline713 = args.tensor(10).ref();
-    const ChipTensor &routed_w2_csa_inline533 = args.tensor(11).ref();
-    const ChipTensor &routed_w2_scale_csa_inline722 = args.tensor(12).ref();
-    const ChipTensor &shared_w1_csa_inline532 = args.tensor(13).ref();
-    const ChipTensor &shared_w1_scale_csa_inline531 = args.tensor(14).ref();
-    const ChipTensor &shared_w3_csa_inline530 = args.tensor(15).ref();
-    const ChipTensor &shared_w3_scale_csa_inline578 = args.tensor(16).ref();
-    const ChipTensor &shared_w2_csa_inline571 = args.tensor(17).ref();
-    const ChipTensor &shared_w2_scale_csa_inline708 = args.tensor(18).ref();
-    const ChipTensor &ext_arrived = args.tensor(19).ref();
-    const ChipTensor &ext_combine_arrived = args.tensor(20).ref();
-    const ChipTensor &ext_data_arrived = args.tensor(21).ref();
-    const ChipTensor &ext_input_ids = args.tensor(22).ref();
-    const ChipTensor &ext_recv_aux = args.tensor(23).ref();
-    const ChipTensor &ext_recv_meta = args.tensor(24).ref();
-    const ChipTensor &ext_recv_route = args.tensor(25).ref();
-    const ChipTensor &ext_recv_x = args.tensor(26).ref();
-    const ChipTensor &ext_routed_y_buf = args.tensor(27).ref();
-    const ChipTensor &x_attn_csa_inline721 = args.tensor(28).ref();
-    const ChipTensor &hidden_mid_inline726 = args.tensor(29).ref();
+    const simpler::hbg::Tensor &hc_ffn_fn_csa_inline547 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_ffn_scale_csa_inline543 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_ffn_base_csa_inline542 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &norm_w_csa_inline656 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &gate_w_csa_inline540 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &gate_bias_csa_inline538 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &tid2eid_csa_inline537 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &routed_w1_csa_inline536 = args.tensor(7).ref();
+    const simpler::hbg::Tensor &routed_w1_scale_csa_inline535 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &routed_w3_csa_inline534 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &routed_w3_scale_csa_inline713 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &routed_w2_csa_inline533 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &routed_w2_scale_csa_inline722 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &shared_w1_csa_inline532 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &shared_w1_scale_csa_inline531 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &shared_w3_csa_inline530 = args.tensor(15).ref();
+    const simpler::hbg::Tensor &shared_w3_scale_csa_inline578 = args.tensor(16).ref();
+    const simpler::hbg::Tensor &shared_w2_csa_inline571 = args.tensor(17).ref();
+    const simpler::hbg::Tensor &shared_w2_scale_csa_inline708 = args.tensor(18).ref();
+    const simpler::hbg::Tensor &ext_arrived = args.tensor(19).ref();
+    const simpler::hbg::Tensor &ext_combine_arrived = args.tensor(20).ref();
+    const simpler::hbg::Tensor &ext_data_arrived = args.tensor(21).ref();
+    const simpler::hbg::Tensor &ext_input_ids = args.tensor(22).ref();
+    const simpler::hbg::Tensor &ext_recv_aux = args.tensor(23).ref();
+    const simpler::hbg::Tensor &ext_recv_meta = args.tensor(24).ref();
+    const simpler::hbg::Tensor &ext_recv_route = args.tensor(25).ref();
+    const simpler::hbg::Tensor &ext_recv_x = args.tensor(26).ref();
+    const simpler::hbg::Tensor &ext_routed_y_buf = args.tensor(27).ref();
+    const simpler::hbg::Tensor &x_attn_csa_inline721 = args.tensor(28).ref();
+    const simpler::hbg::Tensor &hidden_mid_inline726 = args.tensor(29).ref();
     // Each binding keeps the type its submit site passes. The comm-window handles
     // are 64-bit device contexts; read one back as int32_t and the MoE all-to-all
     // pushes to a truncated window address — an MTE bus fault on the AIV, not a
@@ -1328,22 +1338,22 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             biased_scores_buf_inline2564_inline11169_ci, sh_inline11139_ci, recv_x_out_inline11043_ci,
             recv_scale_out_inline10979_ci, recv_w_out_inline11167_ci
         );
-        const ChipTensor &x_mixed_inline11049 = alloc_73.get_ref(0);
-        const ChipTensor &post_ffn_inline11048 = alloc_73.get_ref(1);
-        const ChipTensor &comb_ffn_inline11076 = alloc_73.get_ref(2);
-        const ChipTensor &x_norm_i8_inline11072 = alloc_73.get_ref(3);
-        const ChipTensor &x_norm_scale_inline11052 = alloc_73.get_ref(4);
-        const ChipTensor &indices_inline11093 = alloc_73.get_ref(5);
-        const ChipTensor &weights_inline11083 = alloc_73.get_ref(6);
-        const ChipTensor &xg_buf_inline2582_inline11203 = alloc_73.get_ref(7);
-        const ChipTensor &inv_rms_buf_inline2585_inline11089 = alloc_73.get_ref(8);
-        const ChipTensor &xn_scale_buf_inline2572_inline11165 = alloc_73.get_ref(9);
-        const ChipTensor &route_scores_buf_inline2607_inline11080 = alloc_73.get_ref(10);
-        const ChipTensor &biased_scores_buf_inline2564_inline11169 = alloc_73.get_ref(11);
-        const ChipTensor &sh_inline11139 = alloc_73.get_ref(12);
-        const ChipTensor &recv_x_out_inline11043 = alloc_73.get_ref(13);
-        const ChipTensor &recv_scale_out_inline10979 = alloc_73.get_ref(14);
-        const ChipTensor &recv_w_out_inline11167 = alloc_73.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline11049 = alloc_73.get_ref(0);
+        const simpler::hbg::Tensor &post_ffn_inline11048 = alloc_73.get_ref(1);
+        const simpler::hbg::Tensor &comb_ffn_inline11076 = alloc_73.get_ref(2);
+        const simpler::hbg::Tensor &x_norm_i8_inline11072 = alloc_73.get_ref(3);
+        const simpler::hbg::Tensor &x_norm_scale_inline11052 = alloc_73.get_ref(4);
+        const simpler::hbg::Tensor &indices_inline11093 = alloc_73.get_ref(5);
+        const simpler::hbg::Tensor &weights_inline11083 = alloc_73.get_ref(6);
+        const simpler::hbg::Tensor &xg_buf_inline2582_inline11203 = alloc_73.get_ref(7);
+        const simpler::hbg::Tensor &inv_rms_buf_inline2585_inline11089 = alloc_73.get_ref(8);
+        const simpler::hbg::Tensor &xn_scale_buf_inline2572_inline11165 = alloc_73.get_ref(9);
+        const simpler::hbg::Tensor &route_scores_buf_inline2607_inline11080 = alloc_73.get_ref(10);
+        const simpler::hbg::Tensor &biased_scores_buf_inline2564_inline11169 = alloc_73.get_ref(11);
+        const simpler::hbg::Tensor &sh_inline11139 = alloc_73.get_ref(12);
+        const simpler::hbg::Tensor &recv_x_out_inline11043 = alloc_73.get_ref(13);
+        const simpler::hbg::Tensor &recv_scale_out_inline10979 = alloc_73.get_ref(14);
+        const simpler::hbg::Tensor &recv_w_out_inline11167 = alloc_73.get_ref(15);
         uint32_t recv_r_route_out_inline11176_ci_shapes[2] = {32, 16};
         TensorCreateInfo recv_r_route_out_inline11176_ci(
             recv_r_route_out_inline11176_ci_shapes, 2, DataType::INT32, /*manual_dep=*/true
@@ -1357,28 +1367,29 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
         TaskOutputTensors alloc_74 = alloc_tensors(
             recv_r_route_out_inline11176_ci, recv_count_out_inline11145_ci, recv_meta_local_inline11212_ci
         );
-        const ChipTensor &recv_r_route_out_inline11176 = alloc_74.get_ref(0);
-        const ChipTensor &recv_count_out_inline11145 = alloc_74.get_ref(1);
-        const ChipTensor &recv_meta_local_inline11212 = alloc_74.get_ref(2);
+        const simpler::hbg::Tensor &recv_r_route_out_inline11176 = alloc_74.get_ref(0);
+        const simpler::hbg::Tensor &recv_count_out_inline11145 = alloc_74.get_ref(1);
+        const simpler::hbg::Tensor &recv_meta_local_inline11212 = alloc_74.get_ref(2);
         int64_t t_dim_inline14764 = 8;
         int64_t t_linear_inline14782 = (((t_dim_inline14764 + 15) / 16) * 16);
         uint32_t x_flat_inline14777_shapes[2] = {static_cast<uint32_t>(t_dim_inline14764), 16384};
-        ChipTensor x_flat_inline14777 = x_attn_csa_inline721.reshape(x_flat_inline14777_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14777 = x_attn_csa_inline721.reshape(x_flat_inline14777_shapes, 2);
         uint32_t hc_base_2d_inline14792_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14792 = hc_ffn_base_csa_inline542.reshape(hc_base_2d_inline14792_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14792 =
+            hc_ffn_base_csa_inline542.reshape(hc_base_2d_inline14792_shapes, 2);
         uint32_t inv_rms_inline14732_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14782), 1};
         TensorCreateInfo inv_rms_inline14732_ci(inv_rms_inline14732_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_75 = alloc_tensors(inv_rms_inline14732_ci);
-        const ChipTensor &inv_rms_inline14732 = alloc_75.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14732 = alloc_75.get_ref(0);
         uint32_t mixes_raw_inline14755_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14782), 32};
         TensorCreateInfo mixes_raw_inline14755_ci(mixes_raw_inline14755_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_76 = alloc_tensors(mixes_raw_inline14755_ci);
-        const ChipTensor &mixes_raw_inline14755 = alloc_76.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14755 = alloc_76.get_ref(0);
         int64_t linear_partial_rows_inline14730 = (t_linear_inline14782 * 4);
         uint32_t mixes_partials_inline14754_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14730), 32};
         TensorCreateInfo mixes_partials_inline14754_ci(mixes_partials_inline14754_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_77 = alloc_tensors(mixes_partials_inline14754_ci);
-        const ChipTensor &mixes_partials_inline14754 = alloc_77.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline14754 = alloc_77.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_4: hc_pre_rms_4
         CoreTaskArgs params_t167;
@@ -1410,7 +1421,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
         uint32_t pre_val_store_inline14760_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14782), 8};
         TensorCreateInfo pre_val_store_inline14760_ci(pre_val_store_inline14760_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_78 = alloc_tensors(pre_val_store_inline14760_ci);
-        const ChipTensor &pre_val_store_inline14760 = alloc_78.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14760 = alloc_78.get_ref(0);
 
         // Spmd split_pre_post_spmd_4: split_pre_post_4
         CoreTaskArgs params_t170;
@@ -1461,7 +1472,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             active_gate_tokens_inline2604_inline11120__phi_v2 = active_gate_tokens_inline2604_inline11120;
         }
         uint32_t norm_w_2d_inline2589_inline11216_shapes[2] = {1, 4096};
-        ChipTensor norm_w_2d_inline2589_inline11216 =
+        simpler::hbg::Tensor norm_w_2d_inline2589_inline11216 =
             norm_w_csa_inline656.reshape(norm_w_2d_inline2589_inline11216_shapes, 2);
 
         // Spmd ffn_norm_spmd_1: ffn_norm_1
@@ -1512,7 +1523,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
         )};
         TensorCreateInfo gm_pipe_buffer_6_ci(gm_pipe_buffer_6_ci_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true);
         TaskOutputTensors alloc_79 = alloc_tensors(gm_pipe_buffer_6_ci);
-        const ChipTensor &gm_pipe_buffer_6 = alloc_79.get_ref(0);
+        const simpler::hbg::Tensor &gm_pipe_buffer_6 = alloc_79.get_ref(0);
 
         // Group gate_1: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t176;
@@ -1593,12 +1604,12 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                 h_tile_fp32_inline2660_inline11021_ci, h_tile_i8_inline2663_inline10980_ci,
                 h_tile_scale_dq_inline2676_inline11050_ci, y_i32_inline2673_inline11192_ci
             );
-            const ChipTensor &gate_i32_inline2662_inline11084 = alloc_80.get_ref(0);
-            const ChipTensor &up_i32_inline2654_inline11075 = alloc_80.get_ref(1);
-            const ChipTensor &h_tile_fp32_inline2660_inline11021 = alloc_80.get_ref(2);
-            const ChipTensor &h_tile_i8_inline2663_inline10980 = alloc_80.get_ref(3);
-            const ChipTensor &h_tile_scale_dq_inline2676_inline11050 = alloc_80.get_ref(4);
-            const ChipTensor &y_i32_inline2673_inline11192 = alloc_80.get_ref(5);
+            const simpler::hbg::Tensor &gate_i32_inline2662_inline11084 = alloc_80.get_ref(0);
+            const simpler::hbg::Tensor &up_i32_inline2654_inline11075 = alloc_80.get_ref(1);
+            const simpler::hbg::Tensor &h_tile_fp32_inline2660_inline11021 = alloc_80.get_ref(2);
+            const simpler::hbg::Tensor &h_tile_i8_inline2663_inline10980 = alloc_80.get_ref(3);
+            const simpler::hbg::Tensor &h_tile_scale_dq_inline2676_inline11050 = alloc_80.get_ref(4);
+            const simpler::hbg::Tensor &y_i32_inline2673_inline11192 = alloc_80.get_ref(5);
             int64_t ts0_inline2658_inline11033 = 0;
 
             // Spmd sh_gate_mm_spmd_1: sh_gate_mm_1
@@ -1659,7 +1670,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             TaskOutputTensors task_183_outs = rt_submit_aiv_task(190, params_t183);
         }
         uint32_t recv_x_out_flat_inline2699_inline11131_shapes[2] = {512, 4096};
-        ChipTensor recv_x_out_flat_inline2699_inline11131 =
+        simpler::hbg::Tensor recv_x_out_flat_inline2699_inline11131 =
             recv_x_out_inline11043.reshape(recv_x_out_flat_inline2699_inline11131_shapes, 2);
 
         // Task 184: dispatch_meta_1
@@ -1741,13 +1752,13 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             uint32_t ffn_out_inline10948_ci_shapes[2] = {8, 4096};
             TensorCreateInfo ffn_out_inline10948_ci(ffn_out_inline10948_ci_shapes, 2, DataType::BFLOAT16);
             TaskOutputTensors alloc_81 = alloc_tensors(recv_y_inline11016_ci, ffn_out_inline10948_ci);
-            const ChipTensor &recv_y_inline11016 = alloc_81.get_ref(0);
-            const ChipTensor &ffn_out_inline10948 = alloc_81.get_ref(1);
+            const simpler::hbg::Tensor &recv_y_inline11016 = alloc_81.get_ref(0);
+            const simpler::hbg::Tensor &ffn_out_inline10948 = alloc_81.get_ref(1);
             uint32_t recv_y_flat_inline2783_inline10986_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2783_inline10986 =
+            simpler::hbg::Tensor recv_y_flat_inline2783_inline10986 =
                 recv_y_inline11016.reshape(recv_y_flat_inline2783_inline10986_shapes, 2);
             uint32_t recv_x_flat_inline2781_inline11205_shapes[2] = {512, 4096};
-            ChipTensor recv_x_flat_inline2781_inline11205 =
+            simpler::hbg::Tensor recv_x_flat_inline2781_inline11205 =
                 recv_x_out_inline11043.reshape(recv_x_flat_inline2781_inline11205_shapes, 2);
             SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline11141_ci_shapes[2] = {512, 2048};
@@ -1760,8 +1771,8 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                 );
                 TaskOutputTensors alloc_82 =
                     alloc_tensors(h_i8_inline2773_inline11141_ci, h_scale_dq_inline2766_inline11232_ci);
-                const ChipTensor &h_i8_inline2773_inline11141 = alloc_82.get_ref(0);
-                const ChipTensor &h_scale_dq_inline2766_inline11232 = alloc_82.get_ref(1);
+                const simpler::hbg::Tensor &h_i8_inline2773_inline11141 = alloc_82.get_ref(0);
+                const simpler::hbg::Tensor &h_scale_dq_inline2766_inline11232 = alloc_82.get_ref(1);
                 for (int64_t local_i_inline2779_inline10990 = 0; local_i_inline2779_inline10990 < 32;
                      local_i_inline2779_inline10990 += 1) {
                     int64_t flat_base_inline2774_inline11027 = (local_i_inline2779_inline10990 * 16);
@@ -1797,9 +1808,9 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                 gate_tile_i32_inline2749_inline11102_ci, up_tile_i32_inline2764_inline11182_ci,
                                 h_tile_fp32_inline2744_inline11230_ci
                             );
-                            const ChipTensor &gate_tile_i32_inline2749_inline11102 = alloc_83.get_ref(0);
-                            const ChipTensor &up_tile_i32_inline2764_inline11182 = alloc_83.get_ref(1);
-                            const ChipTensor &h_tile_fp32_inline2744_inline11230 = alloc_83.get_ref(2);
+                            const simpler::hbg::Tensor &gate_tile_i32_inline2749_inline11102 = alloc_83.get_ref(0);
+                            const simpler::hbg::Tensor &up_tile_i32_inline2764_inline11182 = alloc_83.get_ref(1);
+                            const simpler::hbg::Tensor &h_tile_fp32_inline2744_inline11230 = alloc_83.get_ref(2);
 
                             // Spmd exp_gate_mm_spmd_1: exp_gate_mm_1
                             CoreTaskArgs params_t188;
@@ -1854,7 +1865,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                                    h_tile_i8_inline2806_inline11087_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline11087 = h_i8_inline2773_inline11141.view(
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline11087 = h_i8_inline2773_inline11141.view(
                                 h_tile_i8_inline2806_inline11087_shapes, h_tile_i8_inline2806_inline11087_offsets
                             );
                             uint32_t h_tile_scale_dq_inline2808_inline10968_offsets[2] = {
@@ -1876,10 +1887,11 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                                 h_tile_scale_dq_inline2808_inline10968_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline10968 = h_scale_dq_inline2766_inline11232.view(
-                                h_tile_scale_dq_inline2808_inline10968_shapes,
-                                h_tile_scale_dq_inline2808_inline10968_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline10968 =
+                                h_scale_dq_inline2766_inline11232.view(
+                                    h_tile_scale_dq_inline2808_inline10968_shapes,
+                                    h_tile_scale_dq_inline2808_inline10968_offsets
+                                );
 
                             // Task 191: exp_h_q_1
                             CoreTaskArgs params_t191;
@@ -1906,7 +1918,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                 y_i32_inline2737_inline11086_ci_shapes, 2, DataType::INT32
                             );
                             TaskOutputTensors alloc_84 = alloc_tensors(y_i32_inline2737_inline11086_ci);
-                            const ChipTensor &y_i32_inline2737_inline11086 = alloc_84.get_ref(0);
+                            const simpler::hbg::Tensor &y_i32_inline2737_inline11086 = alloc_84.get_ref(0);
                             int64_t tt0_inline2740_inline10960 = (tt_inline2776_inline10961 * 16);
                             CoreTaskPredicate expert_rows_pred;
                             expert_rows_pred.operand.tensor = &recv_count_out_inline11145;
@@ -1936,10 +1948,11 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                                    h_tile_i8_inline2806_inline11087__ssa_v4_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline11087__ssa_v4 = h_i8_inline2773_inline11141.view(
-                                h_tile_i8_inline2806_inline11087__ssa_v4_shapes,
-                                h_tile_i8_inline2806_inline11087__ssa_v4_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline11087__ssa_v4 =
+                                h_i8_inline2773_inline11141.view(
+                                    h_tile_i8_inline2806_inline11087__ssa_v4_shapes,
+                                    h_tile_i8_inline2806_inline11087__ssa_v4_offsets
+                                );
                             uint32_t h_tile_scale_dq_inline2808_inline10968__ssa_v2_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline11157), 0
                             };
@@ -1959,7 +1972,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                                 h_tile_scale_dq_inline2808_inline10968__ssa_v2_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline10968__ssa_v2 =
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline10968__ssa_v2 =
                                 h_scale_dq_inline2766_inline11232.view(
                                     h_tile_scale_dq_inline2808_inline10968__ssa_v2_shapes,
                                     h_tile_scale_dq_inline2808_inline10968__ssa_v2_offsets
@@ -1994,9 +2007,11 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                                                    recv_y_tile_inline2730_inline10957_offsets[1]
                                      ))
                             };
-                            ChipTensor recv_y_tile_inline2730_inline10957 = recv_y_flat_inline2783_inline10986.view(
-                                recv_y_tile_inline2730_inline10957_shapes, recv_y_tile_inline2730_inline10957_offsets
-                            );
+                            simpler::hbg::Tensor recv_y_tile_inline2730_inline10957 =
+                                recv_y_flat_inline2783_inline10986.view(
+                                    recv_y_tile_inline2730_inline10957_shapes,
+                                    recv_y_tile_inline2730_inline10957_offsets
+                                );
 
                             // Spmd exp_w2_act_spmd_1: exp_w2_act_1
                             CoreTaskArgs params_t193;
@@ -2016,7 +2031,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                 }
             }
             uint32_t recv_y_flat_inline2828_inline10947_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2828_inline10947 =
+            simpler::hbg::Tensor recv_y_flat_inline2828_inline10947 =
                 recv_y_inline11016.reshape(recv_y_flat_inline2828_inline10947_shapes, 2);
 
             // Spmd combine_spmd_1: combine_1
@@ -2069,12 +2084,12 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             uint32_t residual_flat_inline2836_inline10935_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline10936), 16384
             };
-            ChipTensor residual_flat_inline2836_inline10935 =
+            simpler::hbg::Tensor residual_flat_inline2836_inline10935 =
                 x_attn_csa_inline721.reshape(residual_flat_inline2836_inline10935_shapes, 2);
             uint32_t y_flat_inline2837_inline10934_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline10936), 16384
             };
-            ChipTensor y_flat_inline2837_inline10934 =
+            simpler::hbg::Tensor y_flat_inline2837_inline10934 =
                 hidden_mid_inline726.reshape(y_flat_inline2837_inline10934_shapes, 2);
 
             // Spmd hc_post_spmd_4: hc_post_4
@@ -2091,39 +2106,39 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
 }
 
 void hca_attn_block(const GraphTaskArgs &args) {
-    const ChipTensor &hc_attn_fn_hca_inline594 = args.tensor(0).ref();
-    const ChipTensor &hc_attn_scale_hca_inline587 = args.tensor(1).ref();
-    const ChipTensor &hc_attn_base_hca_inline567 = args.tensor(2).ref();
-    const ChipTensor &attn_norm_w_hca_inline529 = args.tensor(3).ref();
-    const ChipTensor &wq_a_hca_inline528 = args.tensor(4).ref();
-    const ChipTensor &wq_b_hca_inline526 = args.tensor(5).ref();
-    const ChipTensor &wq_b_scale_hca_inline525 = args.tensor(6).ref();
-    const ChipTensor &wkv_hca_inline527 = args.tensor(7).ref();
-    const ChipTensor &gamma_cq_hca_inline599 = args.tensor(8).ref();
-    const ChipTensor &gamma_ckv_hca_inline524 = args.tensor(9).ref();
-    const ChipTensor &kv_cache_hca_inline625 = args.tensor(10).ref();
-    const ChipTensor &attn_sink_hca_inline717 = args.tensor(11).ref();
-    const ChipTensor &wo_a_hca_inline522 = args.tensor(12).ref();
-    const ChipTensor &wo_b_hca_inline521 = args.tensor(13).ref();
-    const ChipTensor &wo_b_scale_hca_inline546 = args.tensor(14).ref();
-    const ChipTensor &hca_cmp_wkv_hca_inline584 = args.tensor(15).ref();
-    const ChipTensor &hca_cmp_wgate_hca_inline630 = args.tensor(16).ref();
-    const ChipTensor &hca_cmp_ape_hca_inline577 = args.tensor(17).ref();
-    const ChipTensor &hca_cmp_norm_w_hca_inline520 = args.tensor(18).ref();
-    const ChipTensor &hca_compress_state_hca_inline575 = args.tensor(19).ref();
-    const ChipTensor &cmp_kv_hca_inline598 = args.tensor(20).ref();
-    const ChipTensor &compressed_freqs_cos_inline559 = args.tensor(21).ref();
-    const ChipTensor &compressed_freqs_sin_inline692 = args.tensor(22).ref();
-    const ChipTensor &ext_cmp_block_table = args.tensor(23).ref();
-    const ChipTensor &ext_hca_compress_state_block_table = args.tensor(24).ref();
-    const ChipTensor &ext_kv_seq_lens = args.tensor(25).ref();
-    const ChipTensor &ext_position_ids = args.tensor(26).ref();
-    const ChipTensor &hca_cmp_slot_mapping_inline617 = args.tensor(27).ref();
-    const ChipTensor &hca_state_slot_mapping_inline710 = args.tensor(28).ref();
-    const ChipTensor &ori_slot_mapping_inline614 = args.tensor(29).ref();
-    const ChipTensor &swa_indices_inline636 = args.tensor(30).ref();
-    const ChipTensor &x_attn_hca_inline723 = args.tensor(31).ref();
-    const ChipTensor &hidden_mid_inline726 = args.tensor(32).ref();
+    const simpler::hbg::Tensor &hc_attn_fn_hca_inline594 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_attn_scale_hca_inline587 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_attn_base_hca_inline567 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &attn_norm_w_hca_inline529 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &wq_a_hca_inline528 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &wq_b_hca_inline526 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &wq_b_scale_hca_inline525 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &wkv_hca_inline527 = args.tensor(7).ref();
+    const simpler::hbg::Tensor &gamma_cq_hca_inline599 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &gamma_ckv_hca_inline524 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &kv_cache_hca_inline625 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &attn_sink_hca_inline717 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &wo_a_hca_inline522 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &wo_b_hca_inline521 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &wo_b_scale_hca_inline546 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &hca_cmp_wkv_hca_inline584 = args.tensor(15).ref();
+    const simpler::hbg::Tensor &hca_cmp_wgate_hca_inline630 = args.tensor(16).ref();
+    const simpler::hbg::Tensor &hca_cmp_ape_hca_inline577 = args.tensor(17).ref();
+    const simpler::hbg::Tensor &hca_cmp_norm_w_hca_inline520 = args.tensor(18).ref();
+    const simpler::hbg::Tensor &hca_compress_state_hca_inline575 = args.tensor(19).ref();
+    const simpler::hbg::Tensor &cmp_kv_hca_inline598 = args.tensor(20).ref();
+    const simpler::hbg::Tensor &compressed_freqs_cos_inline559 = args.tensor(21).ref();
+    const simpler::hbg::Tensor &compressed_freqs_sin_inline692 = args.tensor(22).ref();
+    const simpler::hbg::Tensor &ext_cmp_block_table = args.tensor(23).ref();
+    const simpler::hbg::Tensor &ext_hca_compress_state_block_table = args.tensor(24).ref();
+    const simpler::hbg::Tensor &ext_kv_seq_lens = args.tensor(25).ref();
+    const simpler::hbg::Tensor &ext_position_ids = args.tensor(26).ref();
+    const simpler::hbg::Tensor &hca_cmp_slot_mapping_inline617 = args.tensor(27).ref();
+    const simpler::hbg::Tensor &hca_state_slot_mapping_inline710 = args.tensor(28).ref();
+    const simpler::hbg::Tensor &ori_slot_mapping_inline614 = args.tensor(29).ref();
+    const simpler::hbg::Tensor &swa_indices_inline636 = args.tensor(30).ref();
+    const simpler::hbg::Tensor &x_attn_hca_inline723 = args.tensor(31).ref();
+    const simpler::hbg::Tensor &hidden_mid_inline726 = args.tensor(32).ref();
     SIMPLER_SCOPE() {
         uint32_t x_mixed_inline11578_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11578_ci(x_mixed_inline11578_ci_shapes, 2, DataType::BFLOAT16);
@@ -2166,22 +2181,22 @@ void hca_attn_block(const GraphTaskArgs &args) {
             qr_inline11477_ci, qr_scale_inline11488_ci, cmp_kv_proj_inline11599_ci,
             kv_proj_pad_inline1372_inline11788_ci
         );
-        const ChipTensor &x_mixed_inline11578 = alloc_85.get_ref(0);
-        const ChipTensor &post_t_inline11780 = alloc_85.get_ref(1);
-        const ChipTensor &comb_t_inline11617 = alloc_85.get_ref(2);
-        const ChipTensor &rope_cos_t_inline11615 = alloc_85.get_ref(3);
-        const ChipTensor &rope_sin_t_inline11554 = alloc_85.get_ref(4);
-        const ChipTensor &cmp_cos_inline11642 = alloc_85.get_ref(5);
-        const ChipTensor &cmp_sin_inline11548 = alloc_85.get_ref(6);
-        const ChipTensor &cmp_cos_il_inline11581 = alloc_85.get_ref(7);
-        const ChipTensor &cmp_sin_signed_inline11505 = alloc_85.get_ref(8);
-        const ChipTensor &x_normed_inline11526 = alloc_85.get_ref(9);
-        const ChipTensor &q_inline11621 = alloc_85.get_ref(10);
-        const ChipTensor &kv_inline11498 = alloc_85.get_ref(11);
-        const ChipTensor &qr_inline11477 = alloc_85.get_ref(12);
-        const ChipTensor &qr_scale_inline11488 = alloc_85.get_ref(13);
-        const ChipTensor &cmp_kv_proj_inline11599 = alloc_85.get_ref(14);
-        const ChipTensor &kv_proj_pad_inline1372_inline11788 = alloc_85.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline11578 = alloc_85.get_ref(0);
+        const simpler::hbg::Tensor &post_t_inline11780 = alloc_85.get_ref(1);
+        const simpler::hbg::Tensor &comb_t_inline11617 = alloc_85.get_ref(2);
+        const simpler::hbg::Tensor &rope_cos_t_inline11615 = alloc_85.get_ref(3);
+        const simpler::hbg::Tensor &rope_sin_t_inline11554 = alloc_85.get_ref(4);
+        const simpler::hbg::Tensor &cmp_cos_inline11642 = alloc_85.get_ref(5);
+        const simpler::hbg::Tensor &cmp_sin_inline11548 = alloc_85.get_ref(6);
+        const simpler::hbg::Tensor &cmp_cos_il_inline11581 = alloc_85.get_ref(7);
+        const simpler::hbg::Tensor &cmp_sin_signed_inline11505 = alloc_85.get_ref(8);
+        const simpler::hbg::Tensor &x_normed_inline11526 = alloc_85.get_ref(9);
+        const simpler::hbg::Tensor &q_inline11621 = alloc_85.get_ref(10);
+        const simpler::hbg::Tensor &kv_inline11498 = alloc_85.get_ref(11);
+        const simpler::hbg::Tensor &qr_inline11477 = alloc_85.get_ref(12);
+        const simpler::hbg::Tensor &qr_scale_inline11488 = alloc_85.get_ref(13);
+        const simpler::hbg::Tensor &cmp_kv_proj_inline11599 = alloc_85.get_ref(14);
+        const simpler::hbg::Tensor &kv_proj_pad_inline1372_inline11788 = alloc_85.get_ref(15);
         uint32_t score_proj_pad_inline1382_inline11463_ci_shapes[2] = {16, 512};
         TensorCreateInfo score_proj_pad_inline1382_inline11463_ci(
             score_proj_pad_inline1382_inline11463_ci_shapes, 2, DataType::FLOAT32
@@ -2249,22 +2264,22 @@ void hca_attn_block(const GraphTaskArgs &args) {
             rope_cos_il_inline1559_inline11376_ci, rope_sin_signed_inline1560_inline11790_ci,
             rope_swap_idx_inline1490_inline11789_ci, o_r_pad_inline1536_inline11403_ci
         );
-        const ChipTensor &score_proj_pad_inline1382_inline11463 = alloc_86.get_ref(0);
-        const ChipTensor &pooled_kv_inline1357_inline11800 = alloc_86.get_ref(1);
-        const ChipTensor &normed_kv_inline1420_inline11506 = alloc_86.get_ref(2);
-        const ChipTensor &attn_out_inline11390 = alloc_86.get_ref(3);
-        const ChipTensor &topk_all_inline11389 = alloc_86.get_ref(4);
-        const ChipTensor &sparse_bias_inline1492_inline11373 = alloc_86.get_ref(5);
-        const ChipTensor &hca_kv_flat_inline1485_inline11368 = alloc_86.get_ref(6);
-        const ChipTensor &o_packed_inline1463_inline11349 = alloc_86.get_ref(7);
-        const ChipTensor &sparse_blk_mi_inline1555_inline11367 = alloc_86.get_ref(8);
-        const ChipTensor &sparse_blk_li_inline1523_inline11348 = alloc_86.get_ref(9);
-        const ChipTensor &sparse_blk_oi_inline1460_inline11347 = alloc_86.get_ref(10);
-        const ChipTensor &gm_pipe_buffer_7 = alloc_86.get_ref(11);
-        const ChipTensor &rope_cos_il_inline1559_inline11376 = alloc_86.get_ref(12);
-        const ChipTensor &rope_sin_signed_inline1560_inline11790 = alloc_86.get_ref(13);
-        const ChipTensor &rope_swap_idx_inline1490_inline11789 = alloc_86.get_ref(14);
-        const ChipTensor &o_r_pad_inline1536_inline11403 = alloc_86.get_ref(15);
+        const simpler::hbg::Tensor &score_proj_pad_inline1382_inline11463 = alloc_86.get_ref(0);
+        const simpler::hbg::Tensor &pooled_kv_inline1357_inline11800 = alloc_86.get_ref(1);
+        const simpler::hbg::Tensor &normed_kv_inline1420_inline11506 = alloc_86.get_ref(2);
+        const simpler::hbg::Tensor &attn_out_inline11390 = alloc_86.get_ref(3);
+        const simpler::hbg::Tensor &topk_all_inline11389 = alloc_86.get_ref(4);
+        const simpler::hbg::Tensor &sparse_bias_inline1492_inline11373 = alloc_86.get_ref(5);
+        const simpler::hbg::Tensor &hca_kv_flat_inline1485_inline11368 = alloc_86.get_ref(6);
+        const simpler::hbg::Tensor &o_packed_inline1463_inline11349 = alloc_86.get_ref(7);
+        const simpler::hbg::Tensor &sparse_blk_mi_inline1555_inline11367 = alloc_86.get_ref(8);
+        const simpler::hbg::Tensor &sparse_blk_li_inline1523_inline11348 = alloc_86.get_ref(9);
+        const simpler::hbg::Tensor &sparse_blk_oi_inline1460_inline11347 = alloc_86.get_ref(10);
+        const simpler::hbg::Tensor &gm_pipe_buffer_7 = alloc_86.get_ref(11);
+        const simpler::hbg::Tensor &rope_cos_il_inline1559_inline11376 = alloc_86.get_ref(12);
+        const simpler::hbg::Tensor &rope_sin_signed_inline1560_inline11790 = alloc_86.get_ref(13);
+        const simpler::hbg::Tensor &rope_swap_idx_inline1490_inline11789 = alloc_86.get_ref(14);
+        const simpler::hbg::Tensor &o_r_pad_inline1536_inline11403 = alloc_86.get_ref(15);
         uint32_t o_r_i8_pad_inline1462_inline11408_ci_shapes[2] = {16, 8192};
         TensorCreateInfo o_r_i8_pad_inline1462_inline11408_ci(
             o_r_i8_pad_inline1462_inline11408_ci_shapes, 2, DataType::INT8
@@ -2281,28 +2296,29 @@ void hca_attn_block(const GraphTaskArgs &args) {
             o_r_i8_pad_inline1462_inline11408_ci, act_scale_dq_inline1577_inline11391_ci,
             partials_inline1608_inline11714_ci
         );
-        const ChipTensor &o_r_i8_pad_inline1462_inline11408 = alloc_87.get_ref(0);
-        const ChipTensor &act_scale_dq_inline1577_inline11391 = alloc_87.get_ref(1);
-        const ChipTensor &partials_inline1608_inline11714 = alloc_87.get_ref(2);
+        const simpler::hbg::Tensor &o_r_i8_pad_inline1462_inline11408 = alloc_87.get_ref(0);
+        const simpler::hbg::Tensor &act_scale_dq_inline1577_inline11391 = alloc_87.get_ref(1);
+        const simpler::hbg::Tensor &partials_inline1608_inline11714 = alloc_87.get_ref(2);
         int64_t t_dim_inline14891 = 8;
         int64_t t_linear_inline14909 = (((t_dim_inline14891 + 15) / 16) * 16);
         uint32_t x_flat_inline14904_shapes[2] = {static_cast<uint32_t>(t_dim_inline14891), 16384};
-        ChipTensor x_flat_inline14904 = hidden_mid_inline726.reshape(x_flat_inline14904_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14904 = hidden_mid_inline726.reshape(x_flat_inline14904_shapes, 2);
         uint32_t hc_base_2d_inline14919_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14919 = hc_attn_base_hca_inline567.reshape(hc_base_2d_inline14919_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14919 =
+            hc_attn_base_hca_inline567.reshape(hc_base_2d_inline14919_shapes, 2);
         uint32_t inv_rms_inline14859_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14909), 1};
         TensorCreateInfo inv_rms_inline14859_ci(inv_rms_inline14859_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_88 = alloc_tensors(inv_rms_inline14859_ci);
-        const ChipTensor &inv_rms_inline14859 = alloc_88.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14859 = alloc_88.get_ref(0);
         uint32_t mixes_raw_inline14882_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14909), 32};
         TensorCreateInfo mixes_raw_inline14882_ci(mixes_raw_inline14882_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_89 = alloc_tensors(mixes_raw_inline14882_ci);
-        const ChipTensor &mixes_raw_inline14882 = alloc_89.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14882 = alloc_89.get_ref(0);
         int64_t linear_partial_rows_inline14857 = (t_linear_inline14909 * 4);
         uint32_t mixes_partials_inline14881_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14857), 32};
         TensorCreateInfo mixes_partials_inline14881_ci(mixes_partials_inline14881_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_90 = alloc_tensors(mixes_partials_inline14881_ci);
-        const ChipTensor &mixes_partials_inline14881 = alloc_90.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline14881 = alloc_90.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_5: hc_pre_rms_5
         CoreTaskArgs params_t198;
@@ -2334,7 +2350,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline14887_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14909), 8};
         TensorCreateInfo pre_val_store_inline14887_ci(pre_val_store_inline14887_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_91 = alloc_tensors(pre_val_store_inline14887_ci);
-        const ChipTensor &pre_val_store_inline14887 = alloc_91.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14887 = alloc_91.get_ref(0);
 
         // Spmd split_pre_post_spmd_5: split_pre_post_5
         CoreTaskArgs params_t201;
@@ -2415,26 +2431,28 @@ void hca_attn_block(const GraphTaskArgs &args) {
         }
         int64_t t_dim_inline1283_inline11618 = 8;
         uint32_t x_view_inline1221_inline11524_shapes[2] = {static_cast<uint32_t>(t_dim_inline1283_inline11618), 4096};
-        ChipTensor x_view_inline1221_inline11524 =
+        simpler::hbg::Tensor x_view_inline1221_inline11524 =
             x_normed_inline11526.reshape(x_view_inline1221_inline11524_shapes, 2);
         uint32_t rope_cos_view_inline1219_inline11567_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1283_inline11618), 64
         };
-        ChipTensor rope_cos_view_inline1219_inline11567 =
+        simpler::hbg::Tensor rope_cos_view_inline1219_inline11567 =
             rope_cos_t_inline11615.reshape(rope_cos_view_inline1219_inline11567_shapes, 2);
         uint32_t rope_sin_view_inline1207_inline11728_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1283_inline11618), 64
         };
-        ChipTensor rope_sin_view_inline1207_inline11728 =
+        simpler::hbg::Tensor rope_sin_view_inline1207_inline11728 =
             rope_sin_t_inline11554.reshape(rope_sin_view_inline1207_inline11728_shapes, 2);
         uint32_t kv_view_inline1257_inline11496_shapes[2] = {static_cast<uint32_t>(t_dim_inline1283_inline11618), 512};
-        ChipTensor kv_view_inline1257_inline11496 = kv_inline11498.reshape(kv_view_inline1257_inline11496_shapes, 2);
+        simpler::hbg::Tensor kv_view_inline1257_inline11496 =
+            kv_inline11498.reshape(kv_view_inline1257_inline11496_shapes, 2);
         uint32_t qr_view_inline1227_inline11629_shapes[2] = {static_cast<uint32_t>(t_dim_inline1283_inline11618), 1024};
-        ChipTensor qr_view_inline1227_inline11629 = qr_inline11477.reshape(qr_view_inline1227_inline11629_shapes, 2);
+        simpler::hbg::Tensor qr_view_inline1227_inline11629 =
+            qr_inline11477.reshape(qr_view_inline1227_inline11629_shapes, 2);
         uint32_t qr_scale_view_inline1233_inline11585_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1283_inline11618), 1
         };
-        ChipTensor qr_scale_view_inline1233_inline11585 =
+        simpler::hbg::Tensor qr_scale_view_inline1233_inline11585 =
             qr_scale_inline11488.reshape(qr_scale_view_inline1233_inline11585_shapes, 2);
         int64_t t_matmul_inline1250_inline11559 = std::max<int64_t>(t_dim_inline1283_inline11618, 16);
         uint32_t q_rope_cos_il_inline1256_inline11565_ci_shapes[2] = {
@@ -2444,7 +2462,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             q_rope_cos_il_inline1256_inline11565_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_92 = alloc_tensors(q_rope_cos_il_inline1256_inline11565_ci);
-        const ChipTensor &q_rope_cos_il_inline1256_inline11565 = alloc_92.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_cos_il_inline1256_inline11565 = alloc_92.get_ref(0);
         uint32_t q_rope_sin_signed_inline1292_inline11639_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1283_inline11618), 64
         };
@@ -2452,7 +2470,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             q_rope_sin_signed_inline1292_inline11639_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_93 = alloc_tensors(q_rope_sin_signed_inline1292_inline11639_ci);
-        const ChipTensor &q_rope_sin_signed_inline1292_inline11639 = alloc_93.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_sin_signed_inline1292_inline11639 = alloc_93.get_ref(0);
         uint32_t q_rope_swap_idx_inline1258_inline11522_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1283_inline11618), 64
         };
@@ -2460,7 +2478,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             q_rope_swap_idx_inline1258_inline11522_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_94 = alloc_tensors(q_rope_swap_idx_inline1258_inline11522_ci);
-        const ChipTensor &q_rope_swap_idx_inline1258_inline11522 = alloc_94.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_swap_idx_inline1258_inline11522 = alloc_94.get_ref(0);
 
         // Spmd q_rope_prepare_spmd_2: q_rope_prepare_2
         CoreTaskArgs params_t207;
@@ -2479,7 +2497,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             qr_fp32_inline1200_inline11543_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_95 = alloc_tensors(qr_fp32_inline1200_inline11543_ci);
-        const ChipTensor &qr_fp32_inline1200_inline11543 = alloc_95.get_ref(0);
+        const simpler::hbg::Tensor &qr_fp32_inline1200_inline11543 = alloc_95.get_ref(0);
         int64_t qr_partial_rows_inline1240_inline11631 = (t_matmul_inline1250_inline11559 * 2);
         uint32_t qr_partials_inline1197_inline11540_ci_shapes[2] = {
             static_cast<uint32_t>(qr_partial_rows_inline1240_inline11631), 1024
@@ -2488,7 +2506,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             qr_partials_inline1197_inline11540_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_96 = alloc_tensors(qr_partials_inline1197_inline11540_ci);
-        const ChipTensor &qr_partials_inline1197_inline11540 = alloc_96.get_ref(0);
+        const simpler::hbg::Tensor &qr_partials_inline1197_inline11540 = alloc_96.get_ref(0);
         uint32_t qr_i8_matmul_inline1286_inline11750_ci_shapes[2] = {
             static_cast<uint32_t>(t_matmul_inline1250_inline11559), 1024
         };
@@ -2496,7 +2514,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             qr_i8_matmul_inline1286_inline11750_ci_shapes, 2, DataType::INT8
         );
         TaskOutputTensors alloc_97 = alloc_tensors(qr_i8_matmul_inline1286_inline11750_ci);
-        const ChipTensor &qr_i8_matmul_inline1286_inline11750 = alloc_97.get_ref(0);
+        const simpler::hbg::Tensor &qr_i8_matmul_inline1286_inline11750 = alloc_97.get_ref(0);
 
         // Spmd qr_proj_matmul_spmd_2: qr_proj_matmul_2
         CoreTaskArgs params_t208;
@@ -2536,7 +2554,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             q_proj_i32_inline1267_inline11654_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_98 = alloc_tensors(q_proj_i32_inline1267_inline11654_ci);
-        const ChipTensor &q_proj_i32_inline1267_inline11654 = alloc_98.get_ref(0);
+        const simpler::hbg::Tensor &q_proj_i32_inline1267_inline11654 = alloc_98.get_ref(0);
 
         // Spmd qproj_matmul_spmd_2: qproj_matmul_2
         CoreTaskArgs params_t211;
@@ -2547,7 +2565,8 @@ void hca_attn_block(const GraphTaskArgs &args) {
         params_t211.launch_spec.set_block_num(64);
         rt_submit_aic_task(218, params_t211);
         uint32_t q_flat_inline1205_inline11541_shapes[2] = {static_cast<uint32_t>(t_dim_inline1283_inline11618), 32768};
-        ChipTensor q_flat_inline1205_inline11541 = q_inline11621.reshape(q_flat_inline1205_inline11541_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline1205_inline11541 =
+            q_inline11621.reshape(q_flat_inline1205_inline11541_shapes, 2);
 
         // Spmd qproj_dequant_rms_nope_rope_spmd_2: qproj_dequant_rms_nope_rope_2
         CoreTaskArgs params_t212;
@@ -2570,7 +2589,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             kv_fp32_inline1238_inline11720_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_99 = alloc_tensors(kv_fp32_inline1238_inline11720_ci);
-        const ChipTensor &kv_fp32_inline1238_inline11720 = alloc_99.get_ref(0);
+        const simpler::hbg::Tensor &kv_fp32_inline1238_inline11720 = alloc_99.get_ref(0);
         int64_t kv_partial_rows_inline1329_inline11715 = (t_matmul_inline1250_inline11559 * 4);
         uint32_t kv_partials_inline1314_inline11722_ci_shapes[2] = {
             static_cast<uint32_t>(kv_partial_rows_inline1329_inline11715), 512
@@ -2579,7 +2598,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
             kv_partials_inline1314_inline11722_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_100 = alloc_tensors(kv_partials_inline1314_inline11722_ci);
-        const ChipTensor &kv_partials_inline1314_inline11722 = alloc_100.get_ref(0);
+        const simpler::hbg::Tensor &kv_partials_inline1314_inline11722 = alloc_100.get_ref(0);
 
         // Spmd kv_proj_matmul_spmd_2: kv_proj_matmul_2
         CoreTaskArgs params_t213;
@@ -2616,7 +2635,8 @@ void hca_attn_block(const GraphTaskArgs &args) {
         rt_submit_aiv_task(222, params_t215);
         int64_t ori_block_num_inline11664 = (int64_t)kv_cache_hca_inline625.shapes[0];
         uint32_t kv_cache_flat_inline11774_shapes[2] = {static_cast<uint32_t>((ori_block_num_inline11664 * 128)), 512};
-        ChipTensor kv_cache_flat_inline11774 = kv_cache_hca_inline625.reshape(kv_cache_flat_inline11774_shapes, 2);
+        simpler::hbg::Tensor kv_cache_flat_inline11774 =
+            kv_cache_hca_inline625.reshape(kv_cache_flat_inline11774_shapes, 2);
 
         // Spmd hca_cache_writeback_spmd: hca_cache_writeback
         CoreTaskArgs params_t216;
@@ -2626,14 +2646,16 @@ void hca_attn_block(const GraphTaskArgs &args) {
         params_t216.launch_spec.set_block_num(1);
         rt_submit_aiv_task(223, params_t216);
         uint32_t x_normed_bsd_inline11731_shapes[3] = {4, 2, 4096};
-        ChipTensor x_normed_bsd_inline11731 = x_normed_inline11526.reshape(x_normed_bsd_inline11731_shapes, 3);
+        simpler::hbg::Tensor x_normed_bsd_inline11731 =
+            x_normed_inline11526.reshape(x_normed_bsd_inline11731_shapes, 3);
         uint32_t position_ids_bsd_inline11737_shapes[2] = {4, 2};
-        ChipTensor position_ids_bsd_inline11737 = ext_position_ids.reshape(position_ids_bsd_inline11737_shapes, 2);
+        simpler::hbg::Tensor position_ids_bsd_inline11737 =
+            ext_position_ids.reshape(position_ids_bsd_inline11737_shapes, 2);
         uint32_t cmp_slot_mapping_bsd_inline11721_shapes[2] = {4, 2};
-        ChipTensor cmp_slot_mapping_bsd_inline11721 =
+        simpler::hbg::Tensor cmp_slot_mapping_bsd_inline11721 =
             hca_cmp_slot_mapping_inline617.reshape(cmp_slot_mapping_bsd_inline11721_shapes, 2);
         uint32_t state_slot_mapping_bsd_inline11665_shapes[2] = {4, 2};
-        ChipTensor state_slot_mapping_bsd_inline11665 =
+        simpler::hbg::Tensor state_slot_mapping_bsd_inline11665 =
             hca_state_slot_mapping_inline710.reshape(state_slot_mapping_bsd_inline11665_shapes, 2);
         int64_t b_dim_inline1393_inline11785 = 4;
         int64_t s_dim_inline1364_inline11456 = 2;
@@ -2641,7 +2663,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         int64_t compress_state_block_num_inline1398_inline11786 = (int64_t)hca_compress_state_hca_inline575.shapes[0];
         int64_t cmp_block_num_inline1367_inline11778 = (int64_t)cmp_kv_hca_inline598.shapes[0];
         uint32_t x_flat_inline1388_inline11613_shapes[2] = {static_cast<uint32_t>(bs_inline1375_inline11667), 4096};
-        ChipTensor x_flat_inline1388_inline11613 =
+        simpler::hbg::Tensor x_flat_inline1388_inline11613 =
             x_normed_bsd_inline11731.reshape(x_flat_inline1388_inline11613_shapes, 2);
         int64_t t_matmul_inline1366_inline11787 = std::max<int64_t>(bs_inline1375_inline11667, 16);
 
@@ -2663,7 +2685,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         uint32_t compress_state_rows_inline1361_inline11799_shapes[2] = {
             static_cast<uint32_t>(compress_state_rows_num_inline1363_inline11460), 1024
         };
-        ChipTensor compress_state_rows_inline1361_inline11799 =
+        simpler::hbg::Tensor compress_state_rows_inline1361_inline11799 =
             hca_compress_state_hca_inline575.reshape(compress_state_rows_inline1361_inline11799_shapes, 2);
 
         // Task 218: scatter_softmax_pool_1
@@ -2681,16 +2703,16 @@ void hca_attn_block(const GraphTaskArgs &args) {
         TaskOutputTensors task_218_outs = rt_submit_aiv_task(225, params_t218);
         TaskId pool_tid_inline1365_inline11753 = task_218_outs.task_id();
         uint32_t norm_w_2d_inline1362_inline11652_shapes[2] = {1, 512};
-        ChipTensor norm_w_2d_inline1362_inline11652 =
+        simpler::hbg::Tensor norm_w_2d_inline1362_inline11652 =
             hca_cmp_norm_w_hca_inline520.reshape(norm_w_2d_inline1362_inline11652_shapes, 2);
         uint32_t kv_flat_inline1421_inline11424_shapes[2] = {static_cast<uint32_t>(bs_inline1375_inline11667), 512};
-        ChipTensor kv_flat_inline1421_inline11424 =
+        simpler::hbg::Tensor kv_flat_inline1421_inline11424 =
             cmp_kv_proj_inline11599.reshape(kv_flat_inline1421_inline11424_shapes, 2);
         int64_t cmp_flat_rows_inline1395_inline11423 = (cmp_block_num_inline1367_inline11778 * 128);
         uint32_t cmp_kv_cache_flat_inline1354_inline11453_shapes[2] = {
             static_cast<uint32_t>(cmp_flat_rows_inline1395_inline11423), 512
         };
-        ChipTensor cmp_kv_cache_flat_inline1354_inline11453 =
+        simpler::hbg::Tensor cmp_kv_cache_flat_inline1354_inline11453 =
             cmp_kv_hca_inline598.reshape(cmp_kv_cache_flat_inline1354_inline11453_shapes, 2);
 
         // Task 219: rmsnorm_rope_cache_write_0
@@ -2724,12 +2746,12 @@ void hca_attn_block(const GraphTaskArgs &args) {
         uint32_t ori_kv_flat_inline1489_inline11377_shapes[2] = {
             static_cast<uint32_t>((ori_block_num_inline1520_inline11500 * 128)), 512
         };
-        ChipTensor ori_kv_flat_inline1489_inline11377 =
+        simpler::hbg::Tensor ori_kv_flat_inline1489_inline11377 =
             kv_cache_hca_inline625.reshape(ori_kv_flat_inline1489_inline11377_shapes, 2);
         uint32_t cmp_kv_flat_inline1500_inline11375_shapes[2] = {
             static_cast<uint32_t>((cmp_block_num_inline1530_inline11379 * 128)), 512
         };
-        ChipTensor cmp_kv_flat_inline1500_inline11375 =
+        simpler::hbg::Tensor cmp_kv_flat_inline1500_inline11375 =
             cmp_kv_hca_inline598.reshape(cmp_kv_flat_inline1500_inline11375_shapes, 2);
 
         // Spmd build_valid_spmd: build_valid
@@ -2753,7 +2775,8 @@ void hca_attn_block(const GraphTaskArgs &args) {
         TaskOutputTensors task_222_outs = rt_submit_aiv_task(229, params_t222);
         TaskId gather_tid_inline1486_inline11365 = task_222_outs.task_id();
         uint32_t q_flat_inline1542_inline11350_shapes[2] = {512, 512};
-        ChipTensor q_flat_inline1542_inline11350 = q_inline11621.reshape(q_flat_inline1542_inline11350_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline1542_inline11350 =
+            q_inline11621.reshape(q_flat_inline1542_inline11350_shapes, 2);
 
         // Group qk_pv_2: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t223;
@@ -2803,7 +2826,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         TaskId proj_b_tids_inline1519_inline11335[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline1519_inline11335[__init_i] = TaskId::invalid();
-        ChipTensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
+        simpler::hbg::Tensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
         SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline1480_inline11801 = 0; g_inline1480_inline11801 < 8; g_inline1480_inline11801 += 1) {
                 int64_t row_base_o_inline1525_inline11698 = (g_inline1480_inline11801 * 8);
@@ -2914,10 +2937,10 @@ void hca_attn_block(const GraphTaskArgs &args) {
         uint32_t residual_flat_inline1614_inline11374_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1623_inline11547), 16384
         };
-        ChipTensor residual_flat_inline1614_inline11374 =
+        simpler::hbg::Tensor residual_flat_inline1614_inline11374 =
             hidden_mid_inline726.reshape(residual_flat_inline1614_inline11374_shapes, 2);
         uint32_t y_flat_inline1615_inline11275_shapes[2] = {static_cast<uint32_t>(t_dim_inline1623_inline11547), 16384};
-        ChipTensor y_flat_inline1615_inline11275 =
+        simpler::hbg::Tensor y_flat_inline1615_inline11275 =
             x_attn_hca_inline723.reshape(y_flat_inline1615_inline11275_shapes, 2);
 
         // Spmd hc_post_spmd_5: hc_post_5
@@ -2933,34 +2956,34 @@ void hca_attn_block(const GraphTaskArgs &args) {
 }
 
 void hca_moe_block(const GraphTaskArgs &args) {
-    const ChipTensor &hc_ffn_fn_hca_inline519 = args.tensor(0).ref();
-    const ChipTensor &hc_ffn_scale_hca_inline517 = args.tensor(1).ref();
-    const ChipTensor &hc_ffn_base_hca_inline541 = args.tensor(2).ref();
-    const ChipTensor &norm_w_hca_inline516 = args.tensor(3).ref();
-    const ChipTensor &gate_w_hca_inline680 = args.tensor(4).ref();
-    const ChipTensor &gate_bias_hca_inline699 = args.tensor(5).ref();
-    const ChipTensor &routed_w1_hca_inline615 = args.tensor(6).ref();
-    const ChipTensor &routed_w1_scale_hca_inline687 = args.tensor(7).ref();
-    const ChipTensor &routed_w3_hca_inline590 = args.tensor(8).ref();
-    const ChipTensor &routed_w3_scale_hca_inline513 = args.tensor(9).ref();
-    const ChipTensor &routed_w2_hca_inline597 = args.tensor(10).ref();
-    const ChipTensor &routed_w2_scale_hca_inline514 = args.tensor(11).ref();
-    const ChipTensor &shared_w1_hca_inline512 = args.tensor(12).ref();
-    const ChipTensor &shared_w1_scale_hca_inline651 = args.tensor(13).ref();
-    const ChipTensor &shared_w3_hca_inline735 = args.tensor(14).ref();
-    const ChipTensor &shared_w3_scale_hca_inline596 = args.tensor(15).ref();
-    const ChipTensor &shared_w2_hca_inline611 = args.tensor(16).ref();
-    const ChipTensor &shared_w2_scale_hca_inline523 = args.tensor(17).ref();
-    const ChipTensor &ext_arrived = args.tensor(18).ref();
-    const ChipTensor &ext_combine_arrived = args.tensor(19).ref();
-    const ChipTensor &ext_data_arrived = args.tensor(20).ref();
-    const ChipTensor &ext_recv_aux = args.tensor(21).ref();
-    const ChipTensor &ext_recv_meta = args.tensor(22).ref();
-    const ChipTensor &ext_recv_route = args.tensor(23).ref();
-    const ChipTensor &ext_recv_x = args.tensor(24).ref();
-    const ChipTensor &ext_routed_y_buf = args.tensor(25).ref();
-    const ChipTensor &hidden_inline709 = args.tensor(26).ref();
-    const ChipTensor &x_attn_hca_inline723 = args.tensor(27).ref();
+    const simpler::hbg::Tensor &hc_ffn_fn_hca_inline519 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_ffn_scale_hca_inline517 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_ffn_base_hca_inline541 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &norm_w_hca_inline516 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &gate_w_hca_inline680 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &gate_bias_hca_inline699 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &routed_w1_hca_inline615 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &routed_w1_scale_hca_inline687 = args.tensor(7).ref();
+    const simpler::hbg::Tensor &routed_w3_hca_inline590 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &routed_w3_scale_hca_inline513 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &routed_w2_hca_inline597 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &routed_w2_scale_hca_inline514 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &shared_w1_hca_inline512 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &shared_w1_scale_hca_inline651 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &shared_w3_hca_inline735 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &shared_w3_scale_hca_inline596 = args.tensor(15).ref();
+    const simpler::hbg::Tensor &shared_w2_hca_inline611 = args.tensor(16).ref();
+    const simpler::hbg::Tensor &shared_w2_scale_hca_inline523 = args.tensor(17).ref();
+    const simpler::hbg::Tensor &ext_arrived = args.tensor(18).ref();
+    const simpler::hbg::Tensor &ext_combine_arrived = args.tensor(19).ref();
+    const simpler::hbg::Tensor &ext_data_arrived = args.tensor(20).ref();
+    const simpler::hbg::Tensor &ext_recv_aux = args.tensor(21).ref();
+    const simpler::hbg::Tensor &ext_recv_meta = args.tensor(22).ref();
+    const simpler::hbg::Tensor &ext_recv_route = args.tensor(23).ref();
+    const simpler::hbg::Tensor &ext_recv_x = args.tensor(24).ref();
+    const simpler::hbg::Tensor &ext_routed_y_buf = args.tensor(25).ref();
+    const simpler::hbg::Tensor &hidden_inline709 = args.tensor(26).ref();
+    const simpler::hbg::Tensor &x_attn_hca_inline723 = args.tensor(27).ref();
     // Each binding keeps the type its submit site passes. The comm-window handles
     // are 64-bit device contexts; read one back as int32_t and the MoE all-to-all
     // pushes to a truncated window address — an MTE bus fault on the AIV, not a
@@ -3036,22 +3059,22 @@ void hca_moe_block(const GraphTaskArgs &args) {
             biased_scores_buf_inline2564_inline12048_ci, sh_inline12018_ci, recv_x_out_inline11922_ci,
             recv_scale_out_inline11858_ci, recv_w_out_inline12046_ci
         );
-        const ChipTensor &x_mixed_inline11928 = alloc_101.get_ref(0);
-        const ChipTensor &post_ffn_inline11927 = alloc_101.get_ref(1);
-        const ChipTensor &comb_ffn_inline11955 = alloc_101.get_ref(2);
-        const ChipTensor &x_norm_i8_inline11951 = alloc_101.get_ref(3);
-        const ChipTensor &x_norm_scale_inline11931 = alloc_101.get_ref(4);
-        const ChipTensor &indices_inline11972 = alloc_101.get_ref(5);
-        const ChipTensor &weights_inline11962 = alloc_101.get_ref(6);
-        const ChipTensor &xg_buf_inline2582_inline12082 = alloc_101.get_ref(7);
-        const ChipTensor &inv_rms_buf_inline2585_inline11968 = alloc_101.get_ref(8);
-        const ChipTensor &xn_scale_buf_inline2572_inline12044 = alloc_101.get_ref(9);
-        const ChipTensor &route_scores_buf_inline2607_inline11959 = alloc_101.get_ref(10);
-        const ChipTensor &biased_scores_buf_inline2564_inline12048 = alloc_101.get_ref(11);
-        const ChipTensor &sh_inline12018 = alloc_101.get_ref(12);
-        const ChipTensor &recv_x_out_inline11922 = alloc_101.get_ref(13);
-        const ChipTensor &recv_scale_out_inline11858 = alloc_101.get_ref(14);
-        const ChipTensor &recv_w_out_inline12046 = alloc_101.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline11928 = alloc_101.get_ref(0);
+        const simpler::hbg::Tensor &post_ffn_inline11927 = alloc_101.get_ref(1);
+        const simpler::hbg::Tensor &comb_ffn_inline11955 = alloc_101.get_ref(2);
+        const simpler::hbg::Tensor &x_norm_i8_inline11951 = alloc_101.get_ref(3);
+        const simpler::hbg::Tensor &x_norm_scale_inline11931 = alloc_101.get_ref(4);
+        const simpler::hbg::Tensor &indices_inline11972 = alloc_101.get_ref(5);
+        const simpler::hbg::Tensor &weights_inline11962 = alloc_101.get_ref(6);
+        const simpler::hbg::Tensor &xg_buf_inline2582_inline12082 = alloc_101.get_ref(7);
+        const simpler::hbg::Tensor &inv_rms_buf_inline2585_inline11968 = alloc_101.get_ref(8);
+        const simpler::hbg::Tensor &xn_scale_buf_inline2572_inline12044 = alloc_101.get_ref(9);
+        const simpler::hbg::Tensor &route_scores_buf_inline2607_inline11959 = alloc_101.get_ref(10);
+        const simpler::hbg::Tensor &biased_scores_buf_inline2564_inline12048 = alloc_101.get_ref(11);
+        const simpler::hbg::Tensor &sh_inline12018 = alloc_101.get_ref(12);
+        const simpler::hbg::Tensor &recv_x_out_inline11922 = alloc_101.get_ref(13);
+        const simpler::hbg::Tensor &recv_scale_out_inline11858 = alloc_101.get_ref(14);
+        const simpler::hbg::Tensor &recv_w_out_inline12046 = alloc_101.get_ref(15);
         uint32_t recv_r_route_out_inline12055_ci_shapes[2] = {32, 16};
         TensorCreateInfo recv_r_route_out_inline12055_ci(
             recv_r_route_out_inline12055_ci_shapes, 2, DataType::INT32, /*manual_dep=*/true
@@ -3065,28 +3088,29 @@ void hca_moe_block(const GraphTaskArgs &args) {
         TaskOutputTensors alloc_102 = alloc_tensors(
             recv_r_route_out_inline12055_ci, recv_count_out_inline12024_ci, recv_meta_local_inline12091_ci
         );
-        const ChipTensor &recv_r_route_out_inline12055 = alloc_102.get_ref(0);
-        const ChipTensor &recv_count_out_inline12024 = alloc_102.get_ref(1);
-        const ChipTensor &recv_meta_local_inline12091 = alloc_102.get_ref(2);
+        const simpler::hbg::Tensor &recv_r_route_out_inline12055 = alloc_102.get_ref(0);
+        const simpler::hbg::Tensor &recv_count_out_inline12024 = alloc_102.get_ref(1);
+        const simpler::hbg::Tensor &recv_meta_local_inline12091 = alloc_102.get_ref(2);
         int64_t t_dim_inline15018 = 8;
         int64_t t_linear_inline15036 = (((t_dim_inline15018 + 15) / 16) * 16);
         uint32_t x_flat_inline15031_shapes[2] = {static_cast<uint32_t>(t_dim_inline15018), 16384};
-        ChipTensor x_flat_inline15031 = x_attn_hca_inline723.reshape(x_flat_inline15031_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline15031 = x_attn_hca_inline723.reshape(x_flat_inline15031_shapes, 2);
         uint32_t hc_base_2d_inline15046_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline15046 = hc_ffn_base_hca_inline541.reshape(hc_base_2d_inline15046_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline15046 =
+            hc_ffn_base_hca_inline541.reshape(hc_base_2d_inline15046_shapes, 2);
         uint32_t inv_rms_inline14986_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15036), 1};
         TensorCreateInfo inv_rms_inline14986_ci(inv_rms_inline14986_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_103 = alloc_tensors(inv_rms_inline14986_ci);
-        const ChipTensor &inv_rms_inline14986 = alloc_103.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14986 = alloc_103.get_ref(0);
         uint32_t mixes_raw_inline15009_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15036), 32};
         TensorCreateInfo mixes_raw_inline15009_ci(mixes_raw_inline15009_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_104 = alloc_tensors(mixes_raw_inline15009_ci);
-        const ChipTensor &mixes_raw_inline15009 = alloc_104.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline15009 = alloc_104.get_ref(0);
         int64_t linear_partial_rows_inline14984 = (t_linear_inline15036 * 4);
         uint32_t mixes_partials_inline15008_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14984), 32};
         TensorCreateInfo mixes_partials_inline15008_ci(mixes_partials_inline15008_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_105 = alloc_tensors(mixes_partials_inline15008_ci);
-        const ChipTensor &mixes_partials_inline15008 = alloc_105.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline15008 = alloc_105.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_6: hc_pre_rms_6
         CoreTaskArgs params_t232;
@@ -3118,7 +3142,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline15014_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline15036), 8};
         TensorCreateInfo pre_val_store_inline15014_ci(pre_val_store_inline15014_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_106 = alloc_tensors(pre_val_store_inline15014_ci);
-        const ChipTensor &pre_val_store_inline15014 = alloc_106.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline15014 = alloc_106.get_ref(0);
 
         // Spmd split_pre_post_spmd_6: split_pre_post_6
         CoreTaskArgs params_t235;
@@ -3169,7 +3193,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
             active_gate_tokens_inline2604_inline11999__phi_v2 = active_gate_tokens_inline2604_inline11999;
         }
         uint32_t norm_w_2d_inline2589_inline12095_shapes[2] = {1, 4096};
-        ChipTensor norm_w_2d_inline2589_inline12095 =
+        simpler::hbg::Tensor norm_w_2d_inline2589_inline12095 =
             norm_w_hca_inline516.reshape(norm_w_2d_inline2589_inline12095_shapes, 2);
 
         // Spmd ffn_norm_spmd_2: ffn_norm_2
@@ -3220,7 +3244,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
         )};
         TensorCreateInfo gm_pipe_buffer_8_ci(gm_pipe_buffer_8_ci_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true);
         TaskOutputTensors alloc_107 = alloc_tensors(gm_pipe_buffer_8_ci);
-        const ChipTensor &gm_pipe_buffer_8 = alloc_107.get_ref(0);
+        const simpler::hbg::Tensor &gm_pipe_buffer_8 = alloc_107.get_ref(0);
 
         // Group gate_2: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t241;
@@ -3280,12 +3304,12 @@ void hca_moe_block(const GraphTaskArgs &args) {
                 h_tile_fp32_inline2660_inline11900_ci, h_tile_i8_inline2663_inline11859_ci,
                 h_tile_scale_dq_inline2676_inline11929_ci, y_i32_inline2673_inline12071_ci
             );
-            const ChipTensor &gate_i32_inline2662_inline11963 = alloc_108.get_ref(0);
-            const ChipTensor &up_i32_inline2654_inline11954 = alloc_108.get_ref(1);
-            const ChipTensor &h_tile_fp32_inline2660_inline11900 = alloc_108.get_ref(2);
-            const ChipTensor &h_tile_i8_inline2663_inline11859 = alloc_108.get_ref(3);
-            const ChipTensor &h_tile_scale_dq_inline2676_inline11929 = alloc_108.get_ref(4);
-            const ChipTensor &y_i32_inline2673_inline12071 = alloc_108.get_ref(5);
+            const simpler::hbg::Tensor &gate_i32_inline2662_inline11963 = alloc_108.get_ref(0);
+            const simpler::hbg::Tensor &up_i32_inline2654_inline11954 = alloc_108.get_ref(1);
+            const simpler::hbg::Tensor &h_tile_fp32_inline2660_inline11900 = alloc_108.get_ref(2);
+            const simpler::hbg::Tensor &h_tile_i8_inline2663_inline11859 = alloc_108.get_ref(3);
+            const simpler::hbg::Tensor &h_tile_scale_dq_inline2676_inline11929 = alloc_108.get_ref(4);
+            const simpler::hbg::Tensor &y_i32_inline2673_inline12071 = alloc_108.get_ref(5);
             int64_t ts0_inline2658_inline11912 = 0;
 
             // Spmd sh_gate_mm_spmd_2: sh_gate_mm_2
@@ -3346,7 +3370,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
             TaskOutputTensors task_247_outs = rt_submit_aiv_task(256, params_t247);
         }
         uint32_t recv_x_out_flat_inline2699_inline12010_shapes[2] = {512, 4096};
-        ChipTensor recv_x_out_flat_inline2699_inline12010 =
+        simpler::hbg::Tensor recv_x_out_flat_inline2699_inline12010 =
             recv_x_out_inline11922.reshape(recv_x_out_flat_inline2699_inline12010_shapes, 2);
 
         // Task 248: dispatch_meta_2
@@ -3428,13 +3452,13 @@ void hca_moe_block(const GraphTaskArgs &args) {
             uint32_t ffn_out_inline11827_ci_shapes[2] = {8, 4096};
             TensorCreateInfo ffn_out_inline11827_ci(ffn_out_inline11827_ci_shapes, 2, DataType::BFLOAT16);
             TaskOutputTensors alloc_109 = alloc_tensors(recv_y_inline11895_ci, ffn_out_inline11827_ci);
-            const ChipTensor &recv_y_inline11895 = alloc_109.get_ref(0);
-            const ChipTensor &ffn_out_inline11827 = alloc_109.get_ref(1);
+            const simpler::hbg::Tensor &recv_y_inline11895 = alloc_109.get_ref(0);
+            const simpler::hbg::Tensor &ffn_out_inline11827 = alloc_109.get_ref(1);
             uint32_t recv_y_flat_inline2783_inline11865_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2783_inline11865 =
+            simpler::hbg::Tensor recv_y_flat_inline2783_inline11865 =
                 recv_y_inline11895.reshape(recv_y_flat_inline2783_inline11865_shapes, 2);
             uint32_t recv_x_flat_inline2781_inline12084_shapes[2] = {512, 4096};
-            ChipTensor recv_x_flat_inline2781_inline12084 =
+            simpler::hbg::Tensor recv_x_flat_inline2781_inline12084 =
                 recv_x_out_inline11922.reshape(recv_x_flat_inline2781_inline12084_shapes, 2);
             SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline12020_ci_shapes[2] = {512, 2048};
@@ -3447,8 +3471,8 @@ void hca_moe_block(const GraphTaskArgs &args) {
                 );
                 TaskOutputTensors alloc_110 =
                     alloc_tensors(h_i8_inline2773_inline12020_ci, h_scale_dq_inline2766_inline12111_ci);
-                const ChipTensor &h_i8_inline2773_inline12020 = alloc_110.get_ref(0);
-                const ChipTensor &h_scale_dq_inline2766_inline12111 = alloc_110.get_ref(1);
+                const simpler::hbg::Tensor &h_i8_inline2773_inline12020 = alloc_110.get_ref(0);
+                const simpler::hbg::Tensor &h_scale_dq_inline2766_inline12111 = alloc_110.get_ref(1);
                 for (int64_t local_i_inline2779_inline11869 = 0; local_i_inline2779_inline11869 < 32;
                      local_i_inline2779_inline11869 += 1) {
                     int64_t flat_base_inline2774_inline11906 = (local_i_inline2779_inline11869 * 16);
@@ -3484,9 +3508,9 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                 gate_tile_i32_inline2749_inline11981_ci, up_tile_i32_inline2764_inline12061_ci,
                                 h_tile_fp32_inline2744_inline12109_ci
                             );
-                            const ChipTensor &gate_tile_i32_inline2749_inline11981 = alloc_111.get_ref(0);
-                            const ChipTensor &up_tile_i32_inline2764_inline12061 = alloc_111.get_ref(1);
-                            const ChipTensor &h_tile_fp32_inline2744_inline12109 = alloc_111.get_ref(2);
+                            const simpler::hbg::Tensor &gate_tile_i32_inline2749_inline11981 = alloc_111.get_ref(0);
+                            const simpler::hbg::Tensor &up_tile_i32_inline2764_inline12061 = alloc_111.get_ref(1);
+                            const simpler::hbg::Tensor &h_tile_fp32_inline2744_inline12109 = alloc_111.get_ref(2);
 
                             // Spmd exp_gate_mm_spmd_2: exp_gate_mm_2
                             CoreTaskArgs params_t252;
@@ -3541,7 +3565,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline11966_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline11966 = h_i8_inline2773_inline12020.view(
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline11966 = h_i8_inline2773_inline12020.view(
                                 h_tile_i8_inline2806_inline11966_shapes, h_tile_i8_inline2806_inline11966_offsets
                             );
                             uint32_t h_tile_scale_dq_inline2808_inline11847_offsets[2] = {
@@ -3563,10 +3587,11 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline11847_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline11847 = h_scale_dq_inline2766_inline12111.view(
-                                h_tile_scale_dq_inline2808_inline11847_shapes,
-                                h_tile_scale_dq_inline2808_inline11847_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline11847 =
+                                h_scale_dq_inline2766_inline12111.view(
+                                    h_tile_scale_dq_inline2808_inline11847_shapes,
+                                    h_tile_scale_dq_inline2808_inline11847_offsets
+                                );
 
                             // Task 255: exp_h_q_2
                             CoreTaskArgs params_t255;
@@ -3593,7 +3618,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                 y_i32_inline2737_inline11965_ci_shapes, 2, DataType::INT32
                             );
                             TaskOutputTensors alloc_112 = alloc_tensors(y_i32_inline2737_inline11965_ci);
-                            const ChipTensor &y_i32_inline2737_inline11965 = alloc_112.get_ref(0);
+                            const simpler::hbg::Tensor &y_i32_inline2737_inline11965 = alloc_112.get_ref(0);
                             int64_t tt0_inline2740_inline11839 = (tt_inline2776_inline11840 * 16);
                             CoreTaskPredicate expert_rows_pred;
                             expert_rows_pred.operand.tensor = &recv_count_out_inline12024;
@@ -3623,10 +3648,11 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline11966__ssa_v4_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline11966__ssa_v4 = h_i8_inline2773_inline12020.view(
-                                h_tile_i8_inline2806_inline11966__ssa_v4_shapes,
-                                h_tile_i8_inline2806_inline11966__ssa_v4_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline11966__ssa_v4 =
+                                h_i8_inline2773_inline12020.view(
+                                    h_tile_i8_inline2806_inline11966__ssa_v4_shapes,
+                                    h_tile_i8_inline2806_inline11966__ssa_v4_offsets
+                                );
                             uint32_t h_tile_scale_dq_inline2808_inline11847__ssa_v2_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline12036), 0
                             };
@@ -3646,7 +3672,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline11847__ssa_v2_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline11847__ssa_v2 =
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline11847__ssa_v2 =
                                 h_scale_dq_inline2766_inline12111.view(
                                     h_tile_scale_dq_inline2808_inline11847__ssa_v2_shapes,
                                     h_tile_scale_dq_inline2808_inline11847__ssa_v2_offsets
@@ -3681,9 +3707,11 @@ void hca_moe_block(const GraphTaskArgs &args) {
                                                    recv_y_tile_inline2730_inline11836_offsets[1]
                                      ))
                             };
-                            ChipTensor recv_y_tile_inline2730_inline11836 = recv_y_flat_inline2783_inline11865.view(
-                                recv_y_tile_inline2730_inline11836_shapes, recv_y_tile_inline2730_inline11836_offsets
-                            );
+                            simpler::hbg::Tensor recv_y_tile_inline2730_inline11836 =
+                                recv_y_flat_inline2783_inline11865.view(
+                                    recv_y_tile_inline2730_inline11836_shapes,
+                                    recv_y_tile_inline2730_inline11836_offsets
+                                );
 
                             // Spmd exp_w2_act_spmd_2: exp_w2_act_2
                             CoreTaskArgs params_t257;
@@ -3703,7 +3731,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                 }
             }
             uint32_t recv_y_flat_inline2828_inline11826_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2828_inline11826 =
+            simpler::hbg::Tensor recv_y_flat_inline2828_inline11826 =
                 recv_y_inline11895.reshape(recv_y_flat_inline2828_inline11826_shapes, 2);
 
             // Spmd combine_spmd_2: combine_2
@@ -3756,12 +3784,12 @@ void hca_moe_block(const GraphTaskArgs &args) {
             uint32_t residual_flat_inline2836_inline11814_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline11815), 16384
             };
-            ChipTensor residual_flat_inline2836_inline11814 =
+            simpler::hbg::Tensor residual_flat_inline2836_inline11814 =
                 x_attn_hca_inline723.reshape(residual_flat_inline2836_inline11814_shapes, 2);
             uint32_t y_flat_inline2837_inline11813_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline11815), 16384
             };
-            ChipTensor y_flat_inline2837_inline11813 =
+            simpler::hbg::Tensor y_flat_inline2837_inline11813 =
                 hidden_inline709.reshape(y_flat_inline2837_inline11813_shapes, 2);
 
             // Spmd hc_post_spmd_6: hc_post_6
@@ -3778,29 +3806,29 @@ void hca_moe_block(const GraphTaskArgs &args) {
 }
 
 void swa_attn_block(const GraphTaskArgs &args) {
-    const ChipTensor &x_hc_inline711 = args.tensor(0).ref();
-    const ChipTensor &hc_attn_base_l0_inline688 = args.tensor(1).ref();
-    const ChipTensor &hc_attn_fn_l0_inline658 = args.tensor(2).ref();
-    const ChipTensor &hc_attn_scale_l0_inline660 = args.tensor(3).ref();
-    const ChipTensor &ext_position_ids = args.tensor(4).ref();
-    const ChipTensor &swa_freqs_cos_inline585 = args.tensor(5).ref();
-    const ChipTensor &swa_freqs_sin_inline606 = args.tensor(6).ref();
-    const ChipTensor &attn_norm_w_l0_inline616 = args.tensor(7).ref();
-    const ChipTensor &wq_a_l0_inline620 = args.tensor(8).ref();
-    const ChipTensor &gamma_cq_l0_inline612 = args.tensor(9).ref();
-    const ChipTensor &wq_b_l0_inline659 = args.tensor(10).ref();
-    const ChipTensor &wq_b_scale_l0_inline662 = args.tensor(11).ref();
-    const ChipTensor &wkv_l0_inline642 = args.tensor(12).ref();
-    const ChipTensor &gamma_ckv_l0_inline646 = args.tensor(13).ref();
-    const ChipTensor &kv_cache_l0_inline603 = args.tensor(14).ref();
-    const ChipTensor &swa_slot_mapping_inline576 = args.tensor(15).ref();
-    const ChipTensor &swa_lens_inline628 = args.tensor(16).ref();
-    const ChipTensor &swa_indices_inline636 = args.tensor(17).ref();
-    const ChipTensor &attn_sink_l0_inline595 = args.tensor(18).ref();
-    const ChipTensor &wo_a_l0_inline592 = args.tensor(19).ref();
-    const ChipTensor &wo_b_l0_inline643 = args.tensor(20).ref();
-    const ChipTensor &wo_b_scale_l0_inline653 = args.tensor(21).ref();
-    const ChipTensor &x_attn0_inline706 = args.tensor(22).ref();
+    const simpler::hbg::Tensor &x_hc_inline711 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_attn_base_l0_inline688 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_attn_fn_l0_inline658 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &hc_attn_scale_l0_inline660 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &ext_position_ids = args.tensor(4).ref();
+    const simpler::hbg::Tensor &swa_freqs_cos_inline585 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &swa_freqs_sin_inline606 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &attn_norm_w_l0_inline616 = args.tensor(7).ref();
+    const simpler::hbg::Tensor &wq_a_l0_inline620 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &gamma_cq_l0_inline612 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &wq_b_l0_inline659 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &wq_b_scale_l0_inline662 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &wkv_l0_inline642 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &gamma_ckv_l0_inline646 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &kv_cache_l0_inline603 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &swa_slot_mapping_inline576 = args.tensor(15).ref();
+    const simpler::hbg::Tensor &swa_lens_inline628 = args.tensor(16).ref();
+    const simpler::hbg::Tensor &swa_indices_inline636 = args.tensor(17).ref();
+    const simpler::hbg::Tensor &attn_sink_l0_inline595 = args.tensor(18).ref();
+    const simpler::hbg::Tensor &wo_a_l0_inline592 = args.tensor(19).ref();
+    const simpler::hbg::Tensor &wo_b_l0_inline643 = args.tensor(20).ref();
+    const simpler::hbg::Tensor &wo_b_scale_l0_inline653 = args.tensor(21).ref();
+    const simpler::hbg::Tensor &x_attn0_inline706 = args.tensor(22).ref();
     SIMPLER_SCOPE() {
         uint32_t x_mixed_inline8888_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline8888_ci(x_mixed_inline8888_ci_shapes, 2, DataType::BFLOAT16);
@@ -3849,22 +3877,22 @@ void swa_attn_block(const GraphTaskArgs &args) {
             partials_inline1006_inline9071_ci, act_scale_dq_inline1008_inline8928_ci,
             swa_kv_flat_inline1000_inline9087_ci, o_packed_heads_inline1025_inline8944_ci
         );
-        const ChipTensor &x_mixed_inline8888 = alloc_1.get_ref(0);
-        const ChipTensor &post_t_inline8947 = alloc_1.get_ref(1);
-        const ChipTensor &comb_t_inline9086 = alloc_1.get_ref(2);
-        const ChipTensor &rope_cos_t_inline8914 = alloc_1.get_ref(3);
-        const ChipTensor &rope_sin_t_inline8931 = alloc_1.get_ref(4);
-        const ChipTensor &x_normed_t_inline9040 = alloc_1.get_ref(5);
-        const ChipTensor &q_inline8956 = alloc_1.get_ref(6);
-        const ChipTensor &kv_inline9025 = alloc_1.get_ref(7);
-        const ChipTensor &qr_inline8989 = alloc_1.get_ref(8);
-        const ChipTensor &qr_scale_inline8962 = alloc_1.get_ref(9);
-        const ChipTensor &sparse_bias_inline9002 = alloc_1.get_ref(10);
-        const ChipTensor &attn_out_inline9085 = alloc_1.get_ref(11);
-        const ChipTensor &partials_inline1006_inline9071 = alloc_1.get_ref(12);
-        const ChipTensor &act_scale_dq_inline1008_inline8928 = alloc_1.get_ref(13);
-        const ChipTensor &swa_kv_flat_inline1000_inline9087 = alloc_1.get_ref(14);
-        const ChipTensor &o_packed_heads_inline1025_inline8944 = alloc_1.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline8888 = alloc_1.get_ref(0);
+        const simpler::hbg::Tensor &post_t_inline8947 = alloc_1.get_ref(1);
+        const simpler::hbg::Tensor &comb_t_inline9086 = alloc_1.get_ref(2);
+        const simpler::hbg::Tensor &rope_cos_t_inline8914 = alloc_1.get_ref(3);
+        const simpler::hbg::Tensor &rope_sin_t_inline8931 = alloc_1.get_ref(4);
+        const simpler::hbg::Tensor &x_normed_t_inline9040 = alloc_1.get_ref(5);
+        const simpler::hbg::Tensor &q_inline8956 = alloc_1.get_ref(6);
+        const simpler::hbg::Tensor &kv_inline9025 = alloc_1.get_ref(7);
+        const simpler::hbg::Tensor &qr_inline8989 = alloc_1.get_ref(8);
+        const simpler::hbg::Tensor &qr_scale_inline8962 = alloc_1.get_ref(9);
+        const simpler::hbg::Tensor &sparse_bias_inline9002 = alloc_1.get_ref(10);
+        const simpler::hbg::Tensor &attn_out_inline9085 = alloc_1.get_ref(11);
+        const simpler::hbg::Tensor &partials_inline1006_inline9071 = alloc_1.get_ref(12);
+        const simpler::hbg::Tensor &act_scale_dq_inline1008_inline8928 = alloc_1.get_ref(13);
+        const simpler::hbg::Tensor &swa_kv_flat_inline1000_inline9087 = alloc_1.get_ref(14);
+        const simpler::hbg::Tensor &o_packed_heads_inline1025_inline8944 = alloc_1.get_ref(15);
         uint32_t sparse_blk_mi_inline1018_inline9107_ci_shapes[2] = {512, 1};
         TensorCreateInfo sparse_blk_mi_inline1018_inline9107_ci(
             sparse_blk_mi_inline1018_inline9107_ci_shapes, 2, DataType::FLOAT32
@@ -3903,34 +3931,35 @@ void swa_attn_block(const GraphTaskArgs &args) {
             rope_sin_signed_inline1066_inline8798_ci, rope_swap_idx_inline1029_inline8812_ci,
             o_r_pad_inline974_inline8862_ci, o_r_i8_pad_inline1095_inline8747_ci
         );
-        const ChipTensor &sparse_blk_mi_inline1018_inline9107 = alloc_2.get_ref(0);
-        const ChipTensor &sparse_blk_li_inline1070_inline9008 = alloc_2.get_ref(1);
-        const ChipTensor &sparse_blk_oi_inline1043_inline9109 = alloc_2.get_ref(2);
-        const ChipTensor &gm_pipe_buffer_0 = alloc_2.get_ref(3);
-        const ChipTensor &rope_cos_il_inline972_inline8894 = alloc_2.get_ref(4);
-        const ChipTensor &rope_sin_signed_inline1066_inline8798 = alloc_2.get_ref(5);
-        const ChipTensor &rope_swap_idx_inline1029_inline8812 = alloc_2.get_ref(6);
-        const ChipTensor &o_r_pad_inline974_inline8862 = alloc_2.get_ref(7);
-        const ChipTensor &o_r_i8_pad_inline1095_inline8747 = alloc_2.get_ref(8);
+        const simpler::hbg::Tensor &sparse_blk_mi_inline1018_inline9107 = alloc_2.get_ref(0);
+        const simpler::hbg::Tensor &sparse_blk_li_inline1070_inline9008 = alloc_2.get_ref(1);
+        const simpler::hbg::Tensor &sparse_blk_oi_inline1043_inline9109 = alloc_2.get_ref(2);
+        const simpler::hbg::Tensor &gm_pipe_buffer_0 = alloc_2.get_ref(3);
+        const simpler::hbg::Tensor &rope_cos_il_inline972_inline8894 = alloc_2.get_ref(4);
+        const simpler::hbg::Tensor &rope_sin_signed_inline1066_inline8798 = alloc_2.get_ref(5);
+        const simpler::hbg::Tensor &rope_swap_idx_inline1029_inline8812 = alloc_2.get_ref(6);
+        const simpler::hbg::Tensor &o_r_pad_inline974_inline8862 = alloc_2.get_ref(7);
+        const simpler::hbg::Tensor &o_r_i8_pad_inline1095_inline8747 = alloc_2.get_ref(8);
         int64_t t_dim_inline14009 = 8;
         int64_t t_linear_inline14027 = (((t_dim_inline14009 + 15) / 16) * 16);
         uint32_t x_flat_inline14022_shapes[2] = {static_cast<uint32_t>(t_dim_inline14009), 16384};
-        ChipTensor x_flat_inline14022 = x_hc_inline711.reshape(x_flat_inline14022_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14022 = x_hc_inline711.reshape(x_flat_inline14022_shapes, 2);
         uint32_t hc_base_2d_inline14037_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14037 = hc_attn_base_l0_inline688.reshape(hc_base_2d_inline14037_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14037 =
+            hc_attn_base_l0_inline688.reshape(hc_base_2d_inline14037_shapes, 2);
         uint32_t inv_rms_inline13977_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14027), 1};
         TensorCreateInfo inv_rms_inline13977_ci(inv_rms_inline13977_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_3 = alloc_tensors(inv_rms_inline13977_ci);
-        const ChipTensor &inv_rms_inline13977 = alloc_3.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline13977 = alloc_3.get_ref(0);
         uint32_t mixes_raw_inline14000_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14027), 32};
         TensorCreateInfo mixes_raw_inline14000_ci(mixes_raw_inline14000_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_4 = alloc_tensors(mixes_raw_inline14000_ci);
-        const ChipTensor &mixes_raw_inline14000 = alloc_4.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14000 = alloc_4.get_ref(0);
         int64_t linear_partial_rows_inline13975 = (t_linear_inline14027 * 4);
         uint32_t mixes_partials_inline13999_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline13975), 32};
         TensorCreateInfo mixes_partials_inline13999_ci(mixes_partials_inline13999_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_5 = alloc_tensors(mixes_partials_inline13999_ci);
-        const ChipTensor &mixes_partials_inline13999 = alloc_5.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline13999 = alloc_5.get_ref(0);
 
         // Spmd hc_pre_rms_spmd: hc_pre_rms
         CoreTaskArgs params_t4;
@@ -3962,7 +3991,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline14005_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14027), 8};
         TensorCreateInfo pre_val_store_inline14005_ci(pre_val_store_inline14005_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_6 = alloc_tensors(pre_val_store_inline14005_ci);
-        const ChipTensor &pre_val_store_inline14005 = alloc_6.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14005 = alloc_6.get_ref(0);
 
         // Spmd split_pre_post_spmd: split_pre_post
         CoreTaskArgs params_t7;
@@ -4032,19 +4061,22 @@ void swa_attn_block(const GraphTaskArgs &args) {
         }
         int64_t t_dim_inline889_inline8972 = 8;
         uint32_t x_view_inline827_inline8975_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 4096};
-        ChipTensor x_view_inline827_inline8975 = x_normed_t_inline9040.reshape(x_view_inline827_inline8975_shapes, 2);
+        simpler::hbg::Tensor x_view_inline827_inline8975 =
+            x_normed_t_inline9040.reshape(x_view_inline827_inline8975_shapes, 2);
         uint32_t rope_cos_view_inline825_inline8935_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 64};
-        ChipTensor rope_cos_view_inline825_inline8935 =
+        simpler::hbg::Tensor rope_cos_view_inline825_inline8935 =
             rope_cos_t_inline8914.reshape(rope_cos_view_inline825_inline8935_shapes, 2);
         uint32_t rope_sin_view_inline813_inline8906_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 64};
-        ChipTensor rope_sin_view_inline813_inline8906 =
+        simpler::hbg::Tensor rope_sin_view_inline813_inline8906 =
             rope_sin_t_inline8931.reshape(rope_sin_view_inline813_inline8906_shapes, 2);
         uint32_t kv_view_inline863_inline8978_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 512};
-        ChipTensor kv_view_inline863_inline8978 = kv_inline9025.reshape(kv_view_inline863_inline8978_shapes, 2);
+        simpler::hbg::Tensor kv_view_inline863_inline8978 =
+            kv_inline9025.reshape(kv_view_inline863_inline8978_shapes, 2);
         uint32_t qr_view_inline833_inline8919_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 1024};
-        ChipTensor qr_view_inline833_inline8919 = qr_inline8989.reshape(qr_view_inline833_inline8919_shapes, 2);
+        simpler::hbg::Tensor qr_view_inline833_inline8919 =
+            qr_inline8989.reshape(qr_view_inline833_inline8919_shapes, 2);
         uint32_t qr_scale_view_inline839_inline8980_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 1};
-        ChipTensor qr_scale_view_inline839_inline8980 =
+        simpler::hbg::Tensor qr_scale_view_inline839_inline8980 =
             qr_scale_inline8962.reshape(qr_scale_view_inline839_inline8980_shapes, 2);
         int64_t t_matmul_inline856_inline8847 = std::max<int64_t>(t_dim_inline889_inline8972, 16);
         uint32_t q_rope_cos_il_inline862_inline8877_ci_shapes[2] = {
@@ -4054,7 +4086,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             q_rope_cos_il_inline862_inline8877_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_7 = alloc_tensors(q_rope_cos_il_inline862_inline8877_ci);
-        const ChipTensor &q_rope_cos_il_inline862_inline8877 = alloc_7.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_cos_il_inline862_inline8877 = alloc_7.get_ref(0);
         uint32_t q_rope_sin_signed_inline898_inline8960_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline889_inline8972), 64
         };
@@ -4062,7 +4094,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             q_rope_sin_signed_inline898_inline8960_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_8 = alloc_tensors(q_rope_sin_signed_inline898_inline8960_ci);
-        const ChipTensor &q_rope_sin_signed_inline898_inline8960 = alloc_8.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_sin_signed_inline898_inline8960 = alloc_8.get_ref(0);
         uint32_t q_rope_swap_idx_inline864_inline8934_ci_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline889_inline8972), 64
         };
@@ -4070,7 +4102,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             q_rope_swap_idx_inline864_inline8934_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_9 = alloc_tensors(q_rope_swap_idx_inline864_inline8934_ci);
-        const ChipTensor &q_rope_swap_idx_inline864_inline8934 = alloc_9.get_ref(0);
+        const simpler::hbg::Tensor &q_rope_swap_idx_inline864_inline8934 = alloc_9.get_ref(0);
 
         // Spmd q_rope_prepare_spmd: q_rope_prepare
         CoreTaskArgs params_t12;
@@ -4087,7 +4119,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         };
         TensorCreateInfo qr_fp32_inline806_inline8876_ci(qr_fp32_inline806_inline8876_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_10 = alloc_tensors(qr_fp32_inline806_inline8876_ci);
-        const ChipTensor &qr_fp32_inline806_inline8876 = alloc_10.get_ref(0);
+        const simpler::hbg::Tensor &qr_fp32_inline806_inline8876 = alloc_10.get_ref(0);
         int64_t qr_partial_rows_inline846_inline8854 = (t_matmul_inline856_inline8847 * 2);
         uint32_t qr_partials_inline803_inline8977_ci_shapes[2] = {
             static_cast<uint32_t>(qr_partial_rows_inline846_inline8854), 1024
@@ -4096,7 +4128,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             qr_partials_inline803_inline8977_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_11 = alloc_tensors(qr_partials_inline803_inline8977_ci);
-        const ChipTensor &qr_partials_inline803_inline8977 = alloc_11.get_ref(0);
+        const simpler::hbg::Tensor &qr_partials_inline803_inline8977 = alloc_11.get_ref(0);
         uint32_t qr_i8_matmul_inline892_inline8860_ci_shapes[2] = {
             static_cast<uint32_t>(t_matmul_inline856_inline8847), 1024
         };
@@ -4104,7 +4136,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             qr_i8_matmul_inline892_inline8860_ci_shapes, 2, DataType::INT8
         );
         TaskOutputTensors alloc_12 = alloc_tensors(qr_i8_matmul_inline892_inline8860_ci);
-        const ChipTensor &qr_i8_matmul_inline892_inline8860 = alloc_12.get_ref(0);
+        const simpler::hbg::Tensor &qr_i8_matmul_inline892_inline8860 = alloc_12.get_ref(0);
 
         // Spmd qr_proj_matmul_spmd: qr_proj_matmul
         CoreTaskArgs params_t13;
@@ -4144,7 +4176,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             q_proj_i32_inline873_inline9045_ci_shapes, 2, DataType::INT32
         );
         TaskOutputTensors alloc_13 = alloc_tensors(q_proj_i32_inline873_inline9045_ci);
-        const ChipTensor &q_proj_i32_inline873_inline9045 = alloc_13.get_ref(0);
+        const simpler::hbg::Tensor &q_proj_i32_inline873_inline9045 = alloc_13.get_ref(0);
 
         // Spmd qproj_matmul_spmd: qproj_matmul
         CoreTaskArgs params_t16;
@@ -4155,7 +4187,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         params_t16.launch_spec.set_block_num(64);
         rt_submit_aic_task(16, params_t16);
         uint32_t q_flat_inline811_inline8834_shapes[2] = {static_cast<uint32_t>(t_dim_inline889_inline8972), 32768};
-        ChipTensor q_flat_inline811_inline8834 = q_inline8956.reshape(q_flat_inline811_inline8834_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline811_inline8834 = q_inline8956.reshape(q_flat_inline811_inline8834_shapes, 2);
 
         // Spmd qproj_dequant_rms_nope_rope_spmd: qproj_dequant_rms_nope_rope
         CoreTaskArgs params_t17;
@@ -4176,7 +4208,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         };
         TensorCreateInfo kv_fp32_inline844_inline9035_ci(kv_fp32_inline844_inline9035_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_14 = alloc_tensors(kv_fp32_inline844_inline9035_ci);
-        const ChipTensor &kv_fp32_inline844_inline9035 = alloc_14.get_ref(0);
+        const simpler::hbg::Tensor &kv_fp32_inline844_inline9035 = alloc_14.get_ref(0);
         int64_t kv_partial_rows_inline935_inline9036 = (t_matmul_inline856_inline8847 * 4);
         uint32_t kv_partials_inline920_inline9038_ci_shapes[2] = {
             static_cast<uint32_t>(kv_partial_rows_inline935_inline9036), 512
@@ -4185,7 +4217,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
             kv_partials_inline920_inline9038_ci_shapes, 2, DataType::FLOAT32
         );
         TaskOutputTensors alloc_15 = alloc_tensors(kv_partials_inline920_inline9038_ci);
-        const ChipTensor &kv_partials_inline920_inline9038 = alloc_15.get_ref(0);
+        const simpler::hbg::Tensor &kv_partials_inline920_inline9038 = alloc_15.get_ref(0);
 
         // Spmd kv_proj_matmul_spmd: kv_proj_matmul
         CoreTaskArgs params_t18;
@@ -4222,7 +4254,8 @@ void swa_attn_block(const GraphTaskArgs &args) {
         rt_submit_aiv_task(20, params_t20);
         int64_t ori_block_num_inline9079 = (int64_t)kv_cache_l0_inline603.shapes[0];
         uint32_t kv_cache_flat_inline9080_shapes[2] = {static_cast<uint32_t>((ori_block_num_inline9079 * 128)), 512};
-        ChipTensor kv_cache_flat_inline9080 = kv_cache_l0_inline603.reshape(kv_cache_flat_inline9080_shapes, 2);
+        simpler::hbg::Tensor kv_cache_flat_inline9080 =
+            kv_cache_l0_inline603.reshape(kv_cache_flat_inline9080_shapes, 2);
 
         // Task 21: swa_cache_insert_valid_bias
         CoreTaskArgs params_t21;
@@ -4236,7 +4269,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         uint32_t ori_kv_flat_inline1033_inline8970_shapes[2] = {
             static_cast<uint32_t>((ori_block_num_inline1046_inline9076 * 128)), 512
         };
-        ChipTensor ori_kv_flat_inline1033_inline8970 =
+        simpler::hbg::Tensor ori_kv_flat_inline1033_inline8970 =
             kv_cache_l0_inline603.reshape(ori_kv_flat_inline1033_inline8970_shapes, 2);
         TaskId proj_b_tids_inline1013_inline9033[8];
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
@@ -4255,9 +4288,10 @@ void swa_attn_block(const GraphTaskArgs &args) {
         TaskId gather_tid_inline1039_inline9091 = task_22_outs.task_id();
         gather_tids_inline1022_inline9089[0] = gather_tid_inline1039_inline9091;
         uint32_t q_flat_inline1064_inline8925_shapes[2] = {512, 512};
-        ChipTensor q_flat_inline1064_inline8925 = q_inline8956.reshape(q_flat_inline1064_inline8925_shapes, 2);
+        simpler::hbg::Tensor q_flat_inline1064_inline8925 =
+            q_inline8956.reshape(q_flat_inline1064_inline8925_shapes, 2);
         uint32_t o_packed_inline1065_inline9106_shapes[2] = {64, 4096};
-        ChipTensor o_packed_inline1065_inline9106 =
+        simpler::hbg::Tensor o_packed_inline1065_inline9106 =
             o_packed_heads_inline1025_inline8944.reshape(o_packed_inline1065_inline9106_shapes, 2);
         TaskId _submit_deps_buf_inline1099_inline9111[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
@@ -4314,7 +4348,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         params_t25.set_dependencies(params_t25_deps, params_t25_deps_count);
         TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
         TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
-        ChipTensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
+        simpler::hbg::Tensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
         SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline8746 = 0; g_inline978_inline8746 < 8; g_inline978_inline8746 += 1) {
                 int64_t row_base_o_inline1126_inline8745 = (g_inline978_inline8746 * 8);
@@ -4425,10 +4459,11 @@ void swa_attn_block(const GraphTaskArgs &args) {
         uint32_t residual_flat_inline1131_inline8709_shapes[2] = {
             static_cast<uint32_t>(t_dim_inline1140_inline8710), 16384
         };
-        ChipTensor residual_flat_inline1131_inline8709 =
+        simpler::hbg::Tensor residual_flat_inline1131_inline8709 =
             x_hc_inline711.reshape(residual_flat_inline1131_inline8709_shapes, 2);
         uint32_t y_flat_inline1132_inline9059_shapes[2] = {static_cast<uint32_t>(t_dim_inline1140_inline8710), 16384};
-        ChipTensor y_flat_inline1132_inline9059 = x_attn0_inline706.reshape(y_flat_inline1132_inline9059_shapes, 2);
+        simpler::hbg::Tensor y_flat_inline1132_inline9059 =
+            x_attn0_inline706.reshape(y_flat_inline1132_inline9059_shapes, 2);
 
         // Spmd hc_post_spmd: hc_post
         CoreTaskArgs params_t30;
@@ -4443,36 +4478,36 @@ void swa_attn_block(const GraphTaskArgs &args) {
 }
 
 void hash_moe_l0_block(const GraphTaskArgs &args) {
-    const ChipTensor &x_attn0_inline706 = args.tensor(0).ref();
-    const ChipTensor &hc_ffn_base_l0_inline629 = args.tensor(1).ref();
-    const ChipTensor &hc_ffn_fn_l0_inline621 = args.tensor(2).ref();
-    const ChipTensor &hc_ffn_scale_l0_inline583 = args.tensor(3).ref();
-    const ChipTensor &norm_w_l0_inline579 = args.tensor(4).ref();
-    const ChipTensor &gate_bias_l0_inline566 = args.tensor(5).ref();
-    const ChipTensor &gate_w_l0_inline573 = args.tensor(6).ref();
-    const ChipTensor &ext_input_ids = args.tensor(7).ref();
-    const ChipTensor &tid2eid_l0_inline607 = args.tensor(8).ref();
-    const ChipTensor &shared_w1_l0_inline558 = args.tensor(9).ref();
-    const ChipTensor &shared_w3_l0_inline650 = args.tensor(10).ref();
-    const ChipTensor &shared_w1_scale_l0_inline619 = args.tensor(11).ref();
-    const ChipTensor &shared_w3_scale_l0_inline665 = args.tensor(12).ref();
-    const ChipTensor &shared_w2_l0_inline666 = args.tensor(13).ref();
-    const ChipTensor &shared_w2_scale_l0_inline667 = args.tensor(14).ref();
-    const ChipTensor &ext_recv_meta = args.tensor(15).ref();
-    const ChipTensor &ext_arrived = args.tensor(16).ref();
-    const ChipTensor &ext_recv_x = args.tensor(17).ref();
-    const ChipTensor &ext_recv_aux = args.tensor(18).ref();
-    const ChipTensor &ext_recv_route = args.tensor(19).ref();
-    const ChipTensor &ext_data_arrived = args.tensor(20).ref();
-    const ChipTensor &routed_w1_l0_inline564 = args.tensor(21).ref();
-    const ChipTensor &routed_w3_l0_inline589 = args.tensor(22).ref();
-    const ChipTensor &routed_w1_scale_l0_inline654 = args.tensor(23).ref();
-    const ChipTensor &routed_w3_scale_l0_inline562 = args.tensor(24).ref();
-    const ChipTensor &routed_w2_l0_inline591 = args.tensor(25).ref();
-    const ChipTensor &routed_w2_scale_l0_inline563 = args.tensor(26).ref();
-    const ChipTensor &ext_routed_y_buf = args.tensor(27).ref();
-    const ChipTensor &ext_combine_arrived = args.tensor(28).ref();
-    const ChipTensor &hidden_inline709 = args.tensor(29).ref();
+    const simpler::hbg::Tensor &x_attn0_inline706 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_ffn_base_l0_inline629 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_ffn_fn_l0_inline621 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &hc_ffn_scale_l0_inline583 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &norm_w_l0_inline579 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &gate_bias_l0_inline566 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &gate_w_l0_inline573 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &ext_input_ids = args.tensor(7).ref();
+    const simpler::hbg::Tensor &tid2eid_l0_inline607 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &shared_w1_l0_inline558 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &shared_w3_l0_inline650 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &shared_w1_scale_l0_inline619 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &shared_w3_scale_l0_inline665 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &shared_w2_l0_inline666 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &shared_w2_scale_l0_inline667 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &ext_recv_meta = args.tensor(15).ref();
+    const simpler::hbg::Tensor &ext_arrived = args.tensor(16).ref();
+    const simpler::hbg::Tensor &ext_recv_x = args.tensor(17).ref();
+    const simpler::hbg::Tensor &ext_recv_aux = args.tensor(18).ref();
+    const simpler::hbg::Tensor &ext_recv_route = args.tensor(19).ref();
+    const simpler::hbg::Tensor &ext_data_arrived = args.tensor(20).ref();
+    const simpler::hbg::Tensor &routed_w1_l0_inline564 = args.tensor(21).ref();
+    const simpler::hbg::Tensor &routed_w3_l0_inline589 = args.tensor(22).ref();
+    const simpler::hbg::Tensor &routed_w1_scale_l0_inline654 = args.tensor(23).ref();
+    const simpler::hbg::Tensor &routed_w3_scale_l0_inline562 = args.tensor(24).ref();
+    const simpler::hbg::Tensor &routed_w2_l0_inline591 = args.tensor(25).ref();
+    const simpler::hbg::Tensor &routed_w2_scale_l0_inline563 = args.tensor(26).ref();
+    const simpler::hbg::Tensor &ext_routed_y_buf = args.tensor(27).ref();
+    const simpler::hbg::Tensor &ext_combine_arrived = args.tensor(28).ref();
+    const simpler::hbg::Tensor &hidden_inline709 = args.tensor(29).ref();
     int32_t nt_inline677__rv_v2 = static_cast<int32_t>(args.scalar(0));
     int32_t my_rank = static_cast<int32_t>(args.scalar(1));
     uint64_t recv_meta_ctx = args.scalar(2);
@@ -4539,22 +4574,22 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             route_scores_buf_inline2607_inline9273_ci, biased_scores_buf_inline2564_inline9362_ci, sh_inline9332_ci,
             recv_x_out_inline9236_ci, recv_scale_out_inline9172_ci, recv_w_out_inline9360_ci
         );
-        const ChipTensor &x_mixed_inline9242 = alloc_16.get_ref(0);
-        const ChipTensor &post_ffn_inline9241 = alloc_16.get_ref(1);
-        const ChipTensor &comb_ffn_inline9269 = alloc_16.get_ref(2);
-        const ChipTensor &x_norm_i8_inline9265 = alloc_16.get_ref(3);
-        const ChipTensor &x_norm_scale_inline9245 = alloc_16.get_ref(4);
-        const ChipTensor &indices_inline9286 = alloc_16.get_ref(5);
-        const ChipTensor &weights_inline9276 = alloc_16.get_ref(6);
-        const ChipTensor &xg_buf_inline2582_inline9396 = alloc_16.get_ref(7);
-        const ChipTensor &inv_rms_buf_inline2585_inline9282 = alloc_16.get_ref(8);
-        const ChipTensor &xn_scale_buf_inline2572_inline9358 = alloc_16.get_ref(9);
-        const ChipTensor &route_scores_buf_inline2607_inline9273 = alloc_16.get_ref(10);
-        const ChipTensor &biased_scores_buf_inline2564_inline9362 = alloc_16.get_ref(11);
-        const ChipTensor &sh_inline9332 = alloc_16.get_ref(12);
-        const ChipTensor &recv_x_out_inline9236 = alloc_16.get_ref(13);
-        const ChipTensor &recv_scale_out_inline9172 = alloc_16.get_ref(14);
-        const ChipTensor &recv_w_out_inline9360 = alloc_16.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline9242 = alloc_16.get_ref(0);
+        const simpler::hbg::Tensor &post_ffn_inline9241 = alloc_16.get_ref(1);
+        const simpler::hbg::Tensor &comb_ffn_inline9269 = alloc_16.get_ref(2);
+        const simpler::hbg::Tensor &x_norm_i8_inline9265 = alloc_16.get_ref(3);
+        const simpler::hbg::Tensor &x_norm_scale_inline9245 = alloc_16.get_ref(4);
+        const simpler::hbg::Tensor &indices_inline9286 = alloc_16.get_ref(5);
+        const simpler::hbg::Tensor &weights_inline9276 = alloc_16.get_ref(6);
+        const simpler::hbg::Tensor &xg_buf_inline2582_inline9396 = alloc_16.get_ref(7);
+        const simpler::hbg::Tensor &inv_rms_buf_inline2585_inline9282 = alloc_16.get_ref(8);
+        const simpler::hbg::Tensor &xn_scale_buf_inline2572_inline9358 = alloc_16.get_ref(9);
+        const simpler::hbg::Tensor &route_scores_buf_inline2607_inline9273 = alloc_16.get_ref(10);
+        const simpler::hbg::Tensor &biased_scores_buf_inline2564_inline9362 = alloc_16.get_ref(11);
+        const simpler::hbg::Tensor &sh_inline9332 = alloc_16.get_ref(12);
+        const simpler::hbg::Tensor &recv_x_out_inline9236 = alloc_16.get_ref(13);
+        const simpler::hbg::Tensor &recv_scale_out_inline9172 = alloc_16.get_ref(14);
+        const simpler::hbg::Tensor &recv_w_out_inline9360 = alloc_16.get_ref(15);
         uint32_t recv_r_route_out_inline9369_ci_shapes[2] = {32, 16};
         TensorCreateInfo recv_r_route_out_inline9369_ci(
             recv_r_route_out_inline9369_ci_shapes, 2, DataType::INT32, /*manual_dep=*/true
@@ -4567,28 +4602,29 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
         );
         TaskOutputTensors alloc_17 =
             alloc_tensors(recv_r_route_out_inline9369_ci, recv_count_out_inline9338_ci, recv_meta_local_inline9405_ci);
-        const ChipTensor &recv_r_route_out_inline9369 = alloc_17.get_ref(0);
-        const ChipTensor &recv_count_out_inline9338 = alloc_17.get_ref(1);
-        const ChipTensor &recv_meta_local_inline9405 = alloc_17.get_ref(2);
+        const simpler::hbg::Tensor &recv_r_route_out_inline9369 = alloc_17.get_ref(0);
+        const simpler::hbg::Tensor &recv_count_out_inline9338 = alloc_17.get_ref(1);
+        const simpler::hbg::Tensor &recv_meta_local_inline9405 = alloc_17.get_ref(2);
         int64_t t_dim_inline14136 = 8;
         int64_t t_linear_inline14154 = (((t_dim_inline14136 + 15) / 16) * 16);
         uint32_t x_flat_inline14149_shapes[2] = {static_cast<uint32_t>(t_dim_inline14136), 16384};
-        ChipTensor x_flat_inline14149 = x_attn0_inline706.reshape(x_flat_inline14149_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14149 = x_attn0_inline706.reshape(x_flat_inline14149_shapes, 2);
         uint32_t hc_base_2d_inline14164_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14164 = hc_ffn_base_l0_inline629.reshape(hc_base_2d_inline14164_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14164 =
+            hc_ffn_base_l0_inline629.reshape(hc_base_2d_inline14164_shapes, 2);
         uint32_t inv_rms_inline14104_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14154), 1};
         TensorCreateInfo inv_rms_inline14104_ci(inv_rms_inline14104_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_18 = alloc_tensors(inv_rms_inline14104_ci);
-        const ChipTensor &inv_rms_inline14104 = alloc_18.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14104 = alloc_18.get_ref(0);
         uint32_t mixes_raw_inline14127_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14154), 32};
         TensorCreateInfo mixes_raw_inline14127_ci(mixes_raw_inline14127_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_19 = alloc_tensors(mixes_raw_inline14127_ci);
-        const ChipTensor &mixes_raw_inline14127 = alloc_19.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14127 = alloc_19.get_ref(0);
         int64_t linear_partial_rows_inline14102 = (t_linear_inline14154 * 4);
         uint32_t mixes_partials_inline14126_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14102), 32};
         TensorCreateInfo mixes_partials_inline14126_ci(mixes_partials_inline14126_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_20 = alloc_tensors(mixes_partials_inline14126_ci);
-        const ChipTensor &mixes_partials_inline14126 = alloc_20.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline14126 = alloc_20.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_0: hc_pre_rms_0
         CoreTaskArgs params_t31;
@@ -4620,7 +4656,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline14132_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14154), 8};
         TensorCreateInfo pre_val_store_inline14132_ci(pre_val_store_inline14132_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_21 = alloc_tensors(pre_val_store_inline14132_ci);
-        const ChipTensor &pre_val_store_inline14132 = alloc_21.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14132 = alloc_21.get_ref(0);
 
         // Spmd split_pre_post_spmd_0: split_pre_post_0
         CoreTaskArgs params_t34;
@@ -4671,7 +4707,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             active_gate_tokens_inline2604_inline9313__phi_v2 = active_gate_tokens_inline2604_inline9313;
         }
         uint32_t norm_w_2d_inline2589_inline9409_shapes[2] = {1, 4096};
-        ChipTensor norm_w_2d_inline2589_inline9409 =
+        simpler::hbg::Tensor norm_w_2d_inline2589_inline9409 =
             norm_w_l0_inline579.reshape(norm_w_2d_inline2589_inline9409_shapes, 2);
 
         // Spmd ffn_norm_spmd: ffn_norm
@@ -4721,7 +4757,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
         };
         TensorCreateInfo gm_pipe_buffer_1_ci(gm_pipe_buffer_1_ci_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true);
         TaskOutputTensors alloc_22 = alloc_tensors(gm_pipe_buffer_1_ci);
-        const ChipTensor &gm_pipe_buffer_1 = alloc_22.get_ref(0);
+        const simpler::hbg::Tensor &gm_pipe_buffer_1 = alloc_22.get_ref(0);
 
         // Group gate: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t40;
@@ -4776,12 +4812,12 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                 h_tile_fp32_inline2660_inline9214_ci, h_tile_i8_inline2663_inline9173_ci,
                 h_tile_scale_dq_inline2676_inline9243_ci, y_i32_inline2673_inline9385_ci
             );
-            const ChipTensor &gate_i32_inline2662_inline9277 = alloc_23.get_ref(0);
-            const ChipTensor &up_i32_inline2654_inline9268 = alloc_23.get_ref(1);
-            const ChipTensor &h_tile_fp32_inline2660_inline9214 = alloc_23.get_ref(2);
-            const ChipTensor &h_tile_i8_inline2663_inline9173 = alloc_23.get_ref(3);
-            const ChipTensor &h_tile_scale_dq_inline2676_inline9243 = alloc_23.get_ref(4);
-            const ChipTensor &y_i32_inline2673_inline9385 = alloc_23.get_ref(5);
+            const simpler::hbg::Tensor &gate_i32_inline2662_inline9277 = alloc_23.get_ref(0);
+            const simpler::hbg::Tensor &up_i32_inline2654_inline9268 = alloc_23.get_ref(1);
+            const simpler::hbg::Tensor &h_tile_fp32_inline2660_inline9214 = alloc_23.get_ref(2);
+            const simpler::hbg::Tensor &h_tile_i8_inline2663_inline9173 = alloc_23.get_ref(3);
+            const simpler::hbg::Tensor &h_tile_scale_dq_inline2676_inline9243 = alloc_23.get_ref(4);
+            const simpler::hbg::Tensor &y_i32_inline2673_inline9385 = alloc_23.get_ref(5);
             int64_t ts0_inline2658_inline9226 = 0;
 
             // Spmd sh_gate_mm_spmd: sh_gate_mm
@@ -4842,7 +4878,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             TaskOutputTensors task_46_outs = rt_submit_aiv_task(48, params_t46);
         }
         uint32_t recv_x_out_flat_inline2699_inline9324_shapes[2] = {512, 4096};
-        ChipTensor recv_x_out_flat_inline2699_inline9324 =
+        simpler::hbg::Tensor recv_x_out_flat_inline2699_inline9324 =
             recv_x_out_inline9236.reshape(recv_x_out_flat_inline2699_inline9324_shapes, 2);
 
         // Task 47: dispatch_meta
@@ -4922,13 +4958,13 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             uint32_t ffn_out_inline9141_ci_shapes[2] = {8, 4096};
             TensorCreateInfo ffn_out_inline9141_ci(ffn_out_inline9141_ci_shapes, 2, DataType::BFLOAT16);
             TaskOutputTensors alloc_24 = alloc_tensors(recv_y_inline9209_ci, ffn_out_inline9141_ci);
-            const ChipTensor &recv_y_inline9209 = alloc_24.get_ref(0);
-            const ChipTensor &ffn_out_inline9141 = alloc_24.get_ref(1);
+            const simpler::hbg::Tensor &recv_y_inline9209 = alloc_24.get_ref(0);
+            const simpler::hbg::Tensor &ffn_out_inline9141 = alloc_24.get_ref(1);
             uint32_t recv_y_flat_inline2783_inline9179_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2783_inline9179 =
+            simpler::hbg::Tensor recv_y_flat_inline2783_inline9179 =
                 recv_y_inline9209.reshape(recv_y_flat_inline2783_inline9179_shapes, 2);
             uint32_t recv_x_flat_inline2781_inline9398_shapes[2] = {512, 4096};
-            ChipTensor recv_x_flat_inline2781_inline9398 =
+            simpler::hbg::Tensor recv_x_flat_inline2781_inline9398 =
                 recv_x_out_inline9236.reshape(recv_x_flat_inline2781_inline9398_shapes, 2);
             SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline9334_ci_shapes[2] = {512, 2048};
@@ -4939,8 +4975,8 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                 );
                 TaskOutputTensors alloc_25 =
                     alloc_tensors(h_i8_inline2773_inline9334_ci, h_scale_dq_inline2766_inline9425_ci);
-                const ChipTensor &h_i8_inline2773_inline9334 = alloc_25.get_ref(0);
-                const ChipTensor &h_scale_dq_inline2766_inline9425 = alloc_25.get_ref(1);
+                const simpler::hbg::Tensor &h_i8_inline2773_inline9334 = alloc_25.get_ref(0);
+                const simpler::hbg::Tensor &h_scale_dq_inline2766_inline9425 = alloc_25.get_ref(1);
                 for (int64_t local_i_inline2779_inline9183 = 0; local_i_inline2779_inline9183 < 32;
                      local_i_inline2779_inline9183 += 1) {
                     int64_t flat_base_inline2774_inline9220 = (local_i_inline2779_inline9183 * 16);
@@ -4976,9 +5012,9 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                 gate_tile_i32_inline2749_inline9295_ci, up_tile_i32_inline2764_inline9375_ci,
                                 h_tile_fp32_inline2744_inline9423_ci
                             );
-                            const ChipTensor &gate_tile_i32_inline2749_inline9295 = alloc_26.get_ref(0);
-                            const ChipTensor &up_tile_i32_inline2764_inline9375 = alloc_26.get_ref(1);
-                            const ChipTensor &h_tile_fp32_inline2744_inline9423 = alloc_26.get_ref(2);
+                            const simpler::hbg::Tensor &gate_tile_i32_inline2749_inline9295 = alloc_26.get_ref(0);
+                            const simpler::hbg::Tensor &up_tile_i32_inline2764_inline9375 = alloc_26.get_ref(1);
+                            const simpler::hbg::Tensor &h_tile_fp32_inline2744_inline9423 = alloc_26.get_ref(2);
 
                             // Spmd exp_gate_mm_spmd: exp_gate_mm
                             CoreTaskArgs params_t51;
@@ -5033,7 +5069,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline9280_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline9280 = h_i8_inline2773_inline9334.view(
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline9280 = h_i8_inline2773_inline9334.view(
                                 h_tile_i8_inline2806_inline9280_shapes, h_tile_i8_inline2806_inline9280_offsets
                             );
                             uint32_t h_tile_scale_dq_inline2808_inline9161_offsets[2] = {
@@ -5055,10 +5091,11 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline9161_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline9161 = h_scale_dq_inline2766_inline9425.view(
-                                h_tile_scale_dq_inline2808_inline9161_shapes,
-                                h_tile_scale_dq_inline2808_inline9161_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline9161 =
+                                h_scale_dq_inline2766_inline9425.view(
+                                    h_tile_scale_dq_inline2808_inline9161_shapes,
+                                    h_tile_scale_dq_inline2808_inline9161_offsets
+                                );
 
                             // Task 54: exp_h_q
                             CoreTaskArgs params_t54;
@@ -5084,7 +5121,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                 y_i32_inline2737_inline9279_ci_shapes, 2, DataType::INT32
                             );
                             TaskOutputTensors alloc_27 = alloc_tensors(y_i32_inline2737_inline9279_ci);
-                            const ChipTensor &y_i32_inline2737_inline9279 = alloc_27.get_ref(0);
+                            const simpler::hbg::Tensor &y_i32_inline2737_inline9279 = alloc_27.get_ref(0);
                             int64_t tt0_inline2740_inline9153 = (tt_inline2776_inline9154 * 16);
                             CoreTaskPredicate expert_rows_pred;
                             expert_rows_pred.operand.tensor = &recv_count_out_inline9338;
@@ -5114,10 +5151,11 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline9280__ssa_v4_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline9280__ssa_v4 = h_i8_inline2773_inline9334.view(
-                                h_tile_i8_inline2806_inline9280__ssa_v4_shapes,
-                                h_tile_i8_inline2806_inline9280__ssa_v4_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline9280__ssa_v4 =
+                                h_i8_inline2773_inline9334.view(
+                                    h_tile_i8_inline2806_inline9280__ssa_v4_shapes,
+                                    h_tile_i8_inline2806_inline9280__ssa_v4_offsets
+                                );
                             uint32_t h_tile_scale_dq_inline2808_inline9161__ssa_v2_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline9350), 0
                             };
@@ -5137,7 +5175,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline9161__ssa_v2_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline9161__ssa_v2 =
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline9161__ssa_v2 =
                                 h_scale_dq_inline2766_inline9425.view(
                                     h_tile_scale_dq_inline2808_inline9161__ssa_v2_shapes,
                                     h_tile_scale_dq_inline2808_inline9161__ssa_v2_offsets
@@ -5172,9 +5210,10 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                                                    recv_y_tile_inline2730_inline9150_offsets[1]
                                      ))
                             };
-                            ChipTensor recv_y_tile_inline2730_inline9150 = recv_y_flat_inline2783_inline9179.view(
-                                recv_y_tile_inline2730_inline9150_shapes, recv_y_tile_inline2730_inline9150_offsets
-                            );
+                            simpler::hbg::Tensor recv_y_tile_inline2730_inline9150 =
+                                recv_y_flat_inline2783_inline9179.view(
+                                    recv_y_tile_inline2730_inline9150_shapes, recv_y_tile_inline2730_inline9150_offsets
+                                );
 
                             // Spmd exp_w2_act_spmd: exp_w2_act
                             CoreTaskArgs params_t56;
@@ -5194,7 +5233,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                 }
             }
             uint32_t recv_y_flat_inline2828_inline9140_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2828_inline9140 =
+            simpler::hbg::Tensor recv_y_flat_inline2828_inline9140 =
                 recv_y_inline9209.reshape(recv_y_flat_inline2828_inline9140_shapes, 2);
 
             // Spmd combine_spmd: combine
@@ -5246,12 +5285,13 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             uint32_t residual_flat_inline2836_inline9128_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline9129), 16384
             };
-            ChipTensor residual_flat_inline2836_inline9128 =
+            simpler::hbg::Tensor residual_flat_inline2836_inline9128 =
                 x_attn0_inline706.reshape(residual_flat_inline2836_inline9128_shapes, 2);
             uint32_t y_flat_inline2837_inline9127_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline9129), 16384
             };
-            ChipTensor y_flat_inline2837_inline9127 = hidden_inline709.reshape(y_flat_inline2837_inline9127_shapes, 2);
+            simpler::hbg::Tensor y_flat_inline2837_inline9127 =
+                hidden_inline709.reshape(y_flat_inline2837_inline9127_shapes, 2);
 
             // Spmd hc_post_spmd_0: hc_post_0
             CoreTaskArgs params_t60;
@@ -5267,36 +5307,36 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
 }
 
 void hash_moe_l1_block(const GraphTaskArgs &args) {
-    const ChipTensor &x_attn1_inline694 = args.tensor(0).ref();
-    const ChipTensor &hc_ffn_base_l1_inline720 = args.tensor(1).ref();
-    const ChipTensor &hc_ffn_fn_l1_inline718 = args.tensor(2).ref();
-    const ChipTensor &hc_ffn_scale_l1_inline644 = args.tensor(3).ref();
-    const ChipTensor &norm_w_l1_inline684 = args.tensor(4).ref();
-    const ChipTensor &gate_bias_l1_inline586 = args.tensor(5).ref();
-    const ChipTensor &gate_w_l1_inline693 = args.tensor(6).ref();
-    const ChipTensor &ext_input_ids = args.tensor(7).ref();
-    const ChipTensor &tid2eid_l1_inline725 = args.tensor(8).ref();
-    const ChipTensor &shared_w1_l1_inline695 = args.tensor(9).ref();
-    const ChipTensor &shared_w3_l1_inline697 = args.tensor(10).ref();
-    const ChipTensor &shared_w1_scale_l1_inline705 = args.tensor(11).ref();
-    const ChipTensor &shared_w3_scale_l1_inline698 = args.tensor(12).ref();
-    const ChipTensor &shared_w2_l1_inline637 = args.tensor(13).ref();
-    const ChipTensor &shared_w2_scale_l1_inline702 = args.tensor(14).ref();
-    const ChipTensor &ext_recv_meta = args.tensor(15).ref();
-    const ChipTensor &ext_arrived = args.tensor(16).ref();
-    const ChipTensor &ext_recv_x = args.tensor(17).ref();
-    const ChipTensor &ext_recv_aux = args.tensor(18).ref();
-    const ChipTensor &ext_recv_route = args.tensor(19).ref();
-    const ChipTensor &ext_data_arrived = args.tensor(20).ref();
-    const ChipTensor &routed_w1_l1_inline686 = args.tensor(21).ref();
-    const ChipTensor &routed_w3_l1_inline635 = args.tensor(22).ref();
-    const ChipTensor &routed_w1_scale_l1_inline668 = args.tensor(23).ref();
-    const ChipTensor &routed_w3_scale_l1_inline689 = args.tensor(24).ref();
-    const ChipTensor &routed_w2_l1_inline690 = args.tensor(25).ref();
-    const ChipTensor &routed_w2_scale_l1_inline691 = args.tensor(26).ref();
-    const ChipTensor &ext_routed_y_buf = args.tensor(27).ref();
-    const ChipTensor &ext_combine_arrived = args.tensor(28).ref();
-    const ChipTensor &hidden_inline709 = args.tensor(29).ref();
+    const simpler::hbg::Tensor &x_attn1_inline694 = args.tensor(0).ref();
+    const simpler::hbg::Tensor &hc_ffn_base_l1_inline720 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &hc_ffn_fn_l1_inline718 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &hc_ffn_scale_l1_inline644 = args.tensor(3).ref();
+    const simpler::hbg::Tensor &norm_w_l1_inline684 = args.tensor(4).ref();
+    const simpler::hbg::Tensor &gate_bias_l1_inline586 = args.tensor(5).ref();
+    const simpler::hbg::Tensor &gate_w_l1_inline693 = args.tensor(6).ref();
+    const simpler::hbg::Tensor &ext_input_ids = args.tensor(7).ref();
+    const simpler::hbg::Tensor &tid2eid_l1_inline725 = args.tensor(8).ref();
+    const simpler::hbg::Tensor &shared_w1_l1_inline695 = args.tensor(9).ref();
+    const simpler::hbg::Tensor &shared_w3_l1_inline697 = args.tensor(10).ref();
+    const simpler::hbg::Tensor &shared_w1_scale_l1_inline705 = args.tensor(11).ref();
+    const simpler::hbg::Tensor &shared_w3_scale_l1_inline698 = args.tensor(12).ref();
+    const simpler::hbg::Tensor &shared_w2_l1_inline637 = args.tensor(13).ref();
+    const simpler::hbg::Tensor &shared_w2_scale_l1_inline702 = args.tensor(14).ref();
+    const simpler::hbg::Tensor &ext_recv_meta = args.tensor(15).ref();
+    const simpler::hbg::Tensor &ext_arrived = args.tensor(16).ref();
+    const simpler::hbg::Tensor &ext_recv_x = args.tensor(17).ref();
+    const simpler::hbg::Tensor &ext_recv_aux = args.tensor(18).ref();
+    const simpler::hbg::Tensor &ext_recv_route = args.tensor(19).ref();
+    const simpler::hbg::Tensor &ext_data_arrived = args.tensor(20).ref();
+    const simpler::hbg::Tensor &routed_w1_l1_inline686 = args.tensor(21).ref();
+    const simpler::hbg::Tensor &routed_w3_l1_inline635 = args.tensor(22).ref();
+    const simpler::hbg::Tensor &routed_w1_scale_l1_inline668 = args.tensor(23).ref();
+    const simpler::hbg::Tensor &routed_w3_scale_l1_inline689 = args.tensor(24).ref();
+    const simpler::hbg::Tensor &routed_w2_l1_inline690 = args.tensor(25).ref();
+    const simpler::hbg::Tensor &routed_w2_scale_l1_inline691 = args.tensor(26).ref();
+    const simpler::hbg::Tensor &ext_routed_y_buf = args.tensor(27).ref();
+    const simpler::hbg::Tensor &ext_combine_arrived = args.tensor(28).ref();
+    const simpler::hbg::Tensor &hidden_inline709 = args.tensor(29).ref();
     int32_t nt_inline677__rv_v2 = static_cast<int32_t>(args.scalar(0));
     int32_t my_rank = static_cast<int32_t>(args.scalar(1));
     uint64_t recv_meta_ctx = args.scalar(2);
@@ -5366,22 +5406,22 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             biased_scores_buf_inline2564_inline10124_ci, sh_inline10094_ci, recv_x_out_inline9998_ci,
             recv_scale_out_inline9934_ci, recv_w_out_inline10122_ci
         );
-        const ChipTensor &x_mixed_inline10004 = alloc_43.get_ref(0);
-        const ChipTensor &post_ffn_inline10003 = alloc_43.get_ref(1);
-        const ChipTensor &comb_ffn_inline10031 = alloc_43.get_ref(2);
-        const ChipTensor &x_norm_i8_inline10027 = alloc_43.get_ref(3);
-        const ChipTensor &x_norm_scale_inline10007 = alloc_43.get_ref(4);
-        const ChipTensor &indices_inline10048 = alloc_43.get_ref(5);
-        const ChipTensor &weights_inline10038 = alloc_43.get_ref(6);
-        const ChipTensor &xg_buf_inline2582_inline10158 = alloc_43.get_ref(7);
-        const ChipTensor &inv_rms_buf_inline2585_inline10044 = alloc_43.get_ref(8);
-        const ChipTensor &xn_scale_buf_inline2572_inline10120 = alloc_43.get_ref(9);
-        const ChipTensor &route_scores_buf_inline2607_inline10035 = alloc_43.get_ref(10);
-        const ChipTensor &biased_scores_buf_inline2564_inline10124 = alloc_43.get_ref(11);
-        const ChipTensor &sh_inline10094 = alloc_43.get_ref(12);
-        const ChipTensor &recv_x_out_inline9998 = alloc_43.get_ref(13);
-        const ChipTensor &recv_scale_out_inline9934 = alloc_43.get_ref(14);
-        const ChipTensor &recv_w_out_inline10122 = alloc_43.get_ref(15);
+        const simpler::hbg::Tensor &x_mixed_inline10004 = alloc_43.get_ref(0);
+        const simpler::hbg::Tensor &post_ffn_inline10003 = alloc_43.get_ref(1);
+        const simpler::hbg::Tensor &comb_ffn_inline10031 = alloc_43.get_ref(2);
+        const simpler::hbg::Tensor &x_norm_i8_inline10027 = alloc_43.get_ref(3);
+        const simpler::hbg::Tensor &x_norm_scale_inline10007 = alloc_43.get_ref(4);
+        const simpler::hbg::Tensor &indices_inline10048 = alloc_43.get_ref(5);
+        const simpler::hbg::Tensor &weights_inline10038 = alloc_43.get_ref(6);
+        const simpler::hbg::Tensor &xg_buf_inline2582_inline10158 = alloc_43.get_ref(7);
+        const simpler::hbg::Tensor &inv_rms_buf_inline2585_inline10044 = alloc_43.get_ref(8);
+        const simpler::hbg::Tensor &xn_scale_buf_inline2572_inline10120 = alloc_43.get_ref(9);
+        const simpler::hbg::Tensor &route_scores_buf_inline2607_inline10035 = alloc_43.get_ref(10);
+        const simpler::hbg::Tensor &biased_scores_buf_inline2564_inline10124 = alloc_43.get_ref(11);
+        const simpler::hbg::Tensor &sh_inline10094 = alloc_43.get_ref(12);
+        const simpler::hbg::Tensor &recv_x_out_inline9998 = alloc_43.get_ref(13);
+        const simpler::hbg::Tensor &recv_scale_out_inline9934 = alloc_43.get_ref(14);
+        const simpler::hbg::Tensor &recv_w_out_inline10122 = alloc_43.get_ref(15);
         uint32_t recv_r_route_out_inline10131_ci_shapes[2] = {32, 16};
         TensorCreateInfo recv_r_route_out_inline10131_ci(
             recv_r_route_out_inline10131_ci_shapes, 2, DataType::INT32, /*manual_dep=*/true
@@ -5395,28 +5435,29 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
         TaskOutputTensors alloc_44 = alloc_tensors(
             recv_r_route_out_inline10131_ci, recv_count_out_inline10100_ci, recv_meta_local_inline10167_ci
         );
-        const ChipTensor &recv_r_route_out_inline10131 = alloc_44.get_ref(0);
-        const ChipTensor &recv_count_out_inline10100 = alloc_44.get_ref(1);
-        const ChipTensor &recv_meta_local_inline10167 = alloc_44.get_ref(2);
+        const simpler::hbg::Tensor &recv_r_route_out_inline10131 = alloc_44.get_ref(0);
+        const simpler::hbg::Tensor &recv_count_out_inline10100 = alloc_44.get_ref(1);
+        const simpler::hbg::Tensor &recv_meta_local_inline10167 = alloc_44.get_ref(2);
         int64_t t_dim_inline14390 = 8;
         int64_t t_linear_inline14408 = (((t_dim_inline14390 + 15) / 16) * 16);
         uint32_t x_flat_inline14403_shapes[2] = {static_cast<uint32_t>(t_dim_inline14390), 16384};
-        ChipTensor x_flat_inline14403 = x_attn1_inline694.reshape(x_flat_inline14403_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline14403 = x_attn1_inline694.reshape(x_flat_inline14403_shapes, 2);
         uint32_t hc_base_2d_inline14418_shapes[2] = {1, 24};
-        ChipTensor hc_base_2d_inline14418 = hc_ffn_base_l1_inline720.reshape(hc_base_2d_inline14418_shapes, 2);
+        simpler::hbg::Tensor hc_base_2d_inline14418 =
+            hc_ffn_base_l1_inline720.reshape(hc_base_2d_inline14418_shapes, 2);
         uint32_t inv_rms_inline14358_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14408), 1};
         TensorCreateInfo inv_rms_inline14358_ci(inv_rms_inline14358_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_45 = alloc_tensors(inv_rms_inline14358_ci);
-        const ChipTensor &inv_rms_inline14358 = alloc_45.get_ref(0);
+        const simpler::hbg::Tensor &inv_rms_inline14358 = alloc_45.get_ref(0);
         uint32_t mixes_raw_inline14381_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14408), 32};
         TensorCreateInfo mixes_raw_inline14381_ci(mixes_raw_inline14381_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_46 = alloc_tensors(mixes_raw_inline14381_ci);
-        const ChipTensor &mixes_raw_inline14381 = alloc_46.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline14381 = alloc_46.get_ref(0);
         int64_t linear_partial_rows_inline14356 = (t_linear_inline14408 * 4);
         uint32_t mixes_partials_inline14380_ci_shapes[2] = {static_cast<uint32_t>(linear_partial_rows_inline14356), 32};
         TensorCreateInfo mixes_partials_inline14380_ci(mixes_partials_inline14380_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_47 = alloc_tensors(mixes_partials_inline14380_ci);
-        const ChipTensor &mixes_partials_inline14380 = alloc_47.get_ref(0);
+        const simpler::hbg::Tensor &mixes_partials_inline14380 = alloc_47.get_ref(0);
 
         // Spmd hc_pre_rms_spmd_2: hc_pre_rms_2
         CoreTaskArgs params_t88;
@@ -5448,7 +5489,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
         uint32_t pre_val_store_inline14386_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline14408), 8};
         TensorCreateInfo pre_val_store_inline14386_ci(pre_val_store_inline14386_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_48 = alloc_tensors(pre_val_store_inline14386_ci);
-        const ChipTensor &pre_val_store_inline14386 = alloc_48.get_ref(0);
+        const simpler::hbg::Tensor &pre_val_store_inline14386 = alloc_48.get_ref(0);
 
         // Spmd split_pre_post_spmd_2: split_pre_post_2
         CoreTaskArgs params_t91;
@@ -5499,7 +5540,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             active_gate_tokens_inline2604_inline10075__phi_v2 = active_gate_tokens_inline2604_inline10075;
         }
         uint32_t norm_w_2d_inline2589_inline10171_shapes[2] = {1, 4096};
-        ChipTensor norm_w_2d_inline2589_inline10171 =
+        simpler::hbg::Tensor norm_w_2d_inline2589_inline10171 =
             norm_w_l1_inline684.reshape(norm_w_2d_inline2589_inline10171_shapes, 2);
 
         // Spmd ffn_norm_spmd_0: ffn_norm_0
@@ -5549,7 +5590,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
         };
         TensorCreateInfo gm_pipe_buffer_3_ci(gm_pipe_buffer_3_ci_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true);
         TaskOutputTensors alloc_49 = alloc_tensors(gm_pipe_buffer_3_ci);
-        const ChipTensor &gm_pipe_buffer_3 = alloc_49.get_ref(0);
+        const simpler::hbg::Tensor &gm_pipe_buffer_3 = alloc_49.get_ref(0);
 
         // Group gate_0: MixedKernels (AIC + AIV lanes)
         CoreTaskArgs params_t97;
@@ -5606,12 +5647,12 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                 h_tile_fp32_inline2660_inline9976_ci, h_tile_i8_inline2663_inline9935_ci,
                 h_tile_scale_dq_inline2676_inline10005_ci, y_i32_inline2673_inline10147_ci
             );
-            const ChipTensor &gate_i32_inline2662_inline10039 = alloc_50.get_ref(0);
-            const ChipTensor &up_i32_inline2654_inline10030 = alloc_50.get_ref(1);
-            const ChipTensor &h_tile_fp32_inline2660_inline9976 = alloc_50.get_ref(2);
-            const ChipTensor &h_tile_i8_inline2663_inline9935 = alloc_50.get_ref(3);
-            const ChipTensor &h_tile_scale_dq_inline2676_inline10005 = alloc_50.get_ref(4);
-            const ChipTensor &y_i32_inline2673_inline10147 = alloc_50.get_ref(5);
+            const simpler::hbg::Tensor &gate_i32_inline2662_inline10039 = alloc_50.get_ref(0);
+            const simpler::hbg::Tensor &up_i32_inline2654_inline10030 = alloc_50.get_ref(1);
+            const simpler::hbg::Tensor &h_tile_fp32_inline2660_inline9976 = alloc_50.get_ref(2);
+            const simpler::hbg::Tensor &h_tile_i8_inline2663_inline9935 = alloc_50.get_ref(3);
+            const simpler::hbg::Tensor &h_tile_scale_dq_inline2676_inline10005 = alloc_50.get_ref(4);
+            const simpler::hbg::Tensor &y_i32_inline2673_inline10147 = alloc_50.get_ref(5);
             int64_t ts0_inline2658_inline9988 = 0;
 
             // Spmd sh_gate_mm_spmd_0: sh_gate_mm_0
@@ -5672,7 +5713,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             TaskOutputTensors task_103_outs = rt_submit_aiv_task(107, params_t103);
         }
         uint32_t recv_x_out_flat_inline2699_inline10086_shapes[2] = {512, 4096};
-        ChipTensor recv_x_out_flat_inline2699_inline10086 =
+        simpler::hbg::Tensor recv_x_out_flat_inline2699_inline10086 =
             recv_x_out_inline9998.reshape(recv_x_out_flat_inline2699_inline10086_shapes, 2);
 
         // Task 104: dispatch_meta_0
@@ -5752,13 +5793,13 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             uint32_t ffn_out_inline9903_ci_shapes[2] = {8, 4096};
             TensorCreateInfo ffn_out_inline9903_ci(ffn_out_inline9903_ci_shapes, 2, DataType::BFLOAT16);
             TaskOutputTensors alloc_51 = alloc_tensors(recv_y_inline9971_ci, ffn_out_inline9903_ci);
-            const ChipTensor &recv_y_inline9971 = alloc_51.get_ref(0);
-            const ChipTensor &ffn_out_inline9903 = alloc_51.get_ref(1);
+            const simpler::hbg::Tensor &recv_y_inline9971 = alloc_51.get_ref(0);
+            const simpler::hbg::Tensor &ffn_out_inline9903 = alloc_51.get_ref(1);
             uint32_t recv_y_flat_inline2783_inline9941_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2783_inline9941 =
+            simpler::hbg::Tensor recv_y_flat_inline2783_inline9941 =
                 recv_y_inline9971.reshape(recv_y_flat_inline2783_inline9941_shapes, 2);
             uint32_t recv_x_flat_inline2781_inline10160_shapes[2] = {512, 4096};
-            ChipTensor recv_x_flat_inline2781_inline10160 =
+            simpler::hbg::Tensor recv_x_flat_inline2781_inline10160 =
                 recv_x_out_inline9998.reshape(recv_x_flat_inline2781_inline10160_shapes, 2);
             SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline10096_ci_shapes[2] = {512, 2048};
@@ -5771,8 +5812,8 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                 );
                 TaskOutputTensors alloc_52 =
                     alloc_tensors(h_i8_inline2773_inline10096_ci, h_scale_dq_inline2766_inline10187_ci);
-                const ChipTensor &h_i8_inline2773_inline10096 = alloc_52.get_ref(0);
-                const ChipTensor &h_scale_dq_inline2766_inline10187 = alloc_52.get_ref(1);
+                const simpler::hbg::Tensor &h_i8_inline2773_inline10096 = alloc_52.get_ref(0);
+                const simpler::hbg::Tensor &h_scale_dq_inline2766_inline10187 = alloc_52.get_ref(1);
                 for (int64_t local_i_inline2779_inline9945 = 0; local_i_inline2779_inline9945 < 32;
                      local_i_inline2779_inline9945 += 1) {
                     int64_t flat_base_inline2774_inline9982 = (local_i_inline2779_inline9945 * 16);
@@ -5808,9 +5849,9 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                 gate_tile_i32_inline2749_inline10057_ci, up_tile_i32_inline2764_inline10137_ci,
                                 h_tile_fp32_inline2744_inline10185_ci
                             );
-                            const ChipTensor &gate_tile_i32_inline2749_inline10057 = alloc_53.get_ref(0);
-                            const ChipTensor &up_tile_i32_inline2764_inline10137 = alloc_53.get_ref(1);
-                            const ChipTensor &h_tile_fp32_inline2744_inline10185 = alloc_53.get_ref(2);
+                            const simpler::hbg::Tensor &gate_tile_i32_inline2749_inline10057 = alloc_53.get_ref(0);
+                            const simpler::hbg::Tensor &up_tile_i32_inline2764_inline10137 = alloc_53.get_ref(1);
+                            const simpler::hbg::Tensor &h_tile_fp32_inline2744_inline10185 = alloc_53.get_ref(2);
 
                             // Spmd exp_gate_mm_spmd_0: exp_gate_mm_0
                             CoreTaskArgs params_t108;
@@ -5865,7 +5906,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline10042_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline10042 = h_i8_inline2773_inline10096.view(
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline10042 = h_i8_inline2773_inline10096.view(
                                 h_tile_i8_inline2806_inline10042_shapes, h_tile_i8_inline2806_inline10042_offsets
                             );
                             uint32_t h_tile_scale_dq_inline2808_inline9923_offsets[2] = {
@@ -5887,10 +5928,11 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline9923_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline9923 = h_scale_dq_inline2766_inline10187.view(
-                                h_tile_scale_dq_inline2808_inline9923_shapes,
-                                h_tile_scale_dq_inline2808_inline9923_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline9923 =
+                                h_scale_dq_inline2766_inline10187.view(
+                                    h_tile_scale_dq_inline2808_inline9923_shapes,
+                                    h_tile_scale_dq_inline2808_inline9923_offsets
+                                );
 
                             // Task 111: exp_h_q_0
                             CoreTaskArgs params_t111;
@@ -5916,7 +5958,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                 y_i32_inline2737_inline10041_ci_shapes, 2, DataType::INT32
                             );
                             TaskOutputTensors alloc_54 = alloc_tensors(y_i32_inline2737_inline10041_ci);
-                            const ChipTensor &y_i32_inline2737_inline10041 = alloc_54.get_ref(0);
+                            const simpler::hbg::Tensor &y_i32_inline2737_inline10041 = alloc_54.get_ref(0);
                             int64_t tt0_inline2740_inline9915 = (tt_inline2776_inline9916 * 16);
                             CoreTaskPredicate expert_rows_pred;
                             expert_rows_pred.operand.tensor = &recv_count_out_inline10100;
@@ -5946,10 +5988,11 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                                    h_tile_i8_inline2806_inline10042__ssa_v4_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_i8_inline2806_inline10042__ssa_v4 = h_i8_inline2773_inline10096.view(
-                                h_tile_i8_inline2806_inline10042__ssa_v4_shapes,
-                                h_tile_i8_inline2806_inline10042__ssa_v4_offsets
-                            );
+                            simpler::hbg::Tensor h_tile_i8_inline2806_inline10042__ssa_v4 =
+                                h_i8_inline2773_inline10096.view(
+                                    h_tile_i8_inline2806_inline10042__ssa_v4_shapes,
+                                    h_tile_i8_inline2806_inline10042__ssa_v4_offsets
+                                );
                             uint32_t h_tile_scale_dq_inline2808_inline9923__ssa_v2_offsets[2] = {
                                 static_cast<uint32_t>(flat_tt0_inline2738_inline10112), 0
                             };
@@ -5969,7 +6012,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                                 h_tile_scale_dq_inline2808_inline9923__ssa_v2_offsets[1]
                                      ))
                             };
-                            ChipTensor h_tile_scale_dq_inline2808_inline9923__ssa_v2 =
+                            simpler::hbg::Tensor h_tile_scale_dq_inline2808_inline9923__ssa_v2 =
                                 h_scale_dq_inline2766_inline10187.view(
                                     h_tile_scale_dq_inline2808_inline9923__ssa_v2_shapes,
                                     h_tile_scale_dq_inline2808_inline9923__ssa_v2_offsets
@@ -6004,9 +6047,10 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                                                    recv_y_tile_inline2730_inline9912_offsets[1]
                                      ))
                             };
-                            ChipTensor recv_y_tile_inline2730_inline9912 = recv_y_flat_inline2783_inline9941.view(
-                                recv_y_tile_inline2730_inline9912_shapes, recv_y_tile_inline2730_inline9912_offsets
-                            );
+                            simpler::hbg::Tensor recv_y_tile_inline2730_inline9912 =
+                                recv_y_flat_inline2783_inline9941.view(
+                                    recv_y_tile_inline2730_inline9912_shapes, recv_y_tile_inline2730_inline9912_offsets
+                                );
 
                             // Spmd exp_w2_act_spmd_0: exp_w2_act_0
                             CoreTaskArgs params_t113;
@@ -6026,7 +6070,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                 }
             }
             uint32_t recv_y_flat_inline2828_inline9902_shapes[2] = {512, 4096};
-            ChipTensor recv_y_flat_inline2828_inline9902 =
+            simpler::hbg::Tensor recv_y_flat_inline2828_inline9902 =
                 recv_y_inline9971.reshape(recv_y_flat_inline2828_inline9902_shapes, 2);
 
             // Spmd combine_spmd_0: combine_0
@@ -6078,12 +6122,13 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             uint32_t residual_flat_inline2836_inline9890_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline9891), 16384
             };
-            ChipTensor residual_flat_inline2836_inline9890 =
+            simpler::hbg::Tensor residual_flat_inline2836_inline9890 =
                 x_attn1_inline694.reshape(residual_flat_inline2836_inline9890_shapes, 2);
             uint32_t y_flat_inline2837_inline9889_shapes[2] = {
                 static_cast<uint32_t>(t_dim_inline2845_inline9891), 16384
             };
-            ChipTensor y_flat_inline2837_inline9889 = hidden_inline709.reshape(y_flat_inline2837_inline9889_shapes, 2);
+            simpler::hbg::Tensor y_flat_inline2837_inline9889 =
+                hidden_inline709.reshape(y_flat_inline2837_inline9889_shapes, 2);
 
             // Spmd hc_post_spmd_2: hc_post_2
             CoreTaskArgs params_t117;
@@ -6102,98 +6147,98 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // External tensors
-    const ChipTensor &ext_embed_weight = orch_args.tensor(0).ref();
-    const ChipTensor &ext_hc_attn_fn = orch_args.tensor(1).ref();
-    const ChipTensor &ext_hc_attn_scale = orch_args.tensor(2).ref();
-    const ChipTensor &ext_hc_attn_base = orch_args.tensor(3).ref();
-    const ChipTensor &ext_attn_norm_w = orch_args.tensor(4).ref();
-    const ChipTensor &ext_wq_a = orch_args.tensor(5).ref();
-    const ChipTensor &ext_wq_b = orch_args.tensor(6).ref();
-    const ChipTensor &ext_wq_b_scale = orch_args.tensor(7).ref();
-    const ChipTensor &ext_wkv = orch_args.tensor(8).ref();
-    const ChipTensor &ext_gamma_cq = orch_args.tensor(9).ref();
-    const ChipTensor &ext_gamma_ckv = orch_args.tensor(10).ref();
-    const ChipTensor &ext_kv_cache = orch_args.tensor(11).ref();
-    const ChipTensor &ext_attn_sink = orch_args.tensor(12).ref();
-    const ChipTensor &ext_wo_a = orch_args.tensor(13).ref();
-    const ChipTensor &ext_wo_b = orch_args.tensor(14).ref();
-    const ChipTensor &ext_wo_b_scale = orch_args.tensor(15).ref();
-    const ChipTensor &ext_hca_cmp_wkv = orch_args.tensor(16).ref();
-    const ChipTensor &ext_hca_cmp_wgate = orch_args.tensor(17).ref();
-    const ChipTensor &ext_hca_cmp_ape = orch_args.tensor(18).ref();
-    const ChipTensor &ext_hca_cmp_norm_w = orch_args.tensor(19).ref();
-    const ChipTensor &ext_hca_compress_state = orch_args.tensor(20).ref();
-    const ChipTensor &ext_csa_cmp_wkv = orch_args.tensor(21).ref();
-    const ChipTensor &ext_csa_cmp_wgate = orch_args.tensor(22).ref();
-    const ChipTensor &ext_csa_cmp_ape = orch_args.tensor(23).ref();
-    const ChipTensor &ext_csa_cmp_norm_w = orch_args.tensor(24).ref();
-    const ChipTensor &ext_csa_compress_state = orch_args.tensor(25).ref();
-    const ChipTensor &ext_csa_idx_wq_b = orch_args.tensor(26).ref();
-    const ChipTensor &ext_csa_idx_wq_b_scale = orch_args.tensor(27).ref();
-    const ChipTensor &ext_csa_weights_proj = orch_args.tensor(28).ref();
-    const ChipTensor &ext_csa_hadamard_idx = orch_args.tensor(29).ref();
-    const ChipTensor &ext_csa_inner_wkv = orch_args.tensor(30).ref();
-    const ChipTensor &ext_csa_inner_wgate = orch_args.tensor(31).ref();
-    const ChipTensor &ext_csa_inner_ape = orch_args.tensor(32).ref();
-    const ChipTensor &ext_csa_inner_norm_w = orch_args.tensor(33).ref();
-    const ChipTensor &ext_csa_inner_compress_state = orch_args.tensor(34).ref();
-    const ChipTensor &ext_cmp_kv = orch_args.tensor(35).ref();
-    const ChipTensor &ext_idx_kv_cache = orch_args.tensor(36).ref();
-    const ChipTensor &ext_idx_kv_scale = orch_args.tensor(37).ref();
-    const ChipTensor &ext_hc_ffn_fn = orch_args.tensor(38).ref();
-    const ChipTensor &ext_hc_ffn_scale = orch_args.tensor(39).ref();
-    const ChipTensor &ext_hc_ffn_base = orch_args.tensor(40).ref();
-    const ChipTensor &ext_norm_w = orch_args.tensor(41).ref();
-    const ChipTensor &ext_gate_w = orch_args.tensor(42).ref();
-    const ChipTensor &ext_gate_bias = orch_args.tensor(43).ref();
-    const ChipTensor &ext_tid2eid = orch_args.tensor(44).ref();
-    const ChipTensor &ext_routed_w1 = orch_args.tensor(45).ref();
-    const ChipTensor &ext_routed_w1_scale = orch_args.tensor(46).ref();
-    const ChipTensor &ext_routed_w3 = orch_args.tensor(47).ref();
-    const ChipTensor &ext_routed_w3_scale = orch_args.tensor(48).ref();
-    const ChipTensor &ext_routed_w2 = orch_args.tensor(49).ref();
-    const ChipTensor &ext_routed_w2_scale = orch_args.tensor(50).ref();
-    const ChipTensor &ext_shared_w1 = orch_args.tensor(51).ref();
-    const ChipTensor &ext_shared_w1_scale = orch_args.tensor(52).ref();
-    const ChipTensor &ext_shared_w3 = orch_args.tensor(53).ref();
-    const ChipTensor &ext_shared_w3_scale = orch_args.tensor(54).ref();
-    const ChipTensor &ext_shared_w2 = orch_args.tensor(55).ref();
-    const ChipTensor &ext_shared_w2_scale = orch_args.tensor(56).ref();
-    const ChipTensor &ext_freqs_cos = orch_args.tensor(57).ref();
-    const ChipTensor &ext_freqs_sin = orch_args.tensor(58).ref();
-    const ChipTensor &ext_block_table = orch_args.tensor(59).ref();
-    const ChipTensor &ext_position_ids = orch_args.tensor(60).ref();
-    const ChipTensor &ext_kv_seq_lens = orch_args.tensor(61).ref();
-    const ChipTensor &ext_hca_compress_state_block_table = orch_args.tensor(62).ref();
-    const ChipTensor &ext_csa_compress_state_block_table = orch_args.tensor(63).ref();
-    const ChipTensor &ext_csa_inner_compress_state_block_table = orch_args.tensor(64).ref();
-    const ChipTensor &ext_cmp_block_table = orch_args.tensor(65).ref();
-    const ChipTensor &ext_idx_block_table = orch_args.tensor(66).ref();
-    const ChipTensor &ext_block_counts = orch_args.tensor(67).ref();
-    const ChipTensor &ext_input_ids = orch_args.tensor(68).ref();
-    const ChipTensor &ext_hc_head_fn = orch_args.tensor(69).ref();
-    const ChipTensor &ext_hc_head_scale = orch_args.tensor(70).ref();
-    const ChipTensor &ext_hc_head_base = orch_args.tensor(71).ref();
-    const ChipTensor &ext_final_norm_w = orch_args.tensor(72).ref();
-    const ChipTensor &ext_lm_head_weight = orch_args.tensor(73).ref();
-    const ChipTensor &ext_logit_row_indices = orch_args.tensor(74).ref();
-    const ChipTensor &ext_pre_hc_hidden_out = orch_args.tensor(75).ref();
-    const ChipTensor &ext_x_out = orch_args.tensor(76).ref();
-    const ChipTensor &ext_logits = orch_args.tensor(77).ref();
-    const ChipTensor &ext_sampled_ids = orch_args.tensor(78).ref();
-    const ChipTensor &ext_recv_meta = orch_args.tensor(79).ref();
-    const ChipTensor &ext_recv_x = orch_args.tensor(80).ref();
-    const ChipTensor &ext_recv_aux = orch_args.tensor(81).ref();
-    const ChipTensor &ext_recv_route = orch_args.tensor(82).ref();
-    const ChipTensor &ext_arrived = orch_args.tensor(83).ref();
-    const ChipTensor &ext_data_arrived = orch_args.tensor(84).ref();
-    const ChipTensor &ext_routed_y_buf = orch_args.tensor(85).ref();
-    const ChipTensor &ext_combine_arrived = orch_args.tensor(86).ref();
-    const ChipTensor &ext_lm_head_hidden_window = orch_args.tensor(87).ref();
-    const ChipTensor &ext_lm_head_hidden_done = orch_args.tensor(88).ref();
-    const ChipTensor &ext_lm_head_logits_window = orch_args.tensor(89).ref();
-    const ChipTensor &ext_lm_head_logits_done = orch_args.tensor(90).ref();
-    const ChipTensor &ext_num_tokens_per_owner = orch_args.tensor(91).ref();
+    const simpler::hbg::Tensor &ext_embed_weight = orch_args.tensor(0).ref();
+    const simpler::hbg::Tensor &ext_hc_attn_fn = orch_args.tensor(1).ref();
+    const simpler::hbg::Tensor &ext_hc_attn_scale = orch_args.tensor(2).ref();
+    const simpler::hbg::Tensor &ext_hc_attn_base = orch_args.tensor(3).ref();
+    const simpler::hbg::Tensor &ext_attn_norm_w = orch_args.tensor(4).ref();
+    const simpler::hbg::Tensor &ext_wq_a = orch_args.tensor(5).ref();
+    const simpler::hbg::Tensor &ext_wq_b = orch_args.tensor(6).ref();
+    const simpler::hbg::Tensor &ext_wq_b_scale = orch_args.tensor(7).ref();
+    const simpler::hbg::Tensor &ext_wkv = orch_args.tensor(8).ref();
+    const simpler::hbg::Tensor &ext_gamma_cq = orch_args.tensor(9).ref();
+    const simpler::hbg::Tensor &ext_gamma_ckv = orch_args.tensor(10).ref();
+    const simpler::hbg::Tensor &ext_kv_cache = orch_args.tensor(11).ref();
+    const simpler::hbg::Tensor &ext_attn_sink = orch_args.tensor(12).ref();
+    const simpler::hbg::Tensor &ext_wo_a = orch_args.tensor(13).ref();
+    const simpler::hbg::Tensor &ext_wo_b = orch_args.tensor(14).ref();
+    const simpler::hbg::Tensor &ext_wo_b_scale = orch_args.tensor(15).ref();
+    const simpler::hbg::Tensor &ext_hca_cmp_wkv = orch_args.tensor(16).ref();
+    const simpler::hbg::Tensor &ext_hca_cmp_wgate = orch_args.tensor(17).ref();
+    const simpler::hbg::Tensor &ext_hca_cmp_ape = orch_args.tensor(18).ref();
+    const simpler::hbg::Tensor &ext_hca_cmp_norm_w = orch_args.tensor(19).ref();
+    const simpler::hbg::Tensor &ext_hca_compress_state = orch_args.tensor(20).ref();
+    const simpler::hbg::Tensor &ext_csa_cmp_wkv = orch_args.tensor(21).ref();
+    const simpler::hbg::Tensor &ext_csa_cmp_wgate = orch_args.tensor(22).ref();
+    const simpler::hbg::Tensor &ext_csa_cmp_ape = orch_args.tensor(23).ref();
+    const simpler::hbg::Tensor &ext_csa_cmp_norm_w = orch_args.tensor(24).ref();
+    const simpler::hbg::Tensor &ext_csa_compress_state = orch_args.tensor(25).ref();
+    const simpler::hbg::Tensor &ext_csa_idx_wq_b = orch_args.tensor(26).ref();
+    const simpler::hbg::Tensor &ext_csa_idx_wq_b_scale = orch_args.tensor(27).ref();
+    const simpler::hbg::Tensor &ext_csa_weights_proj = orch_args.tensor(28).ref();
+    const simpler::hbg::Tensor &ext_csa_hadamard_idx = orch_args.tensor(29).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_wkv = orch_args.tensor(30).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_wgate = orch_args.tensor(31).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_ape = orch_args.tensor(32).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_norm_w = orch_args.tensor(33).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_compress_state = orch_args.tensor(34).ref();
+    const simpler::hbg::Tensor &ext_cmp_kv = orch_args.tensor(35).ref();
+    const simpler::hbg::Tensor &ext_idx_kv_cache = orch_args.tensor(36).ref();
+    const simpler::hbg::Tensor &ext_idx_kv_scale = orch_args.tensor(37).ref();
+    const simpler::hbg::Tensor &ext_hc_ffn_fn = orch_args.tensor(38).ref();
+    const simpler::hbg::Tensor &ext_hc_ffn_scale = orch_args.tensor(39).ref();
+    const simpler::hbg::Tensor &ext_hc_ffn_base = orch_args.tensor(40).ref();
+    const simpler::hbg::Tensor &ext_norm_w = orch_args.tensor(41).ref();
+    const simpler::hbg::Tensor &ext_gate_w = orch_args.tensor(42).ref();
+    const simpler::hbg::Tensor &ext_gate_bias = orch_args.tensor(43).ref();
+    const simpler::hbg::Tensor &ext_tid2eid = orch_args.tensor(44).ref();
+    const simpler::hbg::Tensor &ext_routed_w1 = orch_args.tensor(45).ref();
+    const simpler::hbg::Tensor &ext_routed_w1_scale = orch_args.tensor(46).ref();
+    const simpler::hbg::Tensor &ext_routed_w3 = orch_args.tensor(47).ref();
+    const simpler::hbg::Tensor &ext_routed_w3_scale = orch_args.tensor(48).ref();
+    const simpler::hbg::Tensor &ext_routed_w2 = orch_args.tensor(49).ref();
+    const simpler::hbg::Tensor &ext_routed_w2_scale = orch_args.tensor(50).ref();
+    const simpler::hbg::Tensor &ext_shared_w1 = orch_args.tensor(51).ref();
+    const simpler::hbg::Tensor &ext_shared_w1_scale = orch_args.tensor(52).ref();
+    const simpler::hbg::Tensor &ext_shared_w3 = orch_args.tensor(53).ref();
+    const simpler::hbg::Tensor &ext_shared_w3_scale = orch_args.tensor(54).ref();
+    const simpler::hbg::Tensor &ext_shared_w2 = orch_args.tensor(55).ref();
+    const simpler::hbg::Tensor &ext_shared_w2_scale = orch_args.tensor(56).ref();
+    const simpler::hbg::Tensor &ext_freqs_cos = orch_args.tensor(57).ref();
+    const simpler::hbg::Tensor &ext_freqs_sin = orch_args.tensor(58).ref();
+    const simpler::hbg::Tensor &ext_block_table = orch_args.tensor(59).ref();
+    const simpler::hbg::Tensor &ext_position_ids = orch_args.tensor(60).ref();
+    const simpler::hbg::Tensor &ext_kv_seq_lens = orch_args.tensor(61).ref();
+    const simpler::hbg::Tensor &ext_hca_compress_state_block_table = orch_args.tensor(62).ref();
+    const simpler::hbg::Tensor &ext_csa_compress_state_block_table = orch_args.tensor(63).ref();
+    const simpler::hbg::Tensor &ext_csa_inner_compress_state_block_table = orch_args.tensor(64).ref();
+    const simpler::hbg::Tensor &ext_cmp_block_table = orch_args.tensor(65).ref();
+    const simpler::hbg::Tensor &ext_idx_block_table = orch_args.tensor(66).ref();
+    const simpler::hbg::Tensor &ext_block_counts = orch_args.tensor(67).ref();
+    const simpler::hbg::Tensor &ext_input_ids = orch_args.tensor(68).ref();
+    const simpler::hbg::Tensor &ext_hc_head_fn = orch_args.tensor(69).ref();
+    const simpler::hbg::Tensor &ext_hc_head_scale = orch_args.tensor(70).ref();
+    const simpler::hbg::Tensor &ext_hc_head_base = orch_args.tensor(71).ref();
+    const simpler::hbg::Tensor &ext_final_norm_w = orch_args.tensor(72).ref();
+    const simpler::hbg::Tensor &ext_lm_head_weight = orch_args.tensor(73).ref();
+    const simpler::hbg::Tensor &ext_logit_row_indices = orch_args.tensor(74).ref();
+    const simpler::hbg::Tensor &ext_pre_hc_hidden_out = orch_args.tensor(75).ref();
+    const simpler::hbg::Tensor &ext_x_out = orch_args.tensor(76).ref();
+    const simpler::hbg::Tensor &ext_logits = orch_args.tensor(77).ref();
+    const simpler::hbg::Tensor &ext_sampled_ids = orch_args.tensor(78).ref();
+    const simpler::hbg::Tensor &ext_recv_meta = orch_args.tensor(79).ref();
+    const simpler::hbg::Tensor &ext_recv_x = orch_args.tensor(80).ref();
+    const simpler::hbg::Tensor &ext_recv_aux = orch_args.tensor(81).ref();
+    const simpler::hbg::Tensor &ext_recv_route = orch_args.tensor(82).ref();
+    const simpler::hbg::Tensor &ext_arrived = orch_args.tensor(83).ref();
+    const simpler::hbg::Tensor &ext_data_arrived = orch_args.tensor(84).ref();
+    const simpler::hbg::Tensor &ext_routed_y_buf = orch_args.tensor(85).ref();
+    const simpler::hbg::Tensor &ext_combine_arrived = orch_args.tensor(86).ref();
+    const simpler::hbg::Tensor &ext_lm_head_hidden_window = orch_args.tensor(87).ref();
+    const simpler::hbg::Tensor &ext_lm_head_hidden_done = orch_args.tensor(88).ref();
+    const simpler::hbg::Tensor &ext_lm_head_logits_window = orch_args.tensor(89).ref();
+    const simpler::hbg::Tensor &ext_lm_head_logits_done = orch_args.tensor(90).ref();
+    const simpler::hbg::Tensor &ext_num_tokens_per_owner = orch_args.tensor(91).ref();
 
     // Scalar params
     int32_t my_rank = from_u64<int32_t>(orch_args.scalar(0));
@@ -6255,22 +6300,22 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         csa_inner_state_slot_mapping_inline609_ci, x_hc_inline711_ci, x_attn0_inline706_ci, x_attn1_inline694_ci,
         hidden_inline709_ci, x_attn_last_inline539_ci, x_head_inline485_ci
     );
-    const ChipTensor &ori_slot_mapping_inline614 = alloc_0.get_ref(0);
-    const ChipTensor &swa_slot_mapping_inline576 = alloc_0.get_ref(1);
-    const ChipTensor &swa_indices_inline636 = alloc_0.get_ref(2);
-    const ChipTensor &swa_lens_inline628 = alloc_0.get_ref(3);
-    const ChipTensor &hca_cmp_slot_mapping_inline617 = alloc_0.get_ref(4);
-    const ChipTensor &hca_state_slot_mapping_inline710 = alloc_0.get_ref(5);
-    const ChipTensor &csa_cmp_slot_mapping_inline719 = alloc_0.get_ref(6);
-    const ChipTensor &csa_idx_slot_mapping_inline600 = alloc_0.get_ref(7);
-    const ChipTensor &csa_state_slot_mapping_inline645 = alloc_0.get_ref(8);
-    const ChipTensor &csa_inner_state_slot_mapping_inline609 = alloc_0.get_ref(9);
-    const ChipTensor &x_hc_inline711 = alloc_0.get_ref(10);
-    const ChipTensor &x_attn0_inline706 = alloc_0.get_ref(11);
-    const ChipTensor &x_attn1_inline694 = alloc_0.get_ref(12);
-    const ChipTensor &hidden_inline709 = alloc_0.get_ref(13);
-    const ChipTensor &x_attn_last_inline539 = alloc_0.get_ref(14);
-    const ChipTensor &x_head_inline485 = alloc_0.get_ref(15);
+    const simpler::hbg::Tensor &ori_slot_mapping_inline614 = alloc_0.get_ref(0);
+    const simpler::hbg::Tensor &swa_slot_mapping_inline576 = alloc_0.get_ref(1);
+    const simpler::hbg::Tensor &swa_indices_inline636 = alloc_0.get_ref(2);
+    const simpler::hbg::Tensor &swa_lens_inline628 = alloc_0.get_ref(3);
+    const simpler::hbg::Tensor &hca_cmp_slot_mapping_inline617 = alloc_0.get_ref(4);
+    const simpler::hbg::Tensor &hca_state_slot_mapping_inline710 = alloc_0.get_ref(5);
+    const simpler::hbg::Tensor &csa_cmp_slot_mapping_inline719 = alloc_0.get_ref(6);
+    const simpler::hbg::Tensor &csa_idx_slot_mapping_inline600 = alloc_0.get_ref(7);
+    const simpler::hbg::Tensor &csa_state_slot_mapping_inline645 = alloc_0.get_ref(8);
+    const simpler::hbg::Tensor &csa_inner_state_slot_mapping_inline609 = alloc_0.get_ref(9);
+    const simpler::hbg::Tensor &x_hc_inline711 = alloc_0.get_ref(10);
+    const simpler::hbg::Tensor &x_attn0_inline706 = alloc_0.get_ref(11);
+    const simpler::hbg::Tensor &x_attn1_inline694 = alloc_0.get_ref(12);
+    const simpler::hbg::Tensor &hidden_inline709 = alloc_0.get_ref(13);
+    const simpler::hbg::Tensor &x_attn_last_inline539 = alloc_0.get_ref(14);
+    const simpler::hbg::Tensor &x_head_inline485 = alloc_0.get_ref(15);
     uint32_t swa_cos_profile_inline639_offsets[3] = {0, 0, 0};
     uint32_t swa_cos_profile_inline639_shapes[3] = {
         (swa_cos_profile_inline639_offsets[0] >= ext_freqs_cos.shapes[0] ?
@@ -6283,7 +6328,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(64, ext_freqs_cos.shapes[2] - swa_cos_profile_inline639_offsets[2]))
     };
-    ChipTensor swa_cos_profile_inline639 =
+    simpler::hbg::Tensor swa_cos_profile_inline639 =
         ext_freqs_cos.view(swa_cos_profile_inline639_shapes, swa_cos_profile_inline639_offsets);
     uint32_t swa_sin_profile_inline633_offsets[3] = {0, 0, 0};
     uint32_t swa_sin_profile_inline633_shapes[3] = {
@@ -6297,7 +6342,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(64, ext_freqs_sin.shapes[2] - swa_sin_profile_inline633_offsets[2]))
     };
-    ChipTensor swa_sin_profile_inline633 =
+    simpler::hbg::Tensor swa_sin_profile_inline633 =
         ext_freqs_sin.view(swa_sin_profile_inline633_shapes, swa_sin_profile_inline633_offsets);
     uint32_t compressed_cos_profile_inline632_offsets[3] = {1, 0, 0};
     uint32_t compressed_cos_profile_inline632_shapes[3] = {
@@ -6311,7 +6356,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(64, ext_freqs_cos.shapes[2] - compressed_cos_profile_inline632_offsets[2]))
     };
-    ChipTensor compressed_cos_profile_inline632 =
+    simpler::hbg::Tensor compressed_cos_profile_inline632 =
         ext_freqs_cos.view(compressed_cos_profile_inline632_shapes, compressed_cos_profile_inline632_offsets);
     uint32_t compressed_sin_profile_inline648_offsets[3] = {1, 0, 0};
     uint32_t compressed_sin_profile_inline648_shapes[3] = {
@@ -6325,17 +6370,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(64, ext_freqs_sin.shapes[2] - compressed_sin_profile_inline648_offsets[2]))
     };
-    ChipTensor compressed_sin_profile_inline648 =
+    simpler::hbg::Tensor compressed_sin_profile_inline648 =
         ext_freqs_sin.view(compressed_sin_profile_inline648_shapes, compressed_sin_profile_inline648_offsets);
     uint32_t swa_freqs_cos_inline585_shapes[2] = {16384, 64};
-    ChipTensor swa_freqs_cos_inline585 = swa_cos_profile_inline639.reshape(swa_freqs_cos_inline585_shapes, 2);
+    simpler::hbg::Tensor swa_freqs_cos_inline585 = swa_cos_profile_inline639.reshape(swa_freqs_cos_inline585_shapes, 2);
     uint32_t swa_freqs_sin_inline606_shapes[2] = {16384, 64};
-    ChipTensor swa_freqs_sin_inline606 = swa_sin_profile_inline633.reshape(swa_freqs_sin_inline606_shapes, 2);
+    simpler::hbg::Tensor swa_freqs_sin_inline606 = swa_sin_profile_inline633.reshape(swa_freqs_sin_inline606_shapes, 2);
     uint32_t compressed_freqs_cos_inline559_shapes[2] = {16384, 64};
-    ChipTensor compressed_freqs_cos_inline559 =
+    simpler::hbg::Tensor compressed_freqs_cos_inline559 =
         compressed_cos_profile_inline632.reshape(compressed_freqs_cos_inline559_shapes, 2);
     uint32_t compressed_freqs_sin_inline692_shapes[2] = {16384, 64};
-    ChipTensor compressed_freqs_sin_inline692 =
+    simpler::hbg::Tensor compressed_freqs_sin_inline692 =
         compressed_sin_profile_inline648.reshape(compressed_freqs_sin_inline692_shapes, 2);
 
     // Spmd decode_build_swa_metadata_spmd: decode_build_swa_metadata
@@ -6379,7 +6424,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     params_t2.launch_spec.set_block_num(1);
     rt_submit_aiv_task(2, params_t2);
     uint32_t x_hc_flat_inline8701_shapes[2] = {32, 4096};
-    ChipTensor x_hc_flat_inline8701 = x_hc_inline711.reshape(x_hc_flat_inline8701_shapes, 2);
+    simpler::hbg::Tensor x_hc_flat_inline8701 = x_hc_inline711.reshape(x_hc_flat_inline8701_shapes, 2);
 
     // Spmd pack_x_hc_spmd: pack_x_hc
     CoreTaskArgs params_t3;
@@ -6405,7 +6450,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(16384, ext_hc_attn_fn.shapes[1] - hc_attn_fn_l0_inline658_offsets[1]))
     };
-    ChipTensor hc_attn_fn_l0_inline658 =
+    simpler::hbg::Tensor hc_attn_fn_l0_inline658 =
         ext_hc_attn_fn.view(hc_attn_fn_l0_inline658_shapes, hc_attn_fn_l0_inline658_offsets);
     uint32_t hc_attn_scale_l0_inline660_offsets[1] = {0};
     uint32_t hc_attn_scale_l0_inline660_shapes[1] = {
@@ -6413,7 +6458,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(3, ext_hc_attn_scale.shapes[0] - hc_attn_scale_l0_inline660_offsets[0]))
     };
-    ChipTensor hc_attn_scale_l0_inline660 =
+    simpler::hbg::Tensor hc_attn_scale_l0_inline660 =
         ext_hc_attn_scale.view(hc_attn_scale_l0_inline660_shapes, hc_attn_scale_l0_inline660_offsets);
     uint32_t hc_attn_base_l0_inline688_offsets[1] = {0};
     uint32_t hc_attn_base_l0_inline688_shapes[1] = {
@@ -6421,7 +6466,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(24, ext_hc_attn_base.shapes[0] - hc_attn_base_l0_inline688_offsets[0]))
     };
-    ChipTensor hc_attn_base_l0_inline688 =
+    simpler::hbg::Tensor hc_attn_base_l0_inline688 =
         ext_hc_attn_base.view(hc_attn_base_l0_inline688_shapes, hc_attn_base_l0_inline688_offsets);
     uint32_t attn_norm_w_l0_inline616_offsets[1] = {0};
     uint32_t attn_norm_w_l0_inline616_shapes[1] = {
@@ -6429,7 +6474,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_attn_norm_w.shapes[0] - attn_norm_w_l0_inline616_offsets[0]))
     };
-    ChipTensor attn_norm_w_l0_inline616 =
+    simpler::hbg::Tensor attn_norm_w_l0_inline616 =
         ext_attn_norm_w.view(attn_norm_w_l0_inline616_shapes, attn_norm_w_l0_inline616_offsets);
     uint32_t wq_a_l0_inline620_offsets[2] = {0, 0};
     uint32_t wq_a_l0_inline620_shapes[2] = {
@@ -6440,7 +6485,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(1024, ext_wq_a.shapes[1] - wq_a_l0_inline620_offsets[1]))
     };
-    ChipTensor wq_a_l0_inline620 = ext_wq_a.view(wq_a_l0_inline620_shapes, wq_a_l0_inline620_offsets);
+    simpler::hbg::Tensor wq_a_l0_inline620 = ext_wq_a.view(wq_a_l0_inline620_shapes, wq_a_l0_inline620_offsets);
     uint32_t wq_b_l0_inline659_offsets[2] = {0, 0};
     uint32_t wq_b_l0_inline659_shapes[2] = {
         (wq_b_l0_inline659_offsets[0] >= ext_wq_b.shapes[0] ?
@@ -6450,14 +6495,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(32768, ext_wq_b.shapes[1] - wq_b_l0_inline659_offsets[1]))
     };
-    ChipTensor wq_b_l0_inline659 = ext_wq_b.view(wq_b_l0_inline659_shapes, wq_b_l0_inline659_offsets);
+    simpler::hbg::Tensor wq_b_l0_inline659 = ext_wq_b.view(wq_b_l0_inline659_shapes, wq_b_l0_inline659_offsets);
     uint32_t wq_b_scale_l0_inline662_offsets[1] = {0};
     uint32_t wq_b_scale_l0_inline662_shapes[1] = {
         (wq_b_scale_l0_inline662_offsets[0] >= ext_wq_b_scale.shapes[0] ?
              0u :
              std::min<uint32_t>(32768, ext_wq_b_scale.shapes[0] - wq_b_scale_l0_inline662_offsets[0]))
     };
-    ChipTensor wq_b_scale_l0_inline662 =
+    simpler::hbg::Tensor wq_b_scale_l0_inline662 =
         ext_wq_b_scale.view(wq_b_scale_l0_inline662_shapes, wq_b_scale_l0_inline662_offsets);
     uint32_t wkv_l0_inline642_offsets[2] = {0, 0};
     uint32_t wkv_l0_inline642_shapes[2] = {
@@ -6468,21 +6513,22 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_wkv.shapes[1] - wkv_l0_inline642_offsets[1]))
     };
-    ChipTensor wkv_l0_inline642 = ext_wkv.view(wkv_l0_inline642_shapes, wkv_l0_inline642_offsets);
+    simpler::hbg::Tensor wkv_l0_inline642 = ext_wkv.view(wkv_l0_inline642_shapes, wkv_l0_inline642_offsets);
     uint32_t gamma_cq_l0_inline612_offsets[1] = {0};
     uint32_t gamma_cq_l0_inline612_shapes[1] = {
         (gamma_cq_l0_inline612_offsets[0] >= ext_gamma_cq.shapes[0] ?
              0u :
              std::min<uint32_t>(1024, ext_gamma_cq.shapes[0] - gamma_cq_l0_inline612_offsets[0]))
     };
-    ChipTensor gamma_cq_l0_inline612 = ext_gamma_cq.view(gamma_cq_l0_inline612_shapes, gamma_cq_l0_inline612_offsets);
+    simpler::hbg::Tensor gamma_cq_l0_inline612 =
+        ext_gamma_cq.view(gamma_cq_l0_inline612_shapes, gamma_cq_l0_inline612_offsets);
     uint32_t gamma_ckv_l0_inline646_offsets[1] = {0};
     uint32_t gamma_ckv_l0_inline646_shapes[1] = {
         (gamma_ckv_l0_inline646_offsets[0] >= ext_gamma_ckv.shapes[0] ?
              0u :
              std::min<uint32_t>(512, ext_gamma_ckv.shapes[0] - gamma_ckv_l0_inline646_offsets[0]))
     };
-    ChipTensor gamma_ckv_l0_inline646 =
+    simpler::hbg::Tensor gamma_ckv_l0_inline646 =
         ext_gamma_ckv.view(gamma_ckv_l0_inline646_shapes, gamma_ckv_l0_inline646_offsets);
     int64_t t__tmp_v3 = (int64_t)orch_args.tensor(11).ref().shapes[0];
     int64_t ori_block_num_inline631 = (t__tmp_v3 / 43);
@@ -6514,14 +6560,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_kv_cache.shapes[3] - kv_cache_l0_inline603_offsets[3]))
     };
-    ChipTensor kv_cache_l0_inline603 = ext_kv_cache.view(kv_cache_l0_inline603_shapes, kv_cache_l0_inline603_offsets);
+    simpler::hbg::Tensor kv_cache_l0_inline603 =
+        ext_kv_cache.view(kv_cache_l0_inline603_shapes, kv_cache_l0_inline603_offsets);
     uint32_t attn_sink_l0_inline595_offsets[1] = {0};
     uint32_t attn_sink_l0_inline595_shapes[1] = {
         (attn_sink_l0_inline595_offsets[0] >= ext_attn_sink.shapes[0] ?
              0u :
              std::min<uint32_t>(64, ext_attn_sink.shapes[0] - attn_sink_l0_inline595_offsets[0]))
     };
-    ChipTensor attn_sink_l0_inline595 =
+    simpler::hbg::Tensor attn_sink_l0_inline595 =
         ext_attn_sink.view(attn_sink_l0_inline595_shapes, attn_sink_l0_inline595_offsets);
     uint32_t wo_a_l0_inline592_offsets[3] = {0, 0, 0};
     uint32_t wo_a_l0_inline592_shapes[3] = {
@@ -6535,7 +6582,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_wo_a.shapes[2] - wo_a_l0_inline592_offsets[2]))
     };
-    ChipTensor wo_a_l0_inline592 = ext_wo_a.view(wo_a_l0_inline592_shapes, wo_a_l0_inline592_offsets);
+    simpler::hbg::Tensor wo_a_l0_inline592 = ext_wo_a.view(wo_a_l0_inline592_shapes, wo_a_l0_inline592_offsets);
     uint32_t wo_b_l0_inline643_offsets[2] = {0, 0};
     uint32_t wo_b_l0_inline643_shapes[2] = {
         (wo_b_l0_inline643_offsets[0] >= ext_wo_b.shapes[0] ?
@@ -6545,14 +6592,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(8192, ext_wo_b.shapes[1] - wo_b_l0_inline643_offsets[1]))
     };
-    ChipTensor wo_b_l0_inline643 = ext_wo_b.view(wo_b_l0_inline643_shapes, wo_b_l0_inline643_offsets);
+    simpler::hbg::Tensor wo_b_l0_inline643 = ext_wo_b.view(wo_b_l0_inline643_shapes, wo_b_l0_inline643_offsets);
     uint32_t wo_b_scale_l0_inline653_offsets[1] = {0};
     uint32_t wo_b_scale_l0_inline653_shapes[1] = {
         (wo_b_scale_l0_inline653_offsets[0] >= ext_wo_b_scale.shapes[0] ?
              0u :
              std::min<uint32_t>(4096, ext_wo_b_scale.shapes[0] - wo_b_scale_l0_inline653_offsets[0]))
     };
-    ChipTensor wo_b_scale_l0_inline653 =
+    simpler::hbg::Tensor wo_b_scale_l0_inline653 =
         ext_wo_b_scale.view(wo_b_scale_l0_inline653_shapes, wo_b_scale_l0_inline653_offsets);
     uint32_t cmp_kv_l0_inline674_offsets[4] = {0, 0, 0, 0};
     uint32_t cmp_kv_l0_inline674_shapes[4] = {
@@ -6571,7 +6618,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_cmp_kv.shapes[3] - cmp_kv_l0_inline674_offsets[3]))
     };
-    ChipTensor cmp_kv_l0_inline674 = ext_cmp_kv.view(cmp_kv_l0_inline674_shapes, cmp_kv_l0_inline674_offsets);
+    simpler::hbg::Tensor cmp_kv_l0_inline674 = ext_cmp_kv.view(cmp_kv_l0_inline674_shapes, cmp_kv_l0_inline674_offsets);
     uint32_t hc_ffn_fn_l0_inline621_offsets[2] = {0, 0};
     uint32_t hc_ffn_fn_l0_inline621_shapes[2] = {
         (hc_ffn_fn_l0_inline621_offsets[0] >= ext_hc_ffn_fn.shapes[0] ?
@@ -6581,7 +6628,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(16384, ext_hc_ffn_fn.shapes[1] - hc_ffn_fn_l0_inline621_offsets[1]))
     };
-    ChipTensor hc_ffn_fn_l0_inline621 =
+    simpler::hbg::Tensor hc_ffn_fn_l0_inline621 =
         ext_hc_ffn_fn.view(hc_ffn_fn_l0_inline621_shapes, hc_ffn_fn_l0_inline621_offsets);
     uint32_t hc_ffn_scale_l0_inline583_offsets[1] = {0};
     uint32_t hc_ffn_scale_l0_inline583_shapes[1] = {
@@ -6589,7 +6636,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(3, ext_hc_ffn_scale.shapes[0] - hc_ffn_scale_l0_inline583_offsets[0]))
     };
-    ChipTensor hc_ffn_scale_l0_inline583 =
+    simpler::hbg::Tensor hc_ffn_scale_l0_inline583 =
         ext_hc_ffn_scale.view(hc_ffn_scale_l0_inline583_shapes, hc_ffn_scale_l0_inline583_offsets);
     uint32_t hc_ffn_base_l0_inline629_offsets[1] = {0};
     uint32_t hc_ffn_base_l0_inline629_shapes[1] = {
@@ -6597,7 +6644,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(24, ext_hc_ffn_base.shapes[0] - hc_ffn_base_l0_inline629_offsets[0]))
     };
-    ChipTensor hc_ffn_base_l0_inline629 =
+    simpler::hbg::Tensor hc_ffn_base_l0_inline629 =
         ext_hc_ffn_base.view(hc_ffn_base_l0_inline629_shapes, hc_ffn_base_l0_inline629_offsets);
     uint32_t norm_w_l0_inline579_offsets[1] = {0};
     uint32_t norm_w_l0_inline579_shapes[1] = {
@@ -6605,7 +6652,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_norm_w.shapes[0] - norm_w_l0_inline579_offsets[0]))
     };
-    ChipTensor norm_w_l0_inline579 = ext_norm_w.view(norm_w_l0_inline579_shapes, norm_w_l0_inline579_offsets);
+    simpler::hbg::Tensor norm_w_l0_inline579 = ext_norm_w.view(norm_w_l0_inline579_shapes, norm_w_l0_inline579_offsets);
     uint32_t gate_w_l0_inline573_offsets[2] = {0, 0};
     uint32_t gate_w_l0_inline573_shapes[2] = {
         (gate_w_l0_inline573_offsets[0] >= ext_gate_w.shapes[0] ?
@@ -6615,14 +6662,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_gate_w.shapes[1] - gate_w_l0_inline573_offsets[1]))
     };
-    ChipTensor gate_w_l0_inline573 = ext_gate_w.view(gate_w_l0_inline573_shapes, gate_w_l0_inline573_offsets);
+    simpler::hbg::Tensor gate_w_l0_inline573 = ext_gate_w.view(gate_w_l0_inline573_shapes, gate_w_l0_inline573_offsets);
     uint32_t gate_bias_l0_inline566_offsets[1] = {0};
     uint32_t gate_bias_l0_inline566_shapes[1] = {
         (gate_bias_l0_inline566_offsets[0] >= ext_gate_bias.shapes[0] ?
              0u :
              std::min<uint32_t>(64, ext_gate_bias.shapes[0] - gate_bias_l0_inline566_offsets[0]))
     };
-    ChipTensor gate_bias_l0_inline566 =
+    simpler::hbg::Tensor gate_bias_l0_inline566 =
         ext_gate_bias.view(gate_bias_l0_inline566_shapes, gate_bias_l0_inline566_offsets);
     uint32_t tid2eid_l0_inline607_offsets[2] = {0, 0};
     uint32_t tid2eid_l0_inline607_shapes[2] = {
@@ -6633,7 +6680,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(6, ext_tid2eid.shapes[1] - tid2eid_l0_inline607_offsets[1]))
     };
-    ChipTensor tid2eid_l0_inline607 = ext_tid2eid.view(tid2eid_l0_inline607_shapes, tid2eid_l0_inline607_offsets);
+    simpler::hbg::Tensor tid2eid_l0_inline607 =
+        ext_tid2eid.view(tid2eid_l0_inline607_shapes, tid2eid_l0_inline607_offsets);
     uint32_t routed_w1_l0_inline564_offsets[3] = {0, 0, 0};
     uint32_t routed_w1_l0_inline564_shapes[3] = {
         (routed_w1_l0_inline564_offsets[0] >= ext_routed_w1.shapes[0] ?
@@ -6646,7 +6694,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w1.shapes[2] - routed_w1_l0_inline564_offsets[2]))
     };
-    ChipTensor routed_w1_l0_inline564 =
+    simpler::hbg::Tensor routed_w1_l0_inline564 =
         ext_routed_w1.view(routed_w1_l0_inline564_shapes, routed_w1_l0_inline564_offsets);
     uint32_t routed_w1_scale_l0_inline654_offsets[2] = {0, 0};
     uint32_t routed_w1_scale_l0_inline654_shapes[2] = {
@@ -6657,7 +6705,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w1_scale.shapes[1] - routed_w1_scale_l0_inline654_offsets[1]))
     };
-    ChipTensor routed_w1_scale_l0_inline654 =
+    simpler::hbg::Tensor routed_w1_scale_l0_inline654 =
         ext_routed_w1_scale.view(routed_w1_scale_l0_inline654_shapes, routed_w1_scale_l0_inline654_offsets);
     uint32_t routed_w3_l0_inline589_offsets[3] = {0, 0, 0};
     uint32_t routed_w3_l0_inline589_shapes[3] = {
@@ -6671,7 +6719,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w3.shapes[2] - routed_w3_l0_inline589_offsets[2]))
     };
-    ChipTensor routed_w3_l0_inline589 =
+    simpler::hbg::Tensor routed_w3_l0_inline589 =
         ext_routed_w3.view(routed_w3_l0_inline589_shapes, routed_w3_l0_inline589_offsets);
     uint32_t routed_w3_scale_l0_inline562_offsets[2] = {0, 0};
     uint32_t routed_w3_scale_l0_inline562_shapes[2] = {
@@ -6682,7 +6730,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w3_scale.shapes[1] - routed_w3_scale_l0_inline562_offsets[1]))
     };
-    ChipTensor routed_w3_scale_l0_inline562 =
+    simpler::hbg::Tensor routed_w3_scale_l0_inline562 =
         ext_routed_w3_scale.view(routed_w3_scale_l0_inline562_shapes, routed_w3_scale_l0_inline562_offsets);
     uint32_t routed_w2_l0_inline591_offsets[3] = {0, 0, 0};
     uint32_t routed_w2_l0_inline591_shapes[3] = {
@@ -6696,7 +6744,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w2.shapes[2] - routed_w2_l0_inline591_offsets[2]))
     };
-    ChipTensor routed_w2_l0_inline591 =
+    simpler::hbg::Tensor routed_w2_l0_inline591 =
         ext_routed_w2.view(routed_w2_l0_inline591_shapes, routed_w2_l0_inline591_offsets);
     uint32_t routed_w2_scale_l0_inline563_offsets[2] = {0, 0};
     uint32_t routed_w2_scale_l0_inline563_shapes[2] = {
@@ -6707,7 +6755,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w2_scale.shapes[1] - routed_w2_scale_l0_inline563_offsets[1]))
     };
-    ChipTensor routed_w2_scale_l0_inline563 =
+    simpler::hbg::Tensor routed_w2_scale_l0_inline563 =
         ext_routed_w2_scale.view(routed_w2_scale_l0_inline563_shapes, routed_w2_scale_l0_inline563_offsets);
     uint32_t shared_w1_l0_inline558_offsets[2] = {0, 0};
     uint32_t shared_w1_l0_inline558_shapes[2] = {
@@ -6718,7 +6766,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w1.shapes[1] - shared_w1_l0_inline558_offsets[1]))
     };
-    ChipTensor shared_w1_l0_inline558 =
+    simpler::hbg::Tensor shared_w1_l0_inline558 =
         ext_shared_w1.view(shared_w1_l0_inline558_shapes, shared_w1_l0_inline558_offsets);
     uint32_t shared_w1_scale_l0_inline619_offsets[1] = {0};
     uint32_t shared_w1_scale_l0_inline619_shapes[1] = {
@@ -6726,7 +6774,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w1_scale.shapes[0] - shared_w1_scale_l0_inline619_offsets[0]))
     };
-    ChipTensor shared_w1_scale_l0_inline619 =
+    simpler::hbg::Tensor shared_w1_scale_l0_inline619 =
         ext_shared_w1_scale.view(shared_w1_scale_l0_inline619_shapes, shared_w1_scale_l0_inline619_offsets);
     uint32_t shared_w3_l0_inline650_offsets[2] = {0, 0};
     uint32_t shared_w3_l0_inline650_shapes[2] = {
@@ -6737,7 +6785,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w3.shapes[1] - shared_w3_l0_inline650_offsets[1]))
     };
-    ChipTensor shared_w3_l0_inline650 =
+    simpler::hbg::Tensor shared_w3_l0_inline650 =
         ext_shared_w3.view(shared_w3_l0_inline650_shapes, shared_w3_l0_inline650_offsets);
     uint32_t shared_w3_scale_l0_inline665_offsets[1] = {0};
     uint32_t shared_w3_scale_l0_inline665_shapes[1] = {
@@ -6745,7 +6793,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w3_scale.shapes[0] - shared_w3_scale_l0_inline665_offsets[0]))
     };
-    ChipTensor shared_w3_scale_l0_inline665 =
+    simpler::hbg::Tensor shared_w3_scale_l0_inline665 =
         ext_shared_w3_scale.view(shared_w3_scale_l0_inline665_shapes, shared_w3_scale_l0_inline665_offsets);
     uint32_t shared_w2_l0_inline666_offsets[2] = {0, 0};
     uint32_t shared_w2_l0_inline666_shapes[2] = {
@@ -6756,7 +6804,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w2.shapes[1] - shared_w2_l0_inline666_offsets[1]))
     };
-    ChipTensor shared_w2_l0_inline666 =
+    simpler::hbg::Tensor shared_w2_l0_inline666 =
         ext_shared_w2.view(shared_w2_l0_inline666_shapes, shared_w2_l0_inline666_offsets);
     uint32_t shared_w2_scale_l0_inline667_offsets[1] = {0};
     uint32_t shared_w2_scale_l0_inline667_shapes[1] = {
@@ -6764,7 +6812,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w2_scale.shapes[0] - shared_w2_scale_l0_inline667_offsets[0]))
     };
-    ChipTensor shared_w2_scale_l0_inline667 =
+    simpler::hbg::Tensor shared_w2_scale_l0_inline667 =
         ext_shared_w2_scale.view(shared_w2_scale_l0_inline667_shapes, shared_w2_scale_l0_inline667_offsets);
     uint32_t hc_attn_fn_l1_inline670_offsets[2] = {24, 0};
     uint32_t hc_attn_fn_l1_inline670_shapes[2] = {
@@ -6775,7 +6823,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(16384, ext_hc_attn_fn.shapes[1] - hc_attn_fn_l1_inline670_offsets[1]))
     };
-    ChipTensor hc_attn_fn_l1_inline670 =
+    simpler::hbg::Tensor hc_attn_fn_l1_inline670 =
         ext_hc_attn_fn.view(hc_attn_fn_l1_inline670_shapes, hc_attn_fn_l1_inline670_offsets);
     uint32_t hc_attn_scale_l1_inline676_offsets[1] = {3};
     uint32_t hc_attn_scale_l1_inline676_shapes[1] = {
@@ -6783,7 +6831,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(3, ext_hc_attn_scale.shapes[0] - hc_attn_scale_l1_inline676_offsets[0]))
     };
-    ChipTensor hc_attn_scale_l1_inline676 =
+    simpler::hbg::Tensor hc_attn_scale_l1_inline676 =
         ext_hc_attn_scale.view(hc_attn_scale_l1_inline676_shapes, hc_attn_scale_l1_inline676_offsets);
     uint32_t hc_attn_base_l1_inline675_offsets[1] = {24};
     uint32_t hc_attn_base_l1_inline675_shapes[1] = {
@@ -6791,7 +6839,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(24, ext_hc_attn_base.shapes[0] - hc_attn_base_l1_inline675_offsets[0]))
     };
-    ChipTensor hc_attn_base_l1_inline675 =
+    simpler::hbg::Tensor hc_attn_base_l1_inline675 =
         ext_hc_attn_base.view(hc_attn_base_l1_inline675_shapes, hc_attn_base_l1_inline675_offsets);
     uint32_t attn_norm_w_l1_inline649_offsets[1] = {4096};
     uint32_t attn_norm_w_l1_inline649_shapes[1] = {
@@ -6799,7 +6847,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_attn_norm_w.shapes[0] - attn_norm_w_l1_inline649_offsets[0]))
     };
-    ChipTensor attn_norm_w_l1_inline649 =
+    simpler::hbg::Tensor attn_norm_w_l1_inline649 =
         ext_attn_norm_w.view(attn_norm_w_l1_inline649_shapes, attn_norm_w_l1_inline649_offsets);
     uint32_t wq_a_l1_inline647_offsets[2] = {4096, 0};
     uint32_t wq_a_l1_inline647_shapes[2] = {
@@ -6810,7 +6858,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(1024, ext_wq_a.shapes[1] - wq_a_l1_inline647_offsets[1]))
     };
-    ChipTensor wq_a_l1_inline647 = ext_wq_a.view(wq_a_l1_inline647_shapes, wq_a_l1_inline647_offsets);
+    simpler::hbg::Tensor wq_a_l1_inline647 = ext_wq_a.view(wq_a_l1_inline647_shapes, wq_a_l1_inline647_offsets);
     uint32_t wq_b_l1_inline623_offsets[2] = {1024, 0};
     uint32_t wq_b_l1_inline623_shapes[2] = {
         (wq_b_l1_inline623_offsets[0] >= ext_wq_b.shapes[0] ?
@@ -6820,14 +6868,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(32768, ext_wq_b.shapes[1] - wq_b_l1_inline623_offsets[1]))
     };
-    ChipTensor wq_b_l1_inline623 = ext_wq_b.view(wq_b_l1_inline623_shapes, wq_b_l1_inline623_offsets);
+    simpler::hbg::Tensor wq_b_l1_inline623 = ext_wq_b.view(wq_b_l1_inline623_shapes, wq_b_l1_inline623_offsets);
     uint32_t wq_b_scale_l1_inline661_offsets[1] = {32768};
     uint32_t wq_b_scale_l1_inline661_shapes[1] = {
         (wq_b_scale_l1_inline661_offsets[0] >= ext_wq_b_scale.shapes[0] ?
              0u :
              std::min<uint32_t>(32768, ext_wq_b_scale.shapes[0] - wq_b_scale_l1_inline661_offsets[0]))
     };
-    ChipTensor wq_b_scale_l1_inline661 =
+    simpler::hbg::Tensor wq_b_scale_l1_inline661 =
         ext_wq_b_scale.view(wq_b_scale_l1_inline661_shapes, wq_b_scale_l1_inline661_offsets);
     uint32_t wkv_l1_inline678_offsets[2] = {4096, 0};
     uint32_t wkv_l1_inline678_shapes[2] = {
@@ -6838,21 +6886,22 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_wkv.shapes[1] - wkv_l1_inline678_offsets[1]))
     };
-    ChipTensor wkv_l1_inline678 = ext_wkv.view(wkv_l1_inline678_shapes, wkv_l1_inline678_offsets);
+    simpler::hbg::Tensor wkv_l1_inline678 = ext_wkv.view(wkv_l1_inline678_shapes, wkv_l1_inline678_offsets);
     uint32_t gamma_cq_l1_inline681_offsets[1] = {1024};
     uint32_t gamma_cq_l1_inline681_shapes[1] = {
         (gamma_cq_l1_inline681_offsets[0] >= ext_gamma_cq.shapes[0] ?
              0u :
              std::min<uint32_t>(1024, ext_gamma_cq.shapes[0] - gamma_cq_l1_inline681_offsets[0]))
     };
-    ChipTensor gamma_cq_l1_inline681 = ext_gamma_cq.view(gamma_cq_l1_inline681_shapes, gamma_cq_l1_inline681_offsets);
+    simpler::hbg::Tensor gamma_cq_l1_inline681 =
+        ext_gamma_cq.view(gamma_cq_l1_inline681_shapes, gamma_cq_l1_inline681_offsets);
     uint32_t gamma_ckv_l1_inline568_offsets[1] = {512};
     uint32_t gamma_ckv_l1_inline568_shapes[1] = {
         (gamma_ckv_l1_inline568_offsets[0] >= ext_gamma_ckv.shapes[0] ?
              0u :
              std::min<uint32_t>(512, ext_gamma_ckv.shapes[0] - gamma_ckv_l1_inline568_offsets[0]))
     };
-    ChipTensor gamma_ckv_l1_inline568 =
+    simpler::hbg::Tensor gamma_ckv_l1_inline568 =
         ext_gamma_ckv.view(gamma_ckv_l1_inline568_shapes, gamma_ckv_l1_inline568_offsets);
     uint32_t kv_cache_l1_inline569_offsets[4] = {static_cast<uint32_t>(ori_block_num_inline631), 0, 0, 0};
     uint32_t kv_cache_l1_inline569_shapes[4] = {
@@ -6872,14 +6921,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_kv_cache.shapes[3] - kv_cache_l1_inline569_offsets[3]))
     };
-    ChipTensor kv_cache_l1_inline569 = ext_kv_cache.view(kv_cache_l1_inline569_shapes, kv_cache_l1_inline569_offsets);
+    simpler::hbg::Tensor kv_cache_l1_inline569 =
+        ext_kv_cache.view(kv_cache_l1_inline569_shapes, kv_cache_l1_inline569_offsets);
     uint32_t attn_sink_l1_inline683_offsets[1] = {64};
     uint32_t attn_sink_l1_inline683_shapes[1] = {
         (attn_sink_l1_inline683_offsets[0] >= ext_attn_sink.shapes[0] ?
              0u :
              std::min<uint32_t>(64, ext_attn_sink.shapes[0] - attn_sink_l1_inline683_offsets[0]))
     };
-    ChipTensor attn_sink_l1_inline683 =
+    simpler::hbg::Tensor attn_sink_l1_inline683 =
         ext_attn_sink.view(attn_sink_l1_inline683_shapes, attn_sink_l1_inline683_offsets);
     uint32_t wo_a_l1_inline655_offsets[3] = {8, 0, 0};
     uint32_t wo_a_l1_inline655_shapes[3] = {
@@ -6893,7 +6943,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_wo_a.shapes[2] - wo_a_l1_inline655_offsets[2]))
     };
-    ChipTensor wo_a_l1_inline655 = ext_wo_a.view(wo_a_l1_inline655_shapes, wo_a_l1_inline655_offsets);
+    simpler::hbg::Tensor wo_a_l1_inline655 = ext_wo_a.view(wo_a_l1_inline655_shapes, wo_a_l1_inline655_offsets);
     uint32_t wo_b_l1_inline736_offsets[2] = {4096, 0};
     uint32_t wo_b_l1_inline736_shapes[2] = {
         (wo_b_l1_inline736_offsets[0] >= ext_wo_b.shapes[0] ?
@@ -6903,14 +6953,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(8192, ext_wo_b.shapes[1] - wo_b_l1_inline736_offsets[1]))
     };
-    ChipTensor wo_b_l1_inline736 = ext_wo_b.view(wo_b_l1_inline736_shapes, wo_b_l1_inline736_offsets);
+    simpler::hbg::Tensor wo_b_l1_inline736 = ext_wo_b.view(wo_b_l1_inline736_shapes, wo_b_l1_inline736_offsets);
     uint32_t wo_b_scale_l1_inline581_offsets[1] = {4096};
     uint32_t wo_b_scale_l1_inline581_shapes[1] = {
         (wo_b_scale_l1_inline581_offsets[0] >= ext_wo_b_scale.shapes[0] ?
              0u :
              std::min<uint32_t>(4096, ext_wo_b_scale.shapes[0] - wo_b_scale_l1_inline581_offsets[0]))
     };
-    ChipTensor wo_b_scale_l1_inline581 =
+    simpler::hbg::Tensor wo_b_scale_l1_inline581 =
         ext_wo_b_scale.view(wo_b_scale_l1_inline581_shapes, wo_b_scale_l1_inline581_offsets);
     uint32_t cmp_kv_l1_inline657_offsets[4] = {static_cast<uint32_t>(cmp_block_num_inline602), 0, 0, 0};
     uint32_t cmp_kv_l1_inline657_shapes[4] = {
@@ -6929,7 +6979,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(512, ext_cmp_kv.shapes[3] - cmp_kv_l1_inline657_offsets[3]))
     };
-    ChipTensor cmp_kv_l1_inline657 = ext_cmp_kv.view(cmp_kv_l1_inline657_shapes, cmp_kv_l1_inline657_offsets);
+    simpler::hbg::Tensor cmp_kv_l1_inline657 = ext_cmp_kv.view(cmp_kv_l1_inline657_shapes, cmp_kv_l1_inline657_offsets);
     uint32_t hc_ffn_fn_l1_inline718_offsets[2] = {24, 0};
     uint32_t hc_ffn_fn_l1_inline718_shapes[2] = {
         (hc_ffn_fn_l1_inline718_offsets[0] >= ext_hc_ffn_fn.shapes[0] ?
@@ -6939,7 +6989,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(16384, ext_hc_ffn_fn.shapes[1] - hc_ffn_fn_l1_inline718_offsets[1]))
     };
-    ChipTensor hc_ffn_fn_l1_inline718 =
+    simpler::hbg::Tensor hc_ffn_fn_l1_inline718 =
         ext_hc_ffn_fn.view(hc_ffn_fn_l1_inline718_shapes, hc_ffn_fn_l1_inline718_offsets);
     uint32_t hc_ffn_scale_l1_inline644_offsets[1] = {3};
     uint32_t hc_ffn_scale_l1_inline644_shapes[1] = {
@@ -6947,7 +6997,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(3, ext_hc_ffn_scale.shapes[0] - hc_ffn_scale_l1_inline644_offsets[0]))
     };
-    ChipTensor hc_ffn_scale_l1_inline644 =
+    simpler::hbg::Tensor hc_ffn_scale_l1_inline644 =
         ext_hc_ffn_scale.view(hc_ffn_scale_l1_inline644_shapes, hc_ffn_scale_l1_inline644_offsets);
     uint32_t hc_ffn_base_l1_inline720_offsets[1] = {24};
     uint32_t hc_ffn_base_l1_inline720_shapes[1] = {
@@ -6955,7 +7005,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(24, ext_hc_ffn_base.shapes[0] - hc_ffn_base_l1_inline720_offsets[0]))
     };
-    ChipTensor hc_ffn_base_l1_inline720 =
+    simpler::hbg::Tensor hc_ffn_base_l1_inline720 =
         ext_hc_ffn_base.view(hc_ffn_base_l1_inline720_shapes, hc_ffn_base_l1_inline720_offsets);
     uint32_t norm_w_l1_inline684_offsets[1] = {4096};
     uint32_t norm_w_l1_inline684_shapes[1] = {
@@ -6963,7 +7013,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_norm_w.shapes[0] - norm_w_l1_inline684_offsets[0]))
     };
-    ChipTensor norm_w_l1_inline684 = ext_norm_w.view(norm_w_l1_inline684_shapes, norm_w_l1_inline684_offsets);
+    simpler::hbg::Tensor norm_w_l1_inline684 = ext_norm_w.view(norm_w_l1_inline684_shapes, norm_w_l1_inline684_offsets);
     uint32_t gate_w_l1_inline693_offsets[2] = {64, 0};
     uint32_t gate_w_l1_inline693_shapes[2] = {
         (gate_w_l1_inline693_offsets[0] >= ext_gate_w.shapes[0] ?
@@ -6973,14 +7023,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_gate_w.shapes[1] - gate_w_l1_inline693_offsets[1]))
     };
-    ChipTensor gate_w_l1_inline693 = ext_gate_w.view(gate_w_l1_inline693_shapes, gate_w_l1_inline693_offsets);
+    simpler::hbg::Tensor gate_w_l1_inline693 = ext_gate_w.view(gate_w_l1_inline693_shapes, gate_w_l1_inline693_offsets);
     uint32_t gate_bias_l1_inline586_offsets[1] = {64};
     uint32_t gate_bias_l1_inline586_shapes[1] = {
         (gate_bias_l1_inline586_offsets[0] >= ext_gate_bias.shapes[0] ?
              0u :
              std::min<uint32_t>(64, ext_gate_bias.shapes[0] - gate_bias_l1_inline586_offsets[0]))
     };
-    ChipTensor gate_bias_l1_inline586 =
+    simpler::hbg::Tensor gate_bias_l1_inline586 =
         ext_gate_bias.view(gate_bias_l1_inline586_shapes, gate_bias_l1_inline586_offsets);
     uint32_t tid2eid_l1_inline725_offsets[2] = {129280, 0};
     uint32_t tid2eid_l1_inline725_shapes[2] = {
@@ -6991,7 +7041,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(6, ext_tid2eid.shapes[1] - tid2eid_l1_inline725_offsets[1]))
     };
-    ChipTensor tid2eid_l1_inline725 = ext_tid2eid.view(tid2eid_l1_inline725_shapes, tid2eid_l1_inline725_offsets);
+    simpler::hbg::Tensor tid2eid_l1_inline725 =
+        ext_tid2eid.view(tid2eid_l1_inline725_shapes, tid2eid_l1_inline725_offsets);
     uint32_t routed_w1_l1_inline686_offsets[3] = {32, 0, 0};
     uint32_t routed_w1_l1_inline686_shapes[3] = {
         (routed_w1_l1_inline686_offsets[0] >= ext_routed_w1.shapes[0] ?
@@ -7004,7 +7055,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w1.shapes[2] - routed_w1_l1_inline686_offsets[2]))
     };
-    ChipTensor routed_w1_l1_inline686 =
+    simpler::hbg::Tensor routed_w1_l1_inline686 =
         ext_routed_w1.view(routed_w1_l1_inline686_shapes, routed_w1_l1_inline686_offsets);
     uint32_t routed_w1_scale_l1_inline668_offsets[2] = {32, 0};
     uint32_t routed_w1_scale_l1_inline668_shapes[2] = {
@@ -7015,7 +7066,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w1_scale.shapes[1] - routed_w1_scale_l1_inline668_offsets[1]))
     };
-    ChipTensor routed_w1_scale_l1_inline668 =
+    simpler::hbg::Tensor routed_w1_scale_l1_inline668 =
         ext_routed_w1_scale.view(routed_w1_scale_l1_inline668_shapes, routed_w1_scale_l1_inline668_offsets);
     uint32_t routed_w3_l1_inline635_offsets[3] = {32, 0, 0};
     uint32_t routed_w3_l1_inline635_shapes[3] = {
@@ -7029,7 +7080,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w3.shapes[2] - routed_w3_l1_inline635_offsets[2]))
     };
-    ChipTensor routed_w3_l1_inline635 =
+    simpler::hbg::Tensor routed_w3_l1_inline635 =
         ext_routed_w3.view(routed_w3_l1_inline635_shapes, routed_w3_l1_inline635_offsets);
     uint32_t routed_w3_scale_l1_inline689_offsets[2] = {32, 0};
     uint32_t routed_w3_scale_l1_inline689_shapes[2] = {
@@ -7040,7 +7091,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w3_scale.shapes[1] - routed_w3_scale_l1_inline689_offsets[1]))
     };
-    ChipTensor routed_w3_scale_l1_inline689 =
+    simpler::hbg::Tensor routed_w3_scale_l1_inline689 =
         ext_routed_w3_scale.view(routed_w3_scale_l1_inline689_shapes, routed_w3_scale_l1_inline689_offsets);
     uint32_t routed_w2_l1_inline690_offsets[3] = {32, 0, 0};
     uint32_t routed_w2_l1_inline690_shapes[3] = {
@@ -7054,7 +7105,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_routed_w2.shapes[2] - routed_w2_l1_inline690_offsets[2]))
     };
-    ChipTensor routed_w2_l1_inline690 =
+    simpler::hbg::Tensor routed_w2_l1_inline690 =
         ext_routed_w2.view(routed_w2_l1_inline690_shapes, routed_w2_l1_inline690_offsets);
     uint32_t routed_w2_scale_l1_inline691_offsets[2] = {32, 0};
     uint32_t routed_w2_scale_l1_inline691_shapes[2] = {
@@ -7065,7 +7116,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_routed_w2_scale.shapes[1] - routed_w2_scale_l1_inline691_offsets[1]))
     };
-    ChipTensor routed_w2_scale_l1_inline691 =
+    simpler::hbg::Tensor routed_w2_scale_l1_inline691 =
         ext_routed_w2_scale.view(routed_w2_scale_l1_inline691_shapes, routed_w2_scale_l1_inline691_offsets);
     uint32_t shared_w1_l1_inline695_offsets[2] = {2048, 0};
     uint32_t shared_w1_l1_inline695_shapes[2] = {
@@ -7076,7 +7127,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w1.shapes[1] - shared_w1_l1_inline695_offsets[1]))
     };
-    ChipTensor shared_w1_l1_inline695 =
+    simpler::hbg::Tensor shared_w1_l1_inline695 =
         ext_shared_w1.view(shared_w1_l1_inline695_shapes, shared_w1_l1_inline695_offsets);
     uint32_t shared_w1_scale_l1_inline705_offsets[1] = {2048};
     uint32_t shared_w1_scale_l1_inline705_shapes[1] = {
@@ -7084,7 +7135,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w1_scale.shapes[0] - shared_w1_scale_l1_inline705_offsets[0]))
     };
-    ChipTensor shared_w1_scale_l1_inline705 =
+    simpler::hbg::Tensor shared_w1_scale_l1_inline705 =
         ext_shared_w1_scale.view(shared_w1_scale_l1_inline705_shapes, shared_w1_scale_l1_inline705_offsets);
     uint32_t shared_w3_l1_inline697_offsets[2] = {2048, 0};
     uint32_t shared_w3_l1_inline697_shapes[2] = {
@@ -7095,7 +7146,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w3.shapes[1] - shared_w3_l1_inline697_offsets[1]))
     };
-    ChipTensor shared_w3_l1_inline697 =
+    simpler::hbg::Tensor shared_w3_l1_inline697 =
         ext_shared_w3.view(shared_w3_l1_inline697_shapes, shared_w3_l1_inline697_offsets);
     uint32_t shared_w3_scale_l1_inline698_offsets[1] = {2048};
     uint32_t shared_w3_scale_l1_inline698_shapes[1] = {
@@ -7103,7 +7154,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w3_scale.shapes[0] - shared_w3_scale_l1_inline698_offsets[0]))
     };
-    ChipTensor shared_w3_scale_l1_inline698 =
+    simpler::hbg::Tensor shared_w3_scale_l1_inline698 =
         ext_shared_w3_scale.view(shared_w3_scale_l1_inline698_shapes, shared_w3_scale_l1_inline698_offsets);
     uint32_t shared_w2_l1_inline637_offsets[2] = {4096, 0};
     uint32_t shared_w2_l1_inline637_shapes[2] = {
@@ -7114,7 +7165,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(2048, ext_shared_w2.shapes[1] - shared_w2_l1_inline637_offsets[1]))
     };
-    ChipTensor shared_w2_l1_inline637 =
+    simpler::hbg::Tensor shared_w2_l1_inline637 =
         ext_shared_w2.view(shared_w2_l1_inline637_shapes, shared_w2_l1_inline637_offsets);
     uint32_t shared_w2_scale_l1_inline702_offsets[1] = {4096};
     uint32_t shared_w2_scale_l1_inline702_shapes[1] = {
@@ -7122,7 +7173,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
              0u :
              std::min<uint32_t>(4096, ext_shared_w2_scale.shapes[0] - shared_w2_scale_l1_inline702_offsets[0]))
     };
-    ChipTensor shared_w2_scale_l1_inline702 =
+    simpler::hbg::Tensor shared_w2_scale_l1_inline702 =
         ext_shared_w2_scale.view(shared_w2_scale_l1_inline702_shapes, shared_w2_scale_l1_inline702_offsets);
     GraphTaskArgs swa_attn_block_args_l0;
     swa_attn_block_args_l0.add_input(x_hc_inline711);
@@ -7245,7 +7296,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     hash_moe_l1_block_args_l1.add_scalar(routed_y_buf_ctx, combine_arrived_ctx);
     rt_submit_graph(&hash_moe_l1_block, hash_moe_l1_block_args_l1);
     auto submit_csa_attn_block = [&](int32_t csa_layer_inline714, int64_t loop_i_inline712,
-                                     const ChipTensor &x_attn_csa_inline721, const ChipTensor &hidden_inline709) {
+                                     const simpler::hbg::Tensor &x_attn_csa_inline721,
+                                     const simpler::hbg::Tensor &hidden_inline709) {
         uint32_t hc_attn_fn_csa_inline700_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 24)), 0
         };
@@ -7257,7 +7309,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(16384, ext_hc_attn_fn.shapes[1] - hc_attn_fn_csa_inline700_offsets[1]))
         };
-        ChipTensor hc_attn_fn_csa_inline700 =
+        simpler::hbg::Tensor hc_attn_fn_csa_inline700 =
             ext_hc_attn_fn.view(hc_attn_fn_csa_inline700_shapes, hc_attn_fn_csa_inline700_offsets);
         uint32_t hc_attn_scale_csa_inline626_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 3))
@@ -7267,7 +7319,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(3, ext_hc_attn_scale.shapes[0] - hc_attn_scale_csa_inline626_offsets[0]))
         };
-        ChipTensor hc_attn_scale_csa_inline626 =
+        simpler::hbg::Tensor hc_attn_scale_csa_inline626 =
             ext_hc_attn_scale.view(hc_attn_scale_csa_inline626_shapes, hc_attn_scale_csa_inline626_offsets);
         uint32_t hc_attn_base_csa_inline593_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 24))
@@ -7277,7 +7329,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(24, ext_hc_attn_base.shapes[0] - hc_attn_base_csa_inline593_offsets[0]))
         };
-        ChipTensor hc_attn_base_csa_inline593 =
+        simpler::hbg::Tensor hc_attn_base_csa_inline593 =
             ext_hc_attn_base.view(hc_attn_base_csa_inline593_shapes, hc_attn_base_csa_inline593_offsets);
         uint32_t attn_norm_w_csa_inline610_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096))
@@ -7287,7 +7339,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_attn_norm_w.shapes[0] - attn_norm_w_csa_inline610_offsets[0]))
         };
-        ChipTensor attn_norm_w_csa_inline610 =
+        simpler::hbg::Tensor attn_norm_w_csa_inline610 =
             ext_attn_norm_w.view(attn_norm_w_csa_inline610_shapes, attn_norm_w_csa_inline610_offsets);
         uint32_t wq_a_csa_inline682_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096)), 0
@@ -7300,7 +7352,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1024, ext_wq_a.shapes[1] - wq_a_csa_inline682_offsets[1]))
         };
-        ChipTensor wq_a_csa_inline682 = ext_wq_a.view(wq_a_csa_inline682_shapes, wq_a_csa_inline682_offsets);
+        simpler::hbg::Tensor wq_a_csa_inline682 = ext_wq_a.view(wq_a_csa_inline682_shapes, wq_a_csa_inline682_offsets);
         uint32_t wq_b_csa_inline582_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 1024)), 0
         };
@@ -7312,7 +7364,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(32768, ext_wq_b.shapes[1] - wq_b_csa_inline582_offsets[1]))
         };
-        ChipTensor wq_b_csa_inline582 = ext_wq_b.view(wq_b_csa_inline582_shapes, wq_b_csa_inline582_offsets);
+        simpler::hbg::Tensor wq_b_csa_inline582 = ext_wq_b.view(wq_b_csa_inline582_shapes, wq_b_csa_inline582_offsets);
         uint32_t wq_b_scale_csa_inline640_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32768))
         };
@@ -7321,7 +7373,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(32768, ext_wq_b_scale.shapes[0] - wq_b_scale_csa_inline640_offsets[0]))
         };
-        ChipTensor wq_b_scale_csa_inline640 =
+        simpler::hbg::Tensor wq_b_scale_csa_inline640 =
             ext_wq_b_scale.view(wq_b_scale_csa_inline640_shapes, wq_b_scale_csa_inline640_offsets);
         uint32_t wkv_csa_inline696_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096)), 0
@@ -7334,7 +7386,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_wkv.shapes[1] - wkv_csa_inline696_offsets[1]))
         };
-        ChipTensor wkv_csa_inline696 = ext_wkv.view(wkv_csa_inline696_shapes, wkv_csa_inline696_offsets);
+        simpler::hbg::Tensor wkv_csa_inline696 = ext_wkv.view(wkv_csa_inline696_shapes, wkv_csa_inline696_offsets);
         uint32_t gamma_cq_csa_inline565_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 1024))
         };
@@ -7343,7 +7395,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1024, ext_gamma_cq.shapes[0] - gamma_cq_csa_inline565_offsets[0]))
         };
-        ChipTensor gamma_cq_csa_inline565 =
+        simpler::hbg::Tensor gamma_cq_csa_inline565 =
             ext_gamma_cq.view(gamma_cq_csa_inline565_shapes, gamma_cq_csa_inline565_offsets);
         uint32_t gamma_ckv_csa_inline728_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 512))
@@ -7353,7 +7405,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_gamma_ckv.shapes[0] - gamma_ckv_csa_inline728_offsets[0]))
         };
-        ChipTensor gamma_ckv_csa_inline728 =
+        simpler::hbg::Tensor gamma_ckv_csa_inline728 =
             ext_gamma_ckv.view(gamma_ckv_csa_inline728_shapes, gamma_ckv_csa_inline728_offsets);
         uint32_t kv_cache_csa_inline730_offsets[4] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * ori_block_num_inline631)), 0, 0, 0
@@ -7375,7 +7427,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_kv_cache.shapes[3] - kv_cache_csa_inline730_offsets[3]))
         };
-        ChipTensor kv_cache_csa_inline730 =
+        simpler::hbg::Tensor kv_cache_csa_inline730 =
             ext_kv_cache.view(kv_cache_csa_inline730_shapes, kv_cache_csa_inline730_offsets);
         uint32_t attn_sink_csa_inline727_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 64))
@@ -7385,7 +7437,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(64, ext_attn_sink.shapes[0] - attn_sink_csa_inline727_offsets[0]))
         };
-        ChipTensor attn_sink_csa_inline727 =
+        simpler::hbg::Tensor attn_sink_csa_inline727 =
             ext_attn_sink.view(attn_sink_csa_inline727_shapes, attn_sink_csa_inline727_offsets);
         uint32_t wo_a_csa_inline672_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 8)), 0, 0
@@ -7401,7 +7453,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_wo_a.shapes[2] - wo_a_csa_inline672_offsets[2]))
         };
-        ChipTensor wo_a_csa_inline672 = ext_wo_a.view(wo_a_csa_inline672_shapes, wo_a_csa_inline672_offsets);
+        simpler::hbg::Tensor wo_a_csa_inline672 = ext_wo_a.view(wo_a_csa_inline672_shapes, wo_a_csa_inline672_offsets);
         uint32_t wo_b_csa_inline732_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096)), 0
         };
@@ -7413,7 +7465,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(8192, ext_wo_b.shapes[1] - wo_b_csa_inline732_offsets[1]))
         };
-        ChipTensor wo_b_csa_inline732 = ext_wo_b.view(wo_b_csa_inline732_shapes, wo_b_csa_inline732_offsets);
+        simpler::hbg::Tensor wo_b_csa_inline732 = ext_wo_b.view(wo_b_csa_inline732_shapes, wo_b_csa_inline732_offsets);
         uint32_t wo_b_scale_csa_inline733_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096))
         };
@@ -7422,7 +7474,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_wo_b_scale.shapes[0] - wo_b_scale_csa_inline733_offsets[0]))
         };
-        ChipTensor wo_b_scale_csa_inline733 =
+        simpler::hbg::Tensor wo_b_scale_csa_inline733 =
             ext_wo_b_scale.view(wo_b_scale_csa_inline733_shapes, wo_b_scale_csa_inline733_offsets);
         uint32_t csa_cmp_wkv_csa_inline701_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 1024)), 0};
         uint32_t csa_cmp_wkv_csa_inline701_shapes[2] = {
@@ -7433,7 +7485,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_csa_cmp_wkv.shapes[1] - csa_cmp_wkv_csa_inline701_offsets[1]))
         };
-        ChipTensor csa_cmp_wkv_csa_inline701 =
+        simpler::hbg::Tensor csa_cmp_wkv_csa_inline701 =
             ext_csa_cmp_wkv.view(csa_cmp_wkv_csa_inline701_shapes, csa_cmp_wkv_csa_inline701_offsets);
         uint32_t csa_cmp_wgate_csa_inline737_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 1024)), 0};
         uint32_t csa_cmp_wgate_csa_inline737_shapes[2] = {
@@ -7444,7 +7496,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_csa_cmp_wgate.shapes[1] - csa_cmp_wgate_csa_inline737_offsets[1]))
         };
-        ChipTensor csa_cmp_wgate_csa_inline737 =
+        simpler::hbg::Tensor csa_cmp_wgate_csa_inline737 =
             ext_csa_cmp_wgate.view(csa_cmp_wgate_csa_inline737_shapes, csa_cmp_wgate_csa_inline737_offsets);
         uint32_t csa_cmp_ape_csa_inline734_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 4)), 0};
         uint32_t csa_cmp_ape_csa_inline734_shapes[2] = {
@@ -7455,7 +7507,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1024, ext_csa_cmp_ape.shapes[1] - csa_cmp_ape_csa_inline734_offsets[1]))
         };
-        ChipTensor csa_cmp_ape_csa_inline734 =
+        simpler::hbg::Tensor csa_cmp_ape_csa_inline734 =
             ext_csa_cmp_ape.view(csa_cmp_ape_csa_inline734_shapes, csa_cmp_ape_csa_inline734_offsets);
         uint32_t csa_cmp_norm_w_csa_inline738_offsets[1] = {static_cast<uint32_t>((loop_i_inline712 * 512))};
         uint32_t csa_cmp_norm_w_csa_inline738_shapes[1] = {
@@ -7463,7 +7515,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_csa_cmp_norm_w.shapes[0] - csa_cmp_norm_w_csa_inline738_offsets[0]))
         };
-        ChipTensor csa_cmp_norm_w_csa_inline738 =
+        simpler::hbg::Tensor csa_cmp_norm_w_csa_inline738 =
             ext_csa_cmp_norm_w.view(csa_cmp_norm_w_csa_inline738_shapes, csa_cmp_norm_w_csa_inline738_offsets);
         uint32_t csa_compress_state_csa_inline557_offsets[3] = {
             static_cast<uint32_t>((loop_i_inline712 * csa_state_block_num_inline604)), 0, 0
@@ -7484,7 +7536,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                      2048, ext_csa_compress_state.shapes[2] - csa_compress_state_csa_inline557_offsets[2]
                  ))
         };
-        ChipTensor csa_compress_state_csa_inline557 = ext_csa_compress_state.view(
+        simpler::hbg::Tensor csa_compress_state_csa_inline557 = ext_csa_compress_state.view(
             csa_compress_state_csa_inline557_shapes, csa_compress_state_csa_inline557_offsets
         );
         uint32_t csa_idx_wq_b_csa_inline556_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 1024)), 0};
@@ -7496,7 +7548,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(8192, ext_csa_idx_wq_b.shapes[1] - csa_idx_wq_b_csa_inline556_offsets[1]))
         };
-        ChipTensor csa_idx_wq_b_csa_inline556 =
+        simpler::hbg::Tensor csa_idx_wq_b_csa_inline556 =
             ext_csa_idx_wq_b.view(csa_idx_wq_b_csa_inline556_shapes, csa_idx_wq_b_csa_inline556_offsets);
         uint32_t csa_idx_wq_b_scale_csa_inline561_offsets[1] = {static_cast<uint32_t>((loop_i_inline712 * 8192))};
         uint32_t csa_idx_wq_b_scale_csa_inline561_shapes[1] = {(
@@ -7504,7 +7556,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 0u :
                 std::min<uint32_t>(8192, ext_csa_idx_wq_b_scale.shapes[0] - csa_idx_wq_b_scale_csa_inline561_offsets[0])
         )};
-        ChipTensor csa_idx_wq_b_scale_csa_inline561 = ext_csa_idx_wq_b_scale.view(
+        simpler::hbg::Tensor csa_idx_wq_b_scale_csa_inline561 = ext_csa_idx_wq_b_scale.view(
             csa_idx_wq_b_scale_csa_inline561_shapes, csa_idx_wq_b_scale_csa_inline561_offsets
         );
         uint32_t csa_weights_proj_csa_inline553_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 4096)), 0};
@@ -7516,7 +7568,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(64, ext_csa_weights_proj.shapes[1] - csa_weights_proj_csa_inline553_offsets[1]))
         };
-        ChipTensor csa_weights_proj_csa_inline553 =
+        simpler::hbg::Tensor csa_weights_proj_csa_inline553 =
             ext_csa_weights_proj.view(csa_weights_proj_csa_inline553_shapes, csa_weights_proj_csa_inline553_offsets);
         uint32_t csa_hadamard_idx_csa_inline572_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 128)), 0};
         uint32_t csa_hadamard_idx_csa_inline572_shapes[2] = {
@@ -7527,7 +7579,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(128, ext_csa_hadamard_idx.shapes[1] - csa_hadamard_idx_csa_inline572_offsets[1]))
         };
-        ChipTensor csa_hadamard_idx_csa_inline572 =
+        simpler::hbg::Tensor csa_hadamard_idx_csa_inline572 =
             ext_csa_hadamard_idx.view(csa_hadamard_idx_csa_inline572_shapes, csa_hadamard_idx_csa_inline572_offsets);
         uint32_t csa_inner_wkv_csa_inline552_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 256)), 0};
         uint32_t csa_inner_wkv_csa_inline552_shapes[2] = {
@@ -7538,7 +7590,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_csa_inner_wkv.shapes[1] - csa_inner_wkv_csa_inline552_offsets[1]))
         };
-        ChipTensor csa_inner_wkv_csa_inline552 =
+        simpler::hbg::Tensor csa_inner_wkv_csa_inline552 =
             ext_csa_inner_wkv.view(csa_inner_wkv_csa_inline552_shapes, csa_inner_wkv_csa_inline552_offsets);
         uint32_t csa_inner_wgate_csa_inline588_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 256)), 0};
         uint32_t csa_inner_wgate_csa_inline588_shapes[2] = {
@@ -7549,7 +7601,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_csa_inner_wgate.shapes[1] - csa_inner_wgate_csa_inline588_offsets[1]))
         };
-        ChipTensor csa_inner_wgate_csa_inline588 =
+        simpler::hbg::Tensor csa_inner_wgate_csa_inline588 =
             ext_csa_inner_wgate.view(csa_inner_wgate_csa_inline588_shapes, csa_inner_wgate_csa_inline588_offsets);
         uint32_t csa_inner_ape_csa_inline622_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 4)), 0};
         uint32_t csa_inner_ape_csa_inline622_shapes[2] = {
@@ -7560,7 +7612,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(256, ext_csa_inner_ape.shapes[1] - csa_inner_ape_csa_inline622_offsets[1]))
         };
-        ChipTensor csa_inner_ape_csa_inline622 =
+        simpler::hbg::Tensor csa_inner_ape_csa_inline622 =
             ext_csa_inner_ape.view(csa_inner_ape_csa_inline622_shapes, csa_inner_ape_csa_inline622_offsets);
         uint32_t csa_inner_norm_w_csa_inline551_offsets[1] = {static_cast<uint32_t>((loop_i_inline712 * 128))};
         uint32_t csa_inner_norm_w_csa_inline551_shapes[1] = {
@@ -7568,7 +7620,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(128, ext_csa_inner_norm_w.shapes[0] - csa_inner_norm_w_csa_inline551_offsets[0]))
         };
-        ChipTensor csa_inner_norm_w_csa_inline551 =
+        simpler::hbg::Tensor csa_inner_norm_w_csa_inline551 =
             ext_csa_inner_norm_w.view(csa_inner_norm_w_csa_inline551_shapes, csa_inner_norm_w_csa_inline551_offsets);
         uint32_t csa_inner_compress_state_csa_inline550_offsets[3] = {
             static_cast<uint32_t>((loop_i_inline712 * inner_state_block_num_inline613)), 0, 0
@@ -7591,7 +7643,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                      512, ext_csa_inner_compress_state.shapes[2] - csa_inner_compress_state_csa_inline550_offsets[2]
                  ))
         };
-        ChipTensor csa_inner_compress_state_csa_inline550 = ext_csa_inner_compress_state.view(
+        simpler::hbg::Tensor csa_inner_compress_state_csa_inline550 = ext_csa_inner_compress_state.view(
             csa_inner_compress_state_csa_inline550_shapes, csa_inner_compress_state_csa_inline550_offsets
         );
         uint32_t cmp_kv_csa_inline638_offsets[4] = {
@@ -7614,7 +7666,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_cmp_kv.shapes[3] - cmp_kv_csa_inline638_offsets[3]))
         };
-        ChipTensor cmp_kv_csa_inline638 = ext_cmp_kv.view(cmp_kv_csa_inline638_shapes, cmp_kv_csa_inline638_offsets);
+        simpler::hbg::Tensor cmp_kv_csa_inline638 =
+            ext_cmp_kv.view(cmp_kv_csa_inline638_shapes, cmp_kv_csa_inline638_offsets);
         uint32_t idx_kv_cache_csa_inline548_offsets[4] = {
             static_cast<uint32_t>((loop_i_inline712 * idx_block_num_inline601)), 0, 0, 0
         };
@@ -7635,7 +7688,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(128, ext_idx_kv_cache.shapes[3] - idx_kv_cache_csa_inline548_offsets[3]))
         };
-        ChipTensor idx_kv_cache_csa_inline548 =
+        simpler::hbg::Tensor idx_kv_cache_csa_inline548 =
             ext_idx_kv_cache.view(idx_kv_cache_csa_inline548_shapes, idx_kv_cache_csa_inline548_offsets);
         uint32_t idx_kv_scale_csa_inline618_offsets[4] = {
             static_cast<uint32_t>((loop_i_inline712 * idx_block_num_inline601)), 0, 0, 0
@@ -7657,7 +7710,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1, ext_idx_kv_scale.shapes[3] - idx_kv_scale_csa_inline618_offsets[3]))
         };
-        ChipTensor idx_kv_scale_csa_inline618 =
+        simpler::hbg::Tensor idx_kv_scale_csa_inline618 =
             ext_idx_kv_scale.view(idx_kv_scale_csa_inline618_shapes, idx_kv_scale_csa_inline618_offsets);
         GraphTaskArgs csa_attn_block_args;
         csa_attn_block_args.add_input(hc_attn_fn_csa_inline700);
@@ -7711,7 +7764,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         rt_submit_graph(&csa_attn_block, csa_attn_block_args);
     };
     auto submit_csa_moe_block = [&](int32_t csa_layer_inline714, int32_t csa_moe_epoch_inline715,
-                                    const ChipTensor &x_attn_csa_inline721, const ChipTensor &hidden_mid_inline726) {
+                                    const simpler::hbg::Tensor &x_attn_csa_inline721,
+                                    const simpler::hbg::Tensor &hidden_mid_inline726) {
         uint32_t hc_ffn_fn_csa_inline547_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 24)), 0
         };
@@ -7723,7 +7777,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(16384, ext_hc_ffn_fn.shapes[1] - hc_ffn_fn_csa_inline547_offsets[1]))
         };
-        ChipTensor hc_ffn_fn_csa_inline547 =
+        simpler::hbg::Tensor hc_ffn_fn_csa_inline547 =
             ext_hc_ffn_fn.view(hc_ffn_fn_csa_inline547_shapes, hc_ffn_fn_csa_inline547_offsets);
         uint32_t hc_ffn_scale_csa_inline543_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 3))
@@ -7733,7 +7787,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(3, ext_hc_ffn_scale.shapes[0] - hc_ffn_scale_csa_inline543_offsets[0]))
         };
-        ChipTensor hc_ffn_scale_csa_inline543 =
+        simpler::hbg::Tensor hc_ffn_scale_csa_inline543 =
             ext_hc_ffn_scale.view(hc_ffn_scale_csa_inline543_shapes, hc_ffn_scale_csa_inline543_offsets);
         uint32_t hc_ffn_base_csa_inline542_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 24))
@@ -7743,7 +7797,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(24, ext_hc_ffn_base.shapes[0] - hc_ffn_base_csa_inline542_offsets[0]))
         };
-        ChipTensor hc_ffn_base_csa_inline542 =
+        simpler::hbg::Tensor hc_ffn_base_csa_inline542 =
             ext_hc_ffn_base.view(hc_ffn_base_csa_inline542_shapes, hc_ffn_base_csa_inline542_offsets);
         uint32_t norm_w_csa_inline656_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096))
@@ -7753,7 +7807,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_norm_w.shapes[0] - norm_w_csa_inline656_offsets[0]))
         };
-        ChipTensor norm_w_csa_inline656 = ext_norm_w.view(norm_w_csa_inline656_shapes, norm_w_csa_inline656_offsets);
+        simpler::hbg::Tensor norm_w_csa_inline656 =
+            ext_norm_w.view(norm_w_csa_inline656_shapes, norm_w_csa_inline656_offsets);
         uint32_t gate_w_csa_inline540_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 64)), 0
         };
@@ -7765,7 +7820,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_gate_w.shapes[1] - gate_w_csa_inline540_offsets[1]))
         };
-        ChipTensor gate_w_csa_inline540 = ext_gate_w.view(gate_w_csa_inline540_shapes, gate_w_csa_inline540_offsets);
+        simpler::hbg::Tensor gate_w_csa_inline540 =
+            ext_gate_w.view(gate_w_csa_inline540_shapes, gate_w_csa_inline540_offsets);
         uint32_t gate_bias_csa_inline538_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 64))
         };
@@ -7774,7 +7830,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(64, ext_gate_bias.shapes[0] - gate_bias_csa_inline538_offsets[0]))
         };
-        ChipTensor gate_bias_csa_inline538 =
+        simpler::hbg::Tensor gate_bias_csa_inline538 =
             ext_gate_bias.view(gate_bias_csa_inline538_shapes, gate_bias_csa_inline538_offsets);
         uint32_t tid2eid_csa_inline537_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 129280)), 0
@@ -7787,7 +7843,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(6, ext_tid2eid.shapes[1] - tid2eid_csa_inline537_offsets[1]))
         };
-        ChipTensor tid2eid_csa_inline537 =
+        simpler::hbg::Tensor tid2eid_csa_inline537 =
             ext_tid2eid.view(tid2eid_csa_inline537_shapes, tid2eid_csa_inline537_offsets);
         uint32_t routed_w1_csa_inline536_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0, 0
@@ -7803,7 +7859,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w1.shapes[2] - routed_w1_csa_inline536_offsets[2]))
         };
-        ChipTensor routed_w1_csa_inline536 =
+        simpler::hbg::Tensor routed_w1_csa_inline536 =
             ext_routed_w1.view(routed_w1_csa_inline536_shapes, routed_w1_csa_inline536_offsets);
         uint32_t routed_w1_scale_csa_inline535_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0
@@ -7816,7 +7872,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w1_scale.shapes[1] - routed_w1_scale_csa_inline535_offsets[1]))
         };
-        ChipTensor routed_w1_scale_csa_inline535 =
+        simpler::hbg::Tensor routed_w1_scale_csa_inline535 =
             ext_routed_w1_scale.view(routed_w1_scale_csa_inline535_shapes, routed_w1_scale_csa_inline535_offsets);
         uint32_t routed_w3_csa_inline534_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0, 0
@@ -7832,7 +7888,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w3.shapes[2] - routed_w3_csa_inline534_offsets[2]))
         };
-        ChipTensor routed_w3_csa_inline534 =
+        simpler::hbg::Tensor routed_w3_csa_inline534 =
             ext_routed_w3.view(routed_w3_csa_inline534_shapes, routed_w3_csa_inline534_offsets);
         uint32_t routed_w3_scale_csa_inline713_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0
@@ -7845,7 +7901,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w3_scale.shapes[1] - routed_w3_scale_csa_inline713_offsets[1]))
         };
-        ChipTensor routed_w3_scale_csa_inline713 =
+        simpler::hbg::Tensor routed_w3_scale_csa_inline713 =
             ext_routed_w3_scale.view(routed_w3_scale_csa_inline713_shapes, routed_w3_scale_csa_inline713_offsets);
         uint32_t routed_w2_csa_inline533_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0, 0
@@ -7861,7 +7917,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w2.shapes[2] - routed_w2_csa_inline533_offsets[2]))
         };
-        ChipTensor routed_w2_csa_inline533 =
+        simpler::hbg::Tensor routed_w2_csa_inline533 =
             ext_routed_w2.view(routed_w2_csa_inline533_shapes, routed_w2_csa_inline533_offsets);
         uint32_t routed_w2_scale_csa_inline722_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 32)), 0
@@ -7874,7 +7930,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w2_scale.shapes[1] - routed_w2_scale_csa_inline722_offsets[1]))
         };
-        ChipTensor routed_w2_scale_csa_inline722 =
+        simpler::hbg::Tensor routed_w2_scale_csa_inline722 =
             ext_routed_w2_scale.view(routed_w2_scale_csa_inline722_shapes, routed_w2_scale_csa_inline722_offsets);
         uint32_t shared_w1_csa_inline532_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 2048)), 0
@@ -7887,7 +7943,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w1.shapes[1] - shared_w1_csa_inline532_offsets[1]))
         };
-        ChipTensor shared_w1_csa_inline532 =
+        simpler::hbg::Tensor shared_w1_csa_inline532 =
             ext_shared_w1.view(shared_w1_csa_inline532_shapes, shared_w1_csa_inline532_offsets);
         uint32_t shared_w1_scale_csa_inline531_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 2048))
@@ -7897,7 +7953,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w1_scale.shapes[0] - shared_w1_scale_csa_inline531_offsets[0]))
         };
-        ChipTensor shared_w1_scale_csa_inline531 =
+        simpler::hbg::Tensor shared_w1_scale_csa_inline531 =
             ext_shared_w1_scale.view(shared_w1_scale_csa_inline531_shapes, shared_w1_scale_csa_inline531_offsets);
         uint32_t shared_w3_csa_inline530_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 2048)), 0
@@ -7910,7 +7966,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w3.shapes[1] - shared_w3_csa_inline530_offsets[1]))
         };
-        ChipTensor shared_w3_csa_inline530 =
+        simpler::hbg::Tensor shared_w3_csa_inline530 =
             ext_shared_w3.view(shared_w3_csa_inline530_shapes, shared_w3_csa_inline530_offsets);
         uint32_t shared_w3_scale_csa_inline578_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 2048))
@@ -7920,7 +7976,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w3_scale.shapes[0] - shared_w3_scale_csa_inline578_offsets[0]))
         };
-        ChipTensor shared_w3_scale_csa_inline578 =
+        simpler::hbg::Tensor shared_w3_scale_csa_inline578 =
             ext_shared_w3_scale.view(shared_w3_scale_csa_inline578_shapes, shared_w3_scale_csa_inline578_offsets);
         uint32_t shared_w2_csa_inline571_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096)), 0
@@ -7933,7 +7989,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w2.shapes[1] - shared_w2_csa_inline571_offsets[1]))
         };
-        ChipTensor shared_w2_csa_inline571 =
+        simpler::hbg::Tensor shared_w2_csa_inline571 =
             ext_shared_w2.view(shared_w2_csa_inline571_shapes, shared_w2_csa_inline571_offsets);
         uint32_t shared_w2_scale_csa_inline708_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(csa_layer_inline714) * 4096))
@@ -7943,7 +7999,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w2_scale.shapes[0] - shared_w2_scale_csa_inline708_offsets[0]))
         };
-        ChipTensor shared_w2_scale_csa_inline708 =
+        simpler::hbg::Tensor shared_w2_scale_csa_inline708 =
             ext_shared_w2_scale.view(shared_w2_scale_csa_inline708_shapes, shared_w2_scale_csa_inline708_offsets);
         GraphTaskArgs csa_moe_block_args;
         csa_moe_block_args.add_input(hc_ffn_fn_csa_inline547);
@@ -7982,7 +8038,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         rt_submit_graph(&csa_moe_block, csa_moe_block_args, static_cast<int64_t>(csa_layer_inline714) < 3);
     };
     auto submit_hca_attn_block = [&](int32_t hca_layer_inline704, int64_t loop_i_inline712,
-                                     const ChipTensor &x_attn_hca_inline723, const ChipTensor &hidden_mid_inline726) {
+                                     const simpler::hbg::Tensor &x_attn_hca_inline723,
+                                     const simpler::hbg::Tensor &hidden_mid_inline726) {
         uint32_t hc_attn_fn_hca_inline594_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 24)), 0
         };
@@ -7994,7 +8051,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(16384, ext_hc_attn_fn.shapes[1] - hc_attn_fn_hca_inline594_offsets[1]))
         };
-        ChipTensor hc_attn_fn_hca_inline594 =
+        simpler::hbg::Tensor hc_attn_fn_hca_inline594 =
             ext_hc_attn_fn.view(hc_attn_fn_hca_inline594_shapes, hc_attn_fn_hca_inline594_offsets);
         uint32_t hc_attn_scale_hca_inline587_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 3))
@@ -8004,7 +8061,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(3, ext_hc_attn_scale.shapes[0] - hc_attn_scale_hca_inline587_offsets[0]))
         };
-        ChipTensor hc_attn_scale_hca_inline587 =
+        simpler::hbg::Tensor hc_attn_scale_hca_inline587 =
             ext_hc_attn_scale.view(hc_attn_scale_hca_inline587_shapes, hc_attn_scale_hca_inline587_offsets);
         uint32_t hc_attn_base_hca_inline567_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 24))
@@ -8014,7 +8071,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(24, ext_hc_attn_base.shapes[0] - hc_attn_base_hca_inline567_offsets[0]))
         };
-        ChipTensor hc_attn_base_hca_inline567 =
+        simpler::hbg::Tensor hc_attn_base_hca_inline567 =
             ext_hc_attn_base.view(hc_attn_base_hca_inline567_shapes, hc_attn_base_hca_inline567_offsets);
         uint32_t attn_norm_w_hca_inline529_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096))
@@ -8024,7 +8081,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_attn_norm_w.shapes[0] - attn_norm_w_hca_inline529_offsets[0]))
         };
-        ChipTensor attn_norm_w_hca_inline529 =
+        simpler::hbg::Tensor attn_norm_w_hca_inline529 =
             ext_attn_norm_w.view(attn_norm_w_hca_inline529_shapes, attn_norm_w_hca_inline529_offsets);
         uint32_t wq_a_hca_inline528_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096)), 0
@@ -8037,7 +8094,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1024, ext_wq_a.shapes[1] - wq_a_hca_inline528_offsets[1]))
         };
-        ChipTensor wq_a_hca_inline528 = ext_wq_a.view(wq_a_hca_inline528_shapes, wq_a_hca_inline528_offsets);
+        simpler::hbg::Tensor wq_a_hca_inline528 = ext_wq_a.view(wq_a_hca_inline528_shapes, wq_a_hca_inline528_offsets);
         uint32_t wq_b_hca_inline526_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 1024)), 0
         };
@@ -8049,7 +8106,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(32768, ext_wq_b.shapes[1] - wq_b_hca_inline526_offsets[1]))
         };
-        ChipTensor wq_b_hca_inline526 = ext_wq_b.view(wq_b_hca_inline526_shapes, wq_b_hca_inline526_offsets);
+        simpler::hbg::Tensor wq_b_hca_inline526 = ext_wq_b.view(wq_b_hca_inline526_shapes, wq_b_hca_inline526_offsets);
         uint32_t wq_b_scale_hca_inline525_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32768))
         };
@@ -8058,7 +8115,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(32768, ext_wq_b_scale.shapes[0] - wq_b_scale_hca_inline525_offsets[0]))
         };
-        ChipTensor wq_b_scale_hca_inline525 =
+        simpler::hbg::Tensor wq_b_scale_hca_inline525 =
             ext_wq_b_scale.view(wq_b_scale_hca_inline525_shapes, wq_b_scale_hca_inline525_offsets);
         uint32_t wkv_hca_inline527_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096)), 0
@@ -8071,7 +8128,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_wkv.shapes[1] - wkv_hca_inline527_offsets[1]))
         };
-        ChipTensor wkv_hca_inline527 = ext_wkv.view(wkv_hca_inline527_shapes, wkv_hca_inline527_offsets);
+        simpler::hbg::Tensor wkv_hca_inline527 = ext_wkv.view(wkv_hca_inline527_shapes, wkv_hca_inline527_offsets);
         uint32_t gamma_cq_hca_inline599_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 1024))
         };
@@ -8080,7 +8137,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(1024, ext_gamma_cq.shapes[0] - gamma_cq_hca_inline599_offsets[0]))
         };
-        ChipTensor gamma_cq_hca_inline599 =
+        simpler::hbg::Tensor gamma_cq_hca_inline599 =
             ext_gamma_cq.view(gamma_cq_hca_inline599_shapes, gamma_cq_hca_inline599_offsets);
         uint32_t gamma_ckv_hca_inline524_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 512))
@@ -8090,7 +8147,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_gamma_ckv.shapes[0] - gamma_ckv_hca_inline524_offsets[0]))
         };
-        ChipTensor gamma_ckv_hca_inline524 =
+        simpler::hbg::Tensor gamma_ckv_hca_inline524 =
             ext_gamma_ckv.view(gamma_ckv_hca_inline524_shapes, gamma_ckv_hca_inline524_offsets);
         uint32_t kv_cache_hca_inline625_offsets[4] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * ori_block_num_inline631)), 0, 0, 0
@@ -8112,7 +8169,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_kv_cache.shapes[3] - kv_cache_hca_inline625_offsets[3]))
         };
-        ChipTensor kv_cache_hca_inline625 =
+        simpler::hbg::Tensor kv_cache_hca_inline625 =
             ext_kv_cache.view(kv_cache_hca_inline625_shapes, kv_cache_hca_inline625_offsets);
         uint32_t attn_sink_hca_inline717_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 64))
@@ -8122,7 +8179,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(64, ext_attn_sink.shapes[0] - attn_sink_hca_inline717_offsets[0]))
         };
-        ChipTensor attn_sink_hca_inline717 =
+        simpler::hbg::Tensor attn_sink_hca_inline717 =
             ext_attn_sink.view(attn_sink_hca_inline717_shapes, attn_sink_hca_inline717_offsets);
         uint32_t wo_a_hca_inline522_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 8)), 0, 0
@@ -8138,7 +8195,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_wo_a.shapes[2] - wo_a_hca_inline522_offsets[2]))
         };
-        ChipTensor wo_a_hca_inline522 = ext_wo_a.view(wo_a_hca_inline522_shapes, wo_a_hca_inline522_offsets);
+        simpler::hbg::Tensor wo_a_hca_inline522 = ext_wo_a.view(wo_a_hca_inline522_shapes, wo_a_hca_inline522_offsets);
         uint32_t wo_b_hca_inline521_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096)), 0
         };
@@ -8150,7 +8207,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(8192, ext_wo_b.shapes[1] - wo_b_hca_inline521_offsets[1]))
         };
-        ChipTensor wo_b_hca_inline521 = ext_wo_b.view(wo_b_hca_inline521_shapes, wo_b_hca_inline521_offsets);
+        simpler::hbg::Tensor wo_b_hca_inline521 = ext_wo_b.view(wo_b_hca_inline521_shapes, wo_b_hca_inline521_offsets);
         uint32_t wo_b_scale_hca_inline546_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096))
         };
@@ -8159,7 +8216,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_wo_b_scale.shapes[0] - wo_b_scale_hca_inline546_offsets[0]))
         };
-        ChipTensor wo_b_scale_hca_inline546 =
+        simpler::hbg::Tensor wo_b_scale_hca_inline546 =
             ext_wo_b_scale.view(wo_b_scale_hca_inline546_shapes, wo_b_scale_hca_inline546_offsets);
         uint32_t hca_cmp_wkv_hca_inline584_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 512)), 0};
         uint32_t hca_cmp_wkv_hca_inline584_shapes[2] = {
@@ -8170,7 +8227,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_hca_cmp_wkv.shapes[1] - hca_cmp_wkv_hca_inline584_offsets[1]))
         };
-        ChipTensor hca_cmp_wkv_hca_inline584 =
+        simpler::hbg::Tensor hca_cmp_wkv_hca_inline584 =
             ext_hca_cmp_wkv.view(hca_cmp_wkv_hca_inline584_shapes, hca_cmp_wkv_hca_inline584_offsets);
         uint32_t hca_cmp_wgate_hca_inline630_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 512)), 0};
         uint32_t hca_cmp_wgate_hca_inline630_shapes[2] = {
@@ -8181,7 +8238,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_hca_cmp_wgate.shapes[1] - hca_cmp_wgate_hca_inline630_offsets[1]))
         };
-        ChipTensor hca_cmp_wgate_hca_inline630 =
+        simpler::hbg::Tensor hca_cmp_wgate_hca_inline630 =
             ext_hca_cmp_wgate.view(hca_cmp_wgate_hca_inline630_shapes, hca_cmp_wgate_hca_inline630_offsets);
         uint32_t hca_cmp_ape_hca_inline577_offsets[2] = {static_cast<uint32_t>((loop_i_inline712 * 128)), 0};
         uint32_t hca_cmp_ape_hca_inline577_shapes[2] = {
@@ -8192,7 +8249,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_hca_cmp_ape.shapes[1] - hca_cmp_ape_hca_inline577_offsets[1]))
         };
-        ChipTensor hca_cmp_ape_hca_inline577 =
+        simpler::hbg::Tensor hca_cmp_ape_hca_inline577 =
             ext_hca_cmp_ape.view(hca_cmp_ape_hca_inline577_shapes, hca_cmp_ape_hca_inline577_offsets);
         uint32_t hca_cmp_norm_w_hca_inline520_offsets[1] = {static_cast<uint32_t>((loop_i_inline712 * 512))};
         uint32_t hca_cmp_norm_w_hca_inline520_shapes[1] = {
@@ -8200,7 +8257,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_hca_cmp_norm_w.shapes[0] - hca_cmp_norm_w_hca_inline520_offsets[0]))
         };
-        ChipTensor hca_cmp_norm_w_hca_inline520 =
+        simpler::hbg::Tensor hca_cmp_norm_w_hca_inline520 =
             ext_hca_cmp_norm_w.view(hca_cmp_norm_w_hca_inline520_shapes, hca_cmp_norm_w_hca_inline520_offsets);
         uint32_t hca_compress_state_hca_inline575_offsets[3] = {
             static_cast<uint32_t>((loop_i_inline712 * hca_state_block_num_inline608)), 0, 0
@@ -8221,7 +8278,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                      1024, ext_hca_compress_state.shapes[2] - hca_compress_state_hca_inline575_offsets[2]
                  ))
         };
-        ChipTensor hca_compress_state_hca_inline575 = ext_hca_compress_state.view(
+        simpler::hbg::Tensor hca_compress_state_hca_inline575 = ext_hca_compress_state.view(
             hca_compress_state_hca_inline575_shapes, hca_compress_state_hca_inline575_offsets
         );
         uint32_t cmp_kv_hca_inline598_offsets[4] = {
@@ -8244,7 +8301,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(512, ext_cmp_kv.shapes[3] - cmp_kv_hca_inline598_offsets[3]))
         };
-        ChipTensor cmp_kv_hca_inline598 = ext_cmp_kv.view(cmp_kv_hca_inline598_shapes, cmp_kv_hca_inline598_offsets);
+        simpler::hbg::Tensor cmp_kv_hca_inline598 =
+            ext_cmp_kv.view(cmp_kv_hca_inline598_shapes, cmp_kv_hca_inline598_offsets);
         GraphTaskArgs hca_attn_block_args;
         hca_attn_block_args.add_input(hc_attn_fn_hca_inline594);
         hca_attn_block_args.add_input(hc_attn_scale_hca_inline587);
@@ -8282,7 +8340,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         rt_submit_graph(&hca_attn_block, hca_attn_block_args);
     };
     auto submit_hca_moe_block = [&](int32_t hca_layer_inline704, int32_t hca_moe_epoch_inline716,
-                                    const ChipTensor &x_attn_hca_inline723, const ChipTensor &hidden_inline709) {
+                                    const simpler::hbg::Tensor &x_attn_hca_inline723,
+                                    const simpler::hbg::Tensor &hidden_inline709) {
         uint32_t hc_ffn_fn_hca_inline519_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 24)), 0
         };
@@ -8294,7 +8353,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(16384, ext_hc_ffn_fn.shapes[1] - hc_ffn_fn_hca_inline519_offsets[1]))
         };
-        ChipTensor hc_ffn_fn_hca_inline519 =
+        simpler::hbg::Tensor hc_ffn_fn_hca_inline519 =
             ext_hc_ffn_fn.view(hc_ffn_fn_hca_inline519_shapes, hc_ffn_fn_hca_inline519_offsets);
         uint32_t hc_ffn_scale_hca_inline517_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 3))
@@ -8304,7 +8363,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(3, ext_hc_ffn_scale.shapes[0] - hc_ffn_scale_hca_inline517_offsets[0]))
         };
-        ChipTensor hc_ffn_scale_hca_inline517 =
+        simpler::hbg::Tensor hc_ffn_scale_hca_inline517 =
             ext_hc_ffn_scale.view(hc_ffn_scale_hca_inline517_shapes, hc_ffn_scale_hca_inline517_offsets);
         uint32_t hc_ffn_base_hca_inline541_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 24))
@@ -8314,7 +8373,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(24, ext_hc_ffn_base.shapes[0] - hc_ffn_base_hca_inline541_offsets[0]))
         };
-        ChipTensor hc_ffn_base_hca_inline541 =
+        simpler::hbg::Tensor hc_ffn_base_hca_inline541 =
             ext_hc_ffn_base.view(hc_ffn_base_hca_inline541_shapes, hc_ffn_base_hca_inline541_offsets);
         uint32_t norm_w_hca_inline516_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096))
@@ -8324,7 +8383,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_norm_w.shapes[0] - norm_w_hca_inline516_offsets[0]))
         };
-        ChipTensor norm_w_hca_inline516 = ext_norm_w.view(norm_w_hca_inline516_shapes, norm_w_hca_inline516_offsets);
+        simpler::hbg::Tensor norm_w_hca_inline516 =
+            ext_norm_w.view(norm_w_hca_inline516_shapes, norm_w_hca_inline516_offsets);
         uint32_t gate_w_hca_inline680_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 64)), 0
         };
@@ -8336,7 +8396,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_gate_w.shapes[1] - gate_w_hca_inline680_offsets[1]))
         };
-        ChipTensor gate_w_hca_inline680 = ext_gate_w.view(gate_w_hca_inline680_shapes, gate_w_hca_inline680_offsets);
+        simpler::hbg::Tensor gate_w_hca_inline680 =
+            ext_gate_w.view(gate_w_hca_inline680_shapes, gate_w_hca_inline680_offsets);
         uint32_t gate_bias_hca_inline699_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 64))
         };
@@ -8345,7 +8406,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(64, ext_gate_bias.shapes[0] - gate_bias_hca_inline699_offsets[0]))
         };
-        ChipTensor gate_bias_hca_inline699 =
+        simpler::hbg::Tensor gate_bias_hca_inline699 =
             ext_gate_bias.view(gate_bias_hca_inline699_shapes, gate_bias_hca_inline699_offsets);
         uint32_t routed_w1_hca_inline615_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0, 0
@@ -8361,7 +8422,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w1.shapes[2] - routed_w1_hca_inline615_offsets[2]))
         };
-        ChipTensor routed_w1_hca_inline615 =
+        simpler::hbg::Tensor routed_w1_hca_inline615 =
             ext_routed_w1.view(routed_w1_hca_inline615_shapes, routed_w1_hca_inline615_offsets);
         uint32_t routed_w1_scale_hca_inline687_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0
@@ -8374,7 +8435,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w1_scale.shapes[1] - routed_w1_scale_hca_inline687_offsets[1]))
         };
-        ChipTensor routed_w1_scale_hca_inline687 =
+        simpler::hbg::Tensor routed_w1_scale_hca_inline687 =
             ext_routed_w1_scale.view(routed_w1_scale_hca_inline687_shapes, routed_w1_scale_hca_inline687_offsets);
         uint32_t routed_w3_hca_inline590_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0, 0
@@ -8390,7 +8451,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w3.shapes[2] - routed_w3_hca_inline590_offsets[2]))
         };
-        ChipTensor routed_w3_hca_inline590 =
+        simpler::hbg::Tensor routed_w3_hca_inline590 =
             ext_routed_w3.view(routed_w3_hca_inline590_shapes, routed_w3_hca_inline590_offsets);
         uint32_t routed_w3_scale_hca_inline513_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0
@@ -8403,7 +8464,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w3_scale.shapes[1] - routed_w3_scale_hca_inline513_offsets[1]))
         };
-        ChipTensor routed_w3_scale_hca_inline513 =
+        simpler::hbg::Tensor routed_w3_scale_hca_inline513 =
             ext_routed_w3_scale.view(routed_w3_scale_hca_inline513_shapes, routed_w3_scale_hca_inline513_offsets);
         uint32_t routed_w2_hca_inline597_offsets[3] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0, 0
@@ -8419,7 +8480,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_routed_w2.shapes[2] - routed_w2_hca_inline597_offsets[2]))
         };
-        ChipTensor routed_w2_hca_inline597 =
+        simpler::hbg::Tensor routed_w2_hca_inline597 =
             ext_routed_w2.view(routed_w2_hca_inline597_shapes, routed_w2_hca_inline597_offsets);
         uint32_t routed_w2_scale_hca_inline514_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 32)), 0
@@ -8432,7 +8493,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_routed_w2_scale.shapes[1] - routed_w2_scale_hca_inline514_offsets[1]))
         };
-        ChipTensor routed_w2_scale_hca_inline514 =
+        simpler::hbg::Tensor routed_w2_scale_hca_inline514 =
             ext_routed_w2_scale.view(routed_w2_scale_hca_inline514_shapes, routed_w2_scale_hca_inline514_offsets);
         uint32_t shared_w1_hca_inline512_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 2048)), 0
@@ -8445,7 +8506,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w1.shapes[1] - shared_w1_hca_inline512_offsets[1]))
         };
-        ChipTensor shared_w1_hca_inline512 =
+        simpler::hbg::Tensor shared_w1_hca_inline512 =
             ext_shared_w1.view(shared_w1_hca_inline512_shapes, shared_w1_hca_inline512_offsets);
         uint32_t shared_w1_scale_hca_inline651_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 2048))
@@ -8455,7 +8516,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w1_scale.shapes[0] - shared_w1_scale_hca_inline651_offsets[0]))
         };
-        ChipTensor shared_w1_scale_hca_inline651 =
+        simpler::hbg::Tensor shared_w1_scale_hca_inline651 =
             ext_shared_w1_scale.view(shared_w1_scale_hca_inline651_shapes, shared_w1_scale_hca_inline651_offsets);
         uint32_t shared_w3_hca_inline735_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 2048)), 0
@@ -8468,7 +8529,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w3.shapes[1] - shared_w3_hca_inline735_offsets[1]))
         };
-        ChipTensor shared_w3_hca_inline735 =
+        simpler::hbg::Tensor shared_w3_hca_inline735 =
             ext_shared_w3.view(shared_w3_hca_inline735_shapes, shared_w3_hca_inline735_offsets);
         uint32_t shared_w3_scale_hca_inline596_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 2048))
@@ -8478,7 +8539,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w3_scale.shapes[0] - shared_w3_scale_hca_inline596_offsets[0]))
         };
-        ChipTensor shared_w3_scale_hca_inline596 =
+        simpler::hbg::Tensor shared_w3_scale_hca_inline596 =
             ext_shared_w3_scale.view(shared_w3_scale_hca_inline596_shapes, shared_w3_scale_hca_inline596_offsets);
         uint32_t shared_w2_hca_inline611_offsets[2] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096)), 0
@@ -8491,7 +8552,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(2048, ext_shared_w2.shapes[1] - shared_w2_hca_inline611_offsets[1]))
         };
-        ChipTensor shared_w2_hca_inline611 =
+        simpler::hbg::Tensor shared_w2_hca_inline611 =
             ext_shared_w2.view(shared_w2_hca_inline611_shapes, shared_w2_hca_inline611_offsets);
         uint32_t shared_w2_scale_hca_inline523_offsets[1] = {
             static_cast<uint32_t>((static_cast<int64_t>(hca_layer_inline704) * 4096))
@@ -8501,7 +8562,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                  0u :
                  std::min<uint32_t>(4096, ext_shared_w2_scale.shapes[0] - shared_w2_scale_hca_inline523_offsets[0]))
         };
-        ChipTensor shared_w2_scale_hca_inline523 =
+        simpler::hbg::Tensor shared_w2_scale_hca_inline523 =
             ext_shared_w2_scale.view(shared_w2_scale_hca_inline523_shapes, shared_w2_scale_hca_inline523_offsets);
         GraphTaskArgs hca_moe_block_args;
         hca_moe_block_args.add_input(hc_ffn_fn_hca_inline519);
@@ -8550,9 +8611,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TensorCreateInfo hidden_mid_inline726_ci(hidden_mid_inline726_ci_shapes, 3, DataType::FLOAT32);
         TaskOutputTensors alloc_55 =
             alloc_tensors(x_attn_csa_inline721_ci, x_attn_hca_inline723_ci, hidden_mid_inline726_ci);
-        const ChipTensor &x_attn_csa_inline721 = alloc_55.get_ref(0);
-        const ChipTensor &x_attn_hca_inline723 = alloc_55.get_ref(1);
-        const ChipTensor &hidden_mid_inline726 = alloc_55.get_ref(2);
+        const simpler::hbg::Tensor &x_attn_csa_inline721 = alloc_55.get_ref(0);
+        const simpler::hbg::Tensor &x_attn_hca_inline723 = alloc_55.get_ref(1);
+        const simpler::hbg::Tensor &hidden_mid_inline726 = alloc_55.get_ref(2);
         submit_csa_attn_block(csa_layer_inline714, loop_i_inline712, x_attn_csa_inline721, hidden_inline709);
         submit_csa_moe_block(csa_layer_inline714, csa_moe_epoch_inline715, x_attn_csa_inline721, hidden_mid_inline726);
         submit_hca_attn_block(hca_layer_inline704, loop_i_inline712, x_attn_hca_inline723, hidden_mid_inline726);
@@ -8567,9 +8628,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TensorCreateInfo hidden_mid_inline726_ci(hidden_mid_inline726_ci_shapes, 3, DataType::FLOAT32);
         TaskOutputTensors alloc_55 =
             alloc_tensors(x_attn_csa_inline721_ci, x_attn_hca_inline723_ci, hidden_mid_inline726_ci);
-        const ChipTensor &x_attn_csa_inline721 = alloc_55.get_ref(0);
-        const ChipTensor &x_attn_hca_inline723 = alloc_55.get_ref(1);
-        const ChipTensor &hidden_mid_inline726 = alloc_55.get_ref(2);
+        const simpler::hbg::Tensor &x_attn_csa_inline721 = alloc_55.get_ref(0);
+        const simpler::hbg::Tensor &x_attn_hca_inline723 = alloc_55.get_ref(1);
+        const simpler::hbg::Tensor &hidden_mid_inline726 = alloc_55.get_ref(2);
         submit_csa_attn_block(42, 20, x_attn_csa_inline721, hidden_inline709);
         submit_hca_moe_block(42, 43, x_attn_csa_inline721, ext_pre_hc_hidden_out);
     }
@@ -8601,19 +8662,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             selected_hidden_inline51_inline13294_ci, owner_hiddens_inline50_inline13292_ci,
             logits_shards_inline40_inline13289_ci
         );
-        const ChipTensor &selected_hidden_inline51_inline13294 = alloc_142.get_ref(0);
-        const ChipTensor &owner_hiddens_inline50_inline13292 = alloc_142.get_ref(1);
-        const ChipTensor &logits_shards_inline40_inline13289 = alloc_142.get_ref(2);
+        const simpler::hbg::Tensor &selected_hidden_inline51_inline13294 = alloc_142.get_ref(0);
+        const simpler::hbg::Tensor &owner_hiddens_inline50_inline13292 = alloc_142.get_ref(1);
+        const simpler::hbg::Tensor &logits_shards_inline40_inline13289 = alloc_142.get_ref(2);
         int64_t t_dim_inline13231 = (int64_t)orch_args.tensor(75).ref().shapes[0];
         int64_t t_linear_inline13230 = std::max<int64_t>(t_dim_inline13231, 16);
         uint32_t x_flat_inline13229_shapes[2] = {static_cast<uint32_t>(t_dim_inline13231), 16384};
-        ChipTensor x_flat_inline13229 = ext_pre_hc_hidden_out.reshape(x_flat_inline13229_shapes, 2);
+        simpler::hbg::Tensor x_flat_inline13229 = ext_pre_hc_hidden_out.reshape(x_flat_inline13229_shapes, 2);
         uint32_t y_flat_inline13226_shapes[2] = {static_cast<uint32_t>(t_dim_inline13231), 4096};
-        ChipTensor y_flat_inline13226 = x_head_inline485.reshape(y_flat_inline13226_shapes, 2);
+        simpler::hbg::Tensor y_flat_inline13226 = x_head_inline485.reshape(y_flat_inline13226_shapes, 2);
         uint32_t sq_part_inline13219_ci_shapes[2] = {16, static_cast<uint32_t>(t_dim_inline13231)};
         TensorCreateInfo sq_part_inline13219_ci(sq_part_inline13219_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_143 = alloc_tensors(sq_part_inline13219_ci);
-        const ChipTensor &sq_part_inline13219 = alloc_143.get_ref(0);
+        const simpler::hbg::Tensor &sq_part_inline13219 = alloc_143.get_ref(0);
 
         // Spmd hc_head_rms_spmd: hc_head_rms
         CoreTaskArgs params_t342;
@@ -8629,7 +8690,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_hc_head_mixes_zero.add_output(mixes_raw_inline13234_ci);
         params_hc_head_mixes_zero.launch_spec.set_block_num(((t_linear_inline13230 + 15) / 16));
         TaskOutputTensors hc_head_mixes_zero_outs = rt_submit_aiv_task(367, params_hc_head_mixes_zero);
-        const ChipTensor &mixes_raw_inline13234 = hc_head_mixes_zero_outs.get_ref(0);
+        const simpler::hbg::Tensor &mixes_raw_inline13234 = hc_head_mixes_zero_outs.get_ref(0);
         TaskId hc_head_mixes_zero_tid = hc_head_mixes_zero_outs.task_id();
 
         // Spmd hc_head_linear_spmd: hc_head_linear
@@ -8654,7 +8715,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t344.launch_spec.set_block_num(((t_dim_inline13231 / 8) * 8));
         rt_submit_aiv_task(356, params_t344);
         uint32_t y_v1_inline13222_shapes[2] = {static_cast<uint32_t>(t_dim_inline13231), 4096};
-        ChipTensor y_v1_inline13222 = y_flat_inline13226.reshape(y_v1_inline13222_shapes, 2);
+        simpler::hbg::Tensor y_v1_inline13222 = y_flat_inline13226.reshape(y_v1_inline13222_shapes, 2);
         int64_t t_dim_inline13248 = 8;
 
         // Spmd rms_norm_spmd_4: rms_norm_4

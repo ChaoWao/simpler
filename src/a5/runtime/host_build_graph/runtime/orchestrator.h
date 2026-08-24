@@ -113,7 +113,7 @@ struct OrchestratorState {
     // dedups producers afterwards, so the region's length is known only when the count
     // is published, and it advances there.
     int32_t *fanin_pool{nullptr};
-    ChipTensor *tensor_pool{nullptr};
+    simpler::hbg::Tensor *tensor_pool{nullptr};
     uint64_t *scalar_pool{nullptr};
     int32_t fanin_pool_cursor{0};
     int32_t tensor_pool_cursor{0};

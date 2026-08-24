@@ -16,7 +16,7 @@
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
- * - ChipTensor pair management for host-device memory tracking
+ * - simpler::tmr::Tensor pair management for host-device memory tracking
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
@@ -45,6 +45,7 @@
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
 #include "task_args.h"
+#include "tensor.h"  // EntryArgsStorage
 
 // =============================================================================
 // Configuration Macros
@@ -111,7 +112,7 @@ enum class TensorReleaseKind {
 };
 
 /**
- * ChipTensor lease for tracking host-device memory mappings and release ownership.
+ * simpler::tmr::Tensor lease for tracking host-device memory mappings and release ownership.
  */
 struct TensorLease {
     void *host_ptr;
@@ -188,8 +189,8 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Controlled via SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE environment variable.
     bool serial_orch_sched;
 
-    void *gm_sm_ptr_;                        // GM pointer to shared memory (device)
-    ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
+    void *gm_sm_ptr_;                                   // GM pointer to shared memory (device)
+    simpler::tmr::EntryArgsStorage orch_args_storage_;  // Entry args, adopted on the host
 
     // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
     // Runtime to device; AICPU reads them in the boot path to skip
@@ -261,7 +262,7 @@ public:
     // =========================================================================
 
     void *get_gm_sm_ptr() const;
-    const ChipStorageTaskArgs &get_orch_args() const;
+    const simpler::tmr::EntryArgsStorage &get_orch_args() const;
     void set_gm_sm_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
 

@@ -15,7 +15,7 @@
  * This header defines the fundamental tensormap_and_ringbuffer runtime types:
  * - Configuration constants
  * - Worker types and task states
- * - ChipTensor regions and task parameters
+ * - simpler::tmr::Tensor regions and task parameters
  * - Task descriptors with fanin/fanout tracking
  * - Dependency list entries
  *
@@ -329,19 +329,19 @@ struct TaskPayload {
     // dispatch.
     alignas(64) DispatchPredicate predicate;
     // === Cache lines 10-73 (4096B) — tensors (alignas(64) forces alignment) ===
-    ChipTensor tensors[MAX_TENSOR_ARGS];
+    simpler::tmr::Tensor tensors[MAX_TENSOR_ARGS];
     // === Cache lines 74-75 (128B) — scalars ===
     uint64_t scalars[MAX_SCALAR_ARGS];
 
     // Layout verification (size checks that don't need offsetof).
-    static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
+    static_assert(sizeof(simpler::tmr::Tensor) == 128, "simpler::tmr::Tensor must be 2 cache lines");
     static_assert(MAX_SCALAR_ARGS * sizeof(uint64_t) == 128, "scalar region must be 128B (2 cache lines)");
 
     // Argument region access. Shared AICPU code (args_dump_aicpu.h) reads a payload's
     // arguments through these, so both runtimes offer them whether the arguments sit
     // inline as they do here or in a pool.
-    ChipTensor *tensor_data() { return tensors; }
-    const ChipTensor *tensor_data() const { return tensors; }
+    simpler::tmr::Tensor *tensor_data() { return tensors; }
+    const simpler::tmr::Tensor *tensor_data() const { return tensors; }
     uint64_t *scalar_data() { return scalars; }
     const uint64_t *scalar_data() const { return scalars; }
 
@@ -421,11 +421,11 @@ static_assert(
 );
 static_assert(offsetof(TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)");
 static_assert(
-    offsetof(TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor),
+    offsetof(TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(simpler::tmr::Tensor),
     "scalars must immediately follow tensors"
 );
 static_assert(
-    sizeof(TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
+    sizeof(TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(simpler::tmr::Tensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
     "TaskPayload size = metadata(576) + predicate cache line(64) + tensors + scalars"
 );
 

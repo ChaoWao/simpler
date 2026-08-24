@@ -51,14 +51,14 @@
 #include "runtime_types.h"           // SIMPLER_ERROR_*
 #include "submit_types.h"            // MixedKernels, INVALID_KERNEL_ID, subtask slots
 #include "types.h"                   // Arg, TaskOutputTensors, TensorArgType
-#include "task_args.h"               // ChipStorageTaskArgs, ChipTensor
-#include "tensor.h"                  // ChipTensor, TensorCreateInfo
+#include "task_args.h"               // ChipStorageTaskArgs, simpler::hbg::Tensor
+#include "tensor.h"                  // simpler::hbg::Tensor, TensorCreateInfo
 
 // =============================================================================
-// ChipTensor Factory Helpers
+// simpler::hbg::Tensor Factory Helpers
 // =============================================================================
 
-// make_tensor_external(...) — canonical factory for pre-allocated external
+// simpler::hbg::make_tensor_external(...) — canonical factory for pre-allocated external
 // memory — is defined in the unified tensor.h (common), so host and runtime
 // build ChipTensors through the same controlled path.
 
@@ -94,9 +94,11 @@ typedef struct RuntimeOps {
 
     // Cross-layer data access (orchestration reads/writes tensor values via runtime)
     // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
+    uint64_t (*get_tensor_data)(
+        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]
+    );
     void (*set_tensor_data)(
-        RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
     );
     TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
@@ -179,7 +181,7 @@ public:
     GraphTaskArgs &args() { return args_; }
 
 private:
-    std::array<ChipTensor, GRAPH_MAX_TENSOR_ARGS> tensors_{};
+    std::array<simpler::hbg::Tensor, GRAPH_MAX_TENSOR_ARGS> tensors_{};
     std::array<uint64_t, GRAPH_MAX_SCALAR_ARGS> scalars_{};
     GraphTaskArgs args_;
 };
@@ -643,7 +645,7 @@ inline uint64_t rt_orch_phase_now_ns() {
  * registered host view; either use is reported as an invalid argument.
  */
 template <typename T = uint64_t>
-static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
+static inline T get_tensor_data(const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
     RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return from_u64<T>(0);
@@ -666,7 +668,8 @@ static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const 
  * is rejected as an invalid argument.
  */
 template <typename T = uint64_t>
-static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {
+static inline void
+set_tensor_data(const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {
     RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;

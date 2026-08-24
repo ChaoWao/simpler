@@ -31,9 +31,9 @@ allreduce_sum_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void allreduce_sum_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &partial_local = orch_args.tensor(0).ref();
-    const ChipTensor &y = orch_args.tensor(1).ref();
-    const ChipTensor &scratch = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &partial_local = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &y = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &scratch = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(partial_local);

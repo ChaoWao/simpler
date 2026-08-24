@@ -74,7 +74,7 @@ constexpr uint32_t TASKPAYLOAD_SCALARS_DELTA_OFFSET = 16;
 // Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate. Scalars follow it,
 // then tensors — the tensor array is last because it is the only region whose used
 // extent varies per task, so a task's read set is a contiguous prefix.
-constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
+constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(simpler::hbg::Tensor)
 
 /**
  * Per-core dispatch payload: function address + args[] + SPMD context.

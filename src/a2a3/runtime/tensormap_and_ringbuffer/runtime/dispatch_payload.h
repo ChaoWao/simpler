@@ -71,7 +71,7 @@ constexpr uint32_t TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
 // Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate; tensors follow it.
 constexpr uint32_t TASKPAYLOAD_TENSORS_OFFSET = 640;
 constexpr uint32_t TASKPAYLOAD_SCALARS_OFFSET = 4736;
-constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
+constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(simpler::tmr::Tensor)
 
 /**
  * Per-core dispatch payload: function address + args[] + SPMD context.

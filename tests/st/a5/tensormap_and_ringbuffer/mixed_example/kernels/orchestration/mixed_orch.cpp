@@ -49,23 +49,23 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // Input tensors use orch_args.tensor(i).ref() — golden shape = kernel shape
-    const ChipTensor &ext_A = orch_args.tensor(0).ref();
-    const ChipTensor &ext_B = orch_args.tensor(1).ref();
-    const ChipTensor &ext_D = orch_args.tensor(3).ref();
-    const ChipTensor &ext_E = orch_args.tensor(4).ref();
-    const ChipTensor &ext_G = orch_args.tensor(6).ref();
-    const ChipTensor &ext_H = orch_args.tensor(7).ref();
+    const simpler::tmr::Tensor &ext_A = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_B = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_D = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_E = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &ext_G = orch_args.tensor(6).ref();
+    const simpler::tmr::Tensor &ext_H = orch_args.tensor(7).ref();
 
     // Output tensors — full buffers
-    const ChipTensor &ext_C = orch_args.tensor(2).ref();
-    const ChipTensor &ext_F = orch_args.tensor(5).ref();
-    const ChipTensor &ext_I = orch_args.tensor(8).ref();
-    const ChipTensor &ext_J = orch_args.tensor(9).ref();
-    const ChipTensor &ext_K = orch_args.tensor(10).ref();
-    const ChipTensor &ext_L = orch_args.tensor(11).ref();
-    const ChipTensor &ext_M = orch_args.tensor(12).ref();
-    const ChipTensor &ext_N = orch_args.tensor(13).ref();
-    const ChipTensor &ext_O = orch_args.tensor(14).ref();
+    const simpler::tmr::Tensor &ext_C = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_F = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &ext_I = orch_args.tensor(8).ref();
+    const simpler::tmr::Tensor &ext_J = orch_args.tensor(9).ref();
+    const simpler::tmr::Tensor &ext_K = orch_args.tensor(10).ref();
+    const simpler::tmr::Tensor &ext_L = orch_args.tensor(11).ref();
+    const simpler::tmr::Tensor &ext_M = orch_args.tensor(12).ref();
+    const simpler::tmr::Tensor &ext_N = orch_args.tensor(13).ref();
+    const simpler::tmr::Tensor &ext_O = orch_args.tensor(14).ref();
 
     // Derive num_iters from output tensor size
     uint32_t total_elems = orch_args.tensor(2).ref().shapes[0];
@@ -78,15 +78,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             uint32_t view_shapes[1] = {TILE_ELEMS};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(i) * TILE_ELEMS};
 
-            ChipTensor C_view = ext_C.view(view_shapes, view_offsets);
-            ChipTensor F_view = ext_F.view(view_shapes, view_offsets);
-            ChipTensor I_view = ext_I.view(view_shapes, view_offsets);
-            ChipTensor J_view = ext_J.view(view_shapes, view_offsets);
-            ChipTensor K_view = ext_K.view(view_shapes, view_offsets);
-            ChipTensor L_view = ext_L.view(view_shapes, view_offsets);
-            ChipTensor M_view = ext_M.view(view_shapes, view_offsets);
-            ChipTensor N_view = ext_N.view(view_shapes, view_offsets);
-            ChipTensor O_view = ext_O.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor C_view = ext_C.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor F_view = ext_F.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor I_view = ext_I.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor J_view = ext_J.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor K_view = ext_K.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor L_view = ext_L.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor M_view = ext_M.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor N_view = ext_N.view(view_shapes, view_offsets);
+            simpler::tmr::Tensor O_view = ext_O.view(view_shapes, view_offsets);
 
             // 1. AIC_AIV_X2: matmul + add + mul
             {

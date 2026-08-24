@@ -49,10 +49,10 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // External tensors from golden.py
-    const ChipTensor &ext_a = orch_args.tensor(0).ref();
-    const ChipTensor &ext_b = orch_args.tensor(1).ref();
-    const ChipTensor &ext_result = orch_args.tensor(2).ref();
-    const ChipTensor &ext_check = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_a = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_b = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_result = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_check = orch_args.tensor(3).ref();
 
     uint32_t SIZE = orch_args.tensor(0).ref().shapes[0];
     LOG_INFO("scalar_data_test: SIZE=%u, check_size=%u", SIZE, orch_args.tensor(3).ref().shapes[0]);
@@ -68,7 +68,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     params_c.add_input(ext_b);
     params_c.add_output(inter_ci);
     TaskOutputTensors c_outs = rt_submit_aiv_task(FUNC_ADD, params_c);
-    const ChipTensor &c = c_outs.get_ref(0);
+    const simpler::tmr::Tensor &c = c_outs.get_ref(0);
 
     // =========================================================
     // Step 2: get_tensor_data(c, {0}) → check[0]
@@ -101,7 +101,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t scalar_shapes[1] = {1};
     TensorCreateInfo scalar_ci(scalar_shapes, 1, DataType::FLOAT32);
     TaskOutputTensors scalar_alloc_outs = alloc_tensors(scalar_ci);
-    const ChipTensor &scalar_tensor = scalar_alloc_outs.get_ref(0);
+    const simpler::tmr::Tensor &scalar_tensor = scalar_alloc_outs.get_ref(0);
     uint32_t scalar_idx[1] = {0};
     set_tensor_data(scalar_tensor, 1, scalar_idx, 77.0f);
 
@@ -167,7 +167,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     //   kernel_add reads d as input: e[0] = d[0] + a[0] = 12.0
     // =========================================================
     TaskOutputTensors d_alloc_outs = alloc_tensors(inter_ci);
-    const ChipTensor &d = d_alloc_outs.get_ref(0);
+    const simpler::tmr::Tensor &d = d_alloc_outs.get_ref(0);
 
     idx[0] = 0;
     set_tensor_data(d, 1, idx, 10.0f);
@@ -177,7 +177,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     params_e.add_input(ext_a);
     params_e.add_output(inter_ci);
     TaskOutputTensors e_outs = rt_submit_aiv_task(FUNC_ADD, params_e);
-    const ChipTensor &e = e_outs.get_ref(0);
+    const simpler::tmr::Tensor &e = e_outs.get_ref(0);
 
     float e0_val = get_tensor_data<float>(e, 1, idx);
     LOG_INFO("Orch→AICore RAW: e[0] = %f (expected 12.0)", static_cast<double>(e0_val));

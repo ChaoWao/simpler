@@ -52,7 +52,7 @@ static int16_t cohort(int32_t total, int32_t divisor, int32_t delta) {
     return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
-static void submit_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
+static void submit_mix(const simpler::tmr::Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     mk.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
@@ -67,8 +67,8 @@ static void submit_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_output = orch_args.tensor(0).ref();
-    const ChipTensor &layout = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &layout = orch_args.tensor(1).ref();
 
     const int32_t clusters = rt_available_cluster_count();
     const int16_t block_nums[5] = {1, cohort(clusters, 3, 0), cohort(clusters, 3, 1), cohort(clusters, 1, -1), 1};

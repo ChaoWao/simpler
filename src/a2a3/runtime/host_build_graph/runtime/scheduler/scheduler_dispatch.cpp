@@ -44,7 +44,7 @@ static_assert(offsetof(TaskPayload, tensor_count) == TASKPAYLOAD_TENSOR_COUNT_OF
 static_assert(offsetof(TaskPayload, scalar_count) == TASKPAYLOAD_SCALAR_COUNT_OFFSET);
 static_assert(offsetof(TaskPayload, tensors) == TASKPAYLOAD_TENSORS_DELTA_OFFSET);
 static_assert(offsetof(TaskPayload, scalars) == TASKPAYLOAD_SCALARS_DELTA_OFFSET);
-static_assert(sizeof(ChipTensor) == TASKPAYLOAD_TENSOR_STRIDE);
+static_assert(sizeof(simpler::hbg::Tensor) == TASKPAYLOAD_TENSOR_STRIDE);
 
 // =============================================================================
 // Dispatch helpers
@@ -145,7 +145,7 @@ void SchedulerContext::build_payload(
         // Both regions are resolved once: the args[] stores below could alias the
         // payload as far as the compiler knows, so re-resolving a delta per element
         // would reload it on every iteration.
-        const ChipTensor *tensors = payload.tensor_data();
+        const simpler::hbg::Tensor *tensors = payload.tensor_data();
         const int32_t tensor_count = payload.tensor_count;
         for (int32_t i = 0; i < tensor_count; i++) {
             dispatch_payload.args[n++] = reinterpret_cast<uint64_t>(&tensors[i]);

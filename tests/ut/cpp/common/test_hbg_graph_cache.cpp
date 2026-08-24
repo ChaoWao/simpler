@@ -191,7 +191,7 @@ private:
 // execution in the heap tail and reads invocation boundaries from the payload.
 //
 // The boundary regions are sized by the same helpers graph_submit_outer reserves
-// with — the ChipTensor slot span that holds GRAPH_MAX_TENSOR_ARGS packed
+// with — the simpler::hbg::Tensor slot span that holds GRAPH_MAX_TENSOR_ARGS packed
 // GraphTensors, and the ARG_POOL_ALIGN-rounded scalar span — rather than by the
 // GraphTaskArgs element caps, so the fixture reserves what production reserves for
 // the widest legal boundary. They are members, not separate allocations: a payload
@@ -225,7 +225,7 @@ public:
         return reinterpret_cast<const std::byte *>(boundary_tensors_.data()) + boundary_count * sizeof(GraphTensor);
     }
     size_t boundary_tail_bytes(uint32_t boundary_count) const {
-        return TENSOR_SLOTS * sizeof(ChipTensor) - boundary_count * sizeof(GraphTensor);
+        return TENSOR_SLOTS * sizeof(simpler::hbg::Tensor) - boundary_count * sizeof(GraphTensor);
     }
 
     GraphExecution *initialize_execution(
@@ -236,7 +236,7 @@ public:
             definition->boundary_scalar_count > SCALAR_SPAN) {
             return nullptr;
         }
-        std::memset(boundary_tensors_.data(), 0, TENSOR_SLOTS * sizeof(ChipTensor));
+        std::memset(boundary_tensors_.data(), 0, TENSOR_SLOTS * sizeof(simpler::hbg::Tensor));
         const GraphTensor boundary = make_test_tensor(boundary_address);
         new (boundary_tensors_.data()) GraphTensor{boundary};
         payload_.tensor_count = static_cast<int32_t>(definition->boundary_count);
@@ -255,7 +255,7 @@ private:
     TaskDescriptor task_{};
     TaskPayload payload_{};
     ChipTaskSlotState slot_{};
-    std::array<ChipTensor, TENSOR_SLOTS> boundary_tensors_{};
+    std::array<simpler::hbg::Tensor, TENSOR_SLOTS> boundary_tensors_{};
     std::array<uint64_t, SCALAR_SPAN> boundary_scalars_{};
 };
 
@@ -319,7 +319,7 @@ TEST(GraphCache, RejectsEmptyBoundary) {
 TEST(GraphCache, AcceptsBoundaryScalars) {
     std::array<uint8_t, 64> boundary{};
     const GraphTensor packed = make_test_tensor(reinterpret_cast<uint64_t>(boundary.data()));
-    ChipTensor tensor{};
+    simpler::hbg::Tensor tensor{};
     graph_tensor_unpack(packed, &tensor);
 
     GraphTaskArgs args;
@@ -376,12 +376,12 @@ TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     EXPECT_EQ(layout.nodes_offset % alignof(GraphNodeStorage), 0U);
     EXPECT_GE(layout.nodes_offset, sizeof(GraphExecution));
     EXPECT_EQ(layout.tensors_offset, layout.nodes_offset + NODE_COUNT * sizeof(GraphNodeStorage));
-    EXPECT_EQ(layout.tensors_offset % alignof(ChipTensor), 0U);
-    EXPECT_EQ(layout.scalars_offset, layout.tensors_offset + TENSOR_ARGS * sizeof(ChipTensor));
+    EXPECT_EQ(layout.tensors_offset % alignof(simpler::hbg::Tensor), 0U);
+    EXPECT_EQ(layout.scalars_offset, layout.tensors_offset + TENSOR_ARGS * sizeof(simpler::hbg::Tensor));
     EXPECT_EQ(layout.total_bytes, layout.scalars_offset + SCALAR_ARGS * sizeof(uint64_t));
 }
 
-// The outer Graph payload's tensor region is counted in ChipTensor pool slots but
+// The outer Graph payload's tensor region is counted in simpler::hbg::Tensor pool slots but
 // holds densely packed GraphTensor values, so the slot count must cover the packed
 // bytes and be the smallest count that does — anything larger silently overdraws the
 // shared pool, anything smaller lets localize read past the region.
@@ -390,8 +390,8 @@ TEST(GraphBoundaryPool, TensorSlotsCoverPackedBytesMinimally) {
     for (uint32_t count = 1; count <= GRAPH_MAX_TENSOR_ARGS; ++count) {
         const size_t slots = graph_boundary_tensor_pool_slots(count);
         const size_t packed = static_cast<size_t>(count) * sizeof(GraphTensor);
-        EXPECT_GE(slots * sizeof(ChipTensor), packed) << "count " << count;
-        EXPECT_LT((slots - 1) * sizeof(ChipTensor), packed) << "count " << count;
+        EXPECT_GE(slots * sizeof(simpler::hbg::Tensor), packed) << "count " << count;
+        EXPECT_LT((slots - 1) * sizeof(simpler::hbg::Tensor), packed) << "count " << count;
     }
 }
 
@@ -409,7 +409,7 @@ TEST(GraphBoundaryPool, WidestBoundaryExceedsOneSlotBudget) {
     );
     // The widest boundary that still fits one slot's tensor budget.
     EXPECT_LE(
-        graph_boundary_tensor_pool_slots(MAX_TENSOR_ARGS * sizeof(ChipTensor) / sizeof(GraphTensor)),
+        graph_boundary_tensor_pool_slots(MAX_TENSOR_ARGS * sizeof(simpler::hbg::Tensor) / sizeof(GraphTensor)),
         static_cast<size_t>(MAX_TENSOR_ARGS)
     );
 }

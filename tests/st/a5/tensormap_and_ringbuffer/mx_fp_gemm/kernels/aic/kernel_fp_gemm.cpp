@@ -166,11 +166,11 @@ static __aicore__ void matmul_mx_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *a_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *as_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *b_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
-    __gm__ ChipTensor *bs_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
-    __gm__ ChipTensor *c_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ TaskTensor *a_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *as_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *b_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ TaskTensor *bs_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ TaskTensor *c_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
     const int mode = static_cast<int>(args[5]);
 
     __gm__ float8_e8m0_t *as =

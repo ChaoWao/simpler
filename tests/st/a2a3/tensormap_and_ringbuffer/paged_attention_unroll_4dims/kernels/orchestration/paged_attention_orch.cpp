@@ -69,11 +69,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint64_t q_loop = (num_heads + q_tile - 1) / q_tile;
 
     // External 4D tensors inherit shape/dtype from TaskArg (golden provides 4D).
-    const ChipTensor &query = orch_args.tensor(0).ref();
-    const ChipTensor &key_cache = orch_args.tensor(1).ref();
-    const ChipTensor &value_cache = orch_args.tensor(2).ref();
-    const ChipTensor &block_table = orch_args.tensor(3).ref();
-    const ChipTensor &out = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &query = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &key_cache = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &value_cache = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &block_table = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(5).ref();
 
     int *host_context_lens = orch_args.tensor(4).ref().data_as<int>();
 
@@ -100,14 +100,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 // 4D views into query/out, matching (1, 1, q_tile, head_dim).
                 uint32_t view_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)head_dim};
                 uint32_t view_offsets[4] = {(uint32_t)b_idx, 0, (uint32_t)(q_idx * q_tile), 0};
-                ChipTensor qi = query.view(view_shapes, view_offsets);
-                ChipTensor out_view = out.view(view_shapes, view_offsets, true);
+                simpler::tmr::Tensor qi = query.view(view_shapes, view_offsets);
+                simpler::tmr::Tensor out_view = out.view(view_shapes, view_offsets, true);
 
                 // Per-group accumulators: oi (4D data), mi_update/li_update (3D scalars).
                 TaskOutputTensors alloc_outs = alloc_tensors(tile4d_ci, scalar_ci, scalar_ci);
-                const ChipTensor &oi = alloc_outs.get_ref(0);
-                const ChipTensor &li_update = alloc_outs.get_ref(1);
-                const ChipTensor &mi_update = alloc_outs.get_ref(2);
+                const simpler::tmr::Tensor &oi = alloc_outs.get_ref(0);
+                const simpler::tmr::Tensor &li_update = alloc_outs.get_ref(1);
+                const simpler::tmr::Tensor &mi_update = alloc_outs.get_ref(2);
 
                 // Reusable Arg objects — reset() before each use avoids
                 // repeated stack-frame construction in the inner loop.
@@ -132,7 +132,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_qk.add_scalar(n_blocks);
                     params_qk.add_scalar(b_idx * block_num + bn);
                     TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                    const ChipTensor &sij_buf = qk_outs.get_ref(0);
+                    const simpler::tmr::Tensor &sij_buf = qk_outs.get_ref(0);
 
                     // === Task 2: Two-pass softmax — produces 4D pij_buf, 3D mi, li ===
                     uint32_t pij_buf_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)(n_blocks * block_size)};
@@ -147,9 +147,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_sf.add_scalar(n_blocks);
                     params_sf.add_scalar(valid_len_last);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                    const ChipTensor &pij_buf = sf_outs.get_ref(0);
-                    const ChipTensor &mi = sf_outs.get_ref(1);
-                    const ChipTensor &li = sf_outs.get_ref(2);
+                    const simpler::tmr::Tensor &pij_buf = sf_outs.get_ref(0);
+                    const simpler::tmr::Tensor &mi = sf_outs.get_ref(1);
+                    const simpler::tmr::Tensor &li = sf_outs.get_ref(2);
 
                     // === Task 3: SplitK PV matmul — produces 4D oi_new ===
                     params_pv.reset();
@@ -160,7 +160,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_pv.add_scalar(n_blocks);
                     params_pv.add_scalar(b_idx * block_num + bn);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                    const ChipTensor &oi_new = pv_outs.get_ref(0);
+                    const simpler::tmr::Tensor &oi_new = pv_outs.get_ref(0);
 
                     // === Task 4: Online update (per-group) ===
                     uint64_t is_first = (bn == 0) ? 1 : 0;

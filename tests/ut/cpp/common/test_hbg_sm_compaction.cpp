@@ -139,8 +139,10 @@ public:
     TaskPayload *payloads() {
         return reinterpret_cast<TaskPayload *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).payloads);
     }
-    ChipTensor *tensor_pool() {
-        return reinterpret_cast<ChipTensor *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).tensor_pool);
+    simpler::hbg::Tensor *tensor_pool() {
+        return reinterpret_cast<simpler::hbg::Tensor *>(
+            image_.base() + sm_layout::ring_segment_offsets(WINDOW).tensor_pool
+        );
     }
     uint64_t *scalar_pool() {
         return reinterpret_cast<uint64_t *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).scalar_pool);
@@ -200,7 +202,9 @@ struct Compacted {
     TaskDescriptor *descriptors() { return reinterpret_cast<TaskDescriptor *>(image.base() + off().descriptors); }
     TaskPayload *payloads() { return payload_at(0); }
     ChipTaskSlotState *slot_states() { return reinterpret_cast<ChipTaskSlotState *>(image.base() + off().slot_states); }
-    ChipTensor *tensor_pool() { return reinterpret_cast<ChipTensor *>(image.base() + off().tensor_pool); }
+    simpler::hbg::Tensor *tensor_pool() {
+        return reinterpret_cast<simpler::hbg::Tensor *>(image.base() + off().tensor_pool);
+    }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(image.base() + off().completion_flags);
     }
@@ -343,7 +347,7 @@ TEST(HbgSmCompaction, RebindsEveryArgumentRegionInsideTheImage) {
     const auto off = compacted.off();
     const char *base = compacted.image.base();
     const char *tensor_begin = base + off.tensor_pool;
-    const char *tensor_end = tensor_begin + compacted.used.tensor_elems * sizeof(ChipTensor);
+    const char *tensor_end = tensor_begin + compacted.used.tensor_elems * sizeof(simpler::hbg::Tensor);
     const char *scalar_begin = base + off.scalar_pool;
     const char *scalar_end = scalar_begin + compacted.used.scalar_elems * sizeof(uint64_t);
     const char *fanin_begin = base + off.fanin_pool;
@@ -471,20 +475,20 @@ TEST(HbgSmCompaction, RebaseIsANoOpWhenNothingCameFromTheHeap) {
 }
 
 // An outer GRAPH task's boundary tensors are GraphTensors packed at their own
-// stride into the ChipTensor-slotted pool (graph_boundary_tensor_pool_slots sizes
-// the slots), so only the first one starts on a ChipTensor boundary. The rebase
+// stride into the simpler::hbg::Tensor-slotted pool (graph_boundary_tensor_pool_slots sizes
+// the slots), so only the first one starts on a simpler::hbg::Tensor boundary. The rebase
 // therefore cannot walk the pool as ChipTensors: every boundary past the first
 // keeps a virtual address the device then dereferences, and the bytes that *are*
 // rewritten land in the middle of a GraphTensor.
 TEST(HbgSmCompaction, MovesEveryGraphBoundaryAddressOntoTheRealBase) {
     constexpr uint64_t REAL_BASE = 0x7F0000000000ULL;
     // Two is enough to expose the stride: the second GraphTensor starts at
-    // sizeof(GraphTensor), which is not a ChipTensor boundary. Their packed bytes
-    // still fit the ChipTensor slots this slot's region owns.
+    // sizeof(GraphTensor), which is not a simpler::hbg::Tensor boundary. Their packed bytes
+    // still fit the simpler::hbg::Tensor slots this slot's region owns.
     constexpr uint32_t BOUNDARIES = 2;
-    ASSERT_LT(sizeof(GraphTensor), sizeof(ChipTensor))
+    ASSERT_LT(sizeof(GraphTensor), sizeof(simpler::hbg::Tensor))
         << "the packing this test is about only exists while GraphTensor is the smaller";
-    ASSERT_LE(BOUNDARIES * sizeof(GraphTensor), TENSORS_PER_TASK * sizeof(ChipTensor));
+    ASSERT_LE(BOUNDARIES * sizeof(GraphTensor), TENSORS_PER_TASK * sizeof(simpler::hbg::Tensor));
 
     Mirror mirror;
     // One GRAPH task whose boundaries all live in the graph heap. task_kind is what

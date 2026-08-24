@@ -31,7 +31,7 @@ enum class GraphTensorSource : uint8_t {
     OWN_OUTPUT = 3,
 };
 
-// Wire representation of ChipTensor. ChipTensor itself is a host/runtime C++ type with
+// Wire representation of simpler::hbg::Tensor. simpler::hbg::Tensor itself is a host/runtime C++ type with
 // 64-byte alignment and helper methods; placing it inside vector<std::byte>
 // would not guarantee that alignment. Keep the boundary image C-compatible and
 // copy only semantic fields into this naturally 8-byte-aligned POD.
@@ -83,7 +83,7 @@ struct GraphPredicate {
     GraphTensor operand;
     GraphTensorSourceRef operand_source;
     // Element index into the rebound operand tensor, added to its start_offset.
-    // Fixed at record time: a Graph with a variable ChipTensor shape is rejected
+    // Fixed at record time: a Graph with a variable simpler::hbg::Tensor shape is rejected
     // before recording, so the operand's strides cannot change across replays.
     uint64_t elem_offset;
     int64_t target;
@@ -315,7 +315,7 @@ static_assert(
     "a Definition section type must not be over-aligned: its storage is a byte vector"
 );
 
-inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
+inline GraphTensor graph_tensor_pack(const simpler::hbg::Tensor &tensor) {
     GraphTensor packed{};
     packed.buffer_addr = tensor.buffer.addr;
     packed.buffer_size = tensor.buffer.size;
@@ -335,7 +335,7 @@ inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
     return packed;
 }
 
-inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
+inline void graph_tensor_unpack(const GraphTensor &packed, simpler::hbg::Tensor *tensor) {
     tensor->buffer = PTOBufferHandle{packed.buffer_addr, packed.buffer_size};
     tensor->owner_task_id = TaskId{packed.owner_task_id};
     tensor->start_offset = packed.start_offset;
@@ -446,7 +446,7 @@ struct GraphExecution {
     // This execution's node argument pools, in the storage tail past node_storage.
     // Every node payload's tensor and scalar deltas point here; its pool position is
     // the Definition's tensor_offset / scalar_offset.
-    ChipTensor *node_tensor_pool{nullptr};
+    simpler::hbg::Tensor *node_tensor_pool{nullptr};
     uint64_t *node_scalar_pool{nullptr};
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
@@ -463,10 +463,12 @@ static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
 // The tensor pool starts right after the node array, and the scalar pool starts
 // after a whole number of ChipTensors.
 static_assert(
-    alignof(GraphNodeStorage) % alignof(ChipTensor) == 0,
-    "a node entry must be at least ChipTensor-aligned: the tensor pool follows the node array"
+    alignof(GraphNodeStorage) % alignof(simpler::hbg::Tensor) == 0,
+    "a node entry must be at least simpler::hbg::Tensor-aligned: the tensor pool follows the node array"
 );
-static_assert(sizeof(ChipTensor) % alignof(uint64_t) == 0, "the tensor stride must keep the scalar pool aligned");
+static_assert(
+    sizeof(simpler::hbg::Tensor) % alignof(uint64_t) == 0, "the tensor stride must keep the scalar pool aligned"
+);
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 // The whole storage is aligned for its widest member, so one base check covers the
 // header as well as the node array that follows it.
@@ -474,15 +476,15 @@ static_assert(
     alignof(GraphNodeStorage) % alignof(GraphExecution) == 0,
     "the node array's alignment must subsume the execution header's"
 );
-static_assert(sizeof(GraphTensor) <= sizeof(ChipTensor));
+static_assert(sizeof(GraphTensor) <= sizeof(simpler::hbg::Tensor));
 
 inline constexpr size_t graph_boundary_tensor_pool_slots(uint32_t tensor_count) {
     const size_t bytes = static_cast<size_t>(tensor_count) * sizeof(GraphTensor);
-    return (bytes + sizeof(ChipTensor) - 1) / sizeof(ChipTensor);
+    return (bytes + sizeof(simpler::hbg::Tensor) - 1) / sizeof(simpler::hbg::Tensor);
 }
 
 // The outer GRAPH task's heap tail occupies
-// [GraphExecution][GraphNodeStorage x node_count][ChipTensor x tensor_arg_count]
+// [GraphExecution][GraphNodeStorage x node_count][simpler::hbg::Tensor x tensor_arg_count]
 // [uint64_t x scalar_arg_count].
 //
 // The last two regions are the node payloads' argument pools, indexed by the
@@ -507,7 +509,7 @@ inline bool graph_execution_storage_layout(
     constexpr size_t ALIGNMENT = alignof(GraphNodeStorage);
     out->nodes_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
     out->tensors_offset = out->nodes_offset + static_cast<size_t>(node_count) * sizeof(GraphNodeStorage);
-    out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(ChipTensor);
+    out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(simpler::hbg::Tensor);
     out->total_bytes = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
     return true;
 }

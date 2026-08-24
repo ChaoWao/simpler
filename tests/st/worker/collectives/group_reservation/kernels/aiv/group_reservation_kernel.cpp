@@ -74,7 +74,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    __gm__ ChipTensor *output_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ TaskTensor *output_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
     Operation operation = static_cast<Operation>(args[1]);
     __gm__ int32_t *state = reinterpret_cast<__gm__ int32_t *>(args[2]);
     __gm__ CommContext *context = reinterpret_cast<__gm__ CommContext *>(args[3]);

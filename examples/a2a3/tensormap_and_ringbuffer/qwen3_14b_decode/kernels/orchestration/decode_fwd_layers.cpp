@@ -31,26 +31,26 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // External tensors
-    const ChipTensor &ext_hidden_states = orch_args.tensor(0).ref();
-    const ChipTensor &ext_input_rms_weight = orch_args.tensor(1).ref();
-    const ChipTensor &ext_wq = orch_args.tensor(2).ref();
-    const ChipTensor &ext_wk = orch_args.tensor(3).ref();
-    const ChipTensor &ext_wv = orch_args.tensor(4).ref();
-    const ChipTensor &ext_q_norm_weight = orch_args.tensor(5).ref();
-    const ChipTensor &ext_k_norm_weight = orch_args.tensor(6).ref();
-    const ChipTensor &ext_seq_lens = orch_args.tensor(7).ref();
-    const ChipTensor &ext_block_table = orch_args.tensor(8).ref();
-    const ChipTensor &ext_slot_mapping = orch_args.tensor(9).ref();
-    const ChipTensor &ext_rope_cos = orch_args.tensor(10).ref();
-    const ChipTensor &ext_rope_sin = orch_args.tensor(11).ref();
-    const ChipTensor &ext_k_cache = orch_args.tensor(12).ref();
-    const ChipTensor &ext_v_cache = orch_args.tensor(13).ref();
-    const ChipTensor &ext_wo = orch_args.tensor(14).ref();
-    const ChipTensor &ext_w_gate = orch_args.tensor(15).ref();
-    const ChipTensor &ext_w_up = orch_args.tensor(16).ref();
-    const ChipTensor &ext_w_down = orch_args.tensor(17).ref();
-    const ChipTensor &ext_post_rms_weight = orch_args.tensor(18).ref();
-    const ChipTensor &ext_out = orch_args.tensor(19).ref();
+    const simpler::tmr::Tensor &ext_hidden_states = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_input_rms_weight = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_wq = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_wk = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_wv = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &ext_q_norm_weight = orch_args.tensor(5).ref();
+    const simpler::tmr::Tensor &ext_k_norm_weight = orch_args.tensor(6).ref();
+    const simpler::tmr::Tensor &ext_seq_lens = orch_args.tensor(7).ref();
+    const simpler::tmr::Tensor &ext_block_table = orch_args.tensor(8).ref();
+    const simpler::tmr::Tensor &ext_slot_mapping = orch_args.tensor(9).ref();
+    const simpler::tmr::Tensor &ext_rope_cos = orch_args.tensor(10).ref();
+    const simpler::tmr::Tensor &ext_rope_sin = orch_args.tensor(11).ref();
+    const simpler::tmr::Tensor &ext_k_cache = orch_args.tensor(12).ref();
+    const simpler::tmr::Tensor &ext_v_cache = orch_args.tensor(13).ref();
+    const simpler::tmr::Tensor &ext_wo = orch_args.tensor(14).ref();
+    const simpler::tmr::Tensor &ext_w_gate = orch_args.tensor(15).ref();
+    const simpler::tmr::Tensor &ext_w_up = orch_args.tensor(16).ref();
+    const simpler::tmr::Tensor &ext_w_down = orch_args.tensor(17).ref();
+    const simpler::tmr::Tensor &ext_post_rms_weight = orch_args.tensor(18).ref();
+    const simpler::tmr::Tensor &ext_out = orch_args.tensor(19).ref();
 
     // Dynamic-dim symbols (extent of the declaring argument)
     int64_t BLOCK_TABLE_FLAT_DYN = (int64_t)orch_args.tensor(8).ref().shapes[0];
@@ -66,10 +66,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         uint32_t normed_ci_shapes[2] = {16, 5120};
         TensorCreateInfo normed_ci(normed_ci_shapes, 2, DataType::BFLOAT16);
         TaskOutputTensors alloc_0 = alloc_tensors(pa_metadata_ci, pa_workspace_ci, cur_ci, normed_ci);
-        const ChipTensor &pa_metadata = alloc_0.get_ref(0);
-        const ChipTensor &pa_workspace = alloc_0.get_ref(1);
-        const ChipTensor &cur = alloc_0.get_ref(2);
-        const ChipTensor &normed = alloc_0.get_ref(3);
+        const simpler::tmr::Tensor &pa_metadata = alloc_0.get_ref(0);
+        const simpler::tmr::Tensor &pa_workspace = alloc_0.get_ref(1);
+        const simpler::tmr::Tensor &cur = alloc_0.get_ref(2);
+        const simpler::tmr::Tensor &normed = alloc_0.get_ref(3);
         int64_t pa_num_layers = 40;
         int64_t pa_num_pages = (KV_CACHE_ROWS_DYN / (pa_num_layers * 1024));
         int64_t pa_max_blocks = (BLOCK_TABLE_FLAT_DYN / 16);
@@ -133,8 +133,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             TaskId xgamma_tid = task_2_outs.task_id();
             prev_normed_tid[0] = xgamma_tid;
         }
-        ChipTensor cur__rv_v7 = cur;
-        ChipTensor normed__rv_v5 = normed;
+        simpler::tmr::Tensor cur__rv_v7 = cur;
+        simpler::tmr::Tensor normed__rv_v5 = normed;
         for (int64_t i = 0; i < 40; i += 1) {
             SIMPLER_SCOPE() {
                 uint32_t next_hidden_ci_shapes[2] = {16, 5120};
@@ -157,14 +157,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     next_hidden_ci, next_normed_ci, inv_rms_states_inline176_ci, q_proj_inline139_ci,
                     k_proj_inline135_ci, v_proj_inline255_ci, q_tnd_flat_inline127_ci, attn_out_inline282_ci
                 );
-                const ChipTensor &next_hidden = alloc_1.get_ref(0);
-                const ChipTensor &next_normed = alloc_1.get_ref(1);
-                const ChipTensor &inv_rms_states_inline176 = alloc_1.get_ref(2);
-                const ChipTensor &q_proj_inline139 = alloc_1.get_ref(3);
-                const ChipTensor &k_proj_inline135 = alloc_1.get_ref(4);
-                const ChipTensor &v_proj_inline255 = alloc_1.get_ref(5);
-                const ChipTensor &q_tnd_flat_inline127 = alloc_1.get_ref(6);
-                const ChipTensor &attn_out_inline282 = alloc_1.get_ref(7);
+                const simpler::tmr::Tensor &next_hidden = alloc_1.get_ref(0);
+                const simpler::tmr::Tensor &next_normed = alloc_1.get_ref(1);
+                const simpler::tmr::Tensor &inv_rms_states_inline176 = alloc_1.get_ref(2);
+                const simpler::tmr::Tensor &q_proj_inline139 = alloc_1.get_ref(3);
+                const simpler::tmr::Tensor &k_proj_inline135 = alloc_1.get_ref(4);
+                const simpler::tmr::Tensor &v_proj_inline255 = alloc_1.get_ref(5);
+                const simpler::tmr::Tensor &q_tnd_flat_inline127 = alloc_1.get_ref(6);
+                const simpler::tmr::Tensor &attn_out_inline282 = alloc_1.get_ref(7);
                 int64_t next_gamma_idx = std::min<int64_t>((i + 1), 39);
                 int64_t layer_hidden_base_inline151 = (static_cast<int64_t>(i) * 5120);
                 int64_t layer_inter_base_inline107 = (static_cast<int64_t>(i) * 17408);
@@ -181,7 +181,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                          0u :
                          std::min<uint32_t>(128, ext_q_norm_weight.shapes[1] - q_norm_w_inline124_offsets[1]))
                 };
-                ChipTensor q_norm_w_inline124 =
+                simpler::tmr::Tensor q_norm_w_inline124 =
                     ext_q_norm_weight.view(q_norm_w_inline124_shapes, q_norm_w_inline124_offsets);
                 uint32_t k_norm_w_inline114_offsets[2] = {static_cast<uint32_t>(i), 0};
                 uint32_t k_norm_w_inline114_shapes[2] = {
@@ -192,7 +192,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                          0u :
                          std::min<uint32_t>(128, ext_k_norm_weight.shapes[1] - k_norm_w_inline114_offsets[1]))
                 };
-                ChipTensor k_norm_w_inline114 =
+                simpler::tmr::Tensor k_norm_w_inline114 =
                     ext_k_norm_weight.view(k_norm_w_inline114_shapes, k_norm_w_inline114_offsets);
                 TaskId down_tids_inline156[85];
                 for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
@@ -220,14 +220,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     attn_proj_fp32_inline220_ci, post_norm_partial_inline118_ci, mlp_norm_in_inline71_ci,
                     inv_rms_tile_inline126_ci, mlp_tile_inline149_ci
                 );
-                const ChipTensor &down_acc_all_inline168 = alloc_2.get_ref(0);
-                const ChipTensor &gate_acc_all_inline203 = alloc_2.get_ref(1);
-                const ChipTensor &up_acc_all_inline303 = alloc_2.get_ref(2);
-                const ChipTensor &attn_proj_fp32_inline220 = alloc_2.get_ref(3);
-                const ChipTensor &post_norm_partial_inline118 = alloc_2.get_ref(4);
-                const ChipTensor &mlp_norm_in_inline71 = alloc_2.get_ref(5);
-                const ChipTensor &inv_rms_tile_inline126 = alloc_2.get_ref(6);
-                const ChipTensor &mlp_tile_inline149 = alloc_2.get_ref(7);
+                const simpler::tmr::Tensor &down_acc_all_inline168 = alloc_2.get_ref(0);
+                const simpler::tmr::Tensor &gate_acc_all_inline203 = alloc_2.get_ref(1);
+                const simpler::tmr::Tensor &up_acc_all_inline303 = alloc_2.get_ref(2);
+                const simpler::tmr::Tensor &attn_proj_fp32_inline220 = alloc_2.get_ref(3);
+                const simpler::tmr::Tensor &post_norm_partial_inline118 = alloc_2.get_ref(4);
+                const simpler::tmr::Tensor &mlp_norm_in_inline71 = alloc_2.get_ref(5);
+                const simpler::tmr::Tensor &inv_rms_tile_inline126 = alloc_2.get_ref(6);
+                const simpler::tmr::Tensor &mlp_tile_inline149 = alloc_2.get_ref(7);
                 SIMPLER_SCOPE(ScopeMode::MANUAL) {
                     // Phase-fence barrier 1: dependency-only dummy task
                     CoreTaskArgs params_phase_fence_barrier_1;
@@ -382,9 +382,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskOutputTensors task_10_outs = rt_submit_aic_task(10, params_t10);
                     TaskId v_proj_tid_inline63 = task_10_outs.task_id();
                     uint32_t q_tnd_inline191_shapes[3] = {16, 40, 128};
-                    ChipTensor q_tnd_inline191 = q_tnd_flat_inline127.reshape(q_tnd_inline191_shapes, 3);
+                    simpler::tmr::Tensor q_tnd_inline191 = q_tnd_flat_inline127.reshape(q_tnd_inline191_shapes, 3);
                     uint32_t attn_out_tnd_inline79_shapes[3] = {16, 40, 128};
-                    ChipTensor attn_out_tnd_inline79 = attn_out_inline282.reshape(attn_out_tnd_inline79_shapes, 3);
+                    simpler::tmr::Tensor attn_out_tnd_inline79 =
+                        attn_out_inline282.reshape(attn_out_tnd_inline79_shapes, 3);
                     int64_t attention_core_num_inline188 = 24;
 
                     // Group paged_attention_rope_cce: MixedKernels (AIC + AIV lanes)
@@ -422,10 +423,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t11_deps[params_t11_deps_count++] = mlp_out_seed_tid_inline206;
                     params_t11.set_dependencies(params_t11_deps, params_t11_deps_count);
                     TaskOutputTensors task_11_outs = rt_submit_task(mixed_11, params_t11);
-                    const ChipTensor &attn_out_tnd_inline79__ssa_v1 = attn_out_tnd_inline79;
+                    const simpler::tmr::Tensor &attn_out_tnd_inline79__ssa_v1 = attn_out_tnd_inline79;
                     TaskId attn_done_tid_inline78 = task_11_outs.task_id();
                     uint32_t attn_out_inline282__ssa_v4_shapes[2] = {16, 5120};
-                    ChipTensor attn_out_inline282__ssa_v4 =
+                    simpler::tmr::Tensor attn_out_inline282__ssa_v4 =
                         attn_out_tnd_inline79__ssa_v1.reshape(attn_out_inline282__ssa_v4_shapes, 2);
                     TaskId silu_tids_inline265[17];
                     for (int64_t __init_i = 0; __init_i < 17; ++__init_i)
@@ -1958,8 +1959,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TaskId dcr_tid_inline58 = task_34_outs.task_id();
                 prev_out_tid[0] = dcr_tid_inline58;
                 prev_normed_tid[0] = dcr_tid_inline58;
-                ChipTensor cur__ssa_v8 = next_hidden;
-                ChipTensor normed__ssa_v6 = next_normed;
+                simpler::tmr::Tensor cur__ssa_v8 = next_hidden;
+                simpler::tmr::Tensor normed__ssa_v6 = next_normed;
                 cur__rv_v7 = cur__ssa_v8;
                 normed__rv_v5 = normed__ssa_v6;
             }

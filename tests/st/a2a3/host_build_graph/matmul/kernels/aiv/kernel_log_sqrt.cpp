@@ -9,12 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Element-wise log then sqrt kernel (submit_task / ChipTensor* ABI)
+ * Element-wise log then sqrt kernel (submit_task / TaskTensor* ABI)
  *
  * Implements: out[i] = sqrt(log(src[i])).  Both input and output are half
  * precision for matmul compatibility.  Single 128x128 tile.
  *
- * Args (ChipTensor*):
+ * Args (TaskTensor*):
  *   args[0] = src (INPUT, half)
  *   args[1] = out (OUTPUT, half)
  */
@@ -37,8 +37,8 @@ using namespace pto;
 #endif
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *src_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ TaskTensor *src_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
 
     __gm__ half *src = reinterpret_cast<__gm__ half *>(src_tensor->buffer.addr) + src_tensor->start_offset;
     __gm__ half *out = reinterpret_cast<__gm__ half *>(out_tensor->buffer.addr) + out_tensor->start_offset;

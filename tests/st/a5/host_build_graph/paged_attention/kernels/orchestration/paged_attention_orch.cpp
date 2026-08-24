@@ -116,18 +116,20 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
         static_cast<uint32_t>(total_blocks_count * block_size), static_cast<uint32_t>(head_dim)
     };
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
-    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
-    ChipTensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
-    ChipTensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
-    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
+    simpler::hbg::Tensor query = simpler::hbg::make_tensor_external(query_ptr, query_shapes, 2, data_type);
+    simpler::hbg::Tensor key_cache = simpler::hbg::make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
+    simpler::hbg::Tensor value_cache = simpler::hbg::make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
+    simpler::hbg::Tensor out = simpler::hbg::make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
     CYCLE_COUNT_LAP(prof_ext_tensor);
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(block_num)};
-    ChipTensor block_table =
-        make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
+    simpler::hbg::Tensor block_table = simpler::hbg::make_tensor_external(
+        orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false
+    );
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    ChipTensor context_lens =
-        make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
+    simpler::hbg::Tensor context_lens = simpler::hbg::make_tensor_external(
+        orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false
+    );
 
     // Create infos are loop-invariant — shapes depend only on q_tile/head_dim/block_size
     uint32_t tile2d_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
@@ -153,17 +155,17 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 
                 uint32_t qi_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                ChipTensor qi = query.view(tile2d_shapes, qi_offsets);
+                simpler::hbg::Tensor qi = query.view(tile2d_shapes, qi_offsets);
                 uint32_t out_view_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                ChipTensor out_view = out.view(tile2d_shapes, out_view_offsets);
+                simpler::hbg::Tensor out_view = out.view(tile2d_shapes, out_view_offsets);
                 prof_view_count += 2;
                 CYCLE_COUNT_LAP(prof_tensor_view);
 
                 CYCLE_COUNT_LAP(prof_param_setup);
                 TaskOutputTensors alloc_outs = alloc_tensors(tile2d_ci, scalar_ci, scalar_ci);
-                const ChipTensor &oi = alloc_outs.get_ref(0);
-                const ChipTensor &li_update = alloc_outs.get_ref(1);
-                const ChipTensor &mi_update = alloc_outs.get_ref(2);
+                const simpler::hbg::Tensor &oi = alloc_outs.get_ref(0);
+                const simpler::hbg::Tensor &li_update = alloc_outs.get_ref(1);
+                const simpler::hbg::Tensor &mi_update = alloc_outs.get_ref(2);
                 prof_submit_count++;
                 CYCLE_COUNT_LAP(prof_submit_task);
 
@@ -177,8 +179,8 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 
                     uint32_t kv_shapes[2] = {static_cast<uint32_t>(block_size), static_cast<uint32_t>(head_dim)};
                     uint32_t kv_offsets[2] = {static_cast<uint32_t>(cur_block_idx * block_size), 0};
-                    ChipTensor kj = key_cache.view(kv_shapes, kv_offsets);
-                    ChipTensor vj = value_cache.view(kv_shapes, kv_offsets);
+                    simpler::hbg::Tensor kj = key_cache.view(kv_shapes, kv_offsets);
+                    simpler::hbg::Tensor vj = value_cache.view(kv_shapes, kv_offsets);
                     prof_view_count += 2;
                     CYCLE_COUNT_LAP(prof_tensor_view);
 
@@ -188,13 +190,13 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     params_qk.add_output(sij_ci);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                    const ChipTensor &sij = qk_outs.get_ref(0);
+                    const simpler::hbg::Tensor &sij = qk_outs.get_ref(0);
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
 
                     uint32_t sij_valid_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(valid_len)};
                     uint32_t sij_valid_offsets[2] = {0, 0};
-                    ChipTensor sij_valid = sij.view(sij_valid_shapes, sij_valid_offsets);
+                    simpler::hbg::Tensor sij_valid = sij.view(sij_valid_shapes, sij_valid_offsets);
                     prof_view_count += 1;
                     CYCLE_COUNT_LAP(prof_tensor_view);
 
@@ -206,9 +208,9 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     params_sf.add_scalar(scale_value);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                    const ChipTensor &pij_f16 = sf_outs.get_ref(0);
-                    const ChipTensor &mi = sf_outs.get_ref(1);
-                    const ChipTensor &li = sf_outs.get_ref(2);
+                    const simpler::hbg::Tensor &pij_f16 = sf_outs.get_ref(0);
+                    const simpler::hbg::Tensor &mi = sf_outs.get_ref(1);
+                    const simpler::hbg::Tensor &li = sf_outs.get_ref(2);
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
 
@@ -218,7 +220,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     params_pv.add_output(tile2d_ci);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                    const ChipTensor &oi_tmp = pv_outs.get_ref(0);
+                    const simpler::hbg::Tensor &oi_tmp = pv_outs.get_ref(0);
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
 

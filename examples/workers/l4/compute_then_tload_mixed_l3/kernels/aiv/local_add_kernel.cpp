@@ -25,9 +25,9 @@
 static constexpr size_t kCount = 256;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *lhs_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *rhs_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *result_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ TaskTensor *lhs_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *rhs_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *result_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
     __gm__ float *lhs = reinterpret_cast<__gm__ float *>(lhs_tensor->buffer.addr) + lhs_tensor->start_offset;
     __gm__ float *rhs = reinterpret_cast<__gm__ float *>(rhs_tensor->buffer.addr) + rhs_tensor->start_offset;
     __gm__ float *result = reinterpret_cast<__gm__ float *>(result_tensor->buffer.addr) + result_tensor->start_offset;

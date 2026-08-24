@@ -53,9 +53,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &a = orch_args.tensor(0).ref();
-    const ChipTensor &b = orch_args.tensor(1).ref();
-    const ChipTensor &c = orch_args.tensor(2).ref();
+    const simpler::hbg::Tensor &a = orch_args.tensor(0).ref();
+    const simpler::hbg::Tensor &b = orch_args.tensor(1).ref();
+    const simpler::hbg::Tensor &c = orch_args.tensor(2).ref();
 
     uint32_t tile_shape[1] = {TILE_ELEMS};
     TensorCreateInfo p_ci(tile_shape, 1, DataType::FLOAT32);
@@ -74,9 +74,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         static_cast<uint32_t>((batch * GRID_M * GRID_N + m_idx * GRID_N + n_idx) * TILE_ELEMS)
                     };
 
-                    ChipTensor a_view = a.view(tile_shape, a_off);
-                    ChipTensor b_view = b.view(tile_shape, b_off);
-                    ChipTensor c_view = c.view(tile_shape, c_off);
+                    simpler::hbg::Tensor a_view = a.view(tile_shape, a_off);
+                    simpler::hbg::Tensor b_view = b.view(tile_shape, b_off);
+                    simpler::hbg::Tensor c_view = c.view(tile_shape, c_off);
 
                     // P_k = A[m,k] @ B[k,n]
                     CoreTaskArgs p_gemm;
@@ -84,7 +84,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     p_gemm.add_input(b_view);
                     p_gemm.add_output(p_ci);
                     TaskOutputTensors p_out = rt_submit_aic_task(FUNC_GEMM, p_gemm);
-                    ChipTensor p = p_out.get_ref(0);
+                    simpler::hbg::Tensor p = p_out.get_ref(0);
 
                     // C[m,n] += P_k
                     CoreTaskArgs p_add;

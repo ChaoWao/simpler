@@ -24,7 +24,7 @@ group_reservation_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void group_reservation_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &output = orch_args.tensor(0).ref();
 
     CoreTaskArgs params;
     params.add_output(output);

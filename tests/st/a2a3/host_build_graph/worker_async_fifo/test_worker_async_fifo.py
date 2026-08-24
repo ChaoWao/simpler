@@ -16,6 +16,7 @@ while both slots are admitted.
 """
 
 import atexit
+import copy
 import ctypes
 import tempfile
 import threading
@@ -39,8 +40,22 @@ from simpler.worker import (
 
 from simpler_setup import SceneTestCase, scene_test
 
-_VECTOR_KERNELS = "../vector_example/kernels"
 _PIPELINED_VECTOR_ORCH = "kernels/orchestration/pipelined_vector_orch.cpp"
+_TMR_KERNELS = "../../tensormap_and_ringbuffer/worker_async_fifo/kernels"
+
+
+def _rebase_callable(callable_spec: dict, kernels_dir: str) -> dict:
+    """Copy a CALLABLE with every ``kernels/...`` source rebased onto ``kernels_dir``."""
+    out = copy.deepcopy(callable_spec)
+    for entry in out["callables"]:
+        if "orchestration" not in entry:
+            continue
+        entry["orchestration"]["source"] = entry["orchestration"]["source"].replace("kernels", kernels_dir, 1)
+        for incore in entry["incores"]:
+            incore["source"] = incore["source"].replace("kernels", kernels_dir, 1)
+    return out
+
+
 _CHAIN_LENGTH = 512
 _DEVICE_SPIN_ITERS = 200_000_000
 _SIZE = 128 * 128
@@ -155,7 +170,7 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                     },
                     {
                         "func_id": 1,
-                        "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
+                        "source": "kernels/aiv/kernel_add_scalar.cpp",
                         "core_type": "aiv",
                         "signature": [D.IN, D.OUT],
                     },
@@ -486,6 +501,10 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
 class TestWorkerAsyncWholeRunFifoTmr(TestWorkerAsyncWholeRunFifo):
     """TMR uses the common FIFO with shared-arena compatibility fallback."""
+
+    # Its own copies under the tensormap_and_ringbuffer tree: a source names one
+    # runtime's Tensor, so it cannot be compiled under both.
+    CALLABLE = _rebase_callable(TestWorkerAsyncWholeRunFifo.CALLABLE, _TMR_KERNELS)
 
     def test_incompatible_runtime_env_falls_back_to_depth_one(self, st_platform, st_worker):
         if st_platform != "a2a3":

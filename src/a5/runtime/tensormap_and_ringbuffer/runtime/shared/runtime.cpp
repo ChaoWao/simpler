@@ -53,9 +53,20 @@ Runtime::Runtime() {
 // =============================================================================
 
 void *Runtime::get_gm_sm_ptr() const { return dev.gm_sm_ptr_; }
-const ChipStorageTaskArgs &Runtime::get_orch_args() const { return dev.orch_args_storage_; }
+const simpler::tmr::EntryArgsStorage &Runtime::get_orch_args() const { return dev.orch_args_storage_; }
 void Runtime::set_gm_sm_ptr(void *p) { dev.gm_sm_ptr_ = p; }
-void Runtime::set_orch_args(const ChipStorageTaskArgs &args) { dev.orch_args_storage_ = args; }
+// The one place a boundary ChipTensor becomes this runtime's Tensor. Called from
+// the host, before any orchestration runs, so nothing inside the runtime — on the
+// host or on the AICPU — ever holds the boundary form.
+void Runtime::set_orch_args(const ChipStorageTaskArgs &args) {
+    dev.orch_args_storage_.clear();
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        dev.orch_args_storage_.add_tensor(simpler::tmr::Tensor::from_boundary(args.tensor(i)));
+    }
+    for (int32_t i = 0; i < args.scalar_count(); ++i) {
+        dev.orch_args_storage_.add_scalar(args.scalar(i));
+    }
+}
 
 void Runtime::set_prebuilt_arena(void *arena_base, size_t runtime_off) {
     dev.prebuilt_arena_base_ = arena_base;

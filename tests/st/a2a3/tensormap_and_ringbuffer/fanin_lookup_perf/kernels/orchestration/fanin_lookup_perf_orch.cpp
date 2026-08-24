@@ -48,8 +48,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &producer_outputs = orch_args.tensor(0).ref();
-    const ChipTensor &consumer_outputs = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &producer_outputs = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &consumer_outputs = orch_args.tensor(1).ref();
     int32_t producer_count = static_cast<int32_t>(orch_args.scalar(0));
     int32_t consumer_count = static_cast<int32_t>(orch_args.scalar(1));
     bool use_real_kernels = orch_args.scalar(2) != 0;
@@ -68,7 +68,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         CoreTaskArgs args;
         if (use_real_kernels) {
             uint32_t offset[1] = {static_cast<uint32_t>(i) * SLOT_ELEMS};
-            ChipTensor producer_out = producer_outputs.view(slot_shape, offset);
+            simpler::tmr::Tensor producer_out = producer_outputs.view(slot_shape, offset);
             args.add_inout(producer_out);
             producer_ids[i] = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         } else {
@@ -81,7 +81,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         args.set_dependencies(producer_ids, static_cast<uint32_t>(producer_count));
         if (use_real_kernels) {
             uint32_t offset[1] = {static_cast<uint32_t>(c) * SLOT_ELEMS};
-            ChipTensor consumer_out = consumer_outputs.view(slot_shape, offset);
+            simpler::tmr::Tensor consumer_out = consumer_outputs.view(slot_shape, offset);
             args.add_inout(consumer_out);
             rt_submit_aic_task(FUNC_WRITE_CONST, args);
         } else {

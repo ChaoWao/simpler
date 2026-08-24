@@ -104,7 +104,7 @@ bool fake_graph_prepare(RuntimeContext *rt, void *recording_handle, const GraphT
     fake.recorded_scalar_count = args.scalar_count();
     fake.recorded_args_object = &args;
     if (args.tensor_count() > 0) {
-        const ChipTensor &tensor = args.tensor(0).ref();
+        const simpler::hbg::Tensor &tensor = args.tensor(0).ref();
         fake.recorded_tensor_addr = tensor.buffer.addr;
         fake.recorded_tensor_size = tensor.buffer.size;
         fake.recorded_ndims = tensor.ndims;
@@ -211,7 +211,7 @@ TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit
 
     uint32_t storage[4]{};
     uint32_t shape[] = {4};
-    ChipTensor boundary = make_tensor_external(storage, shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage, shape, 1);
     GraphTaskArgs args;
     args.add_input(boundary);
 
@@ -242,7 +242,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
 
     uint32_t storage[4]{};
     uint32_t shape[] = {4};
-    ChipTensor boundary = make_tensor_external(storage, shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage, shape, 1);
     GraphTaskArgs args;
     args.add_input(boundary);
 
@@ -334,7 +334,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
 
     uint32_t storage[8]{};
     uint32_t shape[] = {8};
-    ChipTensor boundary = make_tensor_external(storage, shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage, shape, 1);
     constexpr uint64_t kScalar = 0x5eed1715ULL;
     GraphTaskArgs args;
     args.add_input(boundary);
@@ -366,5 +366,5 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
 
     EXPECT_NE(fake.recorded_args_object, caller_args_object) << "the worker must not read the caller's GraphTaskArgs";
     EXPECT_NE(fake.recorded_tensor_storage, caller_tensor_storage)
-        << "the worker must not read ChipTensor storage the caller owns";
+        << "the worker must not read simpler::hbg::Tensor storage the caller owns";
 }

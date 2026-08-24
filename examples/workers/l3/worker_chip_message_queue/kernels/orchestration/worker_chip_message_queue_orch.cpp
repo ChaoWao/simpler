@@ -72,10 +72,10 @@ bool parse_input_header(const WorkerChipQueueInputHandle &input, InputHeader *he
     return true;
 }
 
-ChipTensor make_input_values_tensor(const WorkerChipQueueInputHandle &input) {
+simpler::tmr::Tensor make_input_values_tensor(const WorkerChipQueueInputHandle &input) {
     uint32_t shape[2] = {kTileRows, kTileCols};
     void *values = reinterpret_cast<void *>(static_cast<uintptr_t>(input.payload.gm_addr + kInputHeaderBytes));
-    return make_tensor_external(values, shape, 2, DataType::FLOAT32);
+    return simpler::tmr::make_tensor_external(values, shape, 2, DataType::FLOAT32);
 }
 
 bool publish_aiv_output(
@@ -95,10 +95,11 @@ bool publish_aiv_output(
     memcpy(dst, &header, sizeof(header));
     cache_flush_range(dst, kOutputHeaderBytes);
 
-    ChipTensor first_tensor = make_input_values_tensor(first);
-    ChipTensor second_tensor = make_input_values_tensor(second);
+    simpler::tmr::Tensor first_tensor = make_input_values_tensor(first);
+    simpler::tmr::Tensor second_tensor = make_input_values_tensor(second);
     uint32_t output_shape[2] = {kTileRows, kTileCols};
-    ChipTensor output_tensor = make_tensor_external(dst + kOutputHeaderBytes, output_shape, 2, DataType::FLOAT32);
+    simpler::tmr::Tensor output_tensor =
+        simpler::tmr::make_tensor_external(dst + kOutputHeaderBytes, output_shape, 2, DataType::FLOAT32);
 
     CoreTaskArgs params;
     params.add_input(first_tensor);

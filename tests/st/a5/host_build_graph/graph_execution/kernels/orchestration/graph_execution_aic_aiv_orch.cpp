@@ -29,10 +29,10 @@ namespace {
 // A cache miss records two AIC tasks and one AIV task. Cache hits submit one
 // outer Graph task and let Scheduler materialize this saved topology.
 void decoder_layer(const GraphTaskArgs &args) {
-    const ChipTensor &input = args.tensor(0).ref();
-    const ChipTensor &weight_1 = args.tensor(1).ref();
-    const ChipTensor &weight_2 = args.tensor(2).ref();
-    const ChipTensor &output = args.tensor(3).ref();
+    const simpler::hbg::Tensor &input = args.tensor(0).ref();
+    const simpler::hbg::Tensor &weight_1 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &weight_2 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &output = args.tensor(3).ref();
 
     const std::array<uint32_t, 1> shape{input.shapes[0]};
     TensorCreateInfo projected_info(shape.data(), static_cast<uint32_t>(shape.size()), DataType::FLOAT32);

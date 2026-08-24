@@ -32,8 +32,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_Y1 = orch_args.tensor(0).ref();
-    const ChipTensor &ext_Y2 = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_Y1 = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_Y2 = orch_args.tensor(1).ref();
 
     uint32_t scratch_shapes[2] = {1024, 256};
     TensorCreateInfo scratch_ci(scratch_shapes, 2, DataType::FLOAT32);
@@ -42,7 +42,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         CoreTaskArgs fill1;
         fill1.add_output(scratch_ci);
         TaskOutputTensors t1_outs = rt_submit_aic_task(FUNC_FILL_CONST, fill1);
-        const ChipTensor &t1 = t1_outs.get_ref(0);
+        const simpler::tmr::Tensor &t1 = t1_outs.get_ref(0);
 
         CoreTaskArgs copy1;
         copy1.add_input(t1);
@@ -54,7 +54,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         CoreTaskArgs fill2;
         fill2.add_output(scratch_ci);
         TaskOutputTensors t2_outs = rt_submit_aic_task(FUNC_FILL_CONST, fill2);
-        const ChipTensor &t2 = t2_outs.get_ref(0);
+        const simpler::tmr::Tensor &t2 = t2_outs.get_ref(0);
 
         CoreTaskArgs copy2;
         copy2.add_input(t2);

@@ -96,14 +96,14 @@ protected:
     // Record one Graph of `node_count` chained nodes under `graph_key`. The chain
     // makes the image's size a function of the count, so two keys recorded with
     // different counts cannot come out byte-identical and share one Definition.
-    void record_graph(uint64_t graph_key, int node_count, const ChipTensor &boundary, const uint32_t *shape) {
+    void record_graph(uint64_t graph_key, int node_count, const simpler::hbg::Tensor &boundary, const uint32_t *shape) {
         GraphTaskArgs boundary_args;
         boundary_args.add_input(boundary);
         const GraphScopeResult scope = orch.graph_begin(graph_key, boundary_args, 0x1736);
         ASSERT_TRUE(scope.recording);
         ASSERT_TRUE(scope.task_id.is_valid());
         ASSERT_TRUE(orch.graph_prepare(scope.recording_handle, boundary_args));
-        ChipTensor input = boundary;
+        simpler::hbg::Tensor input = boundary;
         for (int i = 0; i < node_count; ++i) {
             CoreTaskArgs node_args;
             node_args.add_input(input);
@@ -122,7 +122,7 @@ TEST_F(HbgGraphDefinitionArenaTest, ObjectsAreBuiltInTheArenaAtAlignedDisjointOf
 
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     record_graph(0x1715, 1, boundary, shape);
@@ -184,7 +184,7 @@ TEST_F(HbgGraphDefinitionArenaTest, AnArenaWithNoRoomSpillsAndStillPublishesTheI
 
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     record_graph(0x1715, 2, boundary, shape);
@@ -215,7 +215,7 @@ TEST_F(HbgGraphDefinitionArenaTest, AnArenaTooSmallForAnObjectSpillsIt) {
 
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     record_graph(0x1715, 1, boundary, shape);

@@ -38,7 +38,7 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_output = orch_args.tensor(0).ref();
 
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_READ_AIC;
