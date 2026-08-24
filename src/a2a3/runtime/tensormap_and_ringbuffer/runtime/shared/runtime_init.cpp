@@ -326,7 +326,7 @@ OrchestratorLayout OrchestratorState::reserve_layout(
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         const size_t fanin_pool_bytes =
-            PTO2_ALIGN_UP(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(PTO2FaninSpillEntry), PTO2_ALIGN_SIZE);
+            PTO2_ALIGN_UP(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(FaninSpillEntry), PTO2_ALIGN_SIZE);
         layout.off_fanin_pool[r] = arena.reserve(fanin_pool_bytes, PTO2_ALIGN_SIZE);
 
         always_assert(task_window_sizes[r] > 0 && (task_window_sizes[r] & (task_window_sizes[r] - 1)) == 0);
@@ -387,9 +387,9 @@ bool OrchestratorState::init_data_from_layout(
         heap_offset += heap_sizes[r];
 
         const size_t fanin_pool_bytes = PTO2_ALIGN_UP(
-            static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(PTO2FaninSpillEntry), PTO2_ALIGN_SIZE
+            static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(FaninSpillEntry), PTO2_ALIGN_SIZE
         );
-        auto *fanin_entries = static_cast<PTO2FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
+        auto *fanin_entries = static_cast<FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
         memset(fanin_entries, 0, fanin_pool_bytes);
         orch->rings[r].fanin_pool.init(fanin_entries, layout.dep_pool_capacities[r], orch_err);
 
@@ -479,7 +479,7 @@ void OrchestratorState::wire_arena_pointers(
 ) {
     auto *orch = this;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        orch->rings[r].fanin_pool.base = static_cast<PTO2FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
+        orch->rings[r].fanin_pool.base = static_cast<FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
         orch->fanin_seen_epoch[r] = static_cast<uint32_t *>(arena.region_ptr(layout.off_fanin_seen_epoch[r]));
     }
     orch->tensor_map.wire_arena_pointers(layout.tensor_map, arena);

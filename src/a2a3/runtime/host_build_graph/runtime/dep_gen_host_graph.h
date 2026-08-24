@@ -43,7 +43,7 @@
  * progress loop satisfies this by being single-threaded; emit returns -3 if the
  * invariant is ever broken.
  *
- * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
+ * Per-task producer dedup mirrors FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is
  * whole-graph-resident and never reuses a task slot at build time (see
  * append_fanin_or_fail in orchestrator.cpp). A runtime that recycles slots

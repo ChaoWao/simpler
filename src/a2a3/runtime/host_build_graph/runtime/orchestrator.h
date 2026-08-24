@@ -109,7 +109,7 @@ struct OrchestratorState {
     // case (task_window tasks each at their full cap), so a bump cannot overflow.
     // The bases live here, not in the ring header: nothing on the device resolves one.
     //
-    // The fanin cursor does not advance at bind time. PTO2FaninBuilder appends and
+    // The fanin cursor does not advance at bind time. FaninBuilder appends and
     // dedups producers afterwards, so the region's length is known only when the count
     // is published, and it advances there.
     int32_t *fanin_pool{nullptr};

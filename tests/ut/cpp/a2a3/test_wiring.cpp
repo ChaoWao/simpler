@@ -1154,8 +1154,8 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     payload.fanin_inline_edges[0].set(&producers[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producers[1], DEP_WAIT | DEP_RETAIN);
     // Need a valid fanin_spill_pool even though we don't spill
-    PTO2FaninPool dummy_pool{};
-    PTO2FaninSpillEntry dummy_entries[4];
+    FaninPool dummy_pool{};
+    FaninSpillEntry dummy_entries[4];
     std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
@@ -1196,8 +1196,8 @@ TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
     payload.fanin_actual_count = 2;
     payload.fanin_inline_edges[0].set(&wait_producer, DEP_WAIT);
     payload.fanin_inline_edges[1].set(&retain_producer, DEP_WAIT | DEP_RETAIN);
-    PTO2FaninPool dummy_pool{};
-    PTO2FaninSpillEntry dummy_entries[4];
+    FaninPool dummy_pool{};
+    FaninSpillEntry dummy_entries[4];
     std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
@@ -1235,18 +1235,18 @@ TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
     init_slot(spill_retain, CHIP_TASK_COMPLETED, 1, 1);
     init_slot(task_slot, CHIP_TASK_COMPLETED, 0, 1);
 
-    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+    for (int i = 0; i < CHIP_FANIN_INLINE_CAP; i++) {
         payload.fanin_inline_edges[i].set(&filler, DEP_WAIT);
     }
-    PTO2FaninPool spill_pool{};
-    PTO2FaninSpillEntry spill_entries[4];
+    FaninPool spill_pool{};
+    FaninSpillEntry spill_entries[4];
     std::atomic<int32_t> err{SIMPLER_ERROR_NONE};
     spill_pool.init(spill_entries, 4, &err);
     auto *e = spill_pool.alloc();
     int32_t spill_start = spill_pool.top - 1;
     e->set(&spill_retain, DEP_WAIT | DEP_RETAIN);
 
-    payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+    payload.fanin_actual_count = CHIP_FANIN_INLINE_CAP + 1;
     payload.fanin_spill_start = spill_start;
     payload.fanin_spill_pool = &spill_pool;
     task_slot.payload = &payload;
@@ -1316,9 +1316,9 @@ TEST_F(WiringTest, AdvanceRingPointersResetsSlots) {
 
     rss.advance_ring_pointers();
 
-    // After reset_for_reuse: fanout_count=PTO2_FANOUT_SCOPE_BIT (bit31 owning-scope
+    // After reset_for_reuse: fanout_count=FANOUT_SCOPE_BIT (bit31 owning-scope
     // ref, 0 consumers), fanin_refcount=0, etc.
-    EXPECT_EQ(slot.fanout_count, PTO2_FANOUT_SCOPE_BIT);
+    EXPECT_EQ(slot.fanout_count, FANOUT_SCOPE_BIT);
     EXPECT_EQ(slot.fanin_refcount.load(), 0);
     EXPECT_EQ(slot.fanout_refcount.load(), 0);
     EXPECT_EQ(slot.completed_subtasks.load(), 0);

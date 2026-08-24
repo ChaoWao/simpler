@@ -143,8 +143,8 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
         int32_t local_id = slot.task->task_id.local();
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
-        while ((slot.fanout_refcount.load(std::memory_order_acquire) & ~PTO2_FANOUT_SCOPE_BIT) <
-               (slot.fanout_count & ~PTO2_FANOUT_SCOPE_BIT)) {
+        while ((slot.fanout_refcount.load(std::memory_order_acquire) & ~FANOUT_SCOPE_BIT) <
+               (slot.fanout_count & ~FANOUT_SCOPE_BIT)) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
                 // A fatal latched elsewhere breaks this wait; cold path only.

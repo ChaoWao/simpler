@@ -54,7 +54,7 @@ Bundles the three per-ring resources into a single aggregate (`ring_buffer.h`):
 struct ChipRingSet {
     ChipHeapRing   heap_ring;
     ChipTaskRing   task_ring;
-    PTO2FaninPool fanin_pool;
+    FaninPool fanin_pool;
 };
 ```
 

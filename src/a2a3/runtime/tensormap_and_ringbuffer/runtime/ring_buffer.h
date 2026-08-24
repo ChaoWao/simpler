@@ -456,8 +456,8 @@ private:
             uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
             LOG_ERROR(
                 "  Head task %d: state=%d, consumers=%u/%u, scope_released=%d", last_alive,
-                static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~PTO2_FANOUT_SCOPE_BIT,
-                fc & ~PTO2_FANOUT_SCOPE_BIT, (rc & PTO2_FANOUT_SCOPE_BIT) ? 1 : 0
+                static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~FANOUT_SCOPE_BIT,
+                fc & ~FANOUT_SCOPE_BIT, (rc & FANOUT_SCOPE_BIT) ? 1 : 0
             );
         }
         LOG_ERROR("Solution:");
@@ -503,8 +503,8 @@ private:
  * Linear counters (top, tail) grow monotonically; the physical index
  * is obtained via modulo: base[linear_index % capacity].
  */
-struct PTO2FaninPool {
-    PTO2FaninSpillEntry *base;       // Pool base address
+struct FaninPool {
+    FaninSpillEntry *base;           // Pool base address
     int32_t capacity;                // Total number of entries
     int32_t top;                     // Linear next-allocation counter (starts from 1)
     int32_t tail;                    // Linear first-alive counter (entries before this are dead)
@@ -513,7 +513,7 @@ struct PTO2FaninPool {
 
     std::atomic<int32_t> *error_code_ptr = nullptr;
 
-    void init(PTO2FaninSpillEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
+    void init(FaninSpillEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
         base = in_base;
         capacity = in_capacity;
         top = 1;
@@ -537,7 +537,7 @@ struct PTO2FaninPool {
 
     bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed);
 
-    PTO2FaninSpillEntry *alloc() {
+    FaninSpillEntry *alloc() {
         int32_t used = top - tail;
         if (used >= capacity) {
             LOG_ERROR("========================================");
@@ -576,25 +576,25 @@ struct PTO2FaninPool {
 };
 
 template <typename Fn>
-using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, ChipTaskSlotState *, DepFlags>;
+using FaninCallbackResult = std::invoke_result_t<Fn &, ChipTaskSlotState *, DepFlags>;
 
 template <typename Fn>
-using PTO2FaninForEachReturn = std::conditional_t<std::is_same_v<PTO2FaninCallbackResult<Fn>, void>, void, bool>;
+using FaninForEachReturn = std::conditional_t<std::is_same_v<FaninCallbackResult<Fn>, void>, void, bool>;
 
 // Visit each fanin edge as (producer slot, DepFlags). Inline and spill entries
-// share the packed PTO2FaninSpillEntry layout, so both are unpacked the same way.
+// share the packed FaninSpillEntry layout, so both are unpacked the same way.
 template <typename InlineSlots, typename Fn>
-inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
-    InlineSlots &&inline_edges, int32_t fanin_count, int32_t spill_start, PTO2FaninPool &spill_pool, Fn &&fn
+inline FaninForEachReturn<Fn> for_each_fanin_storage(
+    InlineSlots &&inline_edges, int32_t fanin_count, int32_t spill_start, FaninPool &spill_pool, Fn &&fn
 ) {
-    using FaninCallbackResult = PTO2FaninCallbackResult<Fn>;
+    using FaninCallbackResult = FaninCallbackResult<Fn>;
     static_assert(
         std::is_same_v<FaninCallbackResult, void> || std::is_same_v<FaninCallbackResult, bool>,
         "fanin callback must return void or bool"
     );
 
     if constexpr (std::is_void_v<FaninCallbackResult>) {
-        int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(fanin_count, CHIP_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
             fn(inline_edges[i].slot_state(), inline_edges[i].flags());
         }
@@ -606,7 +606,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 
         int32_t start_idx = spill_start % spill_pool.capacity;
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
-        PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
+        FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
             fn(first[i].slot_state(), first[i].flags());
         }
@@ -617,7 +617,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
         }
         return;
     } else {
-        int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(fanin_count, CHIP_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
             if (!fn(inline_edges[i].slot_state(), inline_edges[i].flags())) {
                 return false;
@@ -631,7 +631,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 
         int32_t start_idx = spill_start % spill_pool.capacity;
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
-        PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
+        FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
             if (!fn(first[i].slot_state(), first[i].flags())) {
                 return false;
@@ -649,7 +649,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 }
 
 template <typename Fn>
-inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const TaskPayload &payload, Fn &&fn) {
+inline FaninForEachReturn<Fn> for_each_fanin_slot_state(const TaskPayload &payload, Fn &&fn) {
     return for_each_fanin_storage(
         payload.fanin_inline_edges, payload.fanin_actual_count, payload.fanin_spill_start, *payload.fanin_spill_pool,
         static_cast<Fn &&>(fn)
@@ -811,7 +811,7 @@ struct PTO2DepListPool {
  */
 struct ChipRingSet {
     TaskAllocator task_allocator;
-    PTO2FaninPool fanin_pool;
+    FaninPool fanin_pool;
 };
 
 #endif  // PTO_RING_BUFFER_H

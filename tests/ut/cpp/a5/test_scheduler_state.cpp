@@ -396,8 +396,8 @@ TEST_F(SchedulerStateTest, ScopeEndBatchRelease) {
 
     for (int i = 0; i < N; i++) {
         // on_scope_end releases the owning-scope ref via release_producer_scope,
-        // which adds PTO2_FANOUT_SCOPE_BIT (bit31) to fanout_refcount.
-        EXPECT_EQ(slots[i].fanout_refcount.load(), PTO2_FANOUT_SCOPE_BIT);
+        // which adds FANOUT_SCOPE_BIT (bit31) to fanout_refcount.
+        EXPECT_EQ(slots[i].fanout_refcount.load(), FANOUT_SCOPE_BIT);
     }
 }
 

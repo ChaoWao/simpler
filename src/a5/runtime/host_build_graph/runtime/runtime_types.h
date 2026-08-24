@@ -132,13 +132,13 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 #define PTO2_EARLY_DISPATCH_QUEUE_SIZE 64
 
 // Fanin storage
-#define PTO2_FANIN_INLINE_CAP 64
+#define CHIP_FANIN_INLINE_CAP 64
 
 // Polling-scheduler fanin cap. The polling model stores producer dependencies as
 // flat position-independent local-id integers in the fanin pool (no dep-pool
 // spill), so a task's fanin degree is hard-capped here. Must cover the worst-case
 // fanin of any workload (paged_attention is the densest).
-#define PTO2_MAX_FANIN 128
+#define CHIP_MAX_FANIN 128
 
 // Alignment of every per-task region inside an argument pool. Each region starts
 // and ends on a cache line so TaskPayload::init's round-up scalar memcpy stays
@@ -294,7 +294,7 @@ inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
 struct TaskPayload {
     // === Cache line 0 (64B) — the dispatch path's own line ===
-    // sizeof is independent of PTO2_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
+    // sizeof is independent of CHIP_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
     // widening a cap costs pool bytes for the tasks that need them, not a control
     // block on every task.
     int32_t tensor_count{0};
@@ -310,7 +310,7 @@ struct TaskPayload {
     // fanin holds flat position-independent producer local task ids. Single-ring
     // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned by
     // classify_fanin_state against the ring completion_flags. Hard-capped at
-    // PTO2_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
+    // CHIP_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<ChipTensor> tensors;
     simpler::hbg::SelfRelativePtr<uint64_t> scalars;

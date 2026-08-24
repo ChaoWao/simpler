@@ -54,7 +54,7 @@
  *     are carried per-arg / per-edge alongside ``start_offset`` + ``strides``.
  *   - Distinct producers / arg indices / sources keep their own edges; per-record
  *     deduplication of producer ids mirrors the runtime
- *     ``PTO2FaninBuilder::append_fanin_or_fail`` semantics so the set of
+ *     ``FaninBuilder::append_fanin_or_fail`` semantics so the set of
  *     ``(pred, succ)`` pairs is identical to what the runtime would have
  *     recorded.
  *

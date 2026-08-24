@@ -234,8 +234,8 @@ static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
     return next;
 }
 
-struct PTO2FaninBuilder {
-    PTO2FaninBuilder(OrchestratorState *orch, PTO2FaninPool &spill_pool, uint32_t seen_epoch) :
+struct FaninBuilder {
+    FaninBuilder(OrchestratorState *orch, FaninPool &spill_pool, uint32_t seen_epoch) :
         count(0),
         wait_count(0),
         spill_start(0),
@@ -247,11 +247,11 @@ struct PTO2FaninBuilder {
     int32_t spill_start{0};
     OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
-    PTO2FaninPool &spill_pool;
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP];
+    FaninPool &spill_pool;
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP];
 
     template <typename Fn>
-    PTO2FaninForEachReturn<Fn> for_each(Fn &&fn) const {
+    FaninForEachReturn<Fn> for_each(Fn &&fn) const {
         return for_each_fanin_storage(inline_slots, count, spill_start, spill_pool, static_cast<Fn &&>(fn));
     }
 
@@ -269,7 +269,7 @@ struct PTO2FaninBuilder {
     }
 
     // Append a new edge (caller has already claimed the producer's fanout pin).
-    void push_edge(PTO2FaninSpillEntry &entry, ChipTaskSlotState *prod_state, DepFlags kind) {
+    void push_edge(FaninSpillEntry &entry, ChipTaskSlotState *prod_state, DepFlags kind) {
         entry.set(prod_state, kind);
         count++;
         if (dep_has_wait(kind)) {
@@ -282,7 +282,7 @@ struct PTO2FaninBuilder {
     // edge instead of adding a second one — no extra fanout pin is claimed.
     void or_flags_into_existing(ChipTaskSlotState *prod_state, DepFlags kind) {
         for (int32_t i = 0; i < count; i++) {
-            PTO2FaninSpillEntry &entry = entry_at(i);
+            FaninSpillEntry &entry = entry_at(i);
             if (entry.slot_state() == prod_state) {
                 accumulate_flags(entry, kind);
                 return;
@@ -295,18 +295,18 @@ struct PTO2FaninBuilder {
     }
 
 private:
-    // The i-th appended fanin edge: inline for i < PTO2_FANIN_INLINE_CAP, else in
+    // The i-th appended fanin edge: inline for i < CHIP_FANIN_INLINE_CAP, else in
     // the spill ring at the same linear->physical position for_each_fanin_storage
     // walks. Single source of the wrap arithmetic.
-    PTO2FaninSpillEntry &entry_at(int32_t i) {
-        if (i < PTO2_FANIN_INLINE_CAP) {
+    FaninSpillEntry &entry_at(int32_t i) {
+        if (i < CHIP_FANIN_INLINE_CAP) {
             return inline_slots[i];
         }
-        int32_t spill_idx = i - PTO2_FANIN_INLINE_CAP;
+        int32_t spill_idx = i - CHIP_FANIN_INLINE_CAP;
         return spill_pool.base[(spill_start % spill_pool.capacity + spill_idx) % spill_pool.capacity];
     }
 
-    void accumulate_flags(PTO2FaninSpillEntry &entry, DepFlags kind) {
+    void accumulate_flags(FaninSpillEntry &entry, DepFlags kind) {
         bool had_wait = dep_has_wait(entry.flags());
         entry.add_flags(kind);
         if (!had_wait && dep_has_wait(kind)) {
@@ -317,7 +317,7 @@ private:
 
 static bool append_fanin_or_fail(
     OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
-    TaskId producer_task_id, PTO2FaninBuilder *fanin_builder, uint8_t ring_id, DepFlags kind
+    TaskId producer_task_id, FaninBuilder *fanin_builder, uint8_t ring_id, DepFlags kind
 ) {
     // Decide-and-claim under the producer's fanout_lock. Two conditions make this
     // resolved slot a non-dependency, and both must be checked together with the
@@ -360,11 +360,11 @@ static bool append_fanin_or_fail(
         // count must never carry into bit31 (would corrupt the scope-release
         // flag) — true for any sane fanout (<< 2^31).
         assert(
-            (prod_state->fanout_count & ~PTO2_FANOUT_SCOPE_BIT) < (PTO2_FANOUT_SCOPE_BIT - 1) &&
+            (prod_state->fanout_count & ~FANOUT_SCOPE_BIT) < (FANOUT_SCOPE_BIT - 1) &&
             "fanout consumer count overflow into scope bit"
         );
         prod_state->fanout_count++;
-        fanout_now = static_cast<int32_t>(prod_state->fanout_count & ~PTO2_FANOUT_SCOPE_BIT);
+        fanout_now = static_cast<int32_t>(prod_state->fanout_count & ~FANOUT_SCOPE_BIT);
     }
     prod_state->unlock_fanout();
 #if SIMPLER_ORCH_PROFILING
@@ -390,30 +390,30 @@ static bool append_fanin_or_fail(
         return true;
     }
 
-    if (fanin_builder->count < PTO2_FANIN_INLINE_CAP) {
+    if (fanin_builder->count < CHIP_FANIN_INLINE_CAP) {
         fanin_builder->push_edge(fanin_builder->inline_slots[fanin_builder->count], prod_state, kind);
         return true;
     }
 
-    PTO2FaninPool &fanin_pool = fanin_builder->spill_pool;
+    FaninPool &fanin_pool = fanin_builder->spill_pool;
     if (!fanin_pool.ensure_space(orch->sm_header->rings[ring_id], 1)) {
         orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;
     }
     int32_t spill_idx = fanin_pool.top;
-    PTO2FaninSpillEntry *entry = fanin_pool.alloc();
+    FaninSpillEntry *entry = fanin_pool.alloc();
     if (entry == nullptr) {
         orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;
     }
-    if (fanin_builder->count == PTO2_FANIN_INLINE_CAP) {
+    if (fanin_builder->count == CHIP_FANIN_INLINE_CAP) {
         fanin_builder->spill_start = spill_idx;
     }
     fanin_builder->push_edge(*entry, prod_state, kind);
     return true;
 }
 
-static bool all_claimed_fanin_completed(const PTO2FaninBuilder &fanin_builder) {
+static bool all_claimed_fanin_completed(const FaninBuilder &fanin_builder) {
     if (fanin_builder.count == 0) return true;
     // Only DEP_WAIT edges gate readiness; a retention-only edge never blocks
     // dispatch, so it is treated as satisfied here.
@@ -423,7 +423,7 @@ static bool all_claimed_fanin_completed(const PTO2FaninBuilder &fanin_builder) {
     });
 }
 
-static bool all_claimed_fanin_allow_early_resolve(const PTO2FaninBuilder &fanin_builder) {
+static bool all_claimed_fanin_allow_early_resolve(const FaninBuilder &fanin_builder) {
     if (fanin_builder.count == 0) return true;
     return fanin_builder.for_each([](ChipTaskSlotState *producer, DepFlags flags) -> bool {
         if (!dep_has_wait(flags)) return true;
@@ -645,7 +645,7 @@ static bool prepare_task(
     // single payload-init point, which runs before Orch-side wiring publish.
 
     // Fields already reset by advance_ring_pointers (eager reset after CONSUMED):
-    //   fanout_lock=0, fanout_count=PTO2_FANOUT_SCOPE_BIT, fanout_head=nullptr,
+    //   fanout_lock=0, fanout_count=FANOUT_SCOPE_BIT, fanout_head=nullptr,
     //   fanin_refcount=0, fanout_refcount=0, completed_subtasks=0, next_block_idx=0
     // Fields immutable after RingSchedState::init():
     //   ring_id
@@ -937,7 +937,7 @@ static TaskOutputTensors submit_task_common(
     }
 #endif
 
-    PTO2FaninBuilder fanin_builder(orch, orch->rings[ring_id].fanin_pool, next_fanin_seen_epoch(orch));
+    FaninBuilder fanin_builder(orch, orch->rings[ring_id].fanin_pool, next_fanin_seen_epoch(orch));
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -1032,7 +1032,7 @@ static TaskOutputTensors submit_task_common(
     // the producer's fanout_lock. Doing it there (rather than a separate pass
     // here) is what prevents a producer from transitioning to CONSUMED between
     // the dependency decision and the claim.
-    int32_t inline_count = std::min(fanin_builder.count, PTO2_FANIN_INLINE_CAP);
+    int32_t inline_count = std::min(fanin_builder.count, CHIP_FANIN_INLINE_CAP);
     // Every fanin edge produced here carries DEP_WAIT (creator = WAIT|RETAIN,
     // modifier = WAIT, explicit defaults to WAIT|RETAIN or opts into WAIT), so
     // wait_count == count. fanin_actual_count therefore doubles as the WAIT-edge

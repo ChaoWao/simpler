@@ -733,13 +733,13 @@ struct SchedulerState {
         check_and_handle_consumed(slot_state);
     }
 
-    // Scope-end release: sets bit31 (PTO2_FANOUT_SCOPE_BIT) instead of bumping a
+    // Scope-end release: sets bit31 (FANOUT_SCOPE_BIT) instead of bumping a
     // consumer ref. Called exactly once per task from on_scope_end. Keeping it a
     // distinct add lets a consumer release leave the scope bit unset, so "all
     // consumers done but scope still open" stays distinguishable from "fully
     // consumed".
     void release_producer_scope(ChipTaskSlotState &slot_state) {
-        slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
+        slot_state.fanout_refcount.fetch_add(FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         check_and_handle_consumed(slot_state);
     }
 
@@ -751,7 +751,7 @@ struct SchedulerState {
     }
 
     void release_producer_scope(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
-        slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
+        slot_state.fanout_refcount.fetch_add(FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
         check_and_handle_consumed(slot_state, atomic_count);
     }

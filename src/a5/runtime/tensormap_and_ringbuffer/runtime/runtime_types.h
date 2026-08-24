@@ -94,7 +94,7 @@
 #define PTO2_EARLY_DISPATCH_QUEUE_SIZE 256
 
 // Fanin storage
-#define PTO2_FANIN_INLINE_CAP 64
+#define CHIP_FANIN_INLINE_CAP 64
 
 // Dependency-degree diagnostic: log once at debug level when a task's fanin or
 // a producer's fanout first exceeds this degree, so dense dependency graphs can
@@ -167,18 +167,18 @@ struct PTO2OutputLayout {
  * Stored in the dedicated fanin spill ring buffer.
  */
 struct ChipTaskSlotState;  // Forward declaration
-struct PTO2FaninPool;      // Forward declaration
+struct FaninPool;          // Forward declaration
 
 // One fanin edge: a producer slot pointer with the per-edge DepFlags packed into
 // bits 0..1 of the pointer. ChipTaskSlotState is alignas(64), so bits 0..5 are
 // always zero in a real pointer. Used for both the inline fanin array and the
 // spill pool, keeping sizeof == sizeof(uintptr_t) so neither footprint grows.
-struct PTO2FaninSpillEntry {
+struct FaninSpillEntry {
     static constexpr uintptr_t FLAG_MASK = 0x3;
     // No in-class initializer: the type stays trivially default-constructible so
     // the payload's fanin_inline_edges[64] and the orchestrator's per-submit
     // builder array are default-initialized at zero cost (only entries [0, count)
-    // are written via set()). Value-init (`PTO2FaninSpillEntry{}`) still zeroes it.
+    // are written via set()). Value-init (`FaninSpillEntry{}`) still zeroes it.
     uintptr_t packed;
 
     ChipTaskSlotState *slot_state() const { return reinterpret_cast<ChipTaskSlotState *>(packed & ~FLAG_MASK); }
@@ -191,7 +191,7 @@ struct PTO2FaninSpillEntry {
     void add_flags(DepFlags f) { packed |= (static_cast<uintptr_t>(f) & FLAG_MASK); }
     void clear() { packed = 0; }
 };
-static_assert(sizeof(PTO2FaninSpillEntry) == sizeof(uintptr_t));
+static_assert(sizeof(FaninSpillEntry) == sizeof(uintptr_t));
 
 /**
  * Dependency list entry (singly-linked list node)
@@ -280,11 +280,11 @@ struct TaskPayload {
     int32_t scalar_count{0};
     int32_t fanin_actual_count{0};  // Actual fanin count (without the +1 redundance)
     int32_t fanin_spill_start{0};   // Linear start index in fanin spill pool (0 = no spill)
-    PTO2FaninPool *fanin_spill_pool{nullptr};
+    FaninPool *fanin_spill_pool{nullptr};
     // Inline fanin edges (producer slot + packed DepFlags). Spill beyond
-    // PTO2_FANIN_INLINE_CAP goes to fanin_spill_pool. Same packed layout as the
+    // CHIP_FANIN_INLINE_CAP goes to fanin_spill_pool. Same packed layout as the
     // spill entries, so the array footprint is unchanged.
-    PTO2FaninSpillEntry fanin_inline_edges[PTO2_FANIN_INLINE_CAP];
+    FaninSpillEntry fanin_inline_edges[CHIP_FANIN_INLINE_CAP];
     // Early-dispatch metadata (AICPU-side only). Ordered by descending
     // alignment so the block packs without internal padding. Cache line 8
     // contains the rarely-touched fanin tail rather than the hot tensor/scalar
@@ -444,18 +444,18 @@ static_assert(
 
 // fanout_count / fanout_refcount bit encoding (both uint32):
 //   bits [30:0] = consumer references (count: # consumers; refcount: # released)
-//   bit  [31]   = the owning scope's reference (PTO2_FANOUT_SCOPE_BIT)
-// fanout_count is seeded to PTO2_FANOUT_SCOPE_BIT and ++'d per consumer, so it
+//   bit  [31]   = the owning scope's reference (FANOUT_SCOPE_BIT)
+// fanout_count is seeded to FANOUT_SCOPE_BIT and ++'d per consumer, so it
 // ends as (SCOPE_BIT | num_consumers). release adds 1 (consumer completion) or
 // SCOPE_BIT (scope_end). CONSUMED iff fanout_refcount == fanout_count (every
 // consumer released AND scope bit set). Keeping the scope ref in a distinct bit
 // (rather than folding scope + consumers into one count) lets a consumer reach
-// fanout_refcount == (fanout_count & ~PTO2_FANOUT_SCOPE_BIT) while the scope bit
+// fanout_refcount == (fanout_count & ~FANOUT_SCOPE_BIT) while the scope bit
 // is still unset -- i.e. "all consumers done but scope still open" stays
 // distinguishable from "fully consumed". Structural allocation deadlock is
 // detected separately by checking whether the blocking ring head is the oldest
 // task pinned by any open scope on that ring.
-static constexpr uint32_t PTO2_FANOUT_SCOPE_BIT = 0x80000000u;
+static constexpr uint32_t FANOUT_SCOPE_BIT = 0x80000000u;
 
 enum TaskLifecycleFlag : uint8_t {
     LIFECYCLE_FLAGS_NONE = 0,
@@ -599,7 +599,7 @@ struct alignas(64) ChipTaskSlotState {
      */
     void reset_for_reuse() {
         fanout_lock.store(0, std::memory_order_relaxed);
-        fanout_count = PTO2_FANOUT_SCOPE_BIT;  // bit31 = owning-scope ref; consumers ++ into low bits
+        fanout_count = FANOUT_SCOPE_BIT;  // bit31 = owning-scope ref; consumers ++ into low bits
         fanout_head = nullptr;
         fanin_refcount.store(0, std::memory_order_relaxed);
         fanout_refcount.store(0, std::memory_order_relaxed);
@@ -662,9 +662,9 @@ struct alignas(64) ChipTaskSlotState {
 };
 
 static_assert(sizeof(ChipTaskSlotState) == 64);
-// PTO2FaninSpillEntry packs DepFlags into the low bits of a ChipTaskSlotState*.
+// FaninSpillEntry packs DepFlags into the low bits of a ChipTaskSlotState*.
 // That is only lossless while the type is aligned past those tag bits.
 static_assert(
-    alignof(ChipTaskSlotState) > PTO2FaninSpillEntry::FLAG_MASK,
-    "ChipTaskSlotState alignment must exceed PTO2FaninSpillEntry::FLAG_MASK so the packed DepFlags bits are free"
+    alignof(ChipTaskSlotState) > FaninSpillEntry::FLAG_MASK,
+    "ChipTaskSlotState alignment must exceed FaninSpillEntry::FLAG_MASK so the packed DepFlags bits are free"
 );

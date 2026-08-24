@@ -144,7 +144,7 @@ static inline const char *error_hint(int32_t code) {
                "runtime also check for nested submission or a stalled consumer";
     case SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED:
         return "follow the preceding resource diagnostic: HBG has no spill pool, so reduce fanin to "
-               "PTO2_MAX_FANIN or less; for a reclaiming runtime raise PTO2_RING_DEP_POOL or cut fanin";
+               "CHIP_MAX_FANIN or less; for a reclaiming runtime raise PTO2_RING_DEP_POOL or cut fanin";
     case SIMPLER_ERROR_INVALID_ARGS:
         return "an orchestration bug, not a capacity problem -- resizing the rings will not help; "
                "recheck the arguments of the orchestration API calls listed above";

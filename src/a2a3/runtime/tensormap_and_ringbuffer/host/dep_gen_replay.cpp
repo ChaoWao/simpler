@@ -536,7 +536,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     TensorArgType atype_buf[CORE_MAX_TENSOR_ARGS];
 
     // Per-record producer ID -> accumulated DepFlags — must match runtime's
-    // PTO2FaninBuilder::append_fanin_or_fail semantics, which collapses STEP 1
+    // FaninBuilder::append_fanin_or_fail semantics, which collapses STEP 1
     // (explicit_deps) + STEP A (creator retention) + STEP B (tensormap lookup)
     // into a single per-task fanin edge and OR-accumulates its flags. Both oracle
     // and annot use this same semantics so the divergence check compares the
@@ -761,7 +761,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 // the same producer (different version), or two different
                 // producers, both yield their own edges. The producer-id-set
                 // comparison below uses annot_preds, which dedups by pred
-                // only, matching runtime PTO2FaninBuilder semantics.
+                // only, matching runtime FaninBuilder semantics.
                 annot_preds[producer.raw] |= DEP_WAIT;
                 EdgeAnnot e{};
                 e.pred = producer.raw;

@@ -1137,11 +1137,11 @@ static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
 // Polling: fanin is a flat array of position-independent producer local ids on
 // the payload (no dep-pool spill, no producer pointers). The builder writes them
 // directly into the payload's fanin region as producers are appended, deduping by
-// slot and hard-capping at PTO2_MAX_FANIN. self_local is this task's own local id
+// slot and hard-capping at CHIP_MAX_FANIN. self_local is this task's own local id
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
-struct PTO2FaninBuilder {
-    PTO2FaninBuilder(OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
+struct FaninBuilder {
+    FaninBuilder(OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
         count(0),
         orch(orch),
         seen_epoch(seen_epoch),
@@ -1179,7 +1179,7 @@ struct PTO2FaninBuilder {
 
 static bool append_fanin_or_fail(
     OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
-    TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
+    TaskId producer_task_id, FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
     // to this producer (defensive — whole-graph-resident hbg does not reuse slots
@@ -1192,15 +1192,15 @@ static bool append_fanin_or_fail(
     if (fanin_builder->mark_seen(prod_ring, prod_slot)) {
         return true;
     }
-    if (fanin_builder->count >= PTO2_MAX_FANIN) {
+    if (fanin_builder->count >= CHIP_MAX_FANIN) {
         LOG_ERROR("========================================");
         LOG_ERROR("FATAL: Fanin Capacity Exhausted!");
         LOG_ERROR("========================================");
         LOG_ERROR("HBG stores every producer dependency in the consumer task's fanin region.");
-        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, PTO2_MAX_FANIN);
+        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, CHIP_MAX_FANIN);
         LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
         LOG_ERROR("Solution:");
-        LOG_ERROR("  Reduce the task fanin to at most PTO2_MAX_FANIN=%d.", PTO2_MAX_FANIN);
+        LOG_ERROR("  Reduce the task fanin to at most CHIP_MAX_FANIN=%d.", CHIP_MAX_FANIN);
         LOG_ERROR("  HBG has no dependency spill pool; PTO2_RING_DEP_POOL does not apply.");
         LOG_ERROR("========================================");
         orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
@@ -1279,7 +1279,7 @@ static bool prepare_task(
     const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
     debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= window * MAX_TENSOR_ARGS);
     debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
-    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + PTO2_MAX_FANIN <= window * PTO2_MAX_FANIN);
+    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + CHIP_MAX_FANIN <= window * CHIP_MAX_FANIN);
     out->payload->bind_regions(
         orch->tensor_pool + orch->tensor_pool_cursor, orch->scalar_pool + orch->scalar_pool_cursor,
         orch->fanin_pool + orch->fanin_pool_cursor
@@ -1484,7 +1484,7 @@ static TaskOutputTensors submit_task_common(
         );
     }
 
-    PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
+    FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -1845,7 +1845,7 @@ bool graph_submit_outer(
         );
     }
 
-    PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
+    FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
     auto emit = [&](TaskId producer_id) -> bool {
         const int32_t producer_local = static_cast<int32_t>(producer_id.local());
         const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);

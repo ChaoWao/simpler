@@ -331,7 +331,7 @@ struct RingImageExtents {
 inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
     return RingImageExtents{
         task_window_size,
-        task_window_size * PTO2_MAX_FANIN,
+        task_window_size * CHIP_MAX_FANIN,
         task_window_size * MAX_TENSOR_ARGS,
         task_window_size * MAX_SCALAR_ARGS,
     };
@@ -371,7 +371,7 @@ inline ChipRingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) no
 // round-up scalar memcpy relies on. ChipTensor is 2 cache lines, so a tensor region
 // is aligned for any count; the fanin and scalar strides need it stated.
 static_assert(
-    (PTO2_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
+    (CHIP_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
     "the fanin region's cap must be a whole number of cache lines"
 );
 static_assert(

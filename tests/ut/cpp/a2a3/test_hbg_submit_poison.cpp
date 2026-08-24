@@ -152,7 +152,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         EXPECT_LE(cflag, uint8_t{1});
         // Payload counts are real, not the poison bit pattern.
         EXPECT_GE(pl.fanin_count, 0);
-        EXPECT_LE(pl.fanin_count, PTO2_MAX_FANIN);
+        EXPECT_LE(pl.fanin_count, CHIP_MAX_FANIN);
         EXPECT_GE(pl.tensor_count, 0);
         EXPECT_GE(pl.scalar_count, 0);
         // predicate.op is a dispatch-time field, read only for tasks the device

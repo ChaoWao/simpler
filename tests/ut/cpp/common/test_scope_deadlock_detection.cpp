@@ -28,7 +28,7 @@ void make_head_match_old_structural_predicate(
     descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
     head.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
-    head.fanout_count = PTO2_FANOUT_SCOPE_BIT;
+    head.fanout_count = FANOUT_SCOPE_BIT;
     head.fanout_refcount.store(0, std::memory_order_release);
 }
 

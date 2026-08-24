@@ -34,7 +34,7 @@ static void latch_pool_error(std::atomic<int32_t> *error_code_ptr, int32_t error
 // =============================================================================
 // Fanin Spill Pool Implementation
 // =============================================================================
-void PTO2FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+void FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
     if (sm_last_task_alive <= reclaim_task_cursor) return;
 
     int32_t scan_end = sm_last_task_alive;
@@ -44,7 +44,7 @@ void PTO2FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_a
             continue;
         }
 
-        int32_t inline_count = std::min(payload.fanin_actual_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(payload.fanin_actual_count, CHIP_FANIN_INLINE_CAP);
         int32_t spill_edge_count = payload.fanin_actual_count - inline_count;
         if (spill_edge_count > 0) {
             advance_tail(payload.fanin_spill_start + spill_edge_count);
@@ -53,7 +53,7 @@ void PTO2FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_a
     reclaim_task_cursor = scan_end;
 }
 
-bool PTO2FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
+bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
     if (available() >= needed) return true;
 
     int spin_count = 0;
@@ -165,8 +165,8 @@ void PTO2DepListPool::report_deadlock(
         uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
         LOG_ERROR(
             "  Head task %d: state=%d, consumers=%u/%u, scope_released=%d", last_alive,
-            static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~PTO2_FANOUT_SCOPE_BIT,
-            fc & ~PTO2_FANOUT_SCOPE_BIT, (rc & PTO2_FANOUT_SCOPE_BIT) ? 1 : 0
+            static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~FANOUT_SCOPE_BIT,
+            fc & ~FANOUT_SCOPE_BIT, (rc & FANOUT_SCOPE_BIT) ? 1 : 0
         );
     }
     LOG_ERROR("Solution:");

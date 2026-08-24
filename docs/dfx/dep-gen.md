@@ -66,7 +66,7 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
   Per-record semantics mirror runtime `submit_task` exactly: STEP 1
   (explicit deps), STEP 3 (creator retention + tensormap lookup),
   STEP 4 (register outputs). Per-successor dedup matches
-  `PTO2FaninBuilder::append_fanin_or_fail`. After both passes finish per
+  `FaninBuilder::append_fanin_or_fail`. After both passes finish per
   record, the replay asserts the two producer-id → `DepFlags` mappings are
   equal (same producers and same per-producer flags); if they diverge,
   `deps.json` is not written and the function returns non-zero.

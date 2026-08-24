@@ -13,13 +13,13 @@
  * Negative ST orchestration: SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED (code 4).
  *
  * One consumer with more fanin edges than the dep pool can hold. The first
- * PTO2_FANIN_INLINE_CAP (64) edges live in the consumer's inline fanin slots;
+ * CHIP_FANIN_INLINE_CAP (64) edges live in the consumer's inline fanin slots;
  * only edge 65+ spills into the per-ring fanin spill pool. With the pool pinned
  * to 4 entries (CallConfig.runtime_env.ring_dep_pool) and 64 spill edges that
  * all belong to the one in-construction consumer (so none can be reclaimed), the
  * spill allocator exhausts and the orchestrator latches FANIN_CAPACITY_EXCEEDED.
  *
- * PRODUCER_COUNT must exceed PTO2_FANIN_INLINE_CAP, otherwise every edge fits
+ * PRODUCER_COUNT must exceed CHIP_FANIN_INLINE_CAP, otherwise every edge fits
  * inline and the spill pool is never touched. With Orch-side dependency wiring,
  * already-completed producer fanins bypass the dep pool entirely, so the old
  * inline-boundary scheduler-timeout fixture is no longer a stable public-API
@@ -31,7 +31,7 @@
 
 #include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
-static constexpr int32_t PRODUCER_COUNT = 128;  // > PTO2_FANIN_INLINE_CAP (64)
+static constexpr int32_t PRODUCER_COUNT = 128;  // > CHIP_FANIN_INLINE_CAP (64)
 
 extern "C" {
 

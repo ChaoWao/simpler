@@ -392,7 +392,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
 
     CoreTaskArgs producer_args;
     producer_args.add_output(boundary);
-    for (int32_t i = 0; i < PTO2_MAX_FANIN + 1; ++i) {
+    for (int32_t i = 0; i < CHIP_MAX_FANIN + 1; ++i) {
         ASSERT_TRUE(orch.submit_dummy_task(producer_args).task_id().is_valid());
     }
 

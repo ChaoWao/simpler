@@ -19,7 +19,7 @@
  *   tensormap — a producer whose written slice overlaps what this task reads
  *               (STEP 3 Step B); carries both slices' geometry.
  *
- * Per-task producer dedup mirrors PTO2FaninBuilder::append_fanin_or_fail, which
+ * Per-task producer dedup mirrors FaninBuilder::append_fanin_or_fail, which
  * collapses all three sources into one fanin list: the first edge to name a
  * producer is kept. tensormap edges are exempt — a second producer slice for the
  * same task is a distinct fact about the data flow, and viewers rely on seeing

@@ -102,10 +102,10 @@ TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].slot_state(), &producer_slot);
     // A plain set_dependencies() dep is conservative RETAIN: DEP_WAIT|DEP_RETAIN.
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
-    // fanout_count is bit-packed: bit31 (PTO2_FANOUT_SCOPE_BIT) is the owning-scope
+    // fanout_count is bit-packed: bit31 (FANOUT_SCOPE_BIT) is the owning-scope
     // ref, low bits the consumer count. The duplicate explicit dep is deduped to a
     // single consumer, so this is scope + 1.
-    EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+    EXPECT_EQ(producer_slot.fanout_count, FANOUT_SCOPE_BIT + 1);
 }
 
 // An explicit ordering-only dep (the primitive add_dep_wait() lowers to) yields a
@@ -154,7 +154,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
     ASSERT_NE(consumer_slot.payload, nullptr);
     ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
-    EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+    EXPECT_EQ(producer_slot.fanout_count, FANOUT_SCOPE_BIT + 1);
 }
 
 // The duplicate lands in the spill region (>64 fanin), exercising
@@ -163,7 +163,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
 TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     orch.begin_scope();
 
-    constexpr int kProducers = PTO2_FANIN_INLINE_CAP + 1;  // 65: the last one spills
+    constexpr int kProducers = CHIP_FANIN_INLINE_CAP + 1;  // 65: the last one spills
     std::vector<TaskOutputTensors> producers;
     producers.reserve(kProducers);
     for (int i = 0; i < kProducers; i++) {
@@ -196,13 +196,13 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
 
     TaskId dup = producers.back().task_id();
     auto &dup_slot = sm_handle->header->rings[dup.ring()].get_slot_state_by_task_id(dup.local());
-    EXPECT_EQ(dup_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);  // one pin, not two
+    EXPECT_EQ(dup_slot.fanout_count, FANOUT_SCOPE_BIT + 1);  // one pin, not two
 
     // The first spilled edge is the duplicated producer; its flags OR-folded to
     // WAIT|RETAIN across the two discovery kinds.
     ASSERT_NE(payload->fanin_spill_pool, nullptr);
-    PTO2FaninPool &spill_pool = *payload->fanin_spill_pool;
-    PTO2FaninSpillEntry &spill_edge = spill_pool.base[payload->fanin_spill_start % spill_pool.capacity];
+    FaninPool &spill_pool = *payload->fanin_spill_pool;
+    FaninSpillEntry &spill_edge = spill_pool.base[payload->fanin_spill_start % spill_pool.capacity];
     EXPECT_EQ(spill_edge.slot_state(), &dup_slot);
     EXPECT_EQ(spill_edge.flags(), DEP_WAIT | DEP_RETAIN);
 }
