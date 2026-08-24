@@ -16,7 +16,7 @@
  *
  * The allocator is single-threaded (orchestrator thread), so no concurrency
  * tests are needed. The unified PTO2TaskAllocator replaces the previous
- * separate PTO2HeapRing + PTO2TaskRing.
+ * separate ChipHeapRing + ChipTaskRing.
  *
  * Design contracts (try_bump_heap):
  *

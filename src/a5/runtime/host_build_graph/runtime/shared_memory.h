@@ -50,7 +50,7 @@ struct SharedMemoryHandle;
  * Per-ring flow control state in shared memory.
  * Written/read by Orchestrator and Scheduler for synchronization.
  */
-struct alignas(64) PTO2RingFlowControl {
+struct alignas(64) ChipRingFlowControl {
     // Written by Orchestrator, read by Scheduler. There is no reverse channel:
     // the ring is whole-graph-resident, so the scheduler never reclaims task
     // slots and has nothing to publish back.
@@ -67,7 +67,7 @@ struct alignas(64) PTO2RingFlowControl {
     bool validate(SharedMemoryHandle *handle) const;
 };
 
-static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be exactly one cache line (64B)");
+static_assert(sizeof(ChipRingFlowControl) == 64, "ChipRingFlowControl must be exactly one cache line (64B)");
 
 /**
  * Per-ring shared memory header section.
@@ -76,7 +76,7 @@ static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be ex
  * Pointers are host-side only (set by setup_pointers, invalid on device).
  */
 struct alignas(64) SharedMemoryRingHeader {
-    PTO2RingFlowControl fc;
+    ChipRingFlowControl fc;
 
     // Highest task_id such that every task with id in [0, completed_watermark]
     // has its completion_flags byte set. Advanced over the full contiguous
@@ -293,7 +293,7 @@ inline SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base) noexcept {
 inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
         reinterpret_cast<char *>(ring_header_addr(sm_dev_base)) + offsetof(SharedMemoryRingHeader, fc) +
-        offsetof(PTO2RingFlowControl, current_task_index)
+        offsetof(ChipRingFlowControl, current_task_index)
     );
 }
 
@@ -306,7 +306,7 @@ inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noe
 // The pools sit last because nothing on the device resolves a segment past
 // completion_flags: a payload names its argument regions by delta, so the four
 // slot-pitched offsets are all the attach path computes.
-struct PTO2RingSegmentOffsets {
+struct ChipRingSegmentOffsets {
     uint64_t descriptors;
     uint64_t payloads;
     uint64_t slot_states;
@@ -342,9 +342,9 @@ inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
 // `sm_base`) and the device-address helpers below (which add `sm_dev_base`). Adding
 // or reordering a segment is a one-line edit here; every consumer follows
 // automatically, so the layout walk can never silently disagree across call sites.
-inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
+inline ChipRingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
     uint64_t off = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
-    PTO2RingSegmentOffsets o{};
+    ChipRingSegmentOffsets o{};
     o.descriptors = off;
     off += PTO2_ALIGN_UP(e.slots * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
     o.payloads = off;
@@ -363,7 +363,7 @@ inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) no
     return o;
 }
 
-inline PTO2RingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) noexcept {
+inline ChipRingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) noexcept {
     return ring_segment_offsets(mirror_extents(task_window_size));
 }
 
@@ -473,8 +473,8 @@ inline uint64_t compact_live_image(
     always_assert(used.fanin_elems <= mirror.fanin_elems);
     always_assert(used.tensor_elems <= mirror.tensor_elems);
     always_assert(used.scalar_elems <= mirror.scalar_elems);
-    const PTO2RingSegmentOffsets from = ring_segment_offsets(mirror);
-    const PTO2RingSegmentOffsets to = ring_segment_offsets(image_extents(used));
+    const ChipRingSegmentOffsets from = ring_segment_offsets(mirror);
+    const ChipRingSegmentOffsets to = ring_segment_offsets(image_extents(used));
 
     // The header and the descriptors offset are pitch-independent, so the header
     // lands where it already was.

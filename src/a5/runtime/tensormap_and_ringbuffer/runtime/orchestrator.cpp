@@ -896,7 +896,7 @@ static TaskOutputTensors submit_task_common(
     }
     uint8_t ring_id = prepared.task_id.ring();
     SchedulerState *sched = orch->scheduler;
-    PTO2RingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
+    ChipRingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
     TaskId task_id = prepared.task_id;
     ChipTaskSlotState &cur_slot_state = *prepared.slot_state;
     TaskDescriptor &task = *prepared.task;

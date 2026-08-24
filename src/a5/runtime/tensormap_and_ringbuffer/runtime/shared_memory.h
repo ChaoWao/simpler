@@ -53,7 +53,7 @@ struct SharedMemoryHandle;
  * Per-ring flow control state in shared memory.
  * Written/read by Orchestrator and Scheduler for synchronization.
  */
-struct alignas(64) PTO2RingFlowControl {
+struct alignas(64) ChipRingFlowControl {
     // === Cache Line 0: Written by Orchestrator, Read by Scheduler ===
     alignas(64) std::atomic<int32_t> current_task_index;  // Task ring head (next to allocate)
 
@@ -75,7 +75,7 @@ struct alignas(64) PTO2RingFlowControl {
     bool validate(SharedMemoryHandle *handle, int32_t ring_id) const;
 };
 
-static_assert(sizeof(PTO2RingFlowControl) == 128, "PTO2RingFlowControl must be exactly 2 cache lines (128B)");
+static_assert(sizeof(ChipRingFlowControl) == 128, "ChipRingFlowControl must be exactly 2 cache lines (128B)");
 
 /**
  * Per-ring shared memory header section.
@@ -84,7 +84,7 @@ static_assert(sizeof(PTO2RingFlowControl) == 128, "PTO2RingFlowControl must be e
  * Pointers are host-side only (set by setup_pointers, invalid on device).
  */
 struct alignas(64) SharedMemoryRingHeader {
-    PTO2RingFlowControl fc;
+    ChipRingFlowControl fc;
 
     // Layout metadata (set once at init)
     uint64_t task_window_size;
@@ -255,21 +255,21 @@ inline SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base, int ring_id) 
 inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base, int ring_id) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
         reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(SharedMemoryRingHeader, fc) +
-        offsetof(PTO2RingFlowControl, current_task_index)
+        offsetof(ChipRingFlowControl, current_task_index)
     );
 }
 
 inline std::atomic<int32_t> *ring_last_task_alive_addr(void *sm_dev_base, int ring_id) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
         reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(SharedMemoryRingHeader, fc) +
-        offsetof(PTO2RingFlowControl, last_task_alive)
+        offsetof(ChipRingFlowControl, last_task_alive)
     );
 }
 
 // Byte offsets (from the SM base) of one ring's three segments. The per-ring
 // layout is: header, then for each ring descriptors -> payloads -> slot_states,
 // every segment PTO2_ALIGN_UP-padded.
-struct PTO2RingSegmentOffsets {
+struct ChipRingSegmentOffsets {
     uint64_t descriptors;
     uint64_t payloads;
     uint64_t slot_states;
@@ -282,7 +282,7 @@ struct PTO2RingSegmentOffsets {
 // helpers below (which add `sm_dev_base`). Adding or reordering a per-ring
 // segment is a one-line edit here; every consumer follows automatically, so the
 // layout walk can never silently disagree across call sites.
-inline PTO2RingSegmentOffsets
+inline ChipRingSegmentOffsets
 ring_segment_offsets(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id) noexcept {
     assert(ring_id >= 0 && ring_id < CHIP_MAX_RING_DEPTH && "sm_layout: ring_id out of range");
     uint64_t off = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
@@ -291,7 +291,7 @@ ring_segment_offsets(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int 
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
     }
-    PTO2RingSegmentOffsets o{};
+    ChipRingSegmentOffsets o{};
     o.descriptors = off;
     off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
     o.payloads = off;

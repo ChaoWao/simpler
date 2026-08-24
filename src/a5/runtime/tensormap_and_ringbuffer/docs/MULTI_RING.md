@@ -46,14 +46,14 @@ Type changes:
 
 ## 4. Data Structures
 
-### 4.1 PTO2RingSet (new)
+### 4.1 ChipRingSet (new)
 
 Bundles the three per-ring resources into a single aggregate (`ring_buffer.h`):
 
 ```cpp
-struct PTO2RingSet {
-    PTO2HeapRing   heap_ring;
-    PTO2TaskRing   task_ring;
+struct ChipRingSet {
+    ChipHeapRing   heap_ring;
+    ChipTaskRing   task_ring;
     PTO2FaninPool fanin_pool;
 };
 ```
@@ -62,12 +62,12 @@ struct PTO2RingSet {
 
 ```cpp
 // Before: single ring
-PTO2HeapRing heap_ring;
-PTO2TaskRing task_ring;
+ChipHeapRing heap_ring;
+ChipTaskRing task_ring;
 PTO2DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
-PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
+ChipRingSet rings[CHIP_MAX_RING_DEPTH];
 ```
 
 Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 1)`.
@@ -77,7 +77,7 @@ Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 
 Per-ring flow control and per-ring layout info are grouped together:
 
 ```cpp
-struct PTO2RingFlowControl {
+struct ChipRingFlowControl {
     std::atomic<int32_t> current_task_index;  // task ring head
     std::atomic<int32_t> last_task_alive;     // task ring tail
     std::atomic<uint64_t> heap_top;           // heap alloc pointer
@@ -85,7 +85,7 @@ struct PTO2RingFlowControl {
 };
 
 struct alignas(64) SharedMemoryRingHeader {
-    PTO2RingFlowControl fc;
+    ChipRingFlowControl fc;
 
     // Layout metadata (set once at init)
     uint64_t task_window_size;

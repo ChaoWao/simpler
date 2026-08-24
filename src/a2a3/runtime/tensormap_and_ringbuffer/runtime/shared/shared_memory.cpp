@@ -223,7 +223,7 @@ bool SharedMemoryHandle::validate() {
     return true;
 }
 
-bool PTO2RingFlowControl::validate(SharedMemoryHandle *handle, int32_t ring_id) const {
+bool ChipRingFlowControl::validate(SharedMemoryHandle *handle, int32_t ring_id) const {
     if (!handle) return false;
     if (!handle->header) return false;
     if (ring_id < 0 || ring_id >= CHIP_MAX_RING_DEPTH) return false;

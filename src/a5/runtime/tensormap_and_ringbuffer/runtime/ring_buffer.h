@@ -128,7 +128,7 @@ public:
      *
      * Production callers leave `initial_local_task_id` at 0: the SM ring
      * flow-control counters that current_index_ptr / last_alive_ptr point at
-     * start at zero (PTO2RingFlowControl::init() runs on the AICPU during SM
+     * start at zero (ChipRingFlowControl::init() runs on the AICPU during SM
      * reset), so we keep local_task_id_ aligned with that without reading the
      * SM. Tests that drive SM state directly may pass a non-zero seed to
      * exercise corner cases like task IDs near INT32_MAX.
@@ -923,7 +923,7 @@ struct PTO2DepListPool {
  * Groups a TaskAllocator and DepPool into one per-depth unit.
  * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
-struct PTO2RingSet {
+struct ChipRingSet {
     PTO2TaskAllocator task_allocator;
     PTO2FaninPool fanin_pool;
 };

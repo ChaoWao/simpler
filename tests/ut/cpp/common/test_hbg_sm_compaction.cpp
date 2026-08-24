@@ -192,7 +192,7 @@ struct Compacted {
         bytes = sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
     }
 
-    sm_layout::PTO2RingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
+    sm_layout::ChipRingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
         return sm_layout::ring_segment_offsets(sm_layout::image_extents(usage_for(submitted)));
     }
 

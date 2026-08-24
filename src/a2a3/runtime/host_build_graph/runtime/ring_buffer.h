@@ -60,7 +60,7 @@ public:
      * from host code that constructs a prebuilt arena image.
      *
      * The ring starts at task id 0, matching the SM flow-control counter that
-     * current_index_ptr points at (PTO2RingFlowControl::init() runs on the AICPU
+     * current_index_ptr points at (ChipRingFlowControl::init() runs on the AICPU
      * during SM reset), so local_task_id_ stays in sync without reading the SM.
      * Because ids are never reclaimed, alloc() caps them at window_size — they
      * cannot run away toward INT32_MAX.

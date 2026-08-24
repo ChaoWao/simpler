@@ -189,7 +189,7 @@ Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).
 
 The task ring manages task slot allocation with back-pressure flow control.
 
-**Structure** (`PTO2TaskRing`):
+**Structure** (`ChipTaskRing`):
 
 - `descriptors`: pointer to `TaskDescriptor[]` in shared memory
 - `window_size`: number of slots (power of 2)
@@ -216,7 +216,7 @@ else:
 
 The heap ring manages output buffer allocation from a circular GM heap.
 
-**Structure** (`PTO2HeapRing`):
+**Structure** (`ChipHeapRing`):
 
 - `base`: GM heap base address
 - `size`: total heap size (default 1 GB)
@@ -421,7 +421,7 @@ The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the
 
 Key members:
 
-- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
+- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `ChipRingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
 - `tensor_map`, `tensor_pool`: dependency tracking
 - `scope_tasks[]`, `scope_begins[]`, `scope_stack_top`: scope nesting stack (flat buffer partitioned by level)
 - `scheduler`: pointer to scheduler state (for Orch-side wiring helpers and ready queue access)

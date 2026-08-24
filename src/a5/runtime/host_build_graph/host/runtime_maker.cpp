@@ -560,7 +560,7 @@ int32_t run_host_orchestration(
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
-    const sm_layout::PTO2RingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
+    const sm_layout::ChipRingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
     // Over-allocated and rounded up: every segment offset is a multiple of
     // PTO2_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.

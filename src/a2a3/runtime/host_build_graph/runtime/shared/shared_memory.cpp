@@ -211,7 +211,7 @@ bool SharedMemoryHandle::validate() {
     return true;
 }
 
-bool PTO2RingFlowControl::validate(SharedMemoryHandle *handle) const {
+bool ChipRingFlowControl::validate(SharedMemoryHandle *handle) const {
     if (!handle) return false;
     if (!handle->header) return false;
 

@@ -67,7 +67,7 @@ struct OrchestratorState {
     SharedMemoryHeader *sm_header;
 
     // === PER-RING RESOURCES ===
-    PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
+    ChipRingSet rings[CHIP_MAX_RING_DEPTH];
     uint32_t *fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     uint32_t fanin_seen_current_epoch{1};
 
