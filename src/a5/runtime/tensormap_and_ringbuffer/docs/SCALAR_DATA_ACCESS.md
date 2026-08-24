@@ -12,12 +12,13 @@ During task graph construction, orchestration sometimes needs to read InCore ker
 // Blocking read: returns value at the given indices (default: raw uint64_t bits)
 // Specify T for typed read: float val = get_tensor_data<float>(tensor, 1, idx);
 template<typename T = uint64_t>
-T get_tensor_data(const Tensor& tensor, uint32_t ndims, const uint32_t indices[]);
+T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
 
 // Blocking write: stores value at the given indices (type deduced from argument)
 // Typed write: set_tensor_data(tensor, 1, idx, 42.0f);
+// The tensor is const: the write targets buffer memory, never the descriptor.
 template<typename T = uint64_t>
-void set_tensor_data(Tensor& tensor, uint32_t ndims, const uint32_t indices[], T value);
+void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], T value);
 ```
 
 Both call into the runtime through the ops table — orchestration .so needs no runtime symbol linkage.
@@ -81,7 +82,7 @@ TensorCreateInfo scalar_ci(shapes, 1, DataType::FLOAT32);
 
 // Allocate, seed from orchestration, and keep the returned tensor
 TaskOutputTensors outs = alloc_tensors(scalar_ci);
-const Tensor& scalar_tensor = outs.get_ref(0);
+const ChipTensor &scalar_tensor = outs.get_ref(0);
 uint32_t idx[1] = {0};
 set_tensor_data(scalar_tensor, 1, idx, 77.0f);
 

@@ -35,7 +35,7 @@ landing a value in `check[0..8]`:
 | Steps | What is exercised | Lands in |
 | ----- | ----------------- | -------- |
 | 1–3 | `get_tensor_data` on a runtime-created tensor at two indices | `check[0]` = 2.0, `check[1]` = 102.0 |
-| 4–5 | `add_output(TensorCreateInfo, 77.0f)` — a runtime-created output with an **initial value** | `check[2]` = 77.0 |
+| 4–5 | `alloc_tensors(TensorCreateInfo)` then `set_tensor_data(…, 77.0f)` — seeding a runtime-created output from the orchestration | `check[2]` = 77.0 |
 | 6–7 | `add_inout` on the same tensor: the buffer already exists, so the submit only registers a dependency; the value survives | `check[3]` = 77.0 |
 | 8 | Plain arithmetic in the orchestration on a value it read back | `check[4]` = 79.0 |
 | 9 | `set_tensor_data` → `get_tensor_data` round-trip | `check[5]` = 42.0 |

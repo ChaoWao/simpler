@@ -21,7 +21,7 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
 class TestScalarData(SceneTestCase):
-    """Scalar data dependency: Get/SetTensorData, add_inout with initial value."""
+    """Scalar data dependency: Get/SetTensorData, add_inout with orchestration-seeded outputs."""
 
     CALLABLE = {
         "orchestration": {
