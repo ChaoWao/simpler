@@ -61,7 +61,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     }
 
-    PTO2TaskId producer_ids[MAX_PRODUCERS];
+    TaskId producer_ids[MAX_PRODUCERS];
 
     // N producers each INOUT X. tensormap auto-deps them in a chain, so X[0]
     // stays at SENTINEL through all of them — the host only checks the final
@@ -74,7 +74,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // Dummy barrier with explicit deps on ALL N producers. dc=n > 64 forces
     // the dep_gen writer to emit base + overflow chain.
-    PTO2TaskId barrier_id;
+    TaskId barrier_id;
     {
         CoreTaskArgs args;
         args.set_dependencies(producer_ids, n);
@@ -84,7 +84,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // Consumer: explicit dep on barrier only, reads X, writes Y.
     {
         CoreTaskArgs args;
-        PTO2TaskId consumer_deps[] = {barrier_id};
+        TaskId consumer_deps[] = {barrier_id};
         args.set_dependencies(consumer_deps, 1);
         args.add_input(ext_X);
         args.add_inout(ext_Y);

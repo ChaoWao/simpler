@@ -69,7 +69,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int64_t gate_value = (case_id == 1) ? 0 : 1;
 
     // gate producer: gate[0] = gate_value
-    PTO2TaskId gate_tid;
+    TaskId gate_tid;
     {
         CoreTaskArgs args;
         args.add_inout(ext_gate);
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     {
         CoreTaskArgs args;
         args.add_inout(ext_X);
-        PTO2TaskId deps[] = {gate_tid};
+        TaskId deps[] = {gate_tid};
         args.set_dependencies(deps, 1);
         // predicate: gate[0] > 0  (operand op target), built level by level.
         CoreTaskPredicate pred;

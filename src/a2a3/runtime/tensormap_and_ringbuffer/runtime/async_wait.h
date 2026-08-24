@@ -116,7 +116,7 @@ inline void CompletionCondition::retire() {
 
 struct AsyncWaitEntry {
     PTO2TaskSlotState *slot_state{nullptr};
-    PTO2TaskId task_token{PTO2TaskId::invalid()};
+    TaskId task_token{TaskId::invalid()};
     CompletionCondition conditions[MAX_COMPLETIONS_PER_TASK];
     int32_t condition_count{0};
     int32_t waiting_completion_count{0};
@@ -167,7 +167,7 @@ struct AsyncWaitList {
 
     void unlock() { busy.store(0, std::memory_order_release); }
 
-    AsyncWaitEntry *find_entry_by_token(PTO2TaskId token) {
+    AsyncWaitEntry *find_entry_by_token(TaskId token) {
         for (int32_t i = 0; i < count; i++) {
             if (entries[i].task_token == token) return &entries[i];
         }

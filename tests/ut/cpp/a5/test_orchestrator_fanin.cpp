@@ -86,7 +86,7 @@ TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
     ASSERT_TRUE(producer.task_id().is_valid());
 
-    PTO2TaskId deps[] = {producer.task_id(), producer.task_id()};
+    TaskId deps[] = {producer.task_id(), producer.task_id()};
     CoreTaskArgs consumer_args;
     consumer_args.set_dependencies(deps, 2);
     TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
@@ -117,7 +117,7 @@ TEST_F(OrchestratorFaninTest, ExplicitWaitDepProducesWaitOnlyEdge) {
     TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
     ASSERT_TRUE(producer.task_id().is_valid());
 
-    PTO2TaskId deps[] = {producer.task_id()};
+    TaskId deps[] = {producer.task_id()};
     DepFlags kinds[] = {DEP_WAIT};
     CoreTaskArgs consumer_args;
     consumer_args.set_dependencies_with_kinds(deps, kinds, 1);
@@ -140,7 +140,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
     TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
     ASSERT_TRUE(producer.task_id().is_valid());
 
-    PTO2TaskId deps[] = {producer.task_id(), producer.task_id()};
+    TaskId deps[] = {producer.task_id(), producer.task_id()};
     DepFlags kinds[] = {DEP_WAIT, DEP_WAIT | DEP_RETAIN};
     CoreTaskArgs consumer_args;
     consumer_args.set_dependencies_with_kinds(deps, kinds, 2);
@@ -172,7 +172,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
         ASSERT_TRUE(producers.back().task_id().is_valid());
     }
 
-    std::vector<PTO2TaskId> deps;
+    std::vector<TaskId> deps;
     std::vector<DepFlags> kinds;
     deps.reserve(kProducers + 1);
     kinds.reserve(kProducers + 1);
@@ -194,7 +194,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     PTO2TaskPayload *payload = consumer_slot.payload;
     EXPECT_EQ(payload->fanin_actual_count, kProducers);  // duplicate folded, not 66
 
-    PTO2TaskId dup = producers.back().task_id();
+    TaskId dup = producers.back().task_id();
     auto &dup_slot = sm_handle->header->rings[dup.ring()].get_slot_state_by_task_id(dup.local());
     EXPECT_EQ(dup_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);  // one pin, not two
 
@@ -222,7 +222,7 @@ TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
     producer_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
     int32_t rc_before = producer_slot.fanout_refcount.load();
 
-    PTO2TaskId deps[] = {producer.task_id()};
+    TaskId deps[] = {producer.task_id()};
     DepFlags kinds[] = {DEP_WAIT};  // ordering-only
     CoreTaskArgs consumer_args;
     consumer_args.set_dependencies_with_kinds(deps, kinds, 1);

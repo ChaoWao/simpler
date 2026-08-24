@@ -124,7 +124,7 @@ TEST(ReclaimHeadMatchTest, ComparesExactRingAndLocalTaskId) {
     PTO2TaskDescriptor descriptor{};
     PTO2TaskSlotState slot{};
     slot.task = &descriptor;
-    descriptor.task_id = PTO2TaskId::make(0, 16);
+    descriptor.task_id = TaskId::make(0, 16);
 
     EXPECT_FALSE(reclaim_head_matches_open_task(0, 0, &slot));
     EXPECT_TRUE(reclaim_head_matches_open_task(16, 0, &slot));

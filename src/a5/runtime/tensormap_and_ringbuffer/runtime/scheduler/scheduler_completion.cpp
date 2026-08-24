@@ -121,7 +121,7 @@ void SchedulerContext::complete_slot_task(
         if (cond_count > 0) {
             slot_state.mark_any_subtask_deferred();
 
-            const PTO2TaskId token = slot_state.task->task_id;
+            const TaskId token = slot_state.task->task_id;
             for (uint32_t i = 0; i < cond_count; ++i) {
                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
                 while (!mailbox->try_push_condition(

@@ -51,7 +51,7 @@ static MixedKernels mix_kernels() {
     return mk;
 }
 
-static PTO2TaskId submit_aiv_producer(const ChipTensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
+static TaskId submit_aiv_producer(const ChipTensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -61,7 +61,7 @@ static PTO2TaskId submit_aiv_producer(const ChipTensor &out, int16_t core_num, i
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-static void submit_mix_sync_consumer(const ChipTensor &out, int16_t core_num, int64_t base_cl, PTO2TaskId dep) {
+static void submit_mix_sync_consumer(const ChipTensor &out, int16_t core_num, int64_t base_cl, TaskId dep) {
     CoreTaskArgsWithDeps<4> args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -84,7 +84,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const int32_t producer_blocks = rt_available_aiv_count();
     const int32_t consumer_blocks = rt_available_cluster_count();
 
-    PTO2TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(producer_blocks), 0, early_on);
+    TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(producer_blocks), 0, early_on);
     submit_mix_sync_consumer(ext_output, static_cast<int16_t>(consumer_blocks), producer_blocks, prod);
 
     uint32_t idx[1] = {0};

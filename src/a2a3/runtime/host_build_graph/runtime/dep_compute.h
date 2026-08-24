@@ -29,13 +29,13 @@
  * the minor structural overlap.
  *
  * The Emit callback contract:
- *   bool emit(PTO2TaskId producer);
+ *   bool emit(TaskId producer);
  *     - return true to continue (whether or not the producer was actually recorded —
  *       producer-not-alive / dedup-hit / etc. all return true silently)
  *     - return false to signal fatal (e.g. fanin spill overflow); caller bails
  *
  * The Annotate callback contract (dep_gen graph capture):
- *   void annotate.creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer);
+ *   void annotate.creator(int32_t arg_idx, const ChipTensor &consumer, TaskId producer);
  *   void annotate.tensormap(int32_t arg_idx, const ChipTensor &consumer,
  *                           const PTO2TensorMapEntry &entry, OverlapStatus overlap);
  * Both fire for exactly the producers `emit` saw, with the tensor-side context an
@@ -71,7 +71,7 @@ struct DepInputs {
     const TensorRef *tensors;        // length = tensor_count (union; OUTPUT slots' .ptr is unused)
     const TensorArgType *arg_types;  // length = tensor_count
     int32_t explicit_dep_count;
-    const PTO2TaskId *explicit_deps;  // length = explicit_dep_count (validity checked by caller)
+    const TaskId *explicit_deps;  // length = explicit_dep_count (validity checked by caller)
 };
 
 /**
@@ -79,7 +79,7 @@ struct DepInputs {
  * costs exactly what it did before the hooks existed.
  */
 struct NoDepAnnotate {
-    void creator(int32_t, const ChipTensor &, PTO2TaskId) const {}
+    void creator(int32_t, const ChipTensor &, TaskId) const {}
     void tensormap(int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
 };
 
@@ -114,7 +114,7 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
         const ChipTensor *tensor = &inputs.tensors[i].ref();
 
         // Step A: creator retention — all existing tensors extend their creator lifetime.
-        PTO2TaskId owner = tensor->owner_task_id;
+        TaskId owner = tensor->owner_task_id;
         if (owner.is_valid()) {
             if (!emit(owner)) {
                 return false;
@@ -158,7 +158,7 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }

@@ -45,7 +45,7 @@ KERNELS_BASE = "../../../../../../examples/a5/tensormap_and_ringbuffer/vector_ex
 
 
 def _task_id(ring: int, local: int) -> int:
-    """Encode (ring_id, local_id) → 64-bit raw matching ``PTO2TaskId::raw`` —
+    """Encode (ring_id, local_id) → 64-bit raw matching ``TaskId::raw`` —
     keeps the bit layout (``(ring << 32) | local``) in one place rather than
     repeating ``1 << 32`` arithmetic at every call site.
     """

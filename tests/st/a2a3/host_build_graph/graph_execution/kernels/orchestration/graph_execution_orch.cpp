@@ -32,7 +32,7 @@ void layer(const GraphTaskArgs &args, int variant) {
     CoreTaskArgs add_args;
     add_args.add_input(a, b);
     add_args.add_output(intermediate);
-    const std::array<PTO2TaskId, 1> external_dep{a.owner_task_id};
+    const std::array<TaskId, 1> external_dep{a.owner_task_id};
     add_args.set_dependencies(external_dep.data(), static_cast<uint32_t>(external_dep.size()));
     TaskOutputTensors add_outputs = rt_submit_aiv_task(FUNC_ADD, add_args);
     ChipTensor sum = add_outputs.get_ref(0);

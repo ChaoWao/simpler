@@ -70,7 +70,7 @@ constexpr uint32_t ring_mask_bit(int32_t ring_id) {
 inline bool
 reclaim_head_matches_open_task(int32_t head_task_id, uint8_t ring_id, const PTO2TaskSlotState *oldest_open_task) {
     return oldest_open_task != nullptr && oldest_open_task->task != nullptr &&
-           oldest_open_task->task->task_id == PTO2TaskId::make(ring_id, static_cast<uint32_t>(head_task_id));
+           oldest_open_task->task->task_id == TaskId::make(ring_id, static_cast<uint32_t>(head_task_id));
 }
 
 class ReclaimPublicationRequest {

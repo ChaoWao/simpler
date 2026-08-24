@@ -77,7 +77,7 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {
 // instantiation. Shared by the ordinary submit path and the outer GRAPH task so
 // both describe an edge the same way.
 struct DepGraphAnnotate {
-    void creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer) const {
+    void creator(int32_t arg_idx, const ChipTensor &consumer, TaskId producer) const {
         dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
     }
     void tensormap(
@@ -961,7 +961,7 @@ struct PTO2FaninBuilder {
 
 static bool append_fanin_or_fail(
     PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, PTO2TaskSlotState *prod_state,
-    PTO2TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
+    TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
     // to this producer (defensive — whole-graph-resident hbg does not reuse slots
@@ -1001,7 +1001,7 @@ static bool append_fanin_or_fail(
 static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *task_slot_state);
 
 struct PTO2PreparedTask {
-    PTO2TaskId task_id = PTO2TaskId::invalid();
+    TaskId task_id = TaskId::invalid();
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
     PTO2TaskDescriptor *task = nullptr;
     PTO2TaskPayload *payload = nullptr;
@@ -1048,7 +1048,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = PTO2TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
+    out->task_id = TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->ring.get_slot_state_by_slot(out->alloc_result.slot);
     out->task = &orch->sm_header->ring.task_descriptors[out->alloc_result.slot];
     out->payload = &orch->sm_header->ring.task_payloads[out->alloc_result.slot];
@@ -1316,7 +1316,7 @@ static TaskOutputTensors submit_task_common(
         return result;
     }
     PTO2SchedulerState *sched = orch->scheduler;
-    PTO2TaskId task_id = prepared.task_id;
+    TaskId task_id = prepared.task_id;
     PTO2TaskDescriptor &task = *prepared.task;
     PTO2TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
@@ -1351,7 +1351,7 @@ static TaskOutputTensors submit_task_common(
 #endif
 
     for (uint32_t i = 0; i < args.explicit_dep_count(); i++) {
-        PTO2TaskId dep_task_id = args.explicit_dep(i);
+        TaskId dep_task_id = args.explicit_dep(i);
         if (!dep_task_id.is_valid()) {
             orch->report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "Arg.set_dependencies(...) requires valid task ids"
@@ -1377,7 +1377,7 @@ static TaskOutputTensors submit_task_common(
         args.explicit_deps_data(),
     };
 
-    auto runtime_emit = [&](PTO2TaskId producer_task_id) -> bool {
+    auto runtime_emit = [&](TaskId producer_task_id) -> bool {
         uint8_t prod_ring = producer_task_id.ring();
         PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
@@ -1607,7 +1607,7 @@ void graph_reset_outer_payload(PTO2TaskPayload &payload) {
 
 bool graph_submit_outer(
     PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
-    bool defer_heap, const GraphTaskArgs &args, PTO2TaskId *submitted_id
+    bool defer_heap, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
     auto &allocator = orch->ring.task_allocator;
@@ -1650,7 +1650,7 @@ bool graph_submit_outer(
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
-    const PTO2TaskId task_id = PTO2TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
+    const TaskId task_id = TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
     PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
     PTO2TaskDescriptor &task = ring.task_descriptors[allocation.slot];
     PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
@@ -1702,7 +1702,7 @@ bool graph_submit_outer(
     }
 
     PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
-    auto emit = [&](PTO2TaskId producer_id) -> bool {
+    auto emit = [&](TaskId producer_id) -> bool {
         const int32_t producer_local = static_cast<int32_t>(producer_id.local());
         const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);
         PTO2TaskSlotState *producer = &ring.get_slot_state_by_slot(producer_slot);
@@ -1753,7 +1753,7 @@ bool graph_submit_outer(
 
 bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
-    const GraphTaskArgs &args, PTO2TaskId *submitted_id
+    const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
@@ -1771,7 +1771,7 @@ bool graph_submit_definition(
 
 bool graph_submit_pending_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args,
-    PTO2TaskId *submitted_id
+    TaskId *submitted_id
 ) {
     return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
 }
@@ -1832,8 +1832,8 @@ TaskOutputTensors graph_record_submit_node(
     // A recorded node's index equals its local task id minus the recording
     // baseline, so its synthetic id keeps classification and explicit-dep
     // arithmetic identical to the ordinary path.
-    const PTO2TaskId task_id =
-        PTO2TaskId::make(0, static_cast<uint32_t>(recording.start_local_task_id) + static_cast<uint32_t>(node_index));
+    const TaskId task_id =
+        TaskId::make(0, static_cast<uint32_t>(recording.start_local_task_id) + static_cast<uint32_t>(node_index));
     result.set_task_id(task_id);
 
     if (node_index >= GRAPH_MAX_NODES || args.has_error) {
@@ -2015,7 +2015,7 @@ TaskOutputTensors graph_record_submit_node(
             );
             recording.unsupported = true;
         } else {
-            auto emit_inferred = [&recording, &add_fanin, node_index](PTO2TaskId producer) -> bool {
+            auto emit_inferred = [&recording, &add_fanin, node_index](TaskId producer) -> bool {
                 const int32_t producer_index = static_cast<int32_t>(producer.local()) - recording.start_local_task_id;
                 if (producer.ring() == 0 && producer_index >= 0 && producer_index < static_cast<int32_t>(node_index)) {
                     add_fanin(static_cast<size_t>(producer_index));
@@ -2027,7 +2027,7 @@ TaskOutputTensors graph_record_submit_node(
         }
     }
     for (uint32_t i = 0; i < args.explicit_dep_count(); ++i) {
-        const PTO2TaskId dep = args.explicit_dep(i);
+        const TaskId dep = args.explicit_dep(i);
         const int32_t dep_index = static_cast<int32_t>(dep.local()) - recording.start_local_task_id;
         if (!dep.is_valid() || dep.ring() != 0 || dep_index >= static_cast<int32_t>(node_index)) {
             recording.unsupported = true;
@@ -2087,7 +2087,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     // would make an already-built Definition wait for an unrelated one.
     auto definition_it = state->definitions.find(full_key);
     if (definition_it != state->definitions.end()) {
-        PTO2TaskId submitted = PTO2TaskId::invalid();
+        TaskId submitted = TaskId::invalid();
         ORCH_PHASE_START();
         if (graph_submit_definition(orch, state, definition_it->second, args, &submitted)) {
             result.execute_block = false;
@@ -2113,7 +2113,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
             !graph_recording_boundary_matches(*entry.recording, args)) {
             return result;
         }
-        PTO2TaskId submitted = PTO2TaskId::invalid();
+        TaskId submitted = TaskId::invalid();
         ORCH_PHASE_START();
         if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
             result.execute_block = false;
@@ -2162,7 +2162,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
     state->inflight.emplace(full_key, std::move(entry));
     state->inflight_count.store(state->inflight.size(), std::memory_order_release);
 
-    PTO2TaskId submitted = PTO2TaskId::invalid();
+    TaskId submitted = TaskId::invalid();
     ORCH_PHASE_START();
     if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
         result.execute_block = false;

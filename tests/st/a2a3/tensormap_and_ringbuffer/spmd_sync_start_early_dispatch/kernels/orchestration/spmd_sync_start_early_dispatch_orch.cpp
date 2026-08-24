@@ -55,7 +55,7 @@ static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
 
 static constexpr int32_t PRODUCER_BLOCKS = 50;
 
-static PTO2TaskId submit_producer(const ChipTensor &out, int16_t block_num, int64_t base_cl) {
+static TaskId submit_producer(const ChipTensor &out, int16_t block_num, int64_t base_cl) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -65,7 +65,7 @@ static PTO2TaskId submit_producer(const ChipTensor &out, int16_t block_num, int6
     return rt_submit_aic_task(FUNC_SPMD_WRITE_AIC, args).task_id();
 }
 
-static void submit_sync_consumer(const ChipTensor &out, int16_t block_num, int64_t base_cl, PTO2TaskId dep) {
+static void submit_sync_consumer(const ChipTensor &out, int16_t block_num, int64_t base_cl, TaskId dep) {
     MixedKernels kernels;
     kernels.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     kernels.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const int32_t sync_blocks = rt_available_cluster_count();
 
     rt_scope_begin(PTO2ScopeMode::MANUAL);
-    PTO2TaskId prod = submit_producer(ext_output, PRODUCER_BLOCKS, 0);
+    TaskId prod = submit_producer(ext_output, PRODUCER_BLOCKS, 0);
     submit_sync_consumer(ext_output, static_cast<int16_t>(sync_blocks), PRODUCER_BLOCKS, prod);
     rt_scope_end();
 

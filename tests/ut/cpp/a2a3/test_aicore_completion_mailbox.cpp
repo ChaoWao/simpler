@@ -32,7 +32,7 @@
 
 namespace {
 
-PTO2TaskId make_token(uint32_t local) { return PTO2TaskId::make(/*ring=*/0, local); }
+TaskId make_token(uint32_t local) { return TaskId::make(/*ring=*/0, local); }
 
 AICoreCompletionMailbox *fresh_mailbox() {
     // ~256KB heap allocation — avoid stack/BSS pressure across tests.
@@ -57,7 +57,7 @@ TEST(AICoreCompletionMailbox, PushConditionThenDrainCreatesEntry) {
     AICoreCompletionMailbox *mb = fresh_mailbox();
     AsyncWaitList wait_list{};
 
-    PTO2TaskId token = make_token(42);
+    TaskId token = make_token(42);
     constexpr uint64_t kAddr = 0xCAFEBABEDEADBEEFull;
     ASSERT_TRUE(
         mb->try_push_condition(token, kAddr, /*expected=*/7, /*engine=*/COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER)
@@ -89,7 +89,7 @@ TEST(AICoreCompletionMailbox, PushNormalDoneCreatesEntryReadyToComplete) {
     AICoreCompletionMailbox *mb = fresh_mailbox();
     AsyncWaitList wait_list{};
 
-    PTO2TaskId token = make_token(99);
+    TaskId token = make_token(99);
     PTO2TaskSlotState dummy_slot{};
     uint64_t slot_addr = reinterpret_cast<uint64_t>(&dummy_slot);
     ASSERT_TRUE(mb->try_push_normal_done(token, slot_addr));
@@ -119,7 +119,7 @@ TEST(AICoreCompletionMailbox, NormalDoneAttachesToExistingEntry) {
 
     // Pre-seed an entry so drain's TASK_NORMAL_DONE branch flips it in place
     // rather than stashing. Exercises the "entry exists already" arm.
-    PTO2TaskId token = make_token(7);
+    TaskId token = make_token(7);
     wait_list.entries[0].task_token = token;
     wait_list.entries[0].slot_state = nullptr;
     wait_list.entries[0].condition_count = 0;
@@ -146,7 +146,7 @@ TEST(AICoreCompletionMailbox, ConditionAttachesToExistingEntry) {
     AICoreCompletionMailbox *mb = fresh_mailbox();
     AsyncWaitList wait_list{};
 
-    PTO2TaskId token = make_token(15);
+    TaskId token = make_token(15);
     wait_list.entries[0].task_token = token;
     wait_list.entries[0].slot_state = nullptr;
     wait_list.entries[0].condition_count = 0;
@@ -208,7 +208,7 @@ TEST(AICoreCompletionMailbox, PushReturnsFalseWhenFull) {
     AICoreCompletionMailbox *mb = fresh_mailbox();
 
     constexpr uint32_t kCap = AICORE_COMPLETION_MAILBOX_CAPACITY;
-    PTO2TaskId token = make_token(1);
+    TaskId token = make_token(1);
     for (uint32_t i = 0; i < kCap; i++) {
         ASSERT_TRUE(
             mb->try_push_condition(token, /*addr=*/i, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER)
@@ -237,7 +237,7 @@ TEST(AICoreCompletionMailbox, MultiProducerNoLossAndPerProducerOrder) {
     producers.reserve(kProducers);
     for (int p = 0; p < kProducers; p++) {
         producers.emplace_back([mb, p]() {
-            PTO2TaskId token = make_token(static_cast<uint32_t>(p));
+            TaskId token = make_token(static_cast<uint32_t>(p));
             for (int i = 0; i < kPerProducer; i++) {
                 // Encode (producer, index) into addr to check per-producer
                 // ordering on the consumer side.
@@ -300,7 +300,7 @@ TEST(AICoreCompletionMailbox, ProducerInterleavedWithDrain) {
     AsyncWaitList wait_list{};
     // Pre-seed the entry for `token` so the drained CONDITIONs append to a
     // known slot the final assertions can read.
-    PTO2TaskId token = make_token(5);
+    TaskId token = make_token(5);
     wait_list.entries[0].task_token = token;
     wait_list.entries[0].slot_state = nullptr;
     wait_list.entries[0].condition_count = 0;
@@ -372,7 +372,7 @@ TEST(AICoreCompletionMailbox, MonotonicSeqSurvivesCapacityWrapWithoutZeroing) {
     // Drive head/tail one full capacity past the wrap point so every physical
     // slot has been published once and now carries a stale seq in [1, CAPACITY].
     // Each push is drained immediately so the ring never reports full.
-    PTO2TaskId token = make_token(7);
+    TaskId token = make_token(7);
     AICoreCompletionMsgView msg;
     for (uint64_t i = 0; i < AICORE_COMPLETION_MAILBOX_CAPACITY + 17; i++) {
         ASSERT_TRUE(
@@ -403,7 +403,7 @@ TEST(AICoreCompletionMailbox, TailEqualsHeadDiscardsUndrainedLeftovers) {
 
     // Simulate a prior run that pushed messages but aborted before draining
     // them all (error path): head advances, tail lags.
-    PTO2TaskId token = make_token(11);
+    TaskId token = make_token(11);
     for (int i = 0; i < 5; i++) {
         ASSERT_TRUE(mb->try_push_condition(
             token, /*addr=*/static_cast<uint64_t>(i), /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER

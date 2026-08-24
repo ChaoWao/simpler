@@ -113,8 +113,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         }
     } else if (case_id == 3) {
         // producer A writes X, producer B writes W
-        PTO2TaskId a_id;
-        PTO2TaskId b_id;
+        TaskId a_id;
+        TaskId b_id;
         {
             CoreTaskArgs args;
             args.add_inout(ext_X);
@@ -126,17 +126,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             b_id = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         }
         // dummy barrier on A + B (no tensor args, only explicit deps)
-        PTO2TaskId dummy_id;
+        TaskId dummy_id;
         {
             CoreTaskArgs args;
-            PTO2TaskId barrier_deps[] = {a_id, b_id};
+            TaskId barrier_deps[] = {a_id, b_id};
             args.set_dependencies(barrier_deps, 2);
             dummy_id = rt_submit_dummy_task(args).task_id();
         }
         // consumer: explicit dep on dummy, reads X
         {
             CoreTaskArgs args;
-            PTO2TaskId consumer_deps[] = {dummy_id};
+            TaskId consumer_deps[] = {dummy_id};
             args.set_dependencies(consumer_deps, 1);
             args.add_input(ext_X);
             args.add_inout(ext_Y);
@@ -145,16 +145,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     } else if (case_id == 4) {
         // One producer feeds DENSE_DEP_COUNT dummy barriers, then one consumer
         // depends on all of them, exercising both dense-dependency diagnostics.
-        PTO2TaskId a_id;
+        TaskId a_id;
         {
             CoreTaskArgs args;
             args.add_inout(ext_X);
             a_id = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         }
-        PTO2TaskId dummies[DENSE_DEP_COUNT];
+        TaskId dummies[DENSE_DEP_COUNT];
         for (int32_t i = 0; i < DENSE_DEP_COUNT; i++) {
             CoreTaskArgs args;
-            PTO2TaskId dep[] = {a_id};
+            TaskId dep[] = {a_id};
             args.set_dependencies(dep, 1);
             dummies[i] = rt_submit_dummy_task(args).task_id();
         }

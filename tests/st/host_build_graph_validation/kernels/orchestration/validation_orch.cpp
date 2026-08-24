@@ -40,7 +40,7 @@ void submit_overflowing_mix_task() {
 
 ChipTensor tensor_with_unbound_owner(const ChipTensor &external) {
     ChipTensor forged = external;
-    forged.owner_task_id = PTO2TaskId::make(0, 17);
+    forged.owner_task_id = TaskId::make(0, 17);
     return forged;
 }
 

@@ -165,8 +165,8 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                 const ChipTensor &oi = alloc_outs.get_ref(0);
                 const ChipTensor &li_update = alloc_outs.get_ref(1);
                 const ChipTensor &mi_update = alloc_outs.get_ref(2);
-                PTO2TaskId alloc_task = alloc_outs.task_id();
-                PTO2TaskId prev_update_task = PTO2TaskId::invalid();
+                TaskId alloc_task = alloc_outs.task_id();
+                TaskId prev_update_task = TaskId::invalid();
                 prof_submit_count++;
                 CYCLE_COUNT_LAP(prof_submit_task);
 
@@ -208,7 +208,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     params_sf.add_output(scalar_ci);
                     params_sf.add_output(scalar_ci);
                     params_sf.add_scalar(scale_value);
-                    PTO2TaskId sf_deps[] = {qk_outs.task_id()};
+                    TaskId sf_deps[] = {qk_outs.task_id()};
                     params_sf.set_dependencies(sf_deps, 1);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
@@ -222,7 +222,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     params_pv.add_input(pij_f16);
                     params_pv.add_input(vj);
                     params_pv.add_output(tile2d_ci);
-                    PTO2TaskId pv_deps[] = {sf_outs.task_id()};
+                    TaskId pv_deps[] = {sf_outs.task_id()};
                     params_pv.set_dependencies(pv_deps, 1);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);

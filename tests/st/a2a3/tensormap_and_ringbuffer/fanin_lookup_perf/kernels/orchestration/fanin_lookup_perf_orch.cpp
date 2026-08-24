@@ -63,7 +63,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     }
 
-    PTO2TaskId producer_ids[MAX_PRODUCERS];
+    TaskId producer_ids[MAX_PRODUCERS];
     uint32_t slot_shape[1] = {SLOT_ELEMS};
     for (int32_t i = 0; i < producer_count; i++) {
         CoreTaskArgs args;

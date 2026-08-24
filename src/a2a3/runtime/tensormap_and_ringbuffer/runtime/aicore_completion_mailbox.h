@@ -51,7 +51,7 @@ struct AICoreCompletionMailboxMessage {
     // value with an acquire load. The release-acquire pair publishes all
     // other fields below as a side effect, so they stay plain.
     std::atomic<uint64_t> seq;
-    PTO2TaskId task_token;
+    TaskId task_token;
     // CONDITION: completion observation addr (counter / backend record).
     // TASK_NORMAL_DONE: PTO2TaskSlotState pointer carried over to the consumer
     //   so it can finalize the AsyncWaitEntry.slot_state binding.
@@ -78,7 +78,7 @@ static_assert(
 // payload, so try_pop copies out only the fields below (and seq is not even
 // copyable — it is a std::atomic).
 struct AICoreCompletionMsgView {
-    PTO2TaskId task_token{PTO2TaskId::invalid()};
+    TaskId task_token{TaskId::invalid()};
     uint64_t addr{0};
     uint64_t backend_cookie{0};
     uint32_t expected_value{0};
@@ -116,13 +116,13 @@ struct AICoreCompletionMailbox {
     // Safe to call concurrently from any number of producers; structurally
     // independent of the AsyncWaitList::busy lock.
     bool try_push_condition(
-        PTO2TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
+        TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
     ) {
         return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type);
     }
 
     bool try_push_condition(
-        PTO2TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
+        TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
         int32_t completion_type
     ) {
         while (true) {
@@ -149,7 +149,7 @@ struct AICoreCompletionMailbox {
     // MPSC push for a TASK_NORMAL_DONE sentinel. Carries the PTO2TaskSlotState
     // pointer in the `addr` field so the consumer can finish binding the
     // AsyncWaitEntry.slot_state without going back to the FIN-handling thread.
-    bool try_push_normal_done(PTO2TaskId task_token, uint64_t slot_state_addr) {
+    bool try_push_normal_done(TaskId task_token, uint64_t slot_state_addr) {
         while (true) {
             uint64_t h = head.load(std::memory_order_relaxed);
             uint64_t t = tail.load(std::memory_order_acquire);

@@ -104,7 +104,7 @@ def normalize_pto2_task_id_int(v):
 def format_task_display(task_id):
     """Format PTO2 task_id for human-readable labels.
 
-    Layout: 64-bit raw = (ring_id << 32) | local_id (same as runtime PTO2TaskId).
+    Layout: 64-bit raw = (ring_id << 32) | local_id (same as runtime TaskId).
 
     Returns:
         ``r{ring}t{local}`` when ring != 0 (e.g. r2t100), else ``t{local}`` for single-ring (ring 0).
@@ -2121,7 +2121,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 # Strip "orch_" prefix for display name
                 display_name = phase.replace("orch_", "") if phase.startswith("orch_") else phase
 
-                # Full PTO2TaskId in JSON (device uses task_id.raw, same as TensorMap) → rXtY / tY
+                # Full TaskId in JSON (device uses task_id.raw, same as TensorMap) → rXtY / tY
                 if task_id >= 0:
                     label = f"{display_name}({format_task_display(task_id)})"
                 else:

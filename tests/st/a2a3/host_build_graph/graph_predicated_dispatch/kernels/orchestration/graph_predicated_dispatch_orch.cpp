@@ -94,35 +94,35 @@ void layer(const GraphTaskArgs &args, int variant) {
     gate_args.add_scalar(args.scalar(0));
     TaskOutputTensors gate_outputs = rt_submit_aic_task(FUNC_WRITE_GATE, gate_args);
     ChipTensor internal_gate = gate_outputs.get_ref(0);
-    PTO2TaskId gate_tid = gate_outputs.task_id();
+    TaskId gate_tid = gate_outputs.task_id();
 
     // X is a boundary tensor, so the four tasks below share no Graph-internal
     // tensor and the recorder derives no edge between them. Their write-then-read
     // order is stated explicitly, which is what a recorded Graph preserves.
-    PTO2TaskId sentinel_tid;
+    TaskId sentinel_tid;
     {
         CoreTaskArgs sentinel_args;
         sentinel_args.add_inout(x);
         sentinel_tid = rt_submit_aic_task(FUNC_WRITE_CONST, sentinel_args).task_id();
     }
 
-    PTO2TaskId clobber_tid;
+    TaskId clobber_tid;
     {
         CoreTaskArgs clobber_args;
         clobber_args.add_inout(x);
-        const std::array<PTO2TaskId, 1> deps{sentinel_tid};
+        const std::array<TaskId, 1> deps{sentinel_tid};
         clobber_args.set_dependencies(deps.data(), static_cast<uint32_t>(deps.size()));
         clobber_args.set_predicate(gate_predicate(boundary_gate, 0));
         clobber_tid = rt_submit_aic_task(FUNC_CLOBBER, clobber_args).task_id();
     }
 
-    PTO2TaskId clobber_alt_tid;
+    TaskId clobber_alt_tid;
     {
         CoreTaskArgs clobber_args;
         clobber_args.add_inout(x);
         // The predicate is a condition, not a dependency: the operand's producer
         // is named here so the value is written by the time this task is ready.
-        const std::array<PTO2TaskId, 2> deps{clobber_tid, gate_tid};
+        const std::array<TaskId, 2> deps{clobber_tid, gate_tid};
         clobber_args.set_dependencies(deps.data(), static_cast<uint32_t>(deps.size()));
         clobber_args.set_predicate(gate_predicate(internal_gate, 0));
         clobber_alt_tid = rt_submit_aic_task(FUNC_CLOBBER_ALT, clobber_args).task_id();
@@ -132,7 +132,7 @@ void layer(const GraphTaskArgs &args, int variant) {
         CoreTaskArgs consumer_args;
         consumer_args.add_input(x);
         consumer_args.add_inout(y);
-        const std::array<PTO2TaskId, 1> deps{clobber_alt_tid};
+        const std::array<TaskId, 1> deps{clobber_alt_tid};
         consumer_args.set_dependencies(deps.data(), static_cast<uint32_t>(deps.size()));
         consumer_args.set_predicate(gate_predicate(gate_view, 1));
         rt_submit_aic_task(FUNC_COPY_FIRST, consumer_args);

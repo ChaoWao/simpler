@@ -29,7 +29,7 @@
  * the minor structural overlap. Replay handles STEP 1 with a one-line loop of its own.
  *
  * The Emit callback contract:
- *   bool emit(PTO2TaskId producer, DepFlags kind);
+ *   bool emit(TaskId producer, DepFlags kind);
  *     - kind is DEP_WAIT|DEP_RETAIN for a Step-A creator edge (the consumer reads
  *       the producer's allocated buffer, so the producer is retained) and DEP_WAIT
  *       for a Step-B modifier edge (ordering only; the buffer was allocated
@@ -65,7 +65,7 @@ struct DepInputs {
     const TensorRef *tensors;        // length = tensor_count (union; OUTPUT slots' .ptr is unused)
     const TensorArgType *arg_types;  // length = tensor_count
     int32_t explicit_dep_count;
-    const PTO2TaskId *explicit_deps;  // length = explicit_dep_count (validity checked by caller)
+    const TaskId *explicit_deps;  // length = explicit_dep_count (validity checked by caller)
 };
 
 /**
@@ -99,7 +99,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
 
         // Step A: creator retention — reading a tensor retains its allocator, so
         // the creator edge carries both ordering and lifetime.
-        PTO2TaskId owner = tensor->owner_task_id;
+        TaskId owner = tensor->owner_task_id;
         if (owner.is_valid()) {
             if (!emit(owner, DEP_WAIT | DEP_RETAIN)) {
                 return false;
@@ -151,7 +151,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }

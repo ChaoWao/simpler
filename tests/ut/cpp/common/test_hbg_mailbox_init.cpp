@@ -27,7 +27,7 @@
 
 namespace {
 
-PTO2TaskId make_token(uint32_t local) { return PTO2TaskId::make(/*ring=*/0, local); }
+TaskId make_token(uint32_t local) { return TaskId::make(/*ring=*/0, local); }
 
 // A mailbox on memory holding a prior generation's bytes, which is what the
 // pooled arena hands the AICPU: the region is never uploaded, so nothing zeroes
@@ -86,7 +86,7 @@ TEST(HbgMailboxInit, DirtyMemoryYieldsAUsableRing) {
     AICoreCompletionMailbox *mb = dirty_mailbox(0xAA);
     mb->init_empty();
 
-    const PTO2TaskId token = make_token(11);
+    const TaskId token = make_token(11);
     ASSERT_TRUE(
         mb->try_push_condition(token, /*addr=*/0x4000, /*expected_value=*/7, /*engine=*/1, /*completion_type=*/0)
     );

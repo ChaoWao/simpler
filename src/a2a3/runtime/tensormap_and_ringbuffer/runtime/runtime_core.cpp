@@ -98,7 +98,7 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
 MAYBE_UNINITIALIZED_BEGIN
 static bool
 wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
-    PTO2TaskId owner = tensor.owner_task_id;
+    TaskId owner = tensor.owner_task_id;
     PTO2OrchestratorState &orch = rt->orchestrator;
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
@@ -197,7 +197,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
-            PTO2TaskId pid = entry.producer_task_id;
+            TaskId pid = entry.producer_task_id;
             auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
             try_push(s);
             return !failed;

@@ -328,7 +328,7 @@ inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
 
 inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
     tensor->buffer = PTOBufferHandle{packed.buffer_addr, packed.buffer_size};
-    tensor->owner_task_id = PTO2TaskId{packed.owner_task_id};
+    tensor->owner_task_id = TaskId{packed.owner_task_id};
     tensor->start_offset = packed.start_offset;
     tensor->extent_elem_cache = packed.extent_elem;
     tensor->version = packed.version;

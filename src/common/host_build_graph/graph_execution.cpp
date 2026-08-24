@@ -440,7 +440,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
 
         const uint32_t synthetic_local =
             (static_cast<uint32_t>(outer_slot.task->task_id.local()) << 10) | static_cast<uint32_t>(i);
-        task.task_id = PTO2TaskId::make(1, synthetic_local);
+        task.task_id = TaskId::make(1, synthetic_local);
         const GraphNodeDefinition &source = nodes[i];
         const uint64_t node_offset = node_offsets[i];
         const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), PTO2_ALIGN_SIZE);
