@@ -549,7 +549,7 @@ struct FaninPool {
             LOG_ERROR("  - High water:    %d", high_water);
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase fanin spill pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
-            LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
+            LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
             LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
@@ -670,8 +670,8 @@ inline FaninForEachReturn<Fn> for_each_fanin_slot_state(const TaskPayload &paylo
  * Linear counters (top, tail) grow monotonically; the physical index
  * is obtained via modulo: base[linear_index % capacity].
  */
-struct PTO2DepListPool {
-    PTO2DepListEntry *base;     // Pool base address
+struct DepListPool {
+    DepListEntry *base;         // Pool base address
     int32_t capacity;           // Total number of entries
     int32_t top;                // Linear next-allocation counter (starts from 1)
     int32_t tail;               // Linear first-alive counter (entries before this are dead)
@@ -687,7 +687,7 @@ struct PTO2DepListPool {
      * @param base      Pool base address from shared memory
      * @param capacity  Total number of entries
      */
-    void init(PTO2DepListEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
+    void init(DepListEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
         base = in_base;
         capacity = in_capacity;
         top = 1;   // Start from 1, 0 means NULL/empty
@@ -742,7 +742,7 @@ struct PTO2DepListPool {
      *
      * @return Pointer to allocated entry, or nullptr on fatal error
      */
-    PTO2DepListEntry *alloc() {
+    DepListEntry *alloc() {
         int32_t used = top - tail;
         if (used >= capacity) {
             LOG_ERROR("========================================");
@@ -754,7 +754,7 @@ struct PTO2DepListPool {
             LOG_ERROR("  - High water:    %d", high_water);
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
-            LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
+            LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
             LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
@@ -788,8 +788,8 @@ struct PTO2DepListPool {
      * @param task_slot     Task slot to prepend
      * @return New head offset
      */
-    PTO2DepListEntry *prepend(PTO2DepListEntry *cur, ChipTaskSlotState *slot_state) {
-        PTO2DepListEntry *new_entry = alloc();
+    DepListEntry *prepend(DepListEntry *cur, ChipTaskSlotState *slot_state) {
+        DepListEntry *new_entry = alloc();
         if (!new_entry) return nullptr;
         new_entry->slot_state = slot_state;
         new_entry->next = cur;

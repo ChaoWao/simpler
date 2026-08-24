@@ -691,7 +691,7 @@ TEST_F(WiringTest, EarlyDispatchFanoutWaitsForDoorbellPass) {
     producer.payload->published_block_count.store(1, std::memory_order_relaxed);
     consumer.payload->fanin_actual_count = 1;
 
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &consumer;
     producer.fanout_head = &dep;
 
@@ -813,7 +813,7 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &downstream;
     sync_consumer.fanout_head = &dep;
 
@@ -850,7 +850,7 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
     sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &downstream;
     sync_consumer.fanout_head = &dep;
 
@@ -1040,7 +1040,7 @@ TEST_F(WiringTest, UnflaggedProducerDoesNotPropagate) {
     consumer.payload = &cons_payload;
     cons_payload.fanin_actual_count = 1;
 
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &consumer;
     dep.next = nullptr;
     producer.fanout_head = &dep;
@@ -1110,7 +1110,7 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
     consumer2.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
 
     // Build fanout chain: producer -> consumer2 -> consumer1
-    PTO2DepListEntry dep_entries[2];
+    DepListEntry dep_entries[2];
     dep_entries[0].slot_state = &consumer1;
     dep_entries[0].next = nullptr;
     dep_entries[1].slot_state = &consumer2;

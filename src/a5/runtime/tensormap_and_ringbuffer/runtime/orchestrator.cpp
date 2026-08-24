@@ -367,10 +367,10 @@ static bool append_fanin_or_fail(
     // Dense-fanout diagnostic, emitted outside fanout_lock (no logging under
     // the spinlock). The monotonic fanout_count++ crosses THRESHOLD+1 exactly
     // once, so each dense producer emits one debug message when enabled.
-    if (fanout_now == PTO2_DEP_DEGREE_DEBUG_THRESHOLD + 1) {
+    if (fanout_now == CHIP_DEP_DEGREE_DEBUG_THRESHOLD + 1) {
         LOG_DEBUG(
             "dense dependency: task ring=%u id=%u fanout>%d [orch submit]",
-            static_cast<unsigned>(producer_task_id.ring()), producer_task_id.local(), PTO2_DEP_DEGREE_DEBUG_THRESHOLD
+            static_cast<unsigned>(producer_task_id.ring()), producer_task_id.local(), CHIP_DEP_DEGREE_DEBUG_THRESHOLD
         );
     }
     // Stale/consumed producer: no edge at all.
@@ -1050,10 +1050,10 @@ static TaskOutputTensors submit_task_common(
     // fanin_builder.count is finalized here and submit runs once per task, so
     // each dense consumer emits one debug message when enabled. This checks >
     // THRESHOLD because the count lands at its final total here.
-    if (fanin_builder.count > PTO2_DEP_DEGREE_DEBUG_THRESHOLD) {
+    if (fanin_builder.count > CHIP_DEP_DEGREE_DEBUG_THRESHOLD) {
         LOG_DEBUG(
             "dense dependency: task ring=%u id=%u fanin>%d [orch submit]", static_cast<unsigned>(task_id.ring()),
-            task_id.local(), PTO2_DEP_DEGREE_DEBUG_THRESHOLD
+            task_id.local(), CHIP_DEP_DEGREE_DEBUG_THRESHOLD
         );
     }
     payload.fanin_spill_start = fanin_builder.spill_start;

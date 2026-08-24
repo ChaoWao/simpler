@@ -460,7 +460,7 @@ struct SchedulerState {
         std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
         // --- Cache Line 1+: Orch-side wiring dep_pool ---
-        alignas(64) PTO2DepListPool dep_pool;
+        alignas(64) DepListPool dep_pool;
 #if SIMPLER_DFX
         // Published only for scope_stats; orchestrator must not read dep_pool's non-atomic counters directly.
         alignas(64) std::atomic<int32_t> dep_pool_snapshot_tail;
@@ -959,7 +959,7 @@ struct SchedulerState {
             p.unlock_fanout();
             return;
         }
-        PTO2DepListEntry *edge = p.fanout_head;
+        DepListEntry *edge = p.fanout_head;
         p.unlock_fanout();
         for (; edge != nullptr; edge = edge->next) {
             ChipTaskSlotState *c = edge->slot_state;
@@ -1187,7 +1187,7 @@ struct SchedulerState {
         slot_state.lock_fanout();
 #endif
         slot_state.mark_completed();
-        PTO2DepListEntry *current = slot_state.fanout_head;  // Protected by fanout_lock
+        DepListEntry *current = slot_state.fanout_head;  // Protected by fanout_lock
         slot_state.unlock_fanout();
 
 #if SIMPLER_SCHED_PROFILING
@@ -1287,7 +1287,7 @@ struct SchedulerState {
     // per-ring dep_pool entries) on the supplied arena.
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
-    static SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
+    static SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE);
     static SchedulerLayout reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.

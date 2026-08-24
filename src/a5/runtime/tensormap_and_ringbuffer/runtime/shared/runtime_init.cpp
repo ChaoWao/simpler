@@ -157,7 +157,7 @@ SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capaci
         // Force a cache-line base so Orch-side dep_pool writes do not invalidate
         // adjacent multi-threaded regions like ready_queue.slots.
         layout.off_dep_pool_entries[r] =
-            arena.reserve(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(PTO2DepListEntry), PTO2_ALIGN_SIZE);
+            arena.reserve(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(DepListEntry), PTO2_ALIGN_SIZE);
     }
     return layout;
 }
@@ -215,8 +215,8 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
 
     auto *orch_err = sm_layout::orch_error_code_addr(sm_dev_base);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        auto *dep_entries = static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
-        memset(dep_entries, 0, static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(PTO2DepListEntry));
+        auto *dep_entries = static_cast<DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
+        memset(dep_entries, 0, static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(DepListEntry));
         sched->ring_sched_states[r].dep_pool.init(dep_entries, layout.dep_pool_capacities[r], orch_err);
         sched->ring_sched_states[r].dep_pool.set_reclaim_publication_request(
             &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
@@ -275,7 +275,7 @@ void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceAr
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto &dep_pool = sched->ring_sched_states[r].dep_pool;
-        dep_pool.base = static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
+        dep_pool.base = static_cast<DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
         dep_pool.set_reclaim_publication_request(
             &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
         );

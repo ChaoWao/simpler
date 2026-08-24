@@ -149,7 +149,7 @@ inline constexpr int32_t ARG_POOL_ALIGN = 64;
 // Dependency-degree diagnostic: warn once when a task's fanin or a producer's
 // fanout first exceeds this degree, so dense dependency graphs surface without
 // flooding the AICPU hot-path device log.
-#define PTO2_DEP_DEGREE_WARN_THRESHOLD 16
+#define CHIP_DEP_DEGREE_WARN_THRESHOLD 16
 
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
 // count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp

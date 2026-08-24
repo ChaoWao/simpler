@@ -35,9 +35,9 @@ void make_head_match_old_structural_predicate(
 }  // namespace
 
 TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
-    PTO2DepListEntry entries[POOL_CAPACITY]{};
+    DepListEntry entries[POOL_CAPACITY]{};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2DepListPool pool;
+    DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
         ASSERT_NE(pool.alloc(), nullptr);
@@ -67,9 +67,9 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
 }
 
 TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
-    PTO2DepListEntry entries[POOL_CAPACITY]{};
+    DepListEntry entries[POOL_CAPACITY]{};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2DepListPool pool;
+    DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
         ASSERT_NE(pool.alloc(), nullptr);

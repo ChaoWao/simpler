@@ -242,7 +242,7 @@ static bool resolve_ring_config(
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         eff_task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
         eff_heap_sizes[r] = PTO2_HEAP_SIZE;
-        dep_pool_values[r] = PTO2_DEP_LIST_POOL_SIZE;
+        dep_pool_values[r] = CHIP_DEP_LIST_POOL_SIZE;
     }
 
     apply_env_ring_values("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_sizes);

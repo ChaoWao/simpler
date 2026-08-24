@@ -235,7 +235,7 @@ allocation retires.
 
 ### 4.3 Dependency List Pool
 
-A simple bump allocator for `PTO2DepListEntry` nodes used in fanin/fanout linked lists.
+A simple bump allocator for `DepListEntry` nodes used in fanin/fanout linked lists.
 
 - **Entry 0**: NULL sentinel (`task_id=-1, next_offset=0`)
 - **Allocation**: `pool->top++`, wraps around when full

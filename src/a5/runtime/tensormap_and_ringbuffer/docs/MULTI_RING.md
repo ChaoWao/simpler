@@ -64,7 +64,7 @@ struct ChipRingSet {
 // Before: single ring
 ChipHeapRing heap_ring;
 ChipTaskRing task_ring;
-PTO2DepListPool dep_pool;
+DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
 ChipRingSet rings[CHIP_MAX_RING_DEPTH];
@@ -136,7 +136,7 @@ struct RingSchedState {
     std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
     // Cache Line 1+: Orch-side wiring dep_pool, cache-isolated
-    alignas(64) PTO2DepListPool dep_pool;
+    alignas(64) DepListPool dep_pool;
 };
 
 RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
@@ -165,7 +165,7 @@ bool entry_valid(const ChipTensorMapEntry& e) {
 
 | Structure | Reason |
 | --------- | ------ |
-| `PTO2DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
+| `DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
 | `TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
 | `ChipReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
 | `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
@@ -236,7 +236,7 @@ AICore uses `last_reg_val` to detect new dispatches — identical values cause s
 | -------- | ------- | ---------------- |
 | `PTO2_TASK_WINDOW_SIZE` | 16384 | 65536 |
 | `PTO2_HEAP_SIZE` | 256 MB | 1 GB |
-| `PTO2_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
+| `CHIP_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
 
 ### 7.2 Runtime Overrides
 

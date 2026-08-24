@@ -195,7 +195,7 @@ struct RuntimeContext {
  * Phase 2/3.
  */
 RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+    DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE
 );
 RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH],

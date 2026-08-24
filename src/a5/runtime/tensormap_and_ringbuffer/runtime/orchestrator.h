@@ -141,7 +141,7 @@ struct OrchestratorState {
     // init_data_from_layout.
     static OrchestratorLayout reserve_layout(
         DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
-        int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+        int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE
     );
     static OrchestratorLayout reserve_layout(
         DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],

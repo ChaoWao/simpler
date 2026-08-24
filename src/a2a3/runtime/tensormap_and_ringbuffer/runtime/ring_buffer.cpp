@@ -109,7 +109,7 @@ bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
                 LOG_ERROR(
                     "  Increase fanin spill pool capacity (current: %d, recommended: %d)", capacity, high_water * 2
                 );
-                LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
+                LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
                 LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
                 LOG_ERROR("========================================");
                 latch_pool_error(error_code_ptr, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
@@ -124,8 +124,8 @@ bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
 // =============================================================================
 // Dependency List Pool Implementation
 // =============================================================================
-void PTO2DepListPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
-    if (sm_last_task_alive >= last_reclaimed + PTO2_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
+void DepListPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+    if (sm_last_task_alive >= last_reclaimed + CHIP_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
         int32_t mark = ring.get_slot_state_by_task_id(sm_last_task_alive - 1).dep_pool_mark;
         if (mark > 0) {
             advance_tail(mark);
@@ -134,9 +134,7 @@ void PTO2DepListPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task
     }
 }
 
-void PTO2DepListPool::report_deadlock(
-    SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated
-) {
+void DepListPool::report_deadlock(SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated) {
     int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
     LOG_ERROR("========================================");
     LOG_ERROR("FATAL: Dependency Pool Deadlock Detected!");
@@ -171,12 +169,12 @@ void PTO2DepListPool::report_deadlock(
     }
     LOG_ERROR("Solution:");
     LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d)", capacity, high_water * 2);
-    LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
+    LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
     LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
     LOG_ERROR("========================================");
 }
 
-bool PTO2DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task) {
+bool DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task) {
     if (available() >= needed) return true;
 
     int spin_count = 0;

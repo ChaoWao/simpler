@@ -49,7 +49,7 @@
 #define FUNC_COPY_FIRST 1
 
 static constexpr int32_t LONG_CHAIN_DUMMIES = 4;
-// case=4 exceeds PTO2_DEP_DEGREE_DEBUG_THRESHOLD (16), exercising both the
+// case=4 exceeds CHIP_DEP_DEGREE_DEBUG_THRESHOLD (16), exercising both the
 // producer-fanout and final-consumer-fanin debug diagnostics.
 static constexpr int32_t DENSE_DEP_COUNT = 18;
 

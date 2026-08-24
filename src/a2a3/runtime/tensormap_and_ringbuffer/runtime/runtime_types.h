@@ -70,7 +70,7 @@
 
 // Memory pools (per-ring defaults; total = value × CHIP_MAX_RING_DEPTH)
 #define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
-#define PTO2_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
+#define CHIP_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
 #define CHIP_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
 #define CHIP_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
@@ -99,11 +99,11 @@
 // Dependency-degree diagnostic: log once at debug level when a task's fanin or
 // a producer's fanout first exceeds this degree, so dense dependency graphs can
 // be inspected without adding noise to normal runtime logs.
-#define PTO2_DEP_DEGREE_DEBUG_THRESHOLD 16
+#define CHIP_DEP_DEGREE_DEBUG_THRESHOLD 16
 
 // TensorMap cleanup interval
 #define CHIP_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
-#define PTO2_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
+#define CHIP_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
 
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
 // count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
@@ -197,9 +197,9 @@ static_assert(sizeof(FaninSpillEntry) == sizeof(uintptr_t));
  * Dependency list entry (singly-linked list node)
  * Stored in DepListPool ring buffer.
  */
-struct PTO2DepListEntry {
+struct DepListEntry {
     ChipTaskSlotState *slot_state;  // Consumer slot state (direct pointer)
-    PTO2DepListEntry *next;         // next entry
+    DepListEntry *next;             // next entry
 };
 
 // =============================================================================
@@ -475,7 +475,7 @@ struct alignas(64) ChipTaskSlotState {
     std::atomic<int32_t> fanout_lock;  // Per-task spinlock (0=unlocked, 1=locked)
     uint32_t fanout_count;             // SCOPE_BIT (owning scope) | number of consumers
 
-    PTO2DepListEntry *fanout_head;  // Pointer to first fanout entry (nullptr = empty)
+    DepListEntry *fanout_head;  // Pointer to first fanout entry (nullptr = empty)
 
     // Task state (completion, consumed check, ready check)
     std::atomic<ChipTaskState> task_state;  // PENDING/COMPLETED/CONSUMED
