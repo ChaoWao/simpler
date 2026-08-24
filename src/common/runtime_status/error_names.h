@@ -166,7 +166,7 @@ static inline const char *error_hint(int32_t code) {
                "or shrink the graph; in a reclaiming runtime also inspect entry-reclaim progress";
     case SIMPLER_ERROR_SCHEDULER_TIMEOUT:
         return "read the sub_class= line below first, then follow the S1-S5 table in the doc; raise "
-               "PTO2_SCHEDULER_TIMEOUT_MS to tell a true deadlock apart from a merely slow kernel";
+               "SIMPLER_SCHEDULER_TIMEOUT_MS to tell a true deadlock apart from a merely slow kernel";
     case SIMPLER_ERROR_ASYNC_COMPLETION_INVALID:
         return "recheck the register_completion_condition() arguments in the kernel, in particular the "
                "completion type and the counter address";

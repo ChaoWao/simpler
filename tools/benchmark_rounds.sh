@@ -130,7 +130,7 @@ Options:
   -v, --verbose  Save detailed test_*.py output to a timestamped log file
   --serial-orch-sched
                  Run each TMR case twice: default parallel mode, then serial
-                 orch->sched mode with PTO2_SERIAL_ORCH_SCHED=1.
+                 orch->sched mode with SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE=1.
   -h, --help     Show this help
 
 All other options are passed through to the underlying `python test_*.py`
@@ -290,8 +290,8 @@ run_bench() {
     vlog "Running: ${run_cmd[*]}"
     local rc=0
     if [[ "$mode" == "serial" ]]; then
-        vlog "Environment: PTO2_SERIAL_ORCH_SCHED=1"
-        PTO2_SERIAL_ORCH_SCHED=1 "${run_cmd[@]}" > "$fw_stdout_file" 2>&1 || rc=$?
+        vlog "Environment: SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE=1"
+        SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE=1 "${run_cmd[@]}" > "$fw_stdout_file" 2>&1 || rc=$?
     else
         "${run_cmd[@]}" > "$fw_stdout_file" 2>&1 || rc=$?
     fi
