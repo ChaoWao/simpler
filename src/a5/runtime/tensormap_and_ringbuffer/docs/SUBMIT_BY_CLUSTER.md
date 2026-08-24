@@ -58,17 +58,17 @@ struct MixedKernels {
     int32_t aiv1_kernel_id{INVALID_KERNEL_ID};
 };
 
-static inline void rt_submit_task(PTO2Runtime* rt,
+static inline void rt_submit_task(RuntimeContext* rt,
                                        const MixedKernels& mixed_kernels,
                                        Arg* args,
                                        int32_t num_args);
 
-static inline void rt_submit_aic_task(PTO2Runtime* rt,
+static inline void rt_submit_aic_task(RuntimeContext* rt,
                                            int32_t kernel_id,
                                            Arg* args,
                                            int32_t num_args);
 
-static inline void rt_submit_aiv_task(PTO2Runtime* rt,
+static inline void rt_submit_aiv_task(RuntimeContext* rt,
                                            int32_t kernel_id,
                                            Arg* args,
                                            int32_t num_args);

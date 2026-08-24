@@ -25,7 +25,7 @@
  *   - c flows from outer to inner scope (outer-scope tensors are visible to inner scopes)
  *
  * This file compiles as a standalone .so with zero runtime link dependencies.
- * All runtime calls go through the PTO2RuntimeOps function-pointer table.
+ * All runtime calls go through the RuntimeOps function-pointer table.
  */
 
 #include <stddef.h>

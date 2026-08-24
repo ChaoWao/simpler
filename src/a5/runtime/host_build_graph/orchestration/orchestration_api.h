@@ -14,14 +14,14 @@
  * This header provides everything an orchestration source needs without
  * pulling in runtime implementation headers.  The orchestration .so has
  * zero link dependencies on runtime .cpp files; all runtime calls go
- * through the PTO2RuntimeOps function-pointer table embedded in
- * PTO2Runtime.
+ * through the RuntimeOps function-pointer table embedded in
+ * RuntimeContext.
  *
  * Orchestration sources include ONLY this header:
  *   #include "orchestration_api.h"
  *
  * Runtime sources continue to use runtime_core.h (which defines the
- * full PTO2Runtime struct with all internal fields).
+ * full RuntimeContext struct with all internal fields).
  */
 
 #pragma once
@@ -66,23 +66,23 @@
 // =============================================================================
 
 /**
- * Forward declaration — the orchestration sees PTO2Runtime as a partial
+ * Forward declaration — the orchestration sees RuntimeContext as a partial
  * struct whose first field is the ops pointer.  The full definition
  * lives in runtime_core.h (used only by runtime .cpp files).
  */
-typedef struct PTO2Runtime PTO2Runtime;
+typedef struct RuntimeContext RuntimeContext;
 
 /**
  * Function-pointer table for runtime operations.
  * Populated by the runtime; called by orchestration through inline wrappers.
  */
-typedef struct PTO2RuntimeOps {
-    TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
-    void (*scope_begin)(PTO2Runtime *rt);
-    void (*scope_end)(PTO2Runtime *rt);
-    void (*orchestration_done)(PTO2Runtime *rt);
-    bool (*is_fatal)(PTO2Runtime *rt);
-    void (*report_fatal)(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...);
+typedef struct RuntimeOps {
+    TaskOutputTensors (*submit_task)(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
+    void (*scope_begin)(RuntimeContext *rt);
+    void (*scope_end)(RuntimeContext *rt);
+    void (*orchestration_done)(RuntimeContext *rt);
+    bool (*is_fatal)(RuntimeContext *rt);
+    void (*report_fatal)(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...);
 
     // Logging (populated by runtime, called by orchestration)
     void (*log_error)(const char *func, const char *fmt, ...);
@@ -93,22 +93,22 @@ typedef struct PTO2RuntimeOps {
 
     // Cross-layer data access (orchestration reads/writes tensor values via runtime)
     // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
+    uint64_t (*get_tensor_data)(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
     void (*set_tensor_data)(
-        PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+        RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
     );
-    TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const CoreTaskArgs &args);
-    TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const CoreTaskArgs &args);
+    TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
+    TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
 
     // This-run core geometry latched by the host bind: MIX clusters
     // (one AIC each) and standalone AIV cores.
-    int32_t (*available_cluster_count)(PTO2Runtime *rt);
-    int32_t (*available_aiv_count)(PTO2Runtime *rt);
-    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args);
-    bool (*graph_prepare)(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args);
-    void (*graph_abort)(PTO2Runtime *rt, void *recording_handle);
-    bool (*graph_end)(PTO2Runtime *rt);
-    void (*graph_commit)(PTO2Runtime *rt);
+    int32_t (*available_cluster_count)(RuntimeContext *rt);
+    int32_t (*available_aiv_count)(RuntimeContext *rt);
+    GraphScopeResult (*graph_begin)(RuntimeContext *rt, uint64_t graph_key, const GraphTaskArgs &args);
+    bool (*graph_prepare)(RuntimeContext *rt, void *recording_handle, const GraphTaskArgs &args);
+    void (*graph_abort)(RuntimeContext *rt, void *recording_handle);
+    bool (*graph_end)(RuntimeContext *rt);
+    void (*graph_commit)(RuntimeContext *rt);
 
     // Stash the call-site of the next ScopeGuard so the [ScopeStats]
     // collector can log it. Always present to keep ops-table layout stable
@@ -122,18 +122,18 @@ typedef struct PTO2RuntimeOps {
     // the two must stay in lockstep field for field, since the runtime fills the table
     // and this .so calls through it.
     void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
-} PTO2RuntimeOps;
+} RuntimeOps;
 
 /**
- * Partial PTO2Runtime definition for orchestration.
+ * Partial RuntimeContext definition for orchestration.
  *
  * Exposes the ops pointer (for runtime calls) and pending_scope_mode
  * (read directly by inline scope wrappers).  The real struct (in
  * runtime_core.h) has the same first fields, so accessing them through
  * this definition is well-defined (C struct layout guarantee).
  */
-struct PTO2Runtime {
-    const PTO2RuntimeOps *ops;
+struct RuntimeContext {
+    const RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode;
 };
 
@@ -379,7 +379,7 @@ inline GraphAsyncRecordingState &rt_graph_async_recording() {
 // Inline Convenience Wrappers (call through ops table)
 // =============================================================================
 
-static inline PTO2Runtime *current_runtime() { return framework_current_runtime(); }
+static inline RuntimeContext *current_runtime() { return framework_current_runtime(); }
 
 // Where the previous submission on this thread left off, so the generated code's own
 // work between two submissions can be named rather than showing as an unattributed gap.
@@ -409,7 +409,7 @@ static inline void rt_graph_commit();
 // submitting thread for the rest of every recording in flight, which on the
 // four-Definition DeepSeek-V4 decode was a third of the orchestration window.
 static inline TaskOutputTensors alloc_tensors(const CoreTaskArgs &args) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
     }
@@ -417,7 +417,7 @@ static inline TaskOutputTensors alloc_tensors(const CoreTaskArgs &args) {
 }
 
 static inline TaskOutputTensors alloc_tensors(const TensorCreateInfo create_infos[], uint32_t count) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
     }
@@ -442,7 +442,7 @@ static inline TaskOutputTensors alloc_tensors(const CIs &...cis) {
         (std::is_same_v<std::decay_t<CIs>, TensorCreateInfo> && ...),
         "alloc_tensors only accepts TensorCreateInfo arguments"
     );
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
     }
@@ -459,7 +459,7 @@ static inline TaskOutputTensors alloc_tensors(const CIs &...cis) {
 }
 
 static inline TaskOutputTensors rt_submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
     }
@@ -492,7 +492,7 @@ static inline TaskOutputTensors rt_submit_aiv_task(int32_t kernel_id, const Core
  * barrier or as a placeholder producer for tests / dep-graph wiring.
  */
 static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
     }
@@ -500,7 +500,7 @@ static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
 }
 
 static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTaskArgs &args) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt) || rt->ops->graph_begin == nullptr) {
         return GraphScopeResult{};
     }
@@ -511,19 +511,19 @@ static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTas
 // from the GraphScopeResult that opened it, so a thread can only ever record
 // into the recording it was handed.
 static inline bool rt_graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, recording_handle, args);
 }
 
 static inline void rt_graph_abort(void *recording_handle) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->graph_abort != nullptr) rt->ops->graph_abort(rt, recording_handle);
 }
 
 // Finish the recording pass and publish its Definition. The calling thread
 // finalizes the already-submitted outer Graph shells in rt_graph_commit.
 static inline bool rt_graph_end() {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt) || rt->ops->graph_end == nullptr) {
         return true;
     }
@@ -534,12 +534,12 @@ static inline void rt_graph_commit() {
     GraphAsyncRecordingState &async = rt_graph_async_recording();
     async.wait();
 
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (!rt->ops->is_fatal(rt) && rt->ops->graph_commit != nullptr) rt->ops->graph_commit(rt);
 }
 
 static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
     }
@@ -548,7 +548,7 @@ static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
 }
 
 static inline void rt_scope_end() {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
     }
@@ -558,30 +558,30 @@ static inline void rt_scope_end() {
 static inline void rt_orchestration_done() {
     rt_graph_commit();
     rt_submit_phase_state() = RtSubmitPhaseState{};
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     rt->ops->orchestration_done(rt);
 }
 
 /** This-run MIX cluster (= AIC) count. Do not hardcode 24/36; MIX cohorts use this. */
 static inline int32_t rt_available_cluster_count() {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     return rt->ops->available_cluster_count(rt);
 }
 
 /** This-run standalone AIV core count. AIV-only cohorts size themselves on this. */
 static inline int32_t rt_available_aiv_count() {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     return rt->ops->available_aiv_count(rt);
 }
 
 static inline bool rt_is_fatal() {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     return rt->ops->is_fatal(rt);
 }
 
 #define rt_report_fatal(code, fmt, ...)                                          \
     do {                                                                         \
-        PTO2Runtime *_rt = current_runtime();                                    \
+        RuntimeContext *_rt = current_runtime();                                 \
         _rt->ops->report_fatal(_rt, (code), __FUNCTION__, (fmt), ##__VA_ARGS__); \
     } while (0)
 
@@ -610,7 +610,7 @@ enum class RtOrchPhase : uint32_t {
 };
 
 inline void rt_record_orch_phase(RtOrchPhase phase, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
-    const PTO2RuntimeOps *ops = current_runtime()->ops;
+    const RuntimeOps *ops = current_runtime()->ops;
     if (ops->record_orch_phase != nullptr) {
         ops->record_orch_phase(static_cast<uint32_t>(phase), start_ns, end_ns, detail);
     }
@@ -653,7 +653,7 @@ inline uint64_t rt_orch_phase_now_ns() {
  */
 template <typename T = uint64_t>
 static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return from_u64<T>(0);
     }
@@ -676,7 +676,7 @@ static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const 
  */
 template <typename T = uint64_t>
 static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {
-    PTO2Runtime *rt = current_runtime();
+    RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
     }
@@ -709,7 +709,7 @@ public:
     }
 
 private:
-    PTO2Runtime *rt_;
+    RuntimeContext *rt_;
 };
 
 // Define or submit a Graph Execution. On a cache miss the function executes

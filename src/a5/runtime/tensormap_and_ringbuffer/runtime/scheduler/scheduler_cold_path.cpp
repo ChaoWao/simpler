@@ -1335,7 +1335,7 @@ void SchedulerContext::deinit() {
     func_id_to_addr_ = nullptr;
 }
 
-void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
+void SchedulerContext::bind_runtime(RuntimeContext *rt) {
     rt_ = rt;
     sched_ = &rt->scheduler;
 }
@@ -1356,7 +1356,7 @@ void SchedulerContext::wait_for_orchestration_done_before_dispatch(Runtime *runt
 // and drives the orchestrator → scheduler core transition (or fatal shutdown).
 // =============================================================================
 void SchedulerContext::on_orchestration_done(
-    Runtime *runtime, PTO2Runtime *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
+    Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
 ) {
 #if SIMPLER_DFX
     if (chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES) {

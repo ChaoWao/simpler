@@ -94,9 +94,7 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
 
 extern "C" int concurrent_native_prepare_supported_impl(void) { return 1; }
 
-static_assert(
-    RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match PTO2 runtime ring depth"
-);
+static_assert(RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match the runtime ring depth");
 
 // Helper: return current time in milliseconds
 static int64_t _now_ms() {
@@ -685,7 +683,7 @@ static bool ensure_static_arenas(
     const HostApi *api, const ArenaSizingConfig &sizing, const ArenaStaticSizes &sizes, StaticArenaPtrs *out
 ) {
     DeviceArena sizing_arena;  // discarded; only its computed arena_size is read
-    PTO2RuntimeArenaLayout layout =
+    RuntimeArenaLayout layout =
         runtime_reserve_layout(sizing_arena, sizing.task_window_sizes, sizing.heap_sizes, sizing.dep_pool_capacities);
 
     int64_t t_setup_start = _now_ms();
@@ -740,16 +738,16 @@ static bool ensure_static_arenas(
 // *before* it can dereference the image.
 static bool build_runtime_image(
     const ArenaSizingConfig &sizing, const ArenaStaticSizes &sizes, const StaticArenaPtrs &ptrs,
-    DeviceArena *host_arena, PTO2RuntimeArenaLayout *out_layout
+    DeviceArena *host_arena, RuntimeArenaLayout *out_layout
 ) {
-    PTO2RuntimeArenaLayout layout =
+    RuntimeArenaLayout layout =
         runtime_reserve_layout(*host_arena, sizing.task_window_sizes, sizing.heap_sizes, sizing.dep_pool_capacities);
     if (host_arena->commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
         return false;
     }
 
-    PTO2Runtime *rt = runtime_init_data_from_layout(
+    RuntimeContext *rt = runtime_init_data_from_layout(
         *host_arena, layout, PTO2_MODE_EXECUTE, ptrs.gm_sm, sizes.sm_size, ptrs.gm_heap, sizing.heap_sizes
     );
     if (rt == nullptr) {
@@ -791,7 +789,7 @@ static int bind_cached_runtime_image(
 
 static void store_prebuilt_runtime_image(
     const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe, const StaticArenaPtrs &ptrs,
-    const PTO2RuntimeArenaLayout &layout, const DeviceArena &host_arena
+    const RuntimeArenaLayout &layout, const DeviceArena &host_arena
 ) {
     api->mark_prebuilt_runtime_arena_cached(
         probe.hash, probe.serialized_key.data(), probe.serialized_key.size(), ptrs.gm_heap, ptrs.gm_sm,
@@ -809,7 +807,7 @@ static void store_prebuilt_runtime_image(
 // prewarm_config_impl entry, so both build the arena identically.
 static bool build_and_cache_prebuilt_arena(
     const HostApi *api, const ArenaSizingConfig &sizing, StaticArenaPtrs *out_ptrs = nullptr,
-    PTO2RuntimeArenaLayout *out_layout = nullptr
+    RuntimeArenaLayout *out_layout = nullptr
 ) {
     ArenaStaticSizes sizes;
     if (!derive_arena_static_sizes(sizing, &sizes)) {
@@ -822,7 +820,7 @@ static bool build_and_cache_prebuilt_arena(
     }
 
     DeviceArena host_arena;  // libc malloc backend; owns the image until upload
-    PTO2RuntimeArenaLayout layout;
+    RuntimeArenaLayout layout;
     if (!build_runtime_image(sizing, sizes, ptrs, &host_arena, &layout)) {
         return false;
     }
@@ -937,7 +935,7 @@ extern "C" int bind_callable_to_runtime_impl(
             // cache round-trip, so a backend with no-op cache callbacks still
             // binds successfully.
             StaticArenaPtrs ptrs;
-            PTO2RuntimeArenaLayout layout;
+            RuntimeArenaLayout layout;
             if (!build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout)) {
                 return PTO_RUNTIME_ERR_INTERNAL;
             }

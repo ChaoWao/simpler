@@ -19,7 +19,7 @@
 #include "runtime_types.h"
 #include "spin_hint.h"
 
-// host_build_graph host-orch build: PTO2Runtime embeds PTO2SchedulerState by
+// host_build_graph host-orch build: RuntimeContext embeds PTO2SchedulerState by
 // value, so this header is compiled into the host libhost_runtime.so. The AICPU
 // spin_hint.h that defines PLATFORM_SCHEDULER_TIMEOUT_MS is not on the host
 // include path; supply it here. The value only sizes an on-device scheduler

@@ -540,8 +540,7 @@ void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler_arg) {
 // Top-level runtime arena
 // =============================================================================
 
-PTO2RuntimeArenaLayout
-runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity) {
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity) {
     uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
     uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
     int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
@@ -553,11 +552,11 @@ runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, int32_t de
     return runtime_reserve_layout(arena, task_window_sizes, heap_sizes, dep_pool_capacities);
 }
 
-PTO2RuntimeArenaLayout runtime_reserve_layout(
+RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]
 ) {
-    PTO2RuntimeArenaLayout layout{};
+    RuntimeArenaLayout layout{};
 
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         layout.sizing.task_window_sizes[r] = task_window_sizes[r];
@@ -572,16 +571,16 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     }
     layout.offsets.orch = PTO2OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
     layout.offsets.sched = PTO2SchedulerState::reserve_layout(arena, dep_pool_capacities);
-    layout.offsets.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
+    layout.offsets.off_runtime = arena.reserve(sizeof(RuntimeContext), PTO2_ALIGN_SIZE);
     layout.offsets.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
 
     layout.offsets.arena_size = arena.total_size();
     return layout;
 }
 
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
-    uint64_t /*sm_size*/, void *gm_heap_dev_base, uint64_t heap_size
+RuntimeContext *runtime_init_data_from_layout(
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/,
+    void *gm_heap_dev_base, uint64_t heap_size
 ) {
     uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -590,11 +589,11 @@ PTO2Runtime *runtime_init_data_from_layout(
     return runtime_init_data_from_layout(arena, layout, mode, sm_dev_base, 0, gm_heap_dev_base, heap_sizes);
 }
 
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
-    uint64_t /*sm_size*/, void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+RuntimeContext *runtime_init_data_from_layout(
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/,
+    void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
 ) {
-    PTO2Runtime *rt = static_cast<PTO2Runtime *>(arena.region_ptr(layout.offsets.off_runtime));
+    RuntimeContext *rt = static_cast<RuntimeContext *>(arena.region_ptr(layout.offsets.off_runtime));
     memset(rt, 0, sizeof(*rt));
 
     auto *sm_wrap = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
@@ -626,7 +625,7 @@ PTO2Runtime *runtime_init_data_from_layout(
     return rt;
 }
 
-static bool reclaim_publication_wiring_is_complete(const PTO2Runtime *rt) {
+static bool reclaim_publication_wiring_is_complete(const RuntimeContext *rt) {
     if (rt == nullptr || rt->orchestrator.scheduler != &rt->scheduler) return false;
 
     const auto *request_mask = &rt->scheduler.publication_request_mask;
@@ -646,11 +645,11 @@ static bool reclaim_publication_wiring_is_complete(const PTO2Runtime *rt) {
     return true;
 }
 
-static void enable_publication_batching_if_safe(PTO2Runtime *rt) {
+static void enable_publication_batching_if_safe(RuntimeContext *rt) {
     rt->scheduler.set_publication_batching_enabled(reclaim_publication_wiring_is_complete(rt));
 }
 
-void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
+void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
     rt->scheduler.set_publication_batching_enabled(false);
     rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.offsets.off_mailbox));
@@ -659,7 +658,7 @@ void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayou
     enable_publication_batching_if_safe(rt);
 }
 
-bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
+bool runtime_reset_for_reuse(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
     (void)arena;
     if (rt == nullptr) {
         return false;
@@ -688,7 +687,7 @@ bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &l
     return true;
 }
 
-void runtime_destroy(PTO2Runtime *rt, DeviceArena & /*arena*/) {
+void runtime_destroy(RuntimeContext *rt, DeviceArena & /*arena*/) {
     // Arena buffer is pooled across runs by DeviceRunner — never freed here.
     if (!rt) return;
     rt->scheduler.destroy();

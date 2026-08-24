@@ -1035,7 +1035,7 @@ void SchedulerContext::deinit() {
     func_id_to_addr_ = nullptr;
 }
 
-void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
+void SchedulerContext::bind_runtime(RuntimeContext *rt) {
     rt_ = rt;
     sched_ = rt->scheduler;
 }
@@ -1049,7 +1049,7 @@ void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
 // dispatching.
 // =============================================================================
 void SchedulerContext::on_orchestration_done(
-    Runtime *runtime, PTO2Runtime *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
+    Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
 ) {
     total_tasks_ = total_tasks;
 

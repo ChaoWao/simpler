@@ -242,7 +242,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     }
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     DeviceArena sm_arena;
@@ -252,7 +252,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     std::memset(sm, 0, static_cast<size_t>(sm_size));
 
     std::vector<char> gm(static_cast<size_t>(total_heap));
-    PTO2Runtime *rt =
+    RuntimeContext *rt =
         runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
     ASSERT_NE(rt, nullptr);
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -286,24 +286,24 @@ TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena source_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(source_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(source_arena, ws, heaps, dep_caps);
     ASSERT_NE(source_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     std::vector<char> sm(static_cast<size_t>(sm_size));
     std::vector<char> gm(100 * 1024);
-    PTO2Runtime *source_rt =
+    RuntimeContext *source_rt =
         runtime_init_data_from_layout(source_arena, layout, PTO2_MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
     ASSERT_NE(source_rt, nullptr);
     runtime_wire_arena_pointers(source_arena, layout, source_rt);
 
     DeviceArena relocated_arena;
-    PTO2RuntimeArenaLayout relocated_layout = runtime_reserve_layout(relocated_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout relocated_layout = runtime_reserve_layout(relocated_arena, ws, heaps, dep_caps);
     ASSERT_EQ(relocated_layout.offsets.off_runtime, layout.offsets.off_runtime);
     ASSERT_EQ(relocated_arena.total_size(), source_arena.total_size());
     ASSERT_NE(relocated_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
     std::memcpy(relocated_arena.base(), source_arena.base(), source_arena.total_size());
 
-    auto *relocated_rt = static_cast<PTO2Runtime *>(relocated_arena.region_ptr(layout.offsets.off_runtime));
+    auto *relocated_rt = static_cast<RuntimeContext *>(relocated_arena.region_ptr(layout.offsets.off_runtime));
     runtime_wire_arena_pointers(relocated_arena, layout, relocated_rt);
 
     ASSERT_NE(&relocated_rt->scheduler, &source_rt->scheduler);
@@ -322,7 +322,7 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
     int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     char sm = 0;

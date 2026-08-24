@@ -1,8 +1,8 @@
-# PTO2 Runtime System Design
+# `tensormap_and_ringbuffer` Runtime Design
 
 ## Overview
 
-PTO2 (Parallel Task Orchestration v2) is a runtime system for executing task graphs on Ascend AI processors. It coordinates four layers of execution:
+`tensormap_and_ringbuffer` is a runtime for executing task graphs on Ascend AI processors. It coordinates four layers of execution:
 
 - **Host** (x86/ARM CPU): compiles kernels, allocates device memory, initializes the Runtime, and launches AICPU/AICore threads.
 - **AICPU** (device ARM cores): runs the orchestrator (task graph builder) and scheduler threads.
@@ -810,7 +810,7 @@ Built by the scheduler from `PTO2TaskDescriptor`:
 3. The orchestrator thread writes the SO to a temp file, calls `dlopen`
 4. `dlsym("aicpu_orchestration_config")` returns configuration (expected arg count)
 5. `dlsym("aicpu_orchestration_entry")` returns the orchestration function pointer
-6. The orchestrator thread creates a `PTO2Runtime`, calls the orchestration function within a `SIMPLER_SCOPE`
+6. The orchestrator thread creates a `RuntimeContext`, calls the orchestration function within a `SIMPLER_SCOPE`
 7. After orchestration completes: `dlclose`, delete temp file
 
 ### 10.3 Thread Startup Synchronization

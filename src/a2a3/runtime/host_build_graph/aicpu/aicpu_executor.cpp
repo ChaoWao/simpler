@@ -59,7 +59,7 @@
 
 // From orchestration/common.cpp linked into this DSO — updates g_current_runtime
 // here (cleared on teardown before runtime_destroy).
-extern "C" void framework_bind_runtime(PTO2Runtime *rt);
+extern "C" void framework_bind_runtime(RuntimeContext *rt);
 
 static int32_t read_pto2_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
@@ -77,7 +77,7 @@ static int32_t read_pto2_runtime_status(Runtime *runtime) {
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
 }
 
-static PTO2Runtime *rt{nullptr};
+static RuntimeContext *rt{nullptr};
 
 struct AicpuExecutor {
     // ===== Thread management state =====
@@ -110,7 +110,7 @@ struct AicpuExecutor {
     simpler::ThreadCompletionGate completion_gate_;
     std::atomic<bool> runtime_init_ready_{false};
 
-    // Per-Worker arena backing the PTO2Runtime + sm_handle + orch/sched/mailbox
+    // Per-Worker arena backing the RuntimeContext + sm_handle + orch/sched/mailbox
     // sub-regions (created in runtime_create_from_sm, released in runtime_destroy).
     // Default-constructed: libc-backed backend, no ctx.
     DeviceArena runtime_arena_;
@@ -260,7 +260,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
         if (boot_ok) {
             runtime_arena_.attach(prebuilt_arena, DeviceArena::kDefaultBaseAlign);
-            rt = reinterpret_cast<PTO2Runtime *>(static_cast<char *>(prebuilt_arena) + off_runtime);
+            rt = reinterpret_cast<RuntimeContext *>(static_cast<char *>(prebuilt_arena) + off_runtime);
             runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
 
             void *sm_ptr = runtime->get_gm_sm_ptr();

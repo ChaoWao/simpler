@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Main Implementation
+ * Runtime core implementation
  *
  * Implements the unified runtime API that combines orchestrator and scheduler.
  *
@@ -50,31 +50,31 @@ static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
 // =============================================================================
 
 static TaskOutputTensors
-submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
+submit_task_impl(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     return rt->orchestrator.submit_task(mixed_kernels, args);
 }
 
-static TaskOutputTensors alloc_tensors_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+static TaskOutputTensors alloc_tensors_impl(RuntimeContext *rt, const CoreTaskArgs &args) {
     return rt->orchestrator.alloc_tensors(args);
 }
 
-static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+static TaskOutputTensors submit_dummy_task_impl(RuntimeContext *rt, const CoreTaskArgs &args) {
     return rt->orchestrator.submit_dummy_task(args);
 }
 
-void rt_scope_begin(PTO2Runtime *rt) {
+void rt_scope_begin(RuntimeContext *rt) {
     PTO2ScopeMode mode = rt->pending_scope_mode;
     rt->pending_scope_mode = PTO2ScopeMode::AUTO;
     rt->orchestrator.begin_scope(mode);
 }
 
-void rt_scope_end(PTO2Runtime *rt) { rt->orchestrator.end_scope(); }
+void rt_scope_end(RuntimeContext *rt) { rt->orchestrator.end_scope(); }
 
-void rt_orchestration_done(PTO2Runtime *rt) { rt->orchestrator.mark_done(); }
+void rt_orchestration_done(RuntimeContext *rt) { rt->orchestrator.mark_done(); }
 
-static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator.fatal; }
+static bool is_fatal_impl(RuntimeContext *rt) { return rt->orchestrator.fatal; }
 
-void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...) {
+void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     if (fmt == nullptr || fmt[0] == '\0') {
@@ -97,7 +97,7 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
 // Returns false on timeout (sets orch.fatal).
 MAYBE_UNINITIALIZED_BEGIN
 static bool
-wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
+wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
     TaskId owner = tensor.owner_task_id;
     PTO2OrchestratorState &orch = rt->orchestrator;
 
@@ -211,7 +211,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
 }
 MAYBE_UNINITIALIZED_END
 
-uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
+uint64_t get_tensor_data(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
             __FUNCTION__, "get_tensor_data: buffer not allocated (addr=0). "
@@ -233,7 +233,7 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndi
 }
 
 void set_tensor_data(
-    PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+    RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
 ) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
@@ -262,10 +262,10 @@ void set_tensor_data(
 static void scope_set_site_impl(const char *file, int line) { scope_stats_set_pending_site(file, line); }
 #endif
 
-static int32_t available_cluster_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_cluster_count; }
-static int32_t available_aiv_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_aiv_count; }
+static int32_t available_cluster_count_impl(RuntimeContext *rt) { return rt->orchestrator.total_cluster_count; }
+static int32_t available_aiv_count_impl(RuntimeContext *rt) { return rt->orchestrator.total_aiv_count; }
 
-static const PTO2RuntimeOps s_runtime_ops = {
+static const RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
     .scope_begin = rt_scope_begin,
     .scope_end = rt_scope_end,
@@ -300,13 +300,13 @@ static const PTO2RuntimeOps s_runtime_ops = {
 // SPMD core counts — depend on the device-side s_runtime_ops global and the
 // AICPU SchedulerContext respectively, so they remain in the AICPU build.
 
-void runtime_finalize_after_wire(PTO2Runtime *rt, int32_t aic_count, int32_t aiv_count) {
+void runtime_finalize_after_wire(RuntimeContext *rt, int32_t aic_count, int32_t aiv_count) {
     rt->ops = &s_runtime_ops;
     rt->orchestrator.total_cluster_count = aic_count;
     rt->orchestrator.total_aiv_count = aiv_count;
 }
 
-void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode) {
+void runtime_set_mode(RuntimeContext *rt, RuntimeMode mode) {
     if (rt) {
         rt->mode = mode;
     }

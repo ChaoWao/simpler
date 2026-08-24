@@ -23,7 +23,7 @@
 
 // Framework-internal TLS bridge. The executor binds the current thread's
 // runtime before invoking the orchestration entry, so orchestration helpers can
-// fetch the current PTO2Runtime without explicit parameter threading. Declared
+// fetch the current RuntimeContext without explicit parameter threading. Declared
 // here (rather than in orchestration_api.h) so framework TUs the AICore
 // build also compiles — notably orchestration/common.cpp — see these symbols
 // without pulling in types.h, whose Arg::add_scalar → to_u64 path is
@@ -31,9 +31,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-struct PTO2Runtime;
-PTO2Runtime *framework_current_runtime(void);
-void framework_bind_runtime(PTO2Runtime *rt);
+struct RuntimeContext;
+RuntimeContext *framework_current_runtime(void);
+void framework_bind_runtime(RuntimeContext *rt);
 #ifdef __cplusplus
 }
 #endif

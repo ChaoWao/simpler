@@ -242,7 +242,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     }
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     DeviceArena sm_arena;
@@ -252,7 +252,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     std::memset(sm, 0, static_cast<size_t>(sm_size));
 
     std::vector<char> gm(static_cast<size_t>(total_heap));
-    PTO2Runtime *rt =
+    RuntimeContext *rt =
         runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
     ASSERT_NE(rt, nullptr);
     runtime_wire_arena_pointers(runtime_arena, layout, rt);
@@ -275,7 +275,7 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
     int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     char sm = 0;

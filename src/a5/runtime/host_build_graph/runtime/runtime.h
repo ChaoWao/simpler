@@ -12,7 +12,7 @@
  * Runtime Class - Device Execution and Handshake Control
  *
  * This class manages device-side execution through AICPU-AICore handshake
- * protocol. Task graph construction is handled by PTO2Runtime; this class
+ * protocol. Task graph construction is handled by RuntimeContext; this class
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
@@ -135,7 +135,7 @@ struct Task {
  * Runtime class for device execution and handshake control
  *
  * This class manages AICPU-AICore communication through handshake buffers.
- * Task graph construction is handled by PTO2Runtime; this class only handles
+ * Task graph construction is handled by RuntimeContext; this class only handles
  * execution control and device orchestration state.
  */
 class Runtime {
@@ -252,7 +252,7 @@ public:
 
     // Prebuilt-arena fast path (trb only). Set by host's
     // bind_callable_to_runtime_impl; consumed by AICPU at boot to attach a
-    // DeviceArena to `prebuilt_arena_base_` and pick up the PTO2Runtime at
+    // DeviceArena to `prebuilt_arena_base_` and pick up the RuntimeContext at
     // `prebuilt_arena_base_ + prebuilt_runtime_offset_`. Both stay zero on
     // first construction (Runtime() ctor zeros them) so a non-prebuilt boot
     // path can still detect "no prebuilt image set" via nullptr.
@@ -292,7 +292,7 @@ public:
 
     // =========================================================================
     // Deprecated API (for platform compatibility, always returns 0/nullptr)
-    // Task graph is now managed by PTO2Runtime, not Runtime
+    // Task graph is now managed by RuntimeContext, not Runtime
     // =========================================================================
 
     /** @deprecated Task count is now in PTO2 shared memory */

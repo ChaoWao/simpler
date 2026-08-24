@@ -34,7 +34,7 @@
 // Forward declarations — avoid pulling in full headers for pointer/reference params.
 class Runtime;
 struct Handshake;
-struct PTO2Runtime;
+struct RuntimeContext;
 
 // SPSC ring carrying completed-but-unresolved task slots from one scheduler (S)
 // thread to the dedicated resolution (P) thread. Whole-graph-resident hbg never
@@ -159,7 +159,7 @@ public:
     //    (skipped on fatal error — emergency_shutdown runs instead)
     // Callers must invoke rt_orchestration_done(rt) before this — that
     // step belongs to the orchestrator lifecycle, not the scheduler.
-    void on_orchestration_done(Runtime *runtime, PTO2Runtime *rt, int32_t thread_idx, int32_t total_tasks);
+    void on_orchestration_done(Runtime *runtime, RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
 
     // Seed the ready queues + wake lists for the whole graph at boot. Called by
     // every AICPU thread on a disjoint slice of the submitted-task range, after
@@ -168,8 +168,8 @@ public:
     // register_wake are the same lock-free primitives used during the run.
     void classify_partition(int32_t thread_idx, int32_t nthreads);
 
-    // Bind the PTO2Runtime scheduler pointer.
-    void bind_runtime(PTO2Runtime *rt);
+    // Bind the RuntimeContext scheduler pointer.
+    void bind_runtime(RuntimeContext *rt);
 
     // =========================================================================
     // State queries / external synchronization points
@@ -189,7 +189,7 @@ private:
 
     // --- Scheduler binding & per-core runtime state ---
     alignas(64) PTO2SchedulerState *sched_{nullptr};
-    PTO2Runtime *rt_{nullptr};
+    RuntimeContext *rt_{nullptr};
 
     // Per-core execution state, indexed by core_id (= worker_id)
     CoreExecState core_exec_states_[RUNTIME_MAX_WORKER];

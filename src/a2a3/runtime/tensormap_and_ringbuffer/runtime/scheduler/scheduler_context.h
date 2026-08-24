@@ -35,7 +35,7 @@
 // Forward declarations — avoid pulling in full headers for pointer/reference params.
 class Runtime;
 struct Handshake;
-struct PTO2Runtime;
+struct RuntimeContext;
 
 /**
  * SchedulerContext: owns all scheduler-side state and methods.
@@ -116,11 +116,11 @@ public:
     //    (skipped on fatal error — emergency_shutdown runs instead)
     // Callers must invoke rt_orchestration_done(rt) before this — that
     // step belongs to the orchestrator lifecycle, not the scheduler.
-    void on_orchestration_done(Runtime *runtime, PTO2Runtime *rt, int32_t thread_idx, int32_t total_tasks);
+    void on_orchestration_done(Runtime *runtime, RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
 
-    // Bind the PTO2Runtime scheduler pointer. Required in device-orchestration
+    // Bind the RuntimeContext scheduler pointer. Required in device-orchestration
     // mode where rt is created by the orchestrator thread after init().
-    void bind_runtime(PTO2Runtime *rt);
+    void bind_runtime(RuntimeContext *rt);
 
     // Serial orch->sched mode pre-dispatch wait. No AICore dispatch happens
     // before orchestrator_done_.
@@ -144,7 +144,7 @@ private:
 
     // --- Scheduler binding & per-core runtime state ---
     alignas(64) PTO2SchedulerState *sched_{nullptr};
-    PTO2Runtime *rt_{nullptr};
+    RuntimeContext *rt_{nullptr};
 
     // Per-core execution state, indexed by core_id (= worker_id)
     CoreExecState core_exec_states_[RUNTIME_MAX_WORKER];
