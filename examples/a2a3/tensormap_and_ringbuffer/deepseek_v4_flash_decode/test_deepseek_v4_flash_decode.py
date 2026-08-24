@@ -29,10 +29,11 @@ in either repo. The case validates that the harvested distributed program —
 dispatches across both dies, drives the comm-window protocol to completion,
 and terminates cleanly.
 
-The case participates in the default Per-PR collection. To run it explicitly:
+The case is manual: Per-PR CI runs it in the dedicated `st-deepseek-onboard-a2a3`
+job instead of the main sweep. To run it explicitly:
 
     python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/\
-test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1>
+test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
 
 See README.md for provenance pins and the regeneration recipe.
 """
@@ -610,6 +611,7 @@ class TestDeepseekV4FlashDecode(SceneTestCase):
         {
             "name": "DecodeFwdEP2TP2",
             "platforms": ["a2a3"],
+            "manual": True,
             "skip_golden": True,
             "config": {
                 "device_count": N_RANKS,

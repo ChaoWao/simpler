@@ -160,7 +160,8 @@ pytest examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
     --platform a2a3 --device <d0>,<d1>
 ```
 
-The case participates in the default Per-PR collection. It remains
+The case is manual: Per-PR CI runs it in the dedicated `st-deepseek-onboard-a2a3`
+job, in parallel with the main sweep rather than at its tail. It remains
 `skip_golden` because no full-network torch reference exists upstream.
 
 To exercise only the host side without launching the device body, set
