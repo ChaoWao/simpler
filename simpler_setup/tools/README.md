@@ -412,8 +412,9 @@ A run whose control plane is missing a phase entirely — a change can retire on
 is still totalled, over the phases it has, with the absent ones named. A phase
 missing from only *some* passes is a truncated log instead, and those passes are
 excluded with a warning. If the log's first line is a `[stamp]` line naming the
-command and commit, it is echoed above the table; without one, the conditions
-behind the numbers have to be established by hand.
+command and commit, it is echoed above the table. Distinct
+`torch_backend_autoload` records are printed alongside it. Missing stamps or
+autoload records produce an explicit comparison warning.
 
 ---
 

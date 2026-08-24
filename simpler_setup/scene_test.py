@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import gc
 import inspect
+import json
 import logging
 import os
 import platform as host_platform
@@ -32,11 +33,12 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import IntEnum
+from functools import cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from .compile_pool import compile_slot, current_compile_workers
-from .log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
+from .log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, TIMING, configure_logging
 from .pto_isa import ensure_pto_isa_root
 from .scene_test_cache import (
     compile_artifact_key,
@@ -50,6 +52,8 @@ logger = logging.getLogger(__name__)
 _compile_cache: dict[tuple, object] = {}
 
 _CASE_CONFIG_KEYS = frozenset({"aicpu_thread_num", "runtime_env", "device_count", "num_sub_workers"})
+_TORCH_BACKEND_AUTOLOAD_ENV = "TORCH_DEVICE_BACKEND_AUTOLOAD"
+_TORCH_BACKEND_AUTOLOAD_VALUE_LIMIT = 64
 _RUNTIME_ENV_KEYS = frozenset({"ring_task_window", "ring_heap", "ring_dep_pool"})
 
 
@@ -101,6 +105,35 @@ def effective_diagnostic_options(
         if warn and enabled:
             logger.warning("%s disabled: --rounds > 1", name)
     return _DiagnosticOptions(0, 0, 0, False, False, False)
+
+
+@cache
+def _log_torch_backend_autoload_once() -> None:
+    """Record torch backend autoload configuration and module state once."""
+    raw_setting = os.environ.get(_TORCH_BACKEND_AUTOLOAD_ENV)
+    if raw_setting is None:
+        setting = "unset"
+    elif raw_setting in {"0", "1"}:
+        setting = raw_setting
+    else:
+        setting = "invalid"
+    raw_truncated = raw_setting is not None and len(raw_setting) > _TORCH_BACKEND_AUTOLOAD_VALUE_LIMIT
+    raw_value = None if raw_setting is None else raw_setting[:_TORCH_BACKEND_AUTOLOAD_VALUE_LIMIT]
+    raw_json = json.dumps(raw_value, ensure_ascii=True)
+    # torch._is_device_backend_autoload_enabled() uses getenv(..., "1") == "1".
+    effective = "enabled" if (raw_setting is None or raw_setting == "1") else "disabled"
+
+    # SceneTest configures TIMING on "simpler"; the module logger filters this level.
+    logging.getLogger("simpler").log(
+        TIMING,
+        "torch_backend_autoload setting=%s raw=%s raw_truncated=%s effective=%s torch_imported=%s torch_npu_loaded=%s",
+        setting,
+        raw_json,
+        str(raw_truncated).lower(),
+        effective,
+        str("torch" in sys.modules).lower(),
+        str("torch_npu" in sys.modules).lower(),
+    )
 
 
 def _pto_isa_compile_cache_token() -> str:
@@ -1695,6 +1728,8 @@ class SceneTestCase:
             with _golden_thread_cap():
                 self.compute_golden(golden_args, params)
 
+        _log_torch_backend_autoload_once()
+
         # Save initial output tensor values for reset between rounds
         initial_outputs = {}
         if rounds > 1:
@@ -1778,6 +1813,8 @@ class SceneTestCase:
         # reset, dispatch, and compare below all operate on the rehosted views.
         rehosted = _RehostedTaskArgs(worker, test_args)
         try:
+            _log_torch_backend_autoload_once()
+
             # Save initial tensor values for reset between rounds
             all_tensor_names = test_args.tensor_names()
             initial_tensors = {}
