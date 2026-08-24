@@ -426,7 +426,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
-    PTO2TaskAllocator &allocator = orch.task_allocator;
+    TaskAllocator &allocator = orch.task_allocator;
     while (allocator.active_count() < allocator.window_size() - 1) {
         ASSERT_FALSE(allocator.alloc(0).failed());
     }

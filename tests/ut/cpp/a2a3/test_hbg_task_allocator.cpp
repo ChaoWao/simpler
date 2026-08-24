@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for host_build_graph's PTO2TaskAllocator (ring_buffer.h).
+ * Unit tests for host_build_graph's TaskAllocator (ring_buffer.h).
  *
  * host_build_graph is whole-graph-resident: the device runs only after the host
  * has built the whole graph, so neither the task ring nor the graph heap is ever
@@ -46,7 +46,7 @@ protected:
     alignas(64) uint8_t heap_buf[HEAP_SIZE]{};
     std::atomic<int32_t> current_index{0};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2TaskAllocator allocator{};
+    TaskAllocator allocator{};
 
     void SetUp() override {
         std::memset(heap_buf, 0, sizeof(heap_buf));
@@ -282,11 +282,11 @@ TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsReserveDeferredHeap) {
 // sources by address-range containment alone. A real heap that reached into that
 // range would silently misclassify, so init() refuses it.
 TEST_F(HbgTaskAllocatorTest, InitRejectsAHeapOverlappingTheRecordingVirtualRange) {
-    PTO2TaskAllocator overlapping{};
+    TaskAllocator overlapping{};
     auto *base = reinterpret_cast<void *>(GRAPH_RECORD_VIRTUAL_BASE);
     EXPECT_THROW(overlapping.init(WINDOW_SIZE, &current_index, base, HEAP_SIZE, &error_code), AssertionError);
 
-    PTO2TaskAllocator straddling{};
+    TaskAllocator straddling{};
     auto *just_below = reinterpret_cast<void *>(GRAPH_RECORD_VIRTUAL_BASE - 64);
     EXPECT_THROW(straddling.init(WINDOW_SIZE, &current_index, just_below, HEAP_SIZE, &error_code), AssertionError);
 }
@@ -299,7 +299,7 @@ TEST_F(HbgTaskAllocatorTest, InitRejectsAHeapOverlappingTheRecordingVirtualRange
 TEST_F(HbgTaskAllocatorTest, AcceptsTheVirtualHeapWindow) {
     EXPECT_EQ(HEAP_VIRTUAL_BASE + HEAP_VIRTUAL_CAPACITY, GRAPH_RECORD_VIRTUAL_BASE);
 
-    PTO2TaskAllocator virtual_heap{};
+    TaskAllocator virtual_heap{};
     auto *base = reinterpret_cast<void *>(HEAP_VIRTUAL_BASE);
     virtual_heap.init(WINDOW_SIZE, &current_index, base, HEAP_VIRTUAL_CAPACITY, &error_code);
     EXPECT_EQ(virtual_heap.heap_capacity(), HEAP_VIRTUAL_CAPACITY);

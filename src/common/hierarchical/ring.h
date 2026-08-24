@@ -15,7 +15,7 @@
  * A single structure owns three correlated per-task resources:
  *
  *   1. A monotonic task id (`next_task_id_`), allocated by the Orchestrator.
- *      Unlike L2's `PTO2TaskAllocator` the id is NOT masked into a fixed-size
+ *      Unlike L2's `TaskAllocator` the id is NOT masked into a fixed-size
  *      window — slot state lives in parent-process heap (never crossed into
  *      child workers), so a ring index buys us nothing at L3 (see the plan's
  *      L2 Consistency Audit, allowed exception #6).

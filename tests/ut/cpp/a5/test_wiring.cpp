@@ -749,7 +749,7 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     ASSERT_EQ(rss.last_task_alive, 1);
     ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
 
-    PTO2TaskAllocator allocator;
+    TaskAllocator allocator;
     auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 4, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
@@ -767,7 +767,7 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     request_and_drain_publication();
     ASSERT_EQ(allocator.task_tail(), 1);
 
-    PTO2TaskAllocResult result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
+    TaskAllocResult result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 3);
@@ -779,7 +779,7 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     auto *ring = rss.ring;
 
     alignas(64) char heap[64] = {};
-    PTO2TaskAllocator allocator;
+    TaskAllocator allocator;
     auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 8, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
@@ -809,7 +809,7 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     request_and_drain_publication();
     ASSERT_EQ(allocator.task_tail(), 1);
 
-    PTO2TaskAllocResult result = allocator.alloc(8);
+    TaskAllocResult result = allocator.alloc(8);
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 2);

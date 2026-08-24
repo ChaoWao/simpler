@@ -199,7 +199,7 @@ The task ring manages task slot allocation with back-pressure flow control.
 
 **Slot mapping**: `slot = task_id & (window_size - 1)`
 
-**Allocation** (`PTO2TaskAllocator::alloc`):
+**Allocation** (`TaskAllocator::alloc`):
 
 ```text
 active_count = current_index - *last_alive_ptr
@@ -245,9 +245,9 @@ A simple bump allocator for `PTO2DepListEntry` nodes used in fanin/fanout linked
 
 The ring buffer mechanism provides **flow control** between the orchestrator (producer) and the scheduler (consumer). When a ring is exhausted, the orchestrator **blocks** — it cannot submit new tasks or allocate more output memory until the scheduler reclaims slots/space by advancing the watermarks.
 
-**Task Ring back-pressure**: When `active_count = current_index - last_task_alive >= window_size - 1`, `PTO2TaskAllocator::alloc` spin-waits until the scheduler completes tasks and advances `last_task_alive`.
+**Task Ring back-pressure**: When `active_count = current_index - last_task_alive >= window_size - 1`, `TaskAllocator::alloc` spin-waits until the scheduler completes tasks and advances `last_task_alive`.
 
-**Heap Ring back-pressure**: When the heap has insufficient contiguous space, `PTO2TaskAllocator::alloc` spin-waits until the scheduler advances `heap_tail` past completed tasks' output buffers.
+**Heap Ring back-pressure**: When the heap has insufficient contiguous space, `TaskAllocator::alloc` spin-waits until the scheduler advances `heap_tail` past completed tasks' output buffers.
 
 **TensorMap pool back-pressure**: Before STEP 4 registers a task's outputs, the orchestrator's `ensure_tensormap_capacity` reserves pool space for the inserts. When the shared entry pool is exhausted, it reclaims retired entries across all rings and spin-waits until reclaim actually frees entries, with a 500 ms wall-clock deadlock backstop (see Section 5.4).
 
@@ -442,7 +442,7 @@ Key members:
 | Step | Operation |
 | ---- | --------- |
 | 0 | `ChipTensorMap::sync_tensormap` — prune stale TensorMap entries |
-| 1 | `PTO2TaskAllocator::alloc` — allocate task slot (may block on flow control) |
+| 1 | `TaskAllocator::alloc` — allocate task slot (may block on flow control) |
 | 2 | Initialize task descriptor + slot state, copy parameters |
 | 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `PTO2FaninBuilder` |
 | 4 | **Insert**: register OUTPUT/INOUT args in TensorMap |

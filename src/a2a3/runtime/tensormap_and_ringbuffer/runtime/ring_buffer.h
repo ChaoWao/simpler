@@ -57,7 +57,7 @@
 // oldest task owned by an open scope on the blocked ring. This wall-clock value
 // is the backstop for all other cases; it is an ABSOLUTE TIME (not a spin
 // count), so it is stable across chips/contention.
-#define PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
+#define ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
 
 // =============================================================================
 // Task Allocator (unified task slot + heap buffer allocation)
@@ -73,7 +73,7 @@
  * The alloc() method checks both resources BEFORE committing to either,
  * eliminating the need for rollback on partial failure.
  */
-class PTO2TaskAllocator {
+class TaskAllocator {
 public:
     /**
      * Initialize the allocator with task ring and heap ring resources.
@@ -122,7 +122,7 @@ public:
      * @param oldest_open_task Oldest task owned by any open scope on this ring
      * @return Allocation result; check failed() for errors
      */
-    PTO2TaskAllocResult alloc(int32_t output_size, ChipTaskSlotState *oldest_open_task = nullptr) {
+    TaskAllocResult alloc(int32_t output_size, ChipTaskSlotState *oldest_open_task = nullptr) {
         uint64_t aligned_size =
             output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
 
@@ -196,7 +196,7 @@ public:
                 if (!block_timing) {
                     block_cycle0 = now;
                     block_timing = true;
-                } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+                } else if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                     report_deadlock(output_size, blocked_on_heap, /*scope_gated=*/false);
                     return {-1, -1, nullptr, nullptr};
                 }
@@ -435,7 +435,7 @@ private:
         } else {
             LOG_ERROR(
                 "No reclaim progress for ~500 ms (%" PRIu64 " cycles wall clock).",
-                (uint64_t)PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES
+                (uint64_t)ALLOC_DEADLOCK_TIMEOUT_CYCLES
             );
         }
         LOG_ERROR(
@@ -725,13 +725,13 @@ struct PTO2DepListPool {
      * Ensure dep pool for a specific ring has at least `needed` entries available.
      * Spin-waits for reclamation under pressure. The dep pool shares
      * last_task_alive with the heap and task rings, so it detects a wedged
-     * reclaim watermark the same way PTO2TaskAllocator::alloc does: a structural
+     * reclaim watermark the same way TaskAllocator::alloc does: a structural
      * head-of-line check plus a wall-clock backstop, each emitting report_deadlock.
      */
     bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
 
     /**
-     * Structured dep-pool deadlock report, mirroring PTO2TaskAllocator::report_deadlock.
+     * Structured dep-pool deadlock report, mirroring TaskAllocator::report_deadlock.
      * scope_gated marks the provable head-of-line case where the head is pinned
      * by an open scope on this ring, as opposed to the wall-clock backstop.
      */
@@ -810,7 +810,7 @@ struct PTO2DepListPool {
  * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
 struct ChipRingSet {
-    PTO2TaskAllocator task_allocator;
+    TaskAllocator task_allocator;
     PTO2FaninPool fanin_pool;
 };
 

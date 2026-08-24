@@ -105,7 +105,7 @@ inline constexpr uint64_t HEAP_VIRTUAL_BASE = 1ULL << 62;
 // graph_classify_tensor can tell an internal producer's output from a boundary
 // tensor by address-range containment alone, and the Definition stores them as
 // offsets. That classification is only sound while the range is disjoint from
-// every graph-heap address, which PTO2TaskAllocator::init() asserts, and from
+// every graph-heap address, which TaskAllocator::init() asserts, and from
 // every real device address, which the two asserts in the host's bind path
 // (the acquired heap base, and each caller tensor as it enters device_args)
 // keep below HEAP_VIRTUAL_BASE.
@@ -191,7 +191,7 @@ typedef enum {
 /**
  * Result of a unified task allocation.
  */
-struct PTO2TaskAllocResult {
+struct TaskAllocResult {
     int32_t task_id;    // Absolute task ID (not wrapped)
     int32_t slot;       // task_id & (window_size - 1)
     void *packed_base;  // Heap allocation result (nullptr if failure)
@@ -428,9 +428,8 @@ struct TaskPayload {
      * @param args                Task arguments (tensors + scalars)
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
-    void init(
-        const CoreTaskArgs &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout
-    ) {
+    void
+    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, PTO2OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 

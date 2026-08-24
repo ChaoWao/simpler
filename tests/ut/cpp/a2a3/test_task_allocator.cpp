@@ -9,13 +9,13 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2TaskAllocator from ring_buffer.h
+ * Unit tests for TaskAllocator from ring_buffer.h
  *
  * Tests ring buffer allocation, heap bump logic, wrap-around, alignment,
  * task window flow control, and heap_available semantics.
  *
  * The allocator is single-threaded (orchestrator thread), so no concurrency
- * tests are needed. The unified PTO2TaskAllocator replaces the previous
+ * tests are needed. The unified TaskAllocator replaces the previous
  * separate ChipHeapRing + ChipTaskRing.
  *
  * Design contracts (try_bump_heap):
@@ -79,7 +79,7 @@ protected:
     std::atomic<int32_t> current_index{0};
     std::atomic<int32_t> last_alive{0};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2TaskAllocator allocator{};
+    TaskAllocator allocator{};
 
     void SetUp() override {
         descriptors.assign(WINDOW_SIZE, TaskDescriptor{});

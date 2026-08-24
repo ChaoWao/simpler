@@ -143,7 +143,7 @@ typedef enum {
 /**
  * Result of a unified task allocation.
  */
-struct PTO2TaskAllocResult {
+struct TaskAllocResult {
     int32_t task_id;    // Absolute task ID (not wrapped)
     int32_t slot;       // task_id & (window_size - 1)
     void *packed_base;  // Heap allocation result (nullptr if failure)
@@ -374,9 +374,8 @@ struct TaskPayload {
      * @param args                Task arguments (tensors + scalars)
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
-    void init(
-        const CoreTaskArgs &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout
-    ) {
+    void
+    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, PTO2OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 

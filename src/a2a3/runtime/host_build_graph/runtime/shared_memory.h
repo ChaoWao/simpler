@@ -56,11 +56,11 @@ struct alignas(64) ChipRingFlowControl {
     // slots and has nothing to publish back.
     alignas(64) std::atomic<int32_t> current_task_index;  // Task ring head (next to allocate)
 
-    // Per-boot SM reset. PTO2TaskAllocator::init() seeds its private
+    // Per-boot SM reset. TaskAllocator::init() seeds its private
     // local_task_id_ to 0 *without* dereferencing current_task_index — it
     // relies on this reset running on every AICPU boot so 0 stays in sync. If
     // you ever change the initial fc value or the boot ordering, update
-    // PTO2TaskAllocator::init (ring_buffer.h) in the same change, or
+    // TaskAllocator::init (ring_buffer.h) in the same change, or
     // submit IDs will be off by the divergence.
     void init() { current_task_index.store(0, std::memory_order_relaxed); }
 

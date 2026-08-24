@@ -225,7 +225,7 @@ They exist only to classify `OWN_OUTPUT` and `INTERNAL` Tensor sources and are
 converted to offsets in the Definition; they are never dereferenced or placed
 on the wire. Classification is by address-range containment alone, so it is only
 sound while no real heap address can fall in that range:
-`PTO2TaskAllocator::init()` asserts the whole configured heap lies below
+`TaskAllocator::init()` asserts the whole configured heap lies below
 `GRAPH_RECORD_VIRTUAL_BASE`, which makes an overlapping device GM heap a loud
 failure at setup instead of a silently misclassified Tensor source. Recording
 therefore leaves the shared task allocator unchanged.
@@ -371,7 +371,7 @@ records on either side of H2D.
 Internal nodes consume no ring task-window slots. Their descriptor, payload, slot
 state, and argument pools live in the tail of the outer `GRAPH` task's own heap block,
 past `required_heap`: `[GraphExecution][GraphNodeStorage...][tensor pool][scalar pool]`. One
-`PTO2TaskAllocator::alloc` covers both the packed outputs and this execution storage,
+`TaskAllocator::alloc` covers both the packed outputs and this execution storage,
 so they are reclaimed together without a separate device allocation or release path.
 
 A node payload holds no argument array of its own — it names each region by a delta,

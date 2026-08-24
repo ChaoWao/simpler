@@ -13,5 +13,5 @@
 // dependencies are position-independent local-id integers on the payload and
 // readiness is derived from the ring completion_flags. The pool ring buffers
 // (PTO2FaninPool / PTO2DepListPool) that once lived here are gone, so this
-// translation unit carries no definitions. PTO2TaskAllocator's methods are
+// translation unit carries no definitions. TaskAllocator's methods are
 // defined inline in ring_buffer.h.

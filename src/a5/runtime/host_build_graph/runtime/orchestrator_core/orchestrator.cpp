@@ -1218,7 +1218,7 @@ static bool append_fanin_or_fail(
 
 struct PreparedTask {
     TaskId task_id = TaskId::invalid();
-    PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
+    TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
     TaskDescriptor *task = nullptr;
     TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
@@ -1790,7 +1790,7 @@ bool graph_submit_outer(
     };
     const int32_t tensormap_needed = count_registrable_outputs(boundary_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) return false;
-    const PTO2TaskAllocResult allocation = allocator.alloc(defer_heap ? 0 : owned_heap);
+    const TaskAllocResult allocation = allocator.alloc(defer_heap ? 0 : owned_heap);
     if (allocation.failed()) {
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;

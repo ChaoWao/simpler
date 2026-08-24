@@ -97,7 +97,7 @@ bool PTO2FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
             } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                 publication_request.request();
             }
-            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
                 LOG_ERROR("========================================");
                 LOG_ERROR("FATAL: Fanin Spill Pool Deadlock Detected!");
@@ -244,7 +244,7 @@ bool PTO2DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed,
             // (2) Wall-clock backstop for the residual case the head test cannot
             // prove. Absolute time (get_sys_cnt_aicpu is an MMIO read), sampled
             // once per 1024 spins.
-            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/false);
                 latch_pool_error(error_code_ptr, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
                 return false;

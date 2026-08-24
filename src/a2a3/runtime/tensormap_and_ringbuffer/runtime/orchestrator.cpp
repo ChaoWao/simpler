@@ -539,7 +539,7 @@ static void scope_tasks_push(OrchestratorState *orch, ChipTaskSlotState *task_sl
 
 struct PreparedTask {
     TaskId task_id = TaskId::invalid();
-    PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
+    TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
     TaskDescriptor *task = nullptr;
     TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
@@ -559,7 +559,7 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
     return layout;
 }
 
-static bool check_scope_can_accept_task(OrchestratorState *orch, PTO2TaskAllocator &allocator, uint8_t ring_id) {
+static bool check_scope_can_accept_task(OrchestratorState *orch, TaskAllocator &allocator, uint8_t ring_id) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
 
     int32_t scope_task_count = orch->scope_tasks_size - orch->scope_begins[orch->scope_stack_top];
@@ -852,7 +852,7 @@ static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            } else if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 LOG_ERROR("========================================");
                 LOG_ERROR("FATAL: TensorMap Entry Pool Deadlock Detected!");
                 LOG_ERROR("========================================");

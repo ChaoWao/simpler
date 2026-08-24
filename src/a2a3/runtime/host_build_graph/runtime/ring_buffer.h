@@ -50,7 +50,7 @@
  * request that does not fit can never become satisfiable by waiting — alloc()
  * reports the exhausted resource and fails on the spot.
  */
-class PTO2TaskAllocator {
+class TaskAllocator {
 public:
     /**
      * Initialize the allocator with task ring and heap ring resources.
@@ -100,7 +100,7 @@ public:
      * @param output_size  Total packed output size in bytes (0 = no heap needed)
      * @return Allocation result; check failed() for errors
      */
-    PTO2TaskAllocResult alloc(int32_t output_size) {
+    TaskAllocResult alloc(int32_t output_size) {
         uint64_t aligned_size =
             output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
 

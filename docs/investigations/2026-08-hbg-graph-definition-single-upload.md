@@ -136,7 +136,7 @@ cost is excluded. Worth doing, but it is not where the 12 ms lives.
 **Where the 12 ms does live.** The one-time 12.19 ms is the 53 MB of
 execution-storage allocation and zeroing. Its lifetime is exactly that of the
 outer GRAPH task's packed output buffer, so it can come from the same
-`PTO2TaskAllocator::alloc` call as the outputs instead of a separate retained
+`TaskAllocator::alloc` call as the outputs instead of a separate retained
 `rtMalloc` — removing both the allocations and the memsets, and making cold
 start converge with steady state. That is a separate change; this amendment only
 records why it, and not batching, is the one that moves the 12 ms.

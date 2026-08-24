@@ -62,7 +62,7 @@ struct OrchestratorState {
 
     // === TASK / HEAP ALLOCATION ===
     // hbg is single-ring, so one allocator covers the whole graph.
-    PTO2TaskAllocator task_allocator;
+    TaskAllocator task_allocator;
     std::unique_ptr<uint32_t[]> fanin_seen_epoch;
     uint32_t fanin_seen_current_epoch{1};
 
