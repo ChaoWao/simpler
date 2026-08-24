@@ -432,7 +432,7 @@ static bool all_claimed_fanin_allow_early_resolve(const PTO2FaninBuilder &fanin_
 }
 
 void PTO2OrchestratorState::mark_dep_pool_position(ChipTaskSlotState &slot_state) {
-    PTO2SchedulerState *sched = scheduler;
+    SchedulerState *sched = scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
     slot_state.dep_pool_mark = rss.dep_pool.top;
 #if SIMPLER_DFX
@@ -443,7 +443,7 @@ void PTO2OrchestratorState::mark_dep_pool_position(ChipTaskSlotState &slot_state
 }
 
 void PTO2OrchestratorState::wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin) {
-    PTO2SchedulerState *sched = scheduler;
+    SchedulerState *sched = scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
     TaskPayload *payload = slot_state.payload;
     slot_state.fanin_count = wfanin + 1;
@@ -517,7 +517,7 @@ static ChipTaskSlotState *oldest_open_task_on_current_ring(const PTO2Orchestrato
 }
 
 static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, ChipTaskSlotState &slot_state, int32_t wfanin) {
-    PTO2SchedulerState *sched = orch->scheduler;
+    SchedulerState *sched = orch->scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
 
     // dep_pool is orchestrator-exclusive (no lock). ensure_space waits for the
@@ -893,7 +893,7 @@ static TaskOutputTensors submit_task_common(
         return result;
     }
     uint8_t ring_id = prepared.task_id.ring();
-    PTO2SchedulerState *sched = orch->scheduler;
+    SchedulerState *sched = orch->scheduler;
     PTO2RingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
     TaskId task_id = prepared.task_id;
     ChipTaskSlotState &cur_slot_state = *prepared.slot_state;

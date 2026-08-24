@@ -80,7 +80,7 @@ struct PTO2OrchestratorState {
     // === SCHEDULER REFERENCE ===
     // Note: In simulated mode, orchestrator and scheduler share address space
     // In real mode, they communicate via shared memory only
-    PTO2SchedulerState *scheduler;  // For simulated mode only
+    SchedulerState *scheduler;  // For simulated mode only
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -138,10 +138,9 @@ struct PTO2OrchestratorState {
     //
     // Returns false when an allocation fails; the caller then has no hazard map
     // and must not orchestrate.
-    bool
-    init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler);
+    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler);
 
-    void set_scheduler(PTO2SchedulerState *scheduler);
+    void set_scheduler(SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
     void end_scope();

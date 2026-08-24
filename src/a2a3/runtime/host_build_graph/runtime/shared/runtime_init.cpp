@@ -41,7 +41,7 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
 
 // Initialize the queue header only. slots[] carries the sequence ramp push
 // compares against, but it lives past the uploaded range and is seeded on the
-// device by PTO2SchedulerState::seed_queue_slots(), so nothing writes it here.
+// device by SchedulerState::seed_queue_slots(), so nothing writes it here.
 void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity) {
     queue->capacity = capacity;
     queue->mask = capacity - 1;
@@ -63,7 +63,7 @@ void ready_queue_destroy(PTO2ReadyQueue *queue) {
 // Scheduler
 // =============================================================================
 
-bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
+bool SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
     ring = sm_layout::ring_header_addr(sm_dev_base);
@@ -76,10 +76,10 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     return true;
 }
 
-void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
+void SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
-PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
-    PTO2SchedulerLayout layout{};
+SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
+    SchedulerLayout layout{};
     layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
 
     // Fixed-capacity early-dispatch queues first, then the PTO2_READY_QUEUE_SIZE
@@ -103,10 +103,8 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
     return layout;
 }
 
-bool PTO2SchedulerState::init_data_from_layout(
-    const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base
-) {
-    PTO2SchedulerState *sched = this;
+bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base) {
+    SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
@@ -141,8 +139,8 @@ bool PTO2SchedulerState::init_data_from_layout(
 // wire_arena_pointers / destroy — a queue whose slots[] is never seeded accepts
 // one push and then reports full, since push claims a slot only when its
 // sequence already equals the position being claimed.
-void PTO2SchedulerState::seed_queue_slots() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::seed_queue_slots() {
+    SchedulerState *sched = this;
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_queues[i].seed_slots();
     }
@@ -158,8 +156,8 @@ void PTO2SchedulerState::seed_queue_slots() {
     sched->early_sync_start_queue.seed_slots();
 }
 
-void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena) {
+    SchedulerState *sched = this;
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
@@ -177,8 +175,8 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
 }
 
-void PTO2SchedulerState::destroy() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::destroy() {
+    SchedulerState *sched = this;
     sched->ring_sched_state.destroy();
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
@@ -200,7 +198,7 @@ void PTO2SchedulerState::destroy() {
 // =============================================================================
 
 bool PTO2OrchestratorState::init(
-    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler_arg
+    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
     *orch = PTO2OrchestratorState{};
@@ -245,7 +243,7 @@ bool PTO2OrchestratorState::init(
     return true;
 }
 
-void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this->scheduler = scheduler; }
+void PTO2OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena
@@ -265,8 +263,8 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
     // begin where it ends, making the two adjacent and the upload one copy.
     layout.off_sm_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
-    layout.off_scheduler = arena.reserve(sizeof(PTO2SchedulerState), alignof(PTO2SchedulerState));
-    layout.sched = PTO2SchedulerState::reserve_layout(arena);
+    layout.off_scheduler = arena.reserve(sizeof(SchedulerState), alignof(SchedulerState));
+    layout.sched = SchedulerState::reserve_layout(arena);
 
     layout.off_copied_begin = arena.total_size();
     // Padded to a PTO2_ALIGN_SIZE boundary: the shared-memory image starts at
@@ -319,7 +317,7 @@ RuntimeContext *runtime_init_data_from_layout(
 void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
     rt->sm_handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
-    rt->scheduler = static_cast<PTO2SchedulerState *>(arena.region_ptr(layout.off_scheduler));
+    rt->scheduler = static_cast<SchedulerState *>(arena.region_ptr(layout.off_scheduler));
     rt->scheduler->wire_arena_pointers(layout.sched, arena);
 }
 

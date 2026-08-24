@@ -102,7 +102,7 @@ reserves them in this order:
 
 | Zone | Regions | Copied | Allocated on device | Written by |
 | ---- | ------- | ------ | ------------------- | ---------- |
-| device-only | `sm_handle`, the completion mailbox, `PTO2SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
+| device-only | `sm_handle`, the completion mailbox, `SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
 | copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | yes | host |
 
 The copied zone comes last, so `bind` is a single contiguous `copy_to_device`
@@ -122,7 +122,7 @@ putting an owning member back inside it. The one orchestrator value the device-s
 scheduler reads, the count of tasks completed inline during orchestration, is a
 scalar `rt_orchestration_done` publishes into the runtime header.
 
-**Why the scheduler state is device-written.** `PTO2SchedulerState` holds no
+**Why the scheduler state is device-written.** `SchedulerState` holds no
 per-run content: `sm_header` and the ring pointer derive from a pooled SM base,
 queue capacities are compile-time constants, hbg never advances
 `last_task_alive`, and it has no host-side entry point at all. So the host would
@@ -137,7 +137,7 @@ when that slot's `sequence` already equals `pos`, so an empty queue is a
 match and every later position reads a lower sequence, which is the full-queue
 signal, so such a queue accepts one push and then reports full. The ramp is
 mandatory but it is a function of `capacity` alone, so
-`PTO2SchedulerState::seed_queue_slots()` writes it on the device rather than `bind`
+`SchedulerState::seed_queue_slots()` writes it on the device rather than `bind`
 shipping 1,775,616 bytes of it. The ready queues are still *not* bounded to
 `total_tasks`: graph execution expands a GRAPH task into on-device nodes that push
 past the host task count, so every slot must carry a valid sequence.

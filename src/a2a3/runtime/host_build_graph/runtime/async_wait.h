@@ -22,7 +22,7 @@
 #include "completion_token.h"
 #include "runtime_types.h"
 
-struct PTO2SchedulerState;
+struct SchedulerState;
 struct CompletionStats;
 
 inline constexpr int32_t MAX_ASYNC_WAITS = 64;
@@ -172,7 +172,7 @@ struct AsyncWaitList {
     // NotDeferred tasks inline (without storing a transient entry in
     // entries[]).
     struct DrainCompletionSink {
-        PTO2SchedulerState *sched{nullptr};
+        SchedulerState *sched{nullptr};
         int32_t inline_completed{0};
         int32_t inline_resolved{0};
         int32_t error_code{SIMPLER_ERROR_NONE};
@@ -293,7 +293,7 @@ struct AsyncWaitList {
 
     template <bool Profiling>
     AsyncPollResult poll_and_complete(
-        AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched
+        AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx

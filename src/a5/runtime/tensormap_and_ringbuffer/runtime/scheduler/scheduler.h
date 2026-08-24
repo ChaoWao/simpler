@@ -41,8 +41,8 @@
 
 #if SIMPLER_SCHED_PROFILING
 #include "aicpu/device_time.h"
-#define PTO2_SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
-#define PTO2_SCHED_CYCLE_LAP(acc)   \
+#define SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
+#define SCHED_CYCLE_LAP(acc)        \
     do {                            \
         _st1 = get_sys_cnt_aicpu(); \
         acc += (_st1 - _st0);       \
@@ -420,11 +420,11 @@ struct CompletionStats {
 };
 
 /**
- * Layout descriptor produced by PTO2SchedulerState::reserve_layout(). Holds
+ * Layout descriptor produced by SchedulerState::reserve_layout(). Holds
  * the arena offsets of every sub-region the scheduler needs plus the
  * capacities used at layout time (init_data_from_layout reuses them).
  */
-struct PTO2SchedulerLayout {
+struct SchedulerLayout {
     size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
@@ -442,7 +442,7 @@ struct PTO2SchedulerLayout {
  * Separated from shared memory for cache efficiency.
  * Hot-path methods are defined inline (implicitly inline as member functions).
  */
-struct PTO2SchedulerState {
+struct SchedulerState {
     // Shared memory access
     SharedMemoryHeader *sm_header;
 
@@ -1178,7 +1178,7 @@ struct PTO2SchedulerState {
         extern uint64_t g_sched_lock_atomic_count[], g_sched_lock_wait_cycle[];
         extern uint64_t g_sched_fanout_atomic_count[], g_sched_push_wait_cycle[];
         uint64_t lock_atomics = 0, lock_wait = 0;
-        PTO2_SCHED_CYCLE_START();
+        SCHED_CYCLE_START();
 #endif
 
 #if SIMPLER_SCHED_PROFILING
@@ -1194,7 +1194,7 @@ struct PTO2SchedulerState {
         lock_atomics += 3;  // task_state.store + lifecycle_flags.fetch_or + unlock.store
         g_sched_lock_atomic_count[thread_idx] += lock_atomics;
         g_sched_lock_wait_cycle[thread_idx] += lock_wait;
-        PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
         // Fanout: notify consumers
@@ -1222,7 +1222,7 @@ struct PTO2SchedulerState {
 #if SIMPLER_SCHED_PROFILING
         g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;
         g_sched_push_wait_cycle[thread_idx] += push_wait;
-        PTO2_SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
         return stats;
 #else
         return consumer_walk_count;
@@ -1237,7 +1237,7 @@ struct PTO2SchedulerState {
 
 #if SIMPLER_SCHED_PROFILING
     int32_t on_task_release(ChipTaskSlotState &slot_state, int32_t thread_idx) {
-        PTO2_SCHED_CYCLE_START();
+        SCHED_CYCLE_START();
         extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
         extern uint64_t g_sched_self_atomic_count[];
         extern uint64_t g_sched_self_consumed_cycle[];
@@ -1265,7 +1265,7 @@ struct PTO2SchedulerState {
         });
 #if SIMPLER_SCHED_PROFILING
         g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
-        PTO2_SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
 #endif
 
         // Self consumed check
@@ -1273,7 +1273,7 @@ struct PTO2SchedulerState {
         uint64_t self_atomics = 0;
         check_and_handle_consumed(slot_state, self_atomics);
         g_sched_self_atomic_count[thread_idx] += self_atomics;
-        PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
         g_sched_complete_count[thread_idx]++;
 #else
         check_and_handle_consumed(slot_state);
@@ -1287,9 +1287,8 @@ struct PTO2SchedulerState {
     // per-ring dep_pool entries) on the supplied arena.
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
-    static PTO2SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
-    static PTO2SchedulerLayout
-    reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
+    static SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
+    static SchedulerLayout reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never
@@ -1298,14 +1297,14 @@ struct PTO2SchedulerState {
     // task_window_size for ring task_descriptors address arithmetic; the
     // scheduler only needs the SM header / ring header base addresses,
     // both window-size-independent.)
-    bool init_data_from_layout(const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
-    void reset_for_reuse(const PTO2SchedulerLayout &layout, void *sm_dev_base);
+    bool init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
+    void reset_for_reuse(const SchedulerLayout &layout, void *sm_dev_base);
 
     // Phase 3b: write the arena-internal pointer fields
     // (ready_queues[].slots, dummy_ready_queue.slots, and dep_pool base plus
     // reclaim-publication pointers for each ring). Called on both host and
     // device sides.
-    void wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena);
+    void wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena);
 
     // Forget per-region pointers; arena owns the backing memory.
     void destroy();
@@ -1313,7 +1312,7 @@ struct PTO2SchedulerState {
     void print_queues();
 };
 
-// Scheduler cold-path API is declared as PTO2SchedulerState member functions.
+// Scheduler cold-path API is declared as SchedulerState member functions.
 // See init()/destroy()/print_stats()/print_queues() below the struct definition.
 
 // Short-circuit NotDeferred completions seen during drain so they don't grow
@@ -1343,8 +1342,8 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
-    AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
+    AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched, ChipTaskSlotState **deferred_release_slot_states,
+    int32_t &deferred_release_count, int32_t deferred_release_capacity
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1423,7 +1422,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 // =============================================================================
 
 #if SIMPLER_SCHED_PROFILING
-struct PTO2SchedProfilingData {
+struct SchedProfilingData {
     // Sub-phase cycle breakdown within on_task_complete
     uint64_t lock_cycle;           // lock_fanout + state store + unlock
     uint64_t fanout_cycle;         // fanout traversal
@@ -1449,5 +1448,5 @@ struct PTO2SchedProfilingData {
  * Get and reset scheduler profiling data for a specific thread.
  * Returns accumulated profiling data and resets counters.
  */
-PTO2SchedProfilingData scheduler_get_profiling(int thread_idx);
+SchedProfilingData scheduler_get_profiling(int thread_idx);
 #endif

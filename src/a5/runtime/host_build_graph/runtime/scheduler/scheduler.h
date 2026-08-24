@@ -45,8 +45,8 @@
 
 #include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
 #if SIMPLER_SCHED_PROFILING
-#define PTO2_SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
-#define PTO2_SCHED_CYCLE_LAP(acc)   \
+#define SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
+#define SCHED_CYCLE_LAP(acc)        \
     do {                            \
         _st1 = get_sys_cnt_aicpu(); \
         acc += (_st1 - _st0);       \
@@ -448,11 +448,11 @@ struct CompletionStats {
 };
 
 /**
- * Layout descriptor produced by PTO2SchedulerState::reserve_layout(). Holds
+ * Layout descriptor produced by SchedulerState::reserve_layout(). Holds
  * the arena offsets of every sub-region the scheduler needs plus the
  * capacities used at layout time (init_from_layout reuses them).
  */
-struct PTO2SchedulerLayout {
+struct SchedulerLayout {
     size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
@@ -470,7 +470,7 @@ struct PTO2SchedulerLayout {
  * Separated from shared memory for cache efficiency.
  * Hot-path methods are defined inline (implicitly inline as member functions).
  */
-struct PTO2SchedulerState {
+struct SchedulerState {
     // Shared memory access
     SharedMemoryHeader *sm_header;
 
@@ -1166,7 +1166,7 @@ struct PTO2SchedulerState {
     // per-ring dep_pool entries) on the supplied arena.
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
-    static PTO2SchedulerLayout reserve_layout(DeviceArena &arena);
+    static SchedulerLayout reserve_layout(DeviceArena &arena);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never
@@ -1175,12 +1175,12 @@ struct PTO2SchedulerState {
     // task_window_size for ring task_descriptors address arithmetic; the
     // scheduler only needs the SM header / ring header base addresses,
     // both window-size-independent.)
-    bool init_data_from_layout(const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
+    bool init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
 
     // Phase 3b: write the arena-internal pointer fields
     // (ready_queues[].slots, dummy_ready_queue.slots, dep_pool.base for each
     // ring). Called on both host and device sides.
-    void wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena);
+    void wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena);
 
     // Phase 3c, device only: bring every queue's slots[] to its empty ramp. The
     // slot arrays sit past the uploaded range, so this is the only thing that
@@ -1195,12 +1195,12 @@ struct PTO2SchedulerState {
     void print_queues();
 };
 
-// Scheduler cold-path API is declared as PTO2SchedulerState member functions.
+// Scheduler cold-path API is declared as SchedulerState member functions.
 // See init()/destroy()/print_stats()/print_queues() below the struct definition.
 
 // try_inline_complete_locked: short-circuit NotDeferred completions seen during
 // drain so they don't grow entries[]. Defined here (not in async_wait.h)
-// because PTO2SchedulerState's on_task_complete signature is only known
+// because SchedulerState's on_task_complete signature is only known
 // after its full definition above.
 //
 // Polling: on_task_complete publishes completion + drains the wake list inline,
@@ -1210,9 +1210,9 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
     // Return value (CompletionStats / consumer-walk count) discarded:
     // async-wait drain path has no Resolve swimlane bar attached.
 #if SIMPLER_SCHED_PROFILING
-    PTO2SchedulerState::TaskCompletionOutcome outcome = sink.sched->complete_task(slot_state, sink.thread_idx);
+    SchedulerState::TaskCompletionOutcome outcome = sink.sched->complete_task(slot_state, sink.thread_idx);
 #else
-    PTO2SchedulerState::TaskCompletionOutcome outcome = sink.sched->complete_task(slot_state);
+    SchedulerState::TaskCompletionOutcome outcome = sink.sched->complete_task(slot_state);
 #endif
     if (outcome.error_code != SIMPLER_ERROR_NONE) {
         sink.error_code = outcome.error_code;
@@ -1225,7 +1225,7 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
-    AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched
+    AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1281,9 +1281,9 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
             // Return value (CompletionStats / consumer-walk count) discarded:
             // deferred-completion drain has no Resolve swimlane bar attached.
 #if SIMPLER_SCHED_PROFILING
-            PTO2SchedulerState::TaskCompletionOutcome outcome = sched->complete_task(*entry.slot_state, thread_idx);
+            SchedulerState::TaskCompletionOutcome outcome = sched->complete_task(*entry.slot_state, thread_idx);
 #else
-            PTO2SchedulerState::TaskCompletionOutcome outcome = sched->complete_task(*entry.slot_state);
+            SchedulerState::TaskCompletionOutcome outcome = sched->complete_task(*entry.slot_state);
 #endif
             if (outcome.error_code != SIMPLER_ERROR_NONE) {
                 result.error_code = outcome.error_code;
@@ -1310,7 +1310,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 // =============================================================================
 
 #if SIMPLER_SCHED_PROFILING
-struct PTO2SchedProfilingData {
+struct SchedProfilingData {
     // Sub-phase cycle breakdown within on_task_complete
     uint64_t lock_cycle;           // lock_fanout + state store + unlock
     uint64_t fanout_cycle;         // fanout traversal
@@ -1336,5 +1336,5 @@ struct PTO2SchedProfilingData {
  * Get and reset scheduler profiling data for a specific thread.
  * Returns accumulated profiling data and resets counters.
  */
-PTO2SchedProfilingData scheduler_get_profiling(int thread_idx);
+SchedProfilingData scheduler_get_profiling(int thread_idx);
 #endif

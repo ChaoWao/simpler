@@ -596,7 +596,7 @@ TEST(GraphExecutionActivationState, RetriesDoNotClearReadiness) {
 }
 
 TEST(GraphExecutionActivationState, ExternalReadyBeforePrepareActivatesAtMeet) {
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     GraphExecution execution{};
     ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
@@ -614,7 +614,7 @@ TEST(GraphExecutionActivationState, ExternalReadyBeforePrepareActivatesAtMeet) {
 }
 
 TEST(GraphExecutionActivationState, PrepareBeforeExternalReadyActivatesAtMeet) {
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     GraphExecution execution{};
     ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
@@ -636,7 +636,7 @@ TEST(GraphExecutionErrors, ReadyQueueOverflowHasTriageText) {
 
 TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
     SharedMemoryHeader header{};
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     scheduler.sm_header = &header;
     PTO2ReadyQueueSlot queue_slots[2]{};
     queue_slots[0].sequence.store(0, std::memory_order_relaxed);
@@ -660,7 +660,7 @@ TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
 
 TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
     SharedMemoryHeader header{};
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     scheduler.sm_header = &header;
     PTO2ReadyQueueSlot queue_slots[2]{};
     queue_slots[0].sequence.store(0, std::memory_order_relaxed);
@@ -682,18 +682,18 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
 }
 
 TEST(GraphExecutionErrors, InvalidNodeCompletionIsReported) {
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     ChipTaskSlotState slot{};
     slot.task_kind = TaskKind::GRAPH_NODE;
 
-    const PTO2SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
+    const SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
 
     EXPECT_EQ(outcome.error_code, SIMPLER_ERROR_INVALID_ARGS);
     EXPECT_EQ(outcome.stream_tasks_completed, 0);
 }
 
 TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
-    PTO2SchedulerState scheduler{};
+    SchedulerState scheduler{};
     GraphDefinition definition{};
     GraphNodeStorage node{};
     GraphExecution execution{};

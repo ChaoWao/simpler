@@ -119,7 +119,7 @@ struct RuntimeOps {
  */
 struct RuntimeArenaLayout {
     size_t off_sm_handle{0};
-    PTO2SchedulerLayout sched;
+    SchedulerLayout sched;
     size_t off_scheduler{0};
     size_t off_runtime{0};
     size_t off_mailbox{0};
@@ -179,7 +179,7 @@ struct RuntimeContext {
     PTO2OrchestratorState *orchestrator;
     // Device-only zone: the scheduler state holds no per-run content, so it is
     // addressed through the arena rather than carried inside this header.
-    PTO2SchedulerState *scheduler;
+    SchedulerState *scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
 
     // Mode

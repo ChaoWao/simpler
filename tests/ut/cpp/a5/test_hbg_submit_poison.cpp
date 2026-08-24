@@ -48,8 +48,8 @@ protected:
     DeviceArena runtime_arena;
     SharedMemoryHandle *sm_handle = nullptr;
     PTO2OrchestratorState orch{};
-    PTO2SchedulerState sched{};
-    PTO2SchedulerLayout sched_layout{};
+    SchedulerState sched{};
+    SchedulerLayout sched_layout{};
     std::vector<char> gm_heap;
 
     void SetUp() override {
@@ -57,7 +57,7 @@ protected:
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(4096);
 
-        sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
+        sched_layout = SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));

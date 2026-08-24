@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2SchedulerState from scheduler.h
+ * Unit tests for SchedulerState from scheduler.h
  *
  * Tests task state transitions, fanin/fanout logic, subtask completion.
  */
@@ -53,7 +53,7 @@ TEST(SyncStartDrainAttemptTest, LateAckCannotSatisfyNextAttemptBarrier) {
 
 class SchedulerStateTest : public ::testing::Test {
 protected:
-    PTO2SchedulerState sched;
+    SchedulerState sched;
     SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
@@ -68,7 +68,7 @@ protected:
     void SetUp() override {
         sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
+        auto layout = SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(layout, sched_arena, sm_handle->header));
         sched.wire_arena_pointers(layout, sched_arena);
@@ -130,7 +130,7 @@ protected:
 
     void setup_ring_for_reclaim_race(int32_t ring_id, int32_t current_task_index, int32_t blocked_task_id) {
         SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
-        PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+        SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
 
         ring.fc.current_task_index.store(current_task_index, std::memory_order_release);
         ring.fc.last_task_alive.store(0, std::memory_order_release);
@@ -146,7 +146,7 @@ protected:
 
     void setup_contended_head_case(int32_t ring_id, int32_t head_task_id) {
         SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
-        PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+        SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
         ring.fc.current_task_index.store(head_task_id + 2, std::memory_order_release);
         ring.fc.last_task_alive.store(head_task_id, std::memory_order_release);
         ring_sched.last_task_alive = head_task_id;
@@ -185,9 +185,9 @@ TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
     setup_ring_for_reclaim_race(ring_id, /*current_task_index=*/1, head_task_id);
 
     SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
-    PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+    SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
     ChipTaskSlotState &head = ring.get_slot_state_by_task_id(head_task_id);
-    uint32_t pending_bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
+    uint32_t pending_bit = SchedulerState::ring_advance_pending_bit(ring_id);
 
     ring_sched.advance_lock.store(1, std::memory_order_release);
     std::thread unlocker([&]() {
@@ -231,9 +231,9 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances)
     setup_contended_head_case(ring_id, head_task_id);
 
     SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
-    PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+    SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
     ChipTaskSlotState &head = ring.get_slot_state_by_task_id(head_task_id);
-    uint32_t pending_bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
+    uint32_t pending_bit = SchedulerState::ring_advance_pending_bit(ring_id);
 
     ring_sched.advance_lock.store(1, std::memory_order_release);
     sched.check_and_handle_consumed(head);
@@ -262,7 +262,7 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadIdleDrainStress) {
             setup_contended_head_case(ring_id, head_task_id);
 
             SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
-            PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+            SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
             ChipTaskSlotState &head = ring.get_slot_state_by_task_id(head_task_id);
 
             ring_sched.advance_lock.store(1, std::memory_order_release);

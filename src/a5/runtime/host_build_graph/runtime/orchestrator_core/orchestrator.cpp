@@ -1460,7 +1460,7 @@ static TaskOutputTensors submit_task_common(
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
-    PTO2SchedulerState *sched = orch->scheduler;
+    SchedulerState *sched = orch->scheduler;
     TaskId task_id = prepared.task_id;
     TaskDescriptor &task = *prepared.task;
     TaskPayload &payload = *prepared.payload;

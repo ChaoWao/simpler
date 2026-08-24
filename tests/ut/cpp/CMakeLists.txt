@@ -1004,7 +1004,7 @@ add_a5_hbg_runtime_test(test_a5_graph_cache common/test_hbg_graph_cache.cpp)
 target_sources(test_a5_graph_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/graph_execution.cpp
 )
-# Incremental-activation tests init a real PTO2SchedulerState (ready queues), so
+# Incremental-activation tests init a real SchedulerState (ready queues), so
 # they link the scheduler + shared runtime out-of-line members.
 add_a2a3_hbg_runtime_test(test_graph_activation a2a3/test_graph_activation.cpp)
 target_sources(test_graph_activation PRIVATE

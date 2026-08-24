@@ -142,7 +142,7 @@ private:
     // =========================================================================
 
     // --- Scheduler binding & per-core runtime state ---
-    alignas(64) PTO2SchedulerState *sched_{nullptr};
+    alignas(64) SchedulerState *sched_{nullptr};
     RuntimeContext *rt_{nullptr};
 
     // Per-core execution state, indexed by core_id (= worker_id)

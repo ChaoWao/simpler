@@ -85,7 +85,7 @@ void ready_queue_destroy(PTO2ReadyQueue *queue) {
 // Scheduler
 // =============================================================================
 
-bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base, int32_t ring_id) {
+bool SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base, int32_t ring_id) {
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
     ring = sm_layout::ring_header_addr(sm_dev_base, ring_id);
@@ -104,7 +104,7 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     return true;
 }
 
-void PTO2SchedulerState::RingSchedState::reset_for_reuse(
+void SchedulerState::RingSchedState::reset_for_reuse(
     void *sm_dev_base, int32_t ring_id, std::atomic<int32_t> *orch_err
 ) {
     ring = sm_layout::ring_header_addr(sm_dev_base, ring_id);
@@ -117,9 +117,9 @@ void PTO2SchedulerState::RingSchedState::reset_for_reuse(
 #endif
 }
 
-void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
+void SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
-PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity) {
+SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity) {
     int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         dep_pool_capacities[r] = dep_pool_capacity;
@@ -127,9 +127,9 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena, int32
     return reserve_layout(arena, dep_pool_capacities);
 }
 
-PTO2SchedulerLayout
-PTO2SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]) {
-    PTO2SchedulerLayout layout{};
+SchedulerLayout
+SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]) {
+    SchedulerLayout layout{};
     layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         layout.dep_pool_capacities[r] = dep_pool_capacities[r];
@@ -155,10 +155,8 @@ PTO2SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_ca
     return layout;
 }
 
-bool PTO2SchedulerState::init_data_from_layout(
-    const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base
-) {
-    PTO2SchedulerState *sched = this;
+bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base) {
+    SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
@@ -216,8 +214,8 @@ bool PTO2SchedulerState::init_data_from_layout(
     return true;
 }
 
-void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void *sm_dev_base) {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::reset_for_reuse(const SchedulerLayout &layout, void *sm_dev_base) {
+    SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
@@ -246,8 +244,8 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     (void)layout;
 }
 
-void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena) {
+    SchedulerState *sched = this;
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
@@ -267,8 +265,8 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     }
 }
 
-void PTO2SchedulerState::destroy() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::destroy() {
+    SchedulerState *sched = this;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         sched->ring_sched_states[r].destroy();
         sched->ring_sched_states[r].dep_pool.base = nullptr;
@@ -477,7 +475,7 @@ bool PTO2OrchestratorState::reset_for_reuse(
 }
 
 void PTO2OrchestratorState::wire_arena_pointers(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler_arg
+    const PTO2OrchestratorLayout &layout, DeviceArena &arena, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
@@ -501,7 +499,7 @@ void PTO2OrchestratorState::destroy() {
     orch->scope_begins = nullptr;
 }
 
-void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this->scheduler = scheduler; }
+void PTO2OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena
@@ -537,7 +535,7 @@ RuntimeArenaLayout runtime_reserve_layout(
         task_window_sizes_i32[r] = static_cast<int32_t>(task_window_sizes[r]);
     }
     layout.offsets.orch = PTO2OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
-    layout.offsets.sched = PTO2SchedulerState::reserve_layout(arena, dep_pool_capacities);
+    layout.offsets.sched = SchedulerState::reserve_layout(arena, dep_pool_capacities);
     layout.offsets.off_runtime = arena.reserve(sizeof(RuntimeContext), PTO2_ALIGN_SIZE);
     layout.offsets.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
 

@@ -114,7 +114,7 @@ enum class ResourceShape : uint8_t {
 
 // Number of *dispatchable* resource shapes (AIC, AIV, MIX). DUMMY does not
 // allocate a per-shape ready_queue entry / local buffer — it lives in a
-// dedicated queue inside PTO2SchedulerState.
+// dedicated queue inside SchedulerState.
 inline constexpr int32_t NUM_RESOURCE_SHAPES = 3;
 
 /**

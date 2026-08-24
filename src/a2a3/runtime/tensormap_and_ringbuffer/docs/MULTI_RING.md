@@ -126,7 +126,7 @@ struct SharedMemoryHandle {
 };
 ```
 
-### 4.5 PTO2SchedulerState (modified)
+### 4.5 SchedulerState (modified)
 
 ```cpp
 struct RingSchedState {

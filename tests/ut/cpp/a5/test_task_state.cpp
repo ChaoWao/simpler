@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for ChipTaskSlotState lifecycle through PTO2SchedulerState API.
+ * Unit tests for ChipTaskSlotState lifecycle through SchedulerState API.
  *
  * These tests drive state transitions via src methods (release_fanin,
  * on_subtask_complete, check_and_handle_consumed) rather than manually
@@ -33,7 +33,7 @@
 
 class TaskStateTest : public ::testing::Test {
 protected:
-    PTO2SchedulerState sched;
+    SchedulerState sched;
     SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
@@ -48,7 +48,7 @@ protected:
     void SetUp() override {
         sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
+        auto layout = SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(layout, sched_arena, sm_handle->header));
         sched.wire_arena_pointers(layout, sched_arena);

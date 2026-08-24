@@ -430,7 +430,7 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, int32_t cur
 
 #if SIMPLER_SCHED_PROFILING
     {
-        PTO2SchedProfilingData sp = scheduler_get_profiling(thread_idx);
+        SchedProfilingData sp = scheduler_get_profiling(thread_idx);
         uint64_t otc_total = sp.lock_cycle + sp.fanout_cycle + sp.fanin_cycle + sp.self_consumed_cycle;
         uint64_t complete_poll =
             (chip_swimlane.sched_complete_cycle > otc_total + chip_swimlane.sched_complete_perf_cycle) ?

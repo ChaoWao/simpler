@@ -617,7 +617,7 @@ void SchedulerContext::handle_drain_mode(
     bool coordinator = thread_idx == 0;
 
     ChipTaskSlotState *slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
-    bool gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
+    bool gated = slot_state->payload != nullptr && SchedulerState::owns_early_sync_drain(*slot_state->payload);
 
     if (coordinator) {
         ResourceShape shape = slot_state->active_mask.to_shape();
@@ -680,5 +680,5 @@ void SchedulerContext::handle_drain_mode(
     } else {
         sched_->propagate_dispatch_fanin(*slot_state);
     }
-    PTO2SchedulerState::finish_early_sync_drain(*slot_state->payload);
+    SchedulerState::finish_early_sync_drain(*slot_state->payload);
 }

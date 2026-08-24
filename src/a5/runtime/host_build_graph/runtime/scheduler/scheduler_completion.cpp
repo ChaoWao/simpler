@@ -682,7 +682,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // OWNER is acquired before the drain is published and persists through
     // completion, so every staging thread makes the same gate decision even if
     // producer release changes early_dispatch_state during the barrier.
-    bool gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
+    bool gated = slot_state->payload != nullptr && SchedulerState::owns_early_sync_drain(*slot_state->payload);
 
     if (coordinator) {
         ResourceShape shape = slot_state->active_mask.to_shape();
@@ -769,5 +769,5 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     } else {
         sched_->propagate_dispatch_fanin(*slot_state);
     }
-    PTO2SchedulerState::finish_early_sync_drain(*slot_state->payload);
+    SchedulerState::finish_early_sync_drain(*slot_state->payload);
 }

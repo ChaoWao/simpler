@@ -89,7 +89,7 @@ struct PTO2OrchestratorState {
     // === SCHEDULER STATE ACCESS ===
     // Same runtime-arena scheduler object; Orch-side wiring mutates dep_pool
     // and publishes ready tasks through it before scheduler workers dispatch.
-    PTO2SchedulerState *scheduler;
+    SchedulerState *scheduler;
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -169,11 +169,11 @@ struct PTO2OrchestratorState {
     // scope_begins, rings[].fanin_pool.base, tensor_map.{buckets,entry_pool,
     // free_entry_list,task_entry_heads}, scheduler reference).
     // Idempotent — host runs once on the image, AICPU runs once after attach.
-    void wire_arena_pointers(const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler);
+    void wire_arena_pointers(const PTO2OrchestratorLayout &layout, DeviceArena &arena, SchedulerState *scheduler);
 
     // Forget pointers; arena owns the backing buffers.
     void destroy();
-    void set_scheduler(PTO2SchedulerState *scheduler);
+    void set_scheduler(SchedulerState *scheduler);
     void mark_dep_pool_position(ChipTaskSlotState &slot_state);
     void wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);

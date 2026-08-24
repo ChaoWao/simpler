@@ -120,7 +120,7 @@ void SchedulerContext::build_payload(
     const CoreCallable *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
     dispatch_payload.function_bin_addr = callable->resolved_addr();
     auto &payload = *slot_state.payload;
-    if (PTO2SchedulerState::should_gate_early_dispatch(
+    if (SchedulerState::should_gate_early_dispatch(
             force_gate, payload.early_dispatch_state.load(std::memory_order_relaxed)
         )) {
         dispatch_payload.src_payload = reinterpret_cast<uint64_t>(&payload);
@@ -637,12 +637,12 @@ int32_t SchedulerContext::stage_consumer_blocks(
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             if (my_cores[w] != 0) {
                 owned[w] =
-                    PTO2SchedulerState::claim_late_staged_doorbell_bits(c->payload->staged_core_mask[w], my_cores[w]);
+                    SchedulerState::claim_late_staged_doorbell_bits(c->payload->staged_core_mask[w], my_cores[w]);
             }
         }
         for (int i = 0; i < n; i++) {
             int32_t cid = tracker.get_core_id_by_offset(handles[i].core_offset);
-            PTO2SchedulerState::ring_claimed_local_doorbell(
+            SchedulerState::ring_claimed_local_doorbell(
                 owned[cid >> 6], cid, handles[i].reg_addr, handles[i].reg_task_id
             );
         }
@@ -785,7 +785,7 @@ int32_t SchedulerContext::try_early_dispatch(
     if (ChipTaskSlotState *c = sched_->early_sync_start_queue.pop_tagged(&sync_task_id_snapshot)) {
         bool current_sync_task =
             static_cast<uint64_t>(c->task->task_id.raw) == sync_task_id_snapshot && c->task_attrs.requires_sync_start();
-        if (current_sync_task && PTO2SchedulerState::try_claim_early_sync_drain(*c->payload)) {
+        if (current_sync_task && SchedulerState::try_claim_early_sync_drain(*c->payload)) {
             if (c->payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_STAGING) {
                 sched_->cancel_early_sync_drain(*c);
             } else if (drain_state_.sync_start_pending.load(std::memory_order_acquire) == 0 &&
@@ -797,7 +797,7 @@ int32_t SchedulerContext::try_early_dispatch(
                 // payload becomes visible. Once staging starts, the local
                 // capacity invariant guarantees completion; never fall back
                 // after publishing a partial cohort.
-                PTO2SchedulerState::mark_early_sync_drain_armed(*c->payload);
+                SchedulerState::mark_early_sync_drain_armed(*c->payload);
                 always_assert(c->next_block_idx.load(std::memory_order_seq_cst) == 0);
                 SyncStartStageResult staged = stage_sync_start_cores(
                     c, c->logical_block_num, thread_idx, /*gated=*/true, /*record_drain_phases=*/false
@@ -807,10 +807,10 @@ int32_t SchedulerContext::try_early_dispatch(
                     static_cast<int16_t>(staged.running_cores), std::memory_order_seq_cst
                 );
                 sched_->retry_sync_start_rendezvous_after_staging(*c);
-                PTO2SchedulerState::finish_early_sync_drain(*c->payload);
+                SchedulerState::finish_early_sync_drain(*c->payload);
                 total_staged += staged.staged_blocks;
             } else if (enter_drain_mode(c, c->logical_block_num)) {
-                PTO2SchedulerState::mark_early_sync_drain_armed(*c->payload);
+                SchedulerState::mark_early_sync_drain_armed(*c->payload);
             } else {
                 sched_->cancel_early_sync_drain(*c);
             }
