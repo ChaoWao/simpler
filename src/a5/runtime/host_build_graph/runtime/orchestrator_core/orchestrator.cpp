@@ -233,7 +233,7 @@ __attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { retur
     } while (0)
 #endif
 
-static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) {
+static int32_t orch_mark_fatal(OrchestratorState *orch, int32_t error_code) {
     always_assert(orch != nullptr);
     orch->fatal = true;
     if (error_code == SIMPLER_ERROR_NONE || orch->sm_header == nullptr) {
@@ -249,7 +249,7 @@ static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) 
 }
 
 static void
-orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
+orch_report_fatal_v(OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
     int32_t latched_code = orch_mark_fatal(orch, error_code);
 
     if (fmt == nullptr || fmt[0] == '\0') {
@@ -270,7 +270,7 @@ orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char 
     unified_log_error(func, "FATAL(code=%d): %s", error_code, message.data());
 }
 
-void PTO2OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
+void OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
     auto *orch = this;
     va_list args;
     va_start(args, fmt);
@@ -558,7 +558,7 @@ struct GraphHostState {
 
 namespace {
 
-GraphHostState *graph_state_from(PTO2OrchestratorState *orch) {
+GraphHostState *graph_state_from(OrchestratorState *orch) {
     return orch == nullptr ? nullptr : static_cast<GraphHostState *>(orch->graph_host_state);
 }
 
@@ -571,7 +571,7 @@ thread_local GraphRecording *g_active_graph_recording = nullptr;
 // part of the thread-local identity rather than implied by it.
 thread_local GraphHostState *g_active_graph_owner = nullptr;
 
-GraphRecording *active_graph_recording(PTO2OrchestratorState *orch) {
+GraphRecording *active_graph_recording(OrchestratorState *orch) {
     GraphHostState *state = graph_state_from(orch);
     if (state == nullptr || state != g_active_graph_owner) return nullptr;
     return g_active_graph_recording;
@@ -1121,7 +1121,7 @@ GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
     return list;
 }
 
-static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
+static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
         memset(
@@ -1141,7 +1141,7 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
 struct PTO2FaninBuilder {
-    PTO2FaninBuilder(PTO2OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
+    PTO2FaninBuilder(OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
         count(0),
         orch(orch),
         seen_epoch(seen_epoch),
@@ -1149,7 +1149,7 @@ struct PTO2FaninBuilder {
         payload(payload),
         slots(payload->fanin_data()) {}
     int32_t count{0};
-    PTO2OrchestratorState *orch{nullptr};
+    OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
     int32_t self_local{0};
     TaskPayload *payload{nullptr};
@@ -1178,7 +1178,7 @@ struct PTO2FaninBuilder {
 };
 
 static bool append_fanin_or_fail(
-    PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
+    OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
     TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
@@ -1239,7 +1239,7 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
 }
 
 static bool prepare_task(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
+    OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PreparedTask *out
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
@@ -1339,7 +1339,7 @@ static bool prepare_task(
 // Scope Management
 // =============================================================================
 
-void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
+void OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     auto *orch = this;
     if (orch->fatal) {
         return;
@@ -1384,7 +1384,7 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     }
 }
 
-void PTO2OrchestratorState::end_scope() {
+void OrchestratorState::end_scope() {
     auto *orch = this;
     if (orch->fatal) {
         return;
@@ -1420,7 +1420,7 @@ void PTO2OrchestratorState::end_scope() {
 // SIMPLER_ERROR_TENSORMAP_OVERFLOW and bail rather than letting new_entry()'s hard
 // assert fire mid-registration. Returns false when the pool is exhausted or a
 // fatal is already latched by another party.
-static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t needed) {
+static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
     PTO2TensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
@@ -1449,7 +1449,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // computation (explicit_deps + auto), output registration, slot init, and
 // Orch-side wiring/ready publication.
 static TaskOutputTensors submit_task_common(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     CYCLE_COUNT_START();
@@ -1751,7 +1751,7 @@ void graph_reset_outer_payload(TaskPayload &payload) {
 }
 
 bool graph_submit_outer(
-    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
+    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
     bool defer_heap, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
@@ -1896,7 +1896,7 @@ bool graph_submit_outer(
 }
 
 bool graph_submit_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, const GraphDefinition *definition, const GraphTaskArgs &args,
+    OrchestratorState *orch, GraphHostState *state, const GraphDefinition *definition, const GraphTaskArgs &args,
     TaskId *submitted_id
 ) {
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
@@ -1913,13 +1913,12 @@ bool graph_submit_definition(
 }
 
 bool graph_submit_pending_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args,
-    TaskId *submitted_id
+    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
 }
 
-bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
+bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
     for (GraphPendingUpload &pending : state->pending_uploads) {
         if (!pending.deferred_heap) continue;
         auto definition_it = state->definitions.find(pending.full_key);
@@ -1963,7 +1962,7 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
 // recording.nodes keeps those addresses valid because the inner buffer is
 // transferred, not copied.
 TaskOutputTensors graph_record_submit_node(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     ORCH_PHASE_START();
@@ -2222,8 +2221,7 @@ TaskOutputTensors graph_record_submit_node(
 
 }  // namespace
 
-GraphScopeResult
-PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+GraphScopeResult OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     ORCH_PHASE_START_SPANNING();
     const GraphScopeResult result = graph_begin_inner(graph_key, args, callable_hash);
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphBegin, graph_key);
@@ -2231,7 +2229,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 }
 
 GraphScopeResult
-PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -2348,7 +2346,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
     return result;
 }
 
-bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
+bool OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || recording_handle == nullptr || g_active_graph_recording != nullptr) return false;
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
@@ -2389,7 +2387,7 @@ bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTas
     return true;
 }
 
-void PTO2OrchestratorState::graph_abort(void *recording_handle) {
+void OrchestratorState::graph_abort(void *recording_handle) {
     GraphHostState *state = graph_state_from(this);
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
     if (state == nullptr || entry == nullptr) return;
@@ -2411,7 +2409,7 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
 
 // Finish the background recording and publish the Definition. The main
 // thread finalizes the already-submitted outer Graph tasks in graph_commit.
-bool PTO2OrchestratorState::graph_end() {
+bool OrchestratorState::graph_end() {
     GraphHostState *state = graph_state_from(this);
     GraphRecording *recording = active_graph_recording(this);
     GraphInflightRecording *entry = g_active_graph_entry;
@@ -2471,13 +2469,13 @@ bool PTO2OrchestratorState::graph_end() {
 
 // Join every recording in flight and back-patch all deferred shells in submit
 // order. Orchestration completion is the only normal-path barrier.
-void PTO2OrchestratorState::graph_commit() {
+void OrchestratorState::graph_commit() {
     ORCH_PHASE_START_SPANNING();
     graph_commit_inner();
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphCommit, 0);
 }
 
-void PTO2OrchestratorState::graph_commit_inner() {
+void OrchestratorState::graph_commit_inner() {
     if (active_graph_recording(this) != nullptr) return;
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || state->inflight_count.load(std::memory_order_acquire) == 0) return;
@@ -2517,7 +2515,7 @@ void PTO2OrchestratorState::graph_commit_inner() {
     }
 }
 
-TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     auto *orch = this;
 
     // Orchestration API should short-circuit after fatal, but keep this entry
@@ -2609,7 +2607,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 // AICore dispatch. Empty active_mask routes the slot to the DUMMY ready
 // bucket; dispatch loop short-circuits to completion. Accepts the same Arg
 // shape as submit_task; scalars are permitted but never consumed.
-TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
     auto *orch = this;
 
     if (orch->fatal) {
@@ -2645,7 +2643,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &a
     );
 }
 
-TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     auto *orch = this;
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.
@@ -2775,7 +2773,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
 // Flow Control
 // =============================================================================
 
-void PTO2OrchestratorState::mark_done() {
+void OrchestratorState::mark_done() {
     auto *orch = this;
     int32_t total_tasks = orch->task_allocator.active_count();
     if (total_tasks > 0) {
@@ -2790,8 +2788,8 @@ void PTO2OrchestratorState::mark_done() {
 }
 
 #if SIMPLER_ORCH_PROFILING
-PTO2OrchProfilingData orchestrator_get_profiling() {
-    PTO2OrchProfilingData d;
+OrchProfilingData orchestrator_get_profiling() {
+    OrchProfilingData d;
     d.alloc_cycle = g_orch_alloc_cycle;
     d.args_cycle = g_orch_args_cycle;
     d.lookup_cycle = g_orch_lookup_cycle;

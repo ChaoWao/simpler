@@ -93,7 +93,7 @@ Manual scope v0 is:
 
 `manual_begin_depth` is the only manual-scope-specific state, and it decides whether
 the current submit is in manual mode. It is explicitly initialized in
-`PTO2OrchestratorState::init()` and reset in `mark_done()` so a reused orchestrator
+`OrchestratorState::init()` and reset in `mark_done()` so a reused orchestrator
 starts cleanly on the next run.
 
 Whether a scope keeps a task list at all is runtime-specific, and manual mode does

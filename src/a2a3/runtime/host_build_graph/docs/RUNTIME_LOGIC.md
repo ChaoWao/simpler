@@ -114,7 +114,7 @@ a boundary from which region happens to be reserved first —
 **Why the orchestrator is not in the arena at all.** hbg has no device-side
 orchestrator, so nothing on the device reads its state: not the `fanin_seen_epoch`
 table, not the scope arrays, not the TensorMap (~9.3 MB between them). It is
-therefore a plain host object that owns those arrays — `PTO2OrchestratorState::init`
+therefore a plain host object that owns those arrays — `OrchestratorState::init`
 allocates them — and `RuntimeContext` reaches it through a pointer that `bind` drops
 before the copied zone is uploaded, so no host address crosses the boundary. A
 `static_assert` keeps `RuntimeContext` trivially copyable, which is what forbids

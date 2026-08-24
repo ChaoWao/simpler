@@ -39,7 +39,7 @@
 
 class WiringTest : public ::testing::Test {
 protected:
-    PTO2OrchestratorState orch{};
+    OrchestratorState orch{};
     SchedulerState sched{};
     SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;

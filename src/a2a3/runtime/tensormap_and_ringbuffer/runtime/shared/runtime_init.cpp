@@ -288,7 +288,7 @@ void SchedulerState::destroy() {
 // Orchestrator
 // =============================================================================
 
-PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
+OrchestratorLayout OrchestratorState::reserve_layout(
     DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH], int32_t dep_pool_capacity
 ) {
     int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
@@ -298,11 +298,11 @@ PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
     return reserve_layout(arena, task_window_sizes, dep_pool_capacities);
 }
 
-PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
+OrchestratorLayout OrchestratorState::reserve_layout(
     DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
     const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]
 ) {
-    PTO2OrchestratorLayout layout{};
+    OrchestratorLayout layout{};
     // scope_tasks holds every task in the open scope across all rings, so its cap
     // is the real in-flight budget = sum of the (runtime) per-ring windows. Using
     // the compile-time PTO2_SCOPE_TASKS_CAP instead under-sized the buffer when
@@ -342,8 +342,8 @@ PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
     return layout;
 }
 
-bool PTO2OrchestratorState::init_data_from_layout(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
+bool OrchestratorState::init_data_from_layout(
+    const OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
     uint64_t task_window_size
 ) {
     uint64_t heap_sizes[CHIP_MAX_RING_DEPTH];
@@ -355,12 +355,12 @@ bool PTO2OrchestratorState::init_data_from_layout(
     return init_data_from_layout(layout, arena, sm_dev_base, gm_heap, heap_sizes, task_window_sizes);
 }
 
-bool PTO2OrchestratorState::init_data_from_layout(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap,
+bool OrchestratorState::init_data_from_layout(
+    const OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap,
     const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
 ) {
     auto *orch = this;
-    *orch = PTO2OrchestratorState{};
+    *orch = OrchestratorState{};
 
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     orch->gm_heap_base = gm_heap;
@@ -414,9 +414,9 @@ bool PTO2OrchestratorState::init_data_from_layout(
     return true;
 }
 
-bool PTO2OrchestratorState::reset_for_reuse(
-    const PTO2OrchestratorLayout &layout, void *sm_dev_base, void *gm_heap,
-    const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
+bool OrchestratorState::reset_for_reuse(
+    const OrchestratorLayout &layout, void *sm_dev_base, void *gm_heap, const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH],
+    const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
 ) {
     auto *orch = this;
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
@@ -474,8 +474,8 @@ bool PTO2OrchestratorState::reset_for_reuse(
     return true;
 }
 
-void PTO2OrchestratorState::wire_arena_pointers(
-    const PTO2OrchestratorLayout &layout, DeviceArena &arena, SchedulerState *scheduler_arg
+void OrchestratorState::wire_arena_pointers(
+    const OrchestratorLayout &layout, DeviceArena &arena, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
@@ -488,7 +488,7 @@ void PTO2OrchestratorState::wire_arena_pointers(
     orch->scheduler = scheduler_arg;
 }
 
-void PTO2OrchestratorState::destroy() {
+void OrchestratorState::destroy() {
     auto *orch = this;
     orch->tensor_map.destroy();
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
@@ -499,7 +499,7 @@ void PTO2OrchestratorState::destroy() {
     orch->scope_begins = nullptr;
 }
 
-void PTO2OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
+void OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena
@@ -534,7 +534,7 @@ RuntimeArenaLayout runtime_reserve_layout(
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         task_window_sizes_i32[r] = static_cast<int32_t>(task_window_sizes[r]);
     }
-    layout.offsets.orch = PTO2OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
+    layout.offsets.orch = OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
     layout.offsets.sched = SchedulerState::reserve_layout(arena, dep_pool_capacities);
     layout.offsets.off_runtime = arena.reserve(sizeof(RuntimeContext), PTO2_ALIGN_SIZE);
     layout.offsets.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));

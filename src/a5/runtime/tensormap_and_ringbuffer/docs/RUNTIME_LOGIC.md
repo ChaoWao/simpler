@@ -345,7 +345,7 @@ This guarantees lookup only traverses valid entries — O(valid_entries_in_bucke
 
 **Layer 2 — Periodic Batch Cleanup** (`cleanup_retired`, per-task):
 
-Every time the orchestrator submits a task (Step 0 of `PTO2OrchestratorState::submit_task`), it calls `PTO2TensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `PTO2_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `PTO2TensorMap::cleanup_retired` runs:
+Every time the orchestrator submits a task (Step 0 of `OrchestratorState::submit_task`), it calls `PTO2TensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `PTO2_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `PTO2TensorMap::cleanup_retired` runs:
 
 This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each task's entries are doubly-linked together at insert time via `next_in_task`/`prev_in_task`. A slot's chain can hold more than one task's entries: a task at `local_id + N * window` reuses the slot and prepends to the chain already there, and cleanup can lag that reuse. Cleanup therefore walks the chain and frees only the entries whose `producer_task_id` matches the retiring task, unlinking each and leaving the rest linked — O(entries_in_slot), with no scan of the entire pool or all buckets. Freed entries are returned to `free_entry_list` for immediate reuse.
 
@@ -367,7 +367,7 @@ In steady state, the number of valid TensorMap entries ≈ `active_tasks × avg_
 
 ### 5.5 Dependency Discovery Flow
 
-When `PTO2OrchestratorState::submit_task` processes parameters:
+When `OrchestratorState::submit_task` processes parameters:
 
 1. **INPUT/INOUT**: `PTO2TensorMap::lookup` searches for overlapping producers (with chain truncation)
 2. For each producer found: `append_fanin_or_fail` adds the dependency
@@ -425,7 +425,7 @@ In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
 
 ## 7. Orchestrator
 
-### 7.1 PTO2OrchestratorState
+### 7.1 OrchestratorState
 
 The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the user-provided orchestration function.
 
@@ -437,7 +437,7 @@ Key members:
 - `scheduler`: pointer to scheduler state (for Orch-side wiring helpers and ready queue access)
 - `gm_heap_base`, `gm_heap_size`: GM heap for output buffers
 
-### 7.2 Task Submission Flow (`PTO2OrchestratorState::submit_task`)
+### 7.2 Task Submission Flow (`OrchestratorState::submit_task`)
 
 | Step | Operation |
 | ---- | --------- |

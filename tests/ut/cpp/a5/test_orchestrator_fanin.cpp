@@ -24,9 +24,9 @@ protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
     SharedMemoryHandle *sm_handle = nullptr;
-    PTO2OrchestratorState orch{};
+    OrchestratorState orch{};
     SchedulerState sched{};
-    PTO2OrchestratorLayout orch_layout{};
+    OrchestratorLayout orch_layout{};
     SchedulerLayout sched_layout{};
     std::vector<char> gm_heap;
 
@@ -40,7 +40,7 @@ protected:
             task_window_sizes[r] = static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE);
         }
 
-        orch_layout = PTO2OrchestratorState::reserve_layout(runtime_arena, task_window_sizes);
+        orch_layout = OrchestratorState::reserve_layout(runtime_arena, task_window_sizes);
         sched_layout = SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
@@ -358,7 +358,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
 TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
     auto cap_for = [](const int32_t windows[CHIP_MAX_RING_DEPTH]) {
         DeviceArena arena;
-        int32_t cap = PTO2OrchestratorState::reserve_layout(arena, windows).scope_tasks_cap;
+        int32_t cap = OrchestratorState::reserve_layout(arena, windows).scope_tasks_cap;
         arena.release();
         return cap;
     };

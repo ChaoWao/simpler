@@ -329,7 +329,7 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
     char gm = 0;
     EXPECT_EQ(runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, &sm, 0, &gm, heaps), nullptr);
 
-    PTO2OrchestratorState orch{};
+    OrchestratorState orch{};
     EXPECT_FALSE(orch.init_data_from_layout(layout.offsets.orch, runtime_arena, &sm, &gm, heaps, ws));
 }
 

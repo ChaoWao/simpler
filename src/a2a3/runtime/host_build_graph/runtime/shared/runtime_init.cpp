@@ -197,11 +197,11 @@ void SchedulerState::destroy() {
 // Orchestrator
 // =============================================================================
 
-bool PTO2OrchestratorState::init(
+bool OrchestratorState::init(
     void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
-    *orch = PTO2OrchestratorState{};
+    *orch = OrchestratorState{};
 
     // A power-of-two window lets pto2_task_slot() mask instead of dividing.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
@@ -243,7 +243,7 @@ bool PTO2OrchestratorState::init(
     return true;
 }
 
-void PTO2OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
+void OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena

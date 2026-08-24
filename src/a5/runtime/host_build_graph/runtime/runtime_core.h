@@ -145,7 +145,7 @@ struct RuntimeArenaLayout {
     // adjacent on the device and travel as one copy.
     //
     // The orchestrator is NOT here. It runs on the host, owns its own scratch, and
-    // no device code reads any of it — see PTO2OrchestratorState.
+    // no device code reads any of it — see OrchestratorState.
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
 
@@ -176,7 +176,7 @@ struct RuntimeContext {
     // the orchestrator runs on the host and owns non-trivial scratch. Null on the
     // device — bind drops it before the copied zone is uploaded, so no device code
     // may dereference it.
-    PTO2OrchestratorState *orchestrator;
+    OrchestratorState *orchestrator;
     // Device-only zone: the scheduler state holds no per-run content, so it is
     // addressed through the arena rather than carried inside this header.
     SchedulerState *scheduler;

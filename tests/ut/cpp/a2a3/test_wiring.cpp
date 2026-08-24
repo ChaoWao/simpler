@@ -43,7 +43,7 @@ uint64_t get_test_reg_stub_base_addr();
 
 class WiringTest : public ::testing::Test {
 protected:
-    PTO2OrchestratorState orch{};
+    OrchestratorState orch{};
     SchedulerState sched{};
     SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;

@@ -58,7 +58,7 @@ struct PTO2RingSet {
 };
 ```
 
-### 4.2 PTO2OrchestratorState (modified)
+### 4.2 OrchestratorState (modified)
 
 ```cpp
 // Before: single ring

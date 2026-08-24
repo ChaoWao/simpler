@@ -168,7 +168,7 @@ MAYBE_UNINITIALIZED_BEGIN
 static bool
 wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
     TaskId owner = tensor.owner_task_id;
-    PTO2OrchestratorState &orch = *rt->orchestrator;
+    OrchestratorState &orch = *rt->orchestrator;
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
     // spinning on each. When the segment fills, we wait for the accumulated

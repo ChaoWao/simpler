@@ -56,7 +56,7 @@ struct GraphHostState;
  * holds it by pointer — a by-value member would put non-trivially-copyable state
  * inside the struct bind copies to the device.
  */
-struct PTO2OrchestratorState {
+struct OrchestratorState {
     // === SHARED MEMORY ACCESS ===
     SharedMemoryHeader *sm_header;
 
@@ -165,7 +165,7 @@ struct PTO2OrchestratorState {
 // =============================================================================
 
 #if SIMPLER_ORCH_PROFILING
-struct PTO2OrchProfilingData {
+struct OrchProfilingData {
     uint64_t alloc_cycle;  // Combined task slot + heap allocation
     uint64_t args_cycle;
     uint64_t lookup_cycle;
@@ -178,5 +178,5 @@ struct PTO2OrchProfilingData {
     uint64_t args_atomic_count;
 };
 
-PTO2OrchProfilingData orchestrator_get_profiling();
+OrchProfilingData orchestrator_get_profiling();
 #endif

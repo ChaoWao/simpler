@@ -539,13 +539,13 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
 }
 
 struct GraphHostStateBinding {
-    explicit GraphHostStateBinding(PTO2OrchestratorState &orchestrator, GraphHostState *state) :
+    explicit GraphHostStateBinding(OrchestratorState &orchestrator, GraphHostState *state) :
         orchestrator(orchestrator) {
         orchestrator.graph_host_state = state;
     }
     ~GraphHostStateBinding() { orchestrator.graph_host_state = nullptr; }
 
-    PTO2OrchestratorState &orchestrator;
+    OrchestratorState &orchestrator;
 };
 
 int32_t run_host_orchestration(
@@ -574,7 +574,7 @@ int32_t run_host_orchestration(
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
     // Host-owned and destroyed with this frame, so rt->orchestrator is dropped on
     // every exit — it must never outlive the object it names.
-    PTO2OrchestratorState orchestrator;
+    OrchestratorState orchestrator;
     rt->orchestrator = &orchestrator;
     RAIIScopeGuard orchestrator_binding([rt]() {
         rt->orchestrator = nullptr;
@@ -669,7 +669,7 @@ int32_t run_host_orchestration(
     // as spans rather than LOG_INFO because INFO is suppressed at the default log
     // level. Like the phase spans these are summed cost shares, not intervals.
     {
-        const PTO2OrchProfilingData prof = orchestrator_get_profiling();
+        const OrchProfilingData prof = orchestrator_get_profiling();
         const std::pair<const char *, uint64_t> steps[] = {
             {"alloc", prof.alloc_cycle},   {"args", prof.args_cycle},   {"lookup", prof.lookup_cycle},
             {"insert", prof.insert_cycle}, {"fanin", prof.fanin_cycle},
@@ -760,7 +760,7 @@ int32_t run_host_orchestration(
     // What this bind actually put in the pools. The orchestrator's cursors are the
     // exact populated extent of each one — no scan of the mirror is needed, and the
     // image ships that much rather than the worst case the mirror is dimensioned for.
-    const PTO2OrchestratorState &orch_state = orchestrator;
+    const OrchestratorState &orch_state = orchestrator;
     const sm_layout::BindUsage bind_usage{
         nt,
         static_cast<uint64_t>(orch_state.fanin_pool_cursor),

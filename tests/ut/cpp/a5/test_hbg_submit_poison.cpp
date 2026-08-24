@@ -47,7 +47,7 @@ protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
     SharedMemoryHandle *sm_handle = nullptr;
-    PTO2OrchestratorState orch{};
+    OrchestratorState orch{};
     SchedulerState sched{};
     SchedulerLayout sched_layout{};
     std::vector<char> gm_heap;

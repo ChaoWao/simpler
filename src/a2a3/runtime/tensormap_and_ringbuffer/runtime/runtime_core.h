@@ -122,7 +122,7 @@ struct ArenaSizingKey {
  */
 struct ArenaOffsets {
     size_t off_sm_handle{0};
-    PTO2OrchestratorLayout orch;
+    OrchestratorLayout orch;
     SchedulerLayout sched;
     size_t off_runtime{0};
     size_t off_mailbox{0};
@@ -157,7 +157,7 @@ struct RuntimeContext {
 
     // Components
     SharedMemoryHandle *sm_handle;
-    PTO2OrchestratorState orchestrator;
+    OrchestratorState orchestrator;
     SchedulerState scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
 
