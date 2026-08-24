@@ -205,11 +205,7 @@ bool PTO2OrchestratorState::init(
     auto *orch = this;
     *orch = PTO2OrchestratorState{};
 
-    // scope_tasks holds every task in the open scope, so its cap is the real
-    // in-flight budget = the (runtime) task window. Using the compile-time
-    // PTO2_SCOPE_TASKS_CAP instead under-sized the buffer when ring_task_window
-    // was enlarged past the default (premature SCOPE_TASKS_OVERFLOW) and
-    // over-allocated it when shrunk. See issue #1188.
+    // A power-of-two window lets pto2_task_slot() mask instead of dividing.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
 
     orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_base);
@@ -235,9 +231,7 @@ bool PTO2OrchestratorState::init(
     // Polling: no fanin-spill pool — producer ids are inline on the payload.
     const auto window = static_cast<size_t>(task_window_size);
     orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[window]);
-    orch->scope_tasks.reset(new (std::nothrow) PTO2TaskSlotState *[window]);
-    orch->scope_begins.reset(new (std::nothrow) int32_t[PTO2_MAX_SCOPE_DEPTH]);
-    if (orch->fanin_seen_epoch == nullptr || orch->scope_tasks == nullptr || orch->scope_begins == nullptr) {
+    if (orch->fanin_seen_epoch == nullptr) {
         LOG_ERROR("Orchestrator scratch allocation failed (task_window=%" PRIu64 ")", task_window_size);
         return false;
     }
@@ -247,10 +241,7 @@ bool PTO2OrchestratorState::init(
         return false;
     }
 
-    orch->scope_tasks_size = 0;
-    orch->scope_tasks_capacity = static_cast<int32_t>(window);
     orch->scope_stack_top = -1;
-    orch->scope_stack_capacity = PTO2_MAX_SCOPE_DEPTH;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
 
     return true;

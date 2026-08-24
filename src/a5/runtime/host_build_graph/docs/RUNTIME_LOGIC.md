@@ -124,9 +124,9 @@ scalar `rt_orchestration_done` publishes into the runtime header.
 
 **Why the scheduler state is device-written.** `PTO2SchedulerState` holds no
 per-run content: `sm_header` and the ring pointer derive from a pooled SM base,
-queue capacities are compile-time constants, and hbg never advances
-`last_task_alive`. Its one host-side entry point, `on_scope_end`, is an empty stub
-here. So the host would only be writing an initialization pattern — 203,392 bytes
+queue capacities are compile-time constants, hbg never advances
+`last_task_alive`, and it has no host-side entry point at all. So the host would
+only be writing an initialization pattern — 203,392 bytes
 of it, dominated by `AsyncWaitList::entries` — for the device to receive and never
 read. `PTO2Runtime` therefore holds a *pointer* to it, wired from
 `off_scheduler` on each side, and the AICPU calls `init_data_from_layout` at boot.

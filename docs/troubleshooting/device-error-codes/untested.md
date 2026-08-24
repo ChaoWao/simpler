@@ -10,11 +10,13 @@ they cannot be provoked. Recording why, so the next person does not re-derive it
   at `MAX_COMPLETIONS_PER_TASK` (64) and latches **102** on the 65th condition, so
   the scheduler-side "more than 64" check that would raise 103 never sees enough
   messages. 103 is reachable only by corrupting the slab (UB) or a malformed message.
-- **10 SCOPE_TASKS_OVERFLOW** cannot be reached either. `scope_tasks_cap` is the sum
-  of the per-ring windows, but each ring physically holds only `window - 1` tasks, so
-  all rings together top out at `cap - PTO2_MAX_RING_DEPTH` — strictly below the cap.
+- **10 SCOPE_TASKS_OVERFLOW** has no raise site at all in `host_build_graph`: an hbg
+  scope keeps no task list, so nothing can saturate one. In
+  `tensormap_and_ringbuffer` it exists but cannot be reached — `scope_tasks_cap` is the
+  sum of the per-ring windows, but each ring physically holds only `window - 1` tasks,
+  so all rings together top out at `cap - PTO2_MAX_RING_DEPTH`, strictly below the cap.
   The rings always fill first and latch 1 or 3. Shrinking the window shrinks both, so
-  the gap holds.
+  the gap holds. The number stays reserved in both runtimes' code tables.
 - **11 TENSORMAP_OVERFLOW** needs the 65536-entry pool (`PTO2_TENSORMAP_POOL_SIZE`,
   compile-time, not tunable via `runtime_env`) flooded *and* a stalled producer
   holding entries.
