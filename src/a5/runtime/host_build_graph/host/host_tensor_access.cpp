@@ -26,9 +26,9 @@ struct HostTensorRegion {
     uint64_t dev_base;
     uint64_t size;
     unsigned char *host_view;
-    // The host view is a copy of the device bytes rather than the device bytes
-    // themselves, so a write reaches the device only once pushed back.
-    bool mirrored;
+    // A caller-buffer fallback needs a push-back. A platform mapping writes
+    // the device allocation directly, even when its host VA differs.
+    bool needs_push_back;
 };
 
 // One entry per tensor staged for the run being orchestrated. A run stages a
@@ -72,23 +72,23 @@ bool HostTensorAccessor::add(uint64_t dev_base, uint64_t size, void *fallback_ho
     if (impl_->api == nullptr || dev_base == 0 || size == 0) {
         return false;
     }
-    // Both push_backs below run after the registration succeeds, so reserve
-    // first: a reallocation that threw there would leak the mapping.
     impl_->regions.reserve(impl_->regions.size() + 1);
-    impl_->mappings.reserve(impl_->mappings.size() + 1);
-    void *host_view = impl_->api->register_device_memory_to_host(reinterpret_cast<void *>(dev_base), size);
-    if (host_view != nullptr) {
-        impl_->mappings.push_back(reinterpret_cast<void *>(dev_base));
-        impl_->mapped_bytes += size;
-    } else {
-        host_view = fallback_host_view;
+    const bool needs_push_back = fallback_host_view != nullptr;
+    void *host_view = fallback_host_view;
+    if (host_view == nullptr) {
+        // Reserve before registration: a later reallocation that threw would
+        // leak the mapping.
+        impl_->mappings.reserve(impl_->mappings.size() + 1);
+        host_view = impl_->api->register_device_memory_to_host(reinterpret_cast<void *>(dev_base), size);
+        if (host_view != nullptr) {
+            impl_->mappings.push_back(reinterpret_cast<void *>(dev_base));
+            impl_->mapped_bytes += size;
+        }
     }
     if (host_view == nullptr) {
         return false;
     }
-    impl_->regions.push_back(
-        {dev_base, size, static_cast<unsigned char *>(host_view), reinterpret_cast<uintptr_t>(host_view) != dev_base}
-    );
+    impl_->regions.push_back({dev_base, size, static_cast<unsigned char *>(host_view), needs_push_back});
     return true;
 }
 
@@ -110,7 +110,7 @@ bool HostTensorAccessor::write(uint64_t dev_addr, const void *src, uint64_t byte
     }
     unsigned char *dst = region->host_view + offset;
     memcpy(dst, src, bytes);
-    if (!region->mirrored) {
+    if (!region->needs_push_back) {
         return true;
     }
     return impl_->api->copy_to_device(reinterpret_cast<void *>(dev_addr), dst, static_cast<size_t>(bytes)) == 0;

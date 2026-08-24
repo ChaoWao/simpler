@@ -28,8 +28,8 @@ PHASE_LINE = re.compile(r"bind phase=(\w+) start_ns=(\d+) dur_ns=(\d+)")
 STAMP_LINE = re.compile(r"^\[stamp\] (.*)$")
 
 # The segments between "the caller's data is in place" and "the device can run".
-# `args` and `host_view_close` are per-byte costs over the weights the case
-# stages, so they belong to getting the weights resident, not to dispatch.
+# `args` is a per-byte staging cost. `host_view_close` remains excluded for
+# comparison with historical mapped-view logs; current binds close no mappings.
 CONTROL_PLANE = ("host_orch", "graph_upload", "relocate", "sm_h2d", "arena_h2d")
 
 # Display order: the bind stage's own sequence, so a reader can follow it down.

@@ -20,25 +20,32 @@
  * that capability is resolved, so the orchestrator core never dereferences a
  * device address itself.
  *
- * A region is registered per staged tensor with the host address serving it:
+ * The current bind path registers one region per staged tensor, backed by the
+ * caller's host tensor buffer:
  *
- *   - `host_view == dev_base`  — the device buffer is mapped into the host
- *     address space (a2a3 `halHostRegister(DEV_SVM_MAP_HOST)`; sim, where a
- *     device pointer is already a host pointer). Reads and writes land on the
- *     device bytes directly.
- *   - `host_view != dev_base`  — no host mapping exists. The region is served
- *     from the staging buffer holding the same bytes, and a write is pushed
- *     back through the device-copy hook so the device observes it.
+ *   - A read observes that caller buffer.
+ *   - A write mutates that caller buffer, then uses the device-copy hook so the
+ *     device observes it too. This is visible even for an `IN` argument if its
+ *     host orchestration calls `set_tensor_data`.
+ *
+ * `add` also retains a null-fallback platform path: it asks the platform for a
+ * host-readable mapping whose address may equal or differ from `dev_base`, and
+ * always accesses the returned address. The current runtime-maker path cannot
+ * reach it: staged tensors always have the caller buffer, while pure outputs
+ * are deliberately left unregistered. The path remains as an explicit
+ * platform-capability escape hatch in `add` and is covered directly by unit
+ * tests; no current production caller reaches it.
  *
  * An address no registered region covers is a failure, never a raw
- * dereference: only tensors the runtime staged have a host view at all, so a
- * GM-heap tensor or a pass-through child-memory buffer resolves to nothing.
+ * dereference. Pure outputs, GM-heap tensors and pass-through child-memory
+ * buffers have no region, so both reads and writes resolve to nothing.
  *
- * Registrations are owned by one orchestration run — the window between
- * staging and the first dispatched task. A mirror is a copy, and nothing has
- * executed yet to make it stale; once tasks run, a stale mirror would be
- * indistinguishable from live device memory. `HostTensorAccessor` bounds that
- * window and releases its mappings on every exit path.
+ * Regions and any optional mappings are owned by one orchestration run — the
+ * window between staging and the first dispatched task. A caller-buffer view
+ * holds the staged bytes, and nothing has executed yet to make it stale; once
+ * tasks run, that view would be indistinguishable from live device memory.
+ * `HostTensorAccessor` bounds the window and releases its mappings on every
+ * exit path.
  *
  * The read/write pair carries weak fallbacks in the runtime translation unit
  * (`orchestrator_core/runtime_core.cpp`) that dereference `dev_addr` directly,
@@ -55,8 +62,8 @@
 struct HostApi;  // common/host_api.h — fwd-declared so this header stays out of platform includes
 
 /**
- * The registered regions of one orchestration run, and the mappings that run
- * installed to serve them.
+ * The registered regions of one orchestration run, and any optional mappings
+ * that run installed to serve them.
  *
  * One accessor per run, mutated only by the thread running that run's
  * orchestration. The region and mapping tables are plain vectors with no lock,
@@ -87,9 +94,11 @@ public:
     HostTensorAccessor &operator=(const HostTensorAccessor &) = delete;
 
     /**
-     * Register `[dev_base, dev_base + size)`, preferring a host mapping of the
-     * device buffer and falling back to `fallback_host_view` (the staging copy)
-     * when the platform cannot map it.
+     * Register `[dev_base, dev_base + size)`, using `fallback_host_view` (the
+     * caller's host tensor buffer) when available and asking the platform for a
+     * host mapping otherwise. The current runtime-maker always supplies the
+     * fallback for staged tensors and skips pure outputs, so its bind path does
+     * not install mappings.
      *
      * @return false for an empty region, a null `api`, or when neither a
      *         mapping nor a fallback view is available.
