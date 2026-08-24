@@ -62,7 +62,7 @@ protected:
     // mirroring orch::prepare_task's bind_buffers: every production slot has a
     // payload, and the scheduler's release/propagate paths dereference it.
     static constexpr int kSlotPayloadPoolSize = 16;
-    PTO2TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
+    TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
     int slot_payload_pool_idx_ = 0;
 
     void SetUp() override {
@@ -96,7 +96,7 @@ protected:
         slot.completed_subtasks.store(0);
         slot.total_required_subtasks = 1;
         slot.logical_block_num = 1;
-        PTO2TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
+        TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
         memset(&slot_pl, 0, sizeof(slot_pl));
         slot.payload = &slot_pl;
     }
@@ -106,8 +106,8 @@ protected:
         uint32_t fanout_count = 1, uint32_t fanout_refcount = 1
     ) {
         ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(task_id);
-        PTO2TaskPayload &payload = ring.get_payload_by_task_id(task_id);
-        PTO2TaskDescriptor &task = ring.get_task_by_task_id(task_id);
+        TaskPayload &payload = ring.get_payload_by_task_id(task_id);
+        TaskDescriptor &task = ring.get_task_by_task_id(task_id);
         memset(&slot, 0, sizeof(slot));
         memset(&payload, 0, sizeof(payload));
         memset(&task, 0, sizeof(task));

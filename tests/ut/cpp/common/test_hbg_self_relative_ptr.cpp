@@ -32,17 +32,17 @@ using simpler::hbg::SelfRelativePtr;
 // its targets in one contiguous span, with a target on each side of the field so
 // both delta signs are covered.
 struct Block {
-    PTO2TaskPayload before_payload;
-    SelfRelativePtr<PTO2TaskPayload> to_before;
-    SelfRelativePtr<PTO2TaskPayload> to_after;
-    PTO2TaskPayload after_payload;
+    TaskPayload before_payload;
+    SelfRelativePtr<TaskPayload> to_before;
+    SelfRelativePtr<TaskPayload> to_after;
+    TaskPayload after_payload;
 };
 
 }  // namespace
 
 TEST(HbgSelfRelativePtr, ZeroedMemoryReadsAsUnbound) {
-    std::vector<std::byte> storage(sizeof(SelfRelativePtr<PTO2TaskPayload>), std::byte{0});
-    auto *pointer = reinterpret_cast<SelfRelativePtr<PTO2TaskPayload> *>(storage.data());
+    std::vector<std::byte> storage(sizeof(SelfRelativePtr<TaskPayload>), std::byte{0});
+    auto *pointer = reinterpret_cast<SelfRelativePtr<TaskPayload> *>(storage.data());
 
     EXPECT_EQ(pointer->get(), nullptr);
     EXPECT_TRUE(*pointer == nullptr);
@@ -98,8 +98,8 @@ TEST(HbgSelfRelativePtr, SurvivesABlockCopyToAnotherAddress) {
 // part of the same image as its payload and descriptor.
 TEST(HbgSelfRelativePtr, SlotStateBindingSurvivesTheImageCopy) {
     struct Image {
-        PTO2TaskDescriptor descriptor;
-        PTO2TaskPayload payload;
+        TaskDescriptor descriptor;
+        TaskPayload payload;
         ChipTaskSlotState slot;
     };
 
@@ -125,7 +125,7 @@ TEST(HbgSelfRelativePtr, SlotStateBindingSurvivesTheImageCopy) {
 // tail padding inside the same 64.
 TEST(HbgSelfRelativePtr, KeepsTheSharedMemoryAbiSizes) {
     EXPECT_EQ(sizeof(ChipTaskSlotState), 64u);
-    EXPECT_EQ(sizeof(PTO2TaskDescriptor), 40u);
-    EXPECT_EQ(sizeof(SelfRelativePtr<PTO2TaskPayload>), 4u);
-    EXPECT_EQ(offsetof(PTO2TaskDescriptor, packed_buffer_base), 24u);
+    EXPECT_EQ(sizeof(TaskDescriptor), 40u);
+    EXPECT_EQ(sizeof(SelfRelativePtr<TaskPayload>), 4u);
+    EXPECT_EQ(offsetof(TaskDescriptor, packed_buffer_base), 24u);
 }

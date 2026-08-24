@@ -38,13 +38,13 @@
 #endif
 
 // AICore materializes args[] from src_payload on the gated path using the
-// byte offsets in dispatch_payload.h (the AICore .o cannot see PTO2TaskPayload).
+// byte offsets in dispatch_payload.h (the AICore .o cannot see TaskPayload).
 // Pin those constants to the real layout here, where the struct is fully visible.
-static_assert(offsetof(PTO2TaskPayload, tensor_count) == PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, scalar_count) == PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, tensors) == PTO2_TASKPAYLOAD_TENSORS_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, scalars) == PTO2_TASKPAYLOAD_SCALARS_OFFSET);
-static_assert(sizeof(ChipTensor) == PTO2_TASKPAYLOAD_TENSOR_STRIDE);
+static_assert(offsetof(TaskPayload, tensor_count) == TASKPAYLOAD_TENSOR_COUNT_OFFSET);
+static_assert(offsetof(TaskPayload, scalar_count) == TASKPAYLOAD_SCALAR_COUNT_OFFSET);
+static_assert(offsetof(TaskPayload, tensors) == TASKPAYLOAD_TENSORS_OFFSET);
+static_assert(offsetof(TaskPayload, scalars) == TASKPAYLOAD_SCALARS_OFFSET);
+static_assert(sizeof(ChipTensor) == TASKPAYLOAD_TENSOR_STRIDE);
 
 // =============================================================================
 // Dispatch helpers

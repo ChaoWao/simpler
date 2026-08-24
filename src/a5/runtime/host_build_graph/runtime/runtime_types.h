@@ -141,7 +141,7 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 #define PTO2_MAX_FANIN 128
 
 // Alignment of every per-task region inside an argument pool. Each region starts
-// and ends on a cache line so PTO2TaskPayload::init's round-up scalar memcpy stays
+// and ends on a cache line so TaskPayload::init's round-up scalar memcpy stays
 // inside the task's own region — see its comment. ChipTensor is already 2 cache
 // lines, so only the fanin and scalar regions need the round-up.
 inline constexpr int32_t ARG_POOL_ALIGN = 64;
@@ -233,7 +233,7 @@ struct ChipTaskSlotState;  // Forward declaration (defined below)
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
-struct PTO2TaskDescriptor {
+struct TaskDescriptor {
     // Mixed-task identification (encodes ring_id in upper 32 bits)
     TaskId task_id;  // raw: (ring_id << 32) | local_id
 
@@ -247,8 +247,8 @@ struct PTO2TaskDescriptor {
 
 // A 4-byte alignment pad follows kernel_id[3]; the scheduler and shared-memory
 // ABI depend on the descriptor size and packed_buffer_base offset staying fixed.
-static_assert(sizeof(PTO2TaskDescriptor) == 40, "PTO2TaskDescriptor size is part of the shared-memory ABI");
-static_assert(offsetof(PTO2TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
+static_assert(sizeof(TaskDescriptor) == 40, "TaskDescriptor size is part of the shared-memory ABI");
+static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
 
 // =============================================================================
 // Per-Slot Scheduling State
@@ -261,7 +261,7 @@ static_assert(offsetof(PTO2TaskDescriptor, packed_buffer_base) == 24, "packed_bu
  * by bulk tensor and scalar data. Small fanins stay fully inline; larger
  * fanins spill into a per-ring ring buffer slice.
  */
-// Early-dispatch claim states for PTO2TaskPayload::early_dispatch_state.
+// Early-dispatch claim states for TaskPayload::early_dispatch_state.
 enum PTO2EarlyDispatchState : uint8_t {
     PTO2_EARLY_DISPATCH_NONE = 0,       // not pre-staged
     PTO2_EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
@@ -292,7 +292,7 @@ enum PTO2EarlySyncDrainState : uint8_t {
 // consumer can pre-stage all its idle cores. 2 words = 128 bits >= 72.
 inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
-struct PTO2TaskPayload {
+struct TaskPayload {
     // === Cache line 0 (64B) — the dispatch path's own line ===
     // sizeof is independent of PTO2_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
     // widening a cap costs pool bytes for the tasks that need them, not a control
@@ -500,34 +500,32 @@ struct PTO2TaskPayload {
     }
 };
 
-// PTO2TaskPayload layout verification (offsetof requires complete type). The counts
+// TaskPayload layout verification (offsetof requires complete type). The counts
 // and region deltas share the first cache line, the early-dispatch atomics own the
 // second, and the AICPU-only predicate + dump metadata own the third.
-static_assert(offsetof(PTO2TaskPayload, tensors) == 12, "region deltas must follow the three counts");
+static_assert(offsetof(TaskPayload, tensors) == 12, "region deltas must follow the three counts");
 static_assert(
-    offsetof(PTO2TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
+    offsetof(TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
     "counts + region deltas must fit the first cache line"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, staged_core_mask) == 64,
+    offsetof(TaskPayload, staged_core_mask) == 64,
     "the early-dispatch atomics own cache line 1: they are written during staging while "
     "line 0's counts and deltas are read at dispatch, so sharing a line would false-share"
 );
-static_assert(offsetof(PTO2TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
+static_assert(offsetof(TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
 static_assert(
-    offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
+    offsetof(TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
     "dump metadata must fit the predicate's cache line"
 );
-static_assert(
-    sizeof(PTO2TaskPayload) == 192, "PTO2TaskPayload is three cache lines and independent of every argument cap"
-);
+static_assert(sizeof(TaskPayload) == 192, "TaskPayload is three cache lines and independent of every argument cap");
 // compact_live_image restacks the payload segment with one memcpy and the device
 // copy moves the whole image, so the payload has to be a POD wire struct. Deleting
 // SelfRelativePtr's copy operations does not cost it that — a deleted special member
 // is trivial — but only an assertion keeps a future member from doing so silently.
 static_assert(
-    std::is_trivially_copyable_v<PTO2TaskPayload> && std::is_standard_layout_v<PTO2TaskPayload>,
-    "PTO2TaskPayload crosses to the device by memcpy"
+    std::is_trivially_copyable_v<TaskPayload> && std::is_standard_layout_v<TaskPayload>,
+    "TaskPayload crosses to the device by memcpy"
 );
 static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
 
@@ -561,8 +559,8 @@ struct alignas(64) ChipTaskSlotState {
     // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
     // Self-relative, so the SM image needs no pointer fix-up on its way to the
     // device: both targets sit in the same block as this field.
-    simpler::hbg::SelfRelativePtr<PTO2TaskPayload> payload;
-    simpler::hbg::SelfRelativePtr<PTO2TaskDescriptor> task;
+    simpler::hbg::SelfRelativePtr<TaskPayload> payload;
+    simpler::hbg::SelfRelativePtr<TaskDescriptor> task;
 
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
     // A pending consumer whose fanin scan finds an unmet producer registers on
@@ -617,7 +615,7 @@ struct alignas(64) ChipTaskSlotState {
         return 0;
     }
 
-    void bind_buffers(PTO2TaskPayload *p, PTO2TaskDescriptor *t) {
+    void bind_buffers(TaskPayload *p, TaskDescriptor *t) {
         payload.set(p);
         task.set(t);
     }
@@ -653,7 +651,7 @@ struct alignas(64) ChipTaskSlotState {
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // last_consumer_local_id is seeded in prepare_task once the id is known.
         // Payload early-dispatch/fanin fields are (re)initialized in
-        // PTO2TaskPayload::init on every submit, before the slot is visible.
+        // TaskPayload::init on every submit, before the slot is visible.
     }
 };
 

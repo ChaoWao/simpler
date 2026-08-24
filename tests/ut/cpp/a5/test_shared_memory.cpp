@@ -170,14 +170,14 @@ TEST(SharedMemoryLayout, RegionsNonOverlapping) {
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         uintptr_t desc_start = (uintptr_t)h->header->rings[r].task_descriptors;
-        uintptr_t desc_end = desc_start + 64 * sizeof(PTO2TaskDescriptor);
+        uintptr_t desc_end = desc_start + 64 * sizeof(TaskDescriptor);
         uintptr_t payload_start = (uintptr_t)h->header->rings[r].task_payloads;
 
         EXPECT_GE(payload_start, desc_end) << "Ring " << r << ": payload region should not overlap descriptors";
     }
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH - 1; r++) {
-        uintptr_t this_payload_end = (uintptr_t)h->header->rings[r].task_payloads + 64 * sizeof(PTO2TaskPayload);
+        uintptr_t this_payload_end = (uintptr_t)h->header->rings[r].task_payloads + 64 * sizeof(TaskPayload);
         uintptr_t next_desc_start = (uintptr_t)h->header->rings[r + 1].task_descriptors;
         EXPECT_GE(next_desc_start, this_payload_end) << "Ring " << r << " and " << (r + 1) << " should not overlap";
     }

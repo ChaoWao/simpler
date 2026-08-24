@@ -39,7 +39,7 @@ void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_ta
 
     int32_t scan_end = sm_last_task_alive;
     for (int32_t task_id = reclaim_task_cursor; task_id < scan_end; ++task_id) {
-        PTO2TaskPayload &payload = ring.get_payload_by_task_id(task_id);
+        TaskPayload &payload = ring.get_payload_by_task_id(task_id);
         if (payload.fanin_spill_pool != this) {
             continue;
         }

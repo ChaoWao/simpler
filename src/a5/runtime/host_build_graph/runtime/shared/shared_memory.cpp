@@ -51,8 +51,8 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     // argument region through the payload's delta and needs no base at all.
     auto off = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents({pitch, 0, 0, 0}));
     auto &ring = header->ring;
-    ring.task_descriptors = (PTO2TaskDescriptor *)(base + off.descriptors);
-    ring.task_payloads = (PTO2TaskPayload *)(base + off.payloads);
+    ring.task_descriptors = (TaskDescriptor *)(base + off.descriptors);
+    ring.task_payloads = (TaskPayload *)(base + off.payloads);
     ring.slot_states = (ChipTaskSlotState *)(base + off.slot_states);
     ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
@@ -153,8 +153,8 @@ void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size) {
     header->ring.task_window_size = task_window_size;
     header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
     header->ring.task_descriptors_offset = offset;
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
     offset += PTO2_ALIGN_UP(task_window_size * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
 
     header->total_size = sm_size;

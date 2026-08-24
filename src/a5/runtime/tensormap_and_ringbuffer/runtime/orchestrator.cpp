@@ -438,7 +438,7 @@ void PTO2OrchestratorState::mark_dep_pool_position(ChipTaskSlotState &slot_state
 void PTO2OrchestratorState::wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin) {
     PTO2SchedulerState *sched = scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
-    PTO2TaskPayload *payload = slot_state.payload;
+    TaskPayload *payload = slot_state.payload;
     slot_state.fanin_count = wfanin + 1;
 
     int32_t completed_fanin = 0;
@@ -529,11 +529,11 @@ static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, ChipTaskSlotS
 
 static void scope_tasks_push(PTO2OrchestratorState *orch, ChipTaskSlotState *task_slot_state);
 
-struct PTO2PreparedTask {
+struct PreparedTask {
     TaskId task_id = TaskId::invalid();
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
-    PTO2TaskDescriptor *task = nullptr;
-    PTO2TaskPayload *payload = nullptr;
+    TaskDescriptor *task = nullptr;
+    TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
 };
 
@@ -586,7 +586,7 @@ static bool check_scope_can_accept_task(PTO2OrchestratorState *orch, PTO2TaskAll
 
 static bool prepare_task(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
-    TaskAttrs task_attrs, PTO2PreparedTask *out
+    TaskAttrs task_attrs, PreparedTask *out
 ) {
     uint8_t ring_id = orch->current_ring_id();
     auto &allocator = orch->rings[ring_id].task_allocator;
@@ -890,7 +890,7 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_START();
     TaskOutputTensors result;
     PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
@@ -899,8 +899,8 @@ static TaskOutputTensors submit_task_common(
     PTO2RingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
     TaskId task_id = prepared.task_id;
     ChipTaskSlotState &cur_slot_state = *prepared.slot_state;
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
 
     // dep_gen capture point: snapshot the orch submit_task inputs while the
@@ -1293,15 +1293,15 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
     }
 
     PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time attributes. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).
     if (!prepare_task(orch, args, layout.total_output_size, ActiveMask{}, TaskAttrs{}, &prepared)) {
         return TaskOutputTensors{};
     }
 
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 

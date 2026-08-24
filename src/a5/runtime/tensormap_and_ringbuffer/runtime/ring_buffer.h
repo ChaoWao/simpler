@@ -134,7 +134,7 @@ public:
      * exercise corner cases like task IDs near INT32_MAX.
      */
     void init(
-        PTO2TaskDescriptor *descriptors, int32_t window_size, std::atomic<int32_t> *current_index_ptr,
+        TaskDescriptor *descriptors, int32_t window_size, std::atomic<int32_t> *current_index_ptr,
         std::atomic<int32_t> *last_alive_ptr, void *heap_base, uint64_t heap_size, std::atomic<int32_t> *error_code_ptr,
         ChipTaskSlotState *slot_states = nullptr, int32_t initial_local_task_id = 0, uint8_t ring_id = 0
     ) {
@@ -326,7 +326,7 @@ public:
 
 private:
     // --- Task Ring ---
-    PTO2TaskDescriptor *descriptors_ = nullptr;
+    TaskDescriptor *descriptors_ = nullptr;
     // Parallel to descriptors_, indexed by task_id & window_mask_. Read-only here,
     // used by the deadlock detector to identify the head task's slot.
     ChipTaskSlotState *slot_states_ = nullptr;
@@ -384,7 +384,7 @@ private:
         }
         heap_rebase_anchor_task_id_ = -1;
 
-        PTO2TaskDescriptor &desc = descriptors_[(last_alive - 1) & window_mask_];
+        TaskDescriptor &desc = descriptors_[(last_alive - 1) & window_mask_];
         uint64_t old_tail = heap_tail_;
         heap_tail_ =
             static_cast<uint64_t>(static_cast<char *>(desc.packed_buffer_end) - static_cast<char *>(heap_base_));
@@ -742,7 +742,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 }
 
 template <typename Fn>
-inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const PTO2TaskPayload &payload, Fn &&fn) {
+inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const TaskPayload &payload, Fn &&fn) {
     return for_each_fanin_storage(
         payload.fanin_inline_edges, payload.fanin_actual_count, payload.fanin_spill_start, *payload.fanin_spill_pool,
         static_cast<Fn &&>(fn)

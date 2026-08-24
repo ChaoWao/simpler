@@ -42,7 +42,7 @@ GraphExecution *acquire_execution_storage(
     return execution;
 }
 
-void reset_graph_payload(PTO2TaskPayload &payload) {
+void reset_graph_payload(TaskPayload &payload) {
     payload.fanin_count = 0;
     payload.predicate = DispatchPredicate{};
     payload.early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
@@ -236,7 +236,7 @@ bool graph_rebind_tensor(
             (!own_output && producer_index == node_index)) {
             return false;
         }
-        PTO2TaskDescriptor &producer = execution.node_at(producer_index).task;
+        TaskDescriptor &producer = execution.node_at(producer_index).task;
         const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
         const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
         if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
@@ -313,7 +313,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(definition_addr - sizeof(GraphDefinitionHeader));
     const GraphDefinition *definition = graph_definition_object_verified(*definition_header);
-    PTO2TaskPayload &payload = *outer_slot.payload;
+    TaskPayload &payload = *outer_slot.payload;
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
         definition->task_count > GRAPH_MAX_NODES ||
         payload.tensor_count != static_cast<int32_t>(definition->boundary_count) ||
@@ -434,8 +434,8 @@ GraphMaterializeResult graph_execution_materialize_slice(
             storage = new (storage) GraphNodeStorage;
             execution.constructed_nodes++;
         }
-        PTO2TaskDescriptor &task = storage->task;
-        PTO2TaskPayload &payload = storage->payload;
+        TaskDescriptor &task = storage->task;
+        TaskPayload &payload = storage->payload;
         ChipTaskSlotState &slot = storage->slot;
 
         const uint32_t synthetic_local =

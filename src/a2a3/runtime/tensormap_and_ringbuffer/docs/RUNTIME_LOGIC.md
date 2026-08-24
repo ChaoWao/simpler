@@ -49,7 +49,7 @@ The host builds the complete task graph before launching device execution. The o
 
 The primary production runtime. Uses ring buffers for task slots and output memory, with a TensorMap for automatic dependency tracking.
 
-- **Task storage**: `PTO2TaskDescriptor[]` in shared memory ring buffer
+- **Task storage**: `TaskDescriptor[]` in shared memory ring buffer
 - **Memory**: GM Heap ring for output buffer allocation
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
 - **Thread model**: 3 scheduler threads + 1 orchestrator thread on AICPU
@@ -148,8 +148,8 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 │  PTO2SharedMemoryHeader     │  (per-ring flow control + layout, global flags)
 ├─────────────────────────────┤  aligned
 │  Per-ring regions ×4:       │
-│    PTO2TaskDescriptor[N]    │  N = task_window_size per ring
-│    PTO2TaskPayload[N]       │
+│    TaskDescriptor[N]    │  N = task_window_size per ring
+│    TaskPayload[N]       │
 │    ChipTaskSlotState[N]     │
 └─────────────────────────────┘
 ```
@@ -368,7 +368,7 @@ When `PTO2OrchestratorState::submit_task` processes parameters:
 
 ## 6. Task Descriptor and States
 
-### 6.1 PTO2TaskDescriptor (Hot Path)
+### 6.1 TaskDescriptor (Hot Path)
 
 | Field | Description |
 | ----- | ----------- |
@@ -383,7 +383,7 @@ When `PTO2OrchestratorState::submit_task` processes parameters:
 | `packed_buffer_base` | Start of packed buffer in GM Heap |
 | `packed_buffer_end` | End of packed buffer (for heap reclamation) |
 
-### 6.1b PTO2TaskPayload (Cold Path)
+### 6.1b TaskPayload (Cold Path)
 
 | Field | Description |
 | ----- | ----------- |
@@ -483,7 +483,7 @@ SIMPLER_SCOPE(rt) {
 
 **Output tensor lifetime — single-scope only.** `submit_task` returns a
 `TaskOutputTensors`, and `get_ref(i)` hands back a `const Tensor&`. Both are
-backed by pointers into the submitting task's `PTO2TaskPayload::tensors[]`,
+backed by pointers into the submitting task's `TaskPayload::tensors[]`,
 which lives in a ring-buffer slot. After `scope_end` the slot becomes
 eligible for reuse; once `advance_ring_pointers` reaches it,
 `reset_for_reuse()` runs and the next `submit_task` overwrites the same
@@ -750,7 +750,7 @@ Instead of polling a shared-memory status flag, the production protocol uses har
 
 ### 9.3 PTO2DispatchPayload
 
-Built by the scheduler from `PTO2TaskDescriptor`:
+Built by the scheduler from `TaskDescriptor`:
 
 | Field | Description |
 | ----- | ----------- |

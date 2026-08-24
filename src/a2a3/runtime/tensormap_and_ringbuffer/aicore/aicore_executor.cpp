@@ -172,7 +172,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // behind it. The kernel's own input dcci runs inside execute_task()
             // below — strictly AFTER this gate — so predecessor outputs are visible.
             // src_payload == 0 (the common ready path) skips this; a non-zero
-            // src_payload is both the gate flag and the source PTO2TaskPayload.
+            // src_payload is both the gate flag and the source TaskPayload.
             if (exec_payload->src_payload != 0) {
                 // AICPU staged only src_payload, not the arg vector — fill
                 // args[0..num_args) ourselves now, while we are idle waiting for
@@ -182,15 +182,13 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 // args[SPMD_LOCAL_CONTEXT_INDEX]/[SPMD_GLOBAL_CONTEXT_INDEX] are
                 // still written by the AICPU (num_args <= 48 never reaches them).
                 __gm__ char *src = reinterpret_cast<__gm__ char *>(exec_payload->src_payload);
-                int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
-                int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-                __gm__ uint64_t *src_scalars =
-                    reinterpret_cast<__gm__ uint64_t *>(src + PTO2_TASKPAYLOAD_SCALARS_OFFSET);
+                int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_TENSOR_COUNT_OFFSET);
+                int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_SCALAR_COUNT_OFFSET);
+                __gm__ uint64_t *src_scalars = reinterpret_cast<__gm__ uint64_t *>(src + TASKPAYLOAD_SCALARS_OFFSET);
                 int n = 0;
                 for (int32_t i = 0; i < tensor_count; i++) {
-                    exec_payload->args[n++] = reinterpret_cast<uint64_t>(
-                        src + PTO2_TASKPAYLOAD_TENSORS_OFFSET + i * PTO2_TASKPAYLOAD_TENSOR_STRIDE
-                    );
+                    exec_payload->args[n++] =
+                        reinterpret_cast<uint64_t>(src + TASKPAYLOAD_TENSORS_OFFSET + i * TASKPAYLOAD_TENSOR_STRIDE);
                 }
                 for (int32_t i = 0; i < scalar_count; i++) {
                     exec_payload->args[n++] = src_scalars[i];

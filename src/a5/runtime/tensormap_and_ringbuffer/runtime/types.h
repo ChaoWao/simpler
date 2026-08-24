@@ -121,7 +121,7 @@ constexpr bool dep_has_retain(DepFlags f) { return (f & DEP_RETAIN) != DEP_NONE;
  *
  * LIFETIME — single-scope only:
  *   Internally this class stores pointers into the submitting task's payload
- *   (PTO2TaskPayload::tensors[]), which lives in a ring-buffer slot. After
+ *   (TaskPayload::tensors[]), which lives in a ring-buffer slot. After
  *   scope_end the slot becomes eligible for reuse, and a later submit will
  *   overwrite the same ChipTensor storage in place. Therefore the
  *   TaskOutputTensors instance, the const ChipTensor& returned by get_ref(), and

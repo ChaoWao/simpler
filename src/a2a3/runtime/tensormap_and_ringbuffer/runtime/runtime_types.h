@@ -215,7 +215,7 @@ struct PTO2DepListEntry {
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
-struct PTO2TaskDescriptor {
+struct TaskDescriptor {
     // Mixed-task identification (encodes ring_id in upper 32 bits)
     TaskId task_id;  // raw: (ring_id << 32) | local_id
 
@@ -229,14 +229,14 @@ struct PTO2TaskDescriptor {
 
 // A 4-byte alignment pad follows kernel_id[3]; the scheduler and shared-memory
 // ABI depend on the descriptor size and packed_buffer_base offset staying fixed.
-static_assert(sizeof(PTO2TaskDescriptor) == 40, "PTO2TaskDescriptor size is part of the shared-memory ABI");
-static_assert(offsetof(PTO2TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
+static_assert(sizeof(TaskDescriptor) == 40, "TaskDescriptor size is part of the shared-memory ABI");
+static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
 
 // =============================================================================
 // Per-Slot Scheduling State
 // =============================================================================
 
-// Early-dispatch claim states for PTO2TaskPayload::early_dispatch_state.
+// Early-dispatch claim states for TaskPayload::early_dispatch_state.
 enum PTO2EarlyDispatchState : uint8_t {
     PTO2_EARLY_DISPATCH_NONE = 0,       // not pre-staged
     PTO2_EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
@@ -274,7 +274,7 @@ inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
  * by bulk tensor and scalar data. Small fanins stay fully inline; larger
  * fanins spill into a per-ring ring buffer slice.
  */
-struct PTO2TaskPayload {
+struct TaskPayload {
     // === Cache lines 0-8 (576B) — metadata + inline fanin ===
     int32_t tensor_count{0};
     int32_t scalar_count{0};
@@ -413,23 +413,21 @@ struct PTO2TaskPayload {
     }
 };
 
-// PTO2TaskPayload layout verification (offsetof requires complete type).
-static_assert(offsetof(PTO2TaskPayload, fanin_spill_pool) == 16, "spill pool pointer layout drift");
-static_assert(offsetof(PTO2TaskPayload, fanin_inline_edges) == 24, "inline fanin array must follow spill metadata");
+// TaskPayload layout verification (offsetof requires complete type).
+static_assert(offsetof(TaskPayload, fanin_spill_pool) == 16, "spill pool pointer layout drift");
+static_assert(offsetof(TaskPayload, fanin_inline_edges) == 24, "inline fanin array must follow spill metadata");
 static_assert(
-    offsetof(PTO2TaskPayload, predicate) == 576,
+    offsetof(TaskPayload, predicate) == 576,
     "dispatch predicate occupies cache line 9 at fixed byte 576 (before tensors, never moves)"
 );
+static_assert(offsetof(TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)");
 static_assert(
-    offsetof(PTO2TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)"
-);
-static_assert(
-    offsetof(PTO2TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor),
+    offsetof(TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor),
     "scalars must immediately follow tensors"
 );
 static_assert(
-    sizeof(PTO2TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
-    "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + tensors + scalars"
+    sizeof(TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
+    "TaskPayload size = metadata(576) + predicate cache line(64) + tensors + scalars"
 );
 
 /**
@@ -495,8 +493,8 @@ struct alignas(64) ChipTaskSlotState {
     // but written here per-submit instead of in an O(window_size) init loop —
     // these are the only "scale-dependent" pointers in this struct, so moving
     // them out of init makes startup cost independent of task_window_size.
-    PTO2TaskPayload *payload;
-    PTO2TaskDescriptor *task;
+    TaskPayload *payload;
+    TaskDescriptor *task;
 
     // --- Set per-submit (depend on task inputs) ---
     ActiveMask active_mask;  // Bitmask of active subtask slots (set once)
@@ -552,7 +550,7 @@ struct alignas(64) ChipTaskSlotState {
      * the same 64B slot_state cache line that prepare_task is already
      * dirtying) to avoid the init-time per-slot loop.
      */
-    void bind_buffers(PTO2TaskPayload *p, PTO2TaskDescriptor *t) {
+    void bind_buffers(TaskPayload *p, TaskDescriptor *t) {
         payload = p;
         task = t;
     }
@@ -612,7 +610,7 @@ struct alignas(64) ChipTaskSlotState {
         lifecycle_flags.store(PTO2_LIFECYCLE_FLAGS_NONE, std::memory_order_relaxed);
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
-        // Payload early-dispatch fields are initialized by PTO2TaskPayload::init
+        // Payload early-dispatch fields are initialized by TaskPayload::init
         // on every submit before the slot becomes scheduler-visible.
     }
 

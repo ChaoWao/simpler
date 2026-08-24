@@ -42,12 +42,12 @@ inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
 }
 
 // AICore materializes args[] from src_payload on the gated path using these
-// offsets; pin them against the live PTO2TaskPayload layout.
-static_assert(offsetof(PTO2TaskPayload, tensor_count) == PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, scalar_count) == PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, tensors) == PTO2_TASKPAYLOAD_TENSORS_OFFSET);
-static_assert(offsetof(PTO2TaskPayload, scalars) == PTO2_TASKPAYLOAD_SCALARS_OFFSET);
-static_assert(sizeof(ChipTensor) == PTO2_TASKPAYLOAD_TENSOR_STRIDE);
+// offsets; pin them against the live TaskPayload layout.
+static_assert(offsetof(TaskPayload, tensor_count) == TASKPAYLOAD_TENSOR_COUNT_OFFSET);
+static_assert(offsetof(TaskPayload, scalar_count) == TASKPAYLOAD_SCALAR_COUNT_OFFSET);
+static_assert(offsetof(TaskPayload, tensors) == TASKPAYLOAD_TENSORS_OFFSET);
+static_assert(offsetof(TaskPayload, scalars) == TASKPAYLOAD_SCALARS_OFFSET);
+static_assert(sizeof(ChipTensor) == TASKPAYLOAD_TENSOR_STRIDE);
 static_assert(RUNTIME_MAX_WORKER <= PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64);
 
 const char *SchedulerContext::shape_name(ResourceShape shape) {

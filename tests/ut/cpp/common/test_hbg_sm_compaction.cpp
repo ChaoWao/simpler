@@ -133,15 +133,13 @@ public:
 
     const char *base() const { return image_.base(); }
 
-    PTO2TaskDescriptor *descriptors() {
-        return reinterpret_cast<PTO2TaskDescriptor *>(
+    TaskDescriptor *descriptors() {
+        return reinterpret_cast<TaskDescriptor *>(
             image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).descriptors
         );
     }
-    PTO2TaskPayload *payloads() {
-        return reinterpret_cast<PTO2TaskPayload *>(
-            image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).payloads
-        );
+    TaskPayload *payloads() {
+        return reinterpret_cast<TaskPayload *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).payloads);
     }
     ChipTensor *tensor_pool() {
         return reinterpret_cast<ChipTensor *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).tensor_pool);
@@ -200,13 +198,9 @@ struct Compacted {
         return pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted)));
     }
 
-    PTO2TaskPayload *payload_at(uint64_t i) {
-        return reinterpret_cast<PTO2TaskPayload *>(image.base() + off().payloads) + i;
-    }
-    PTO2TaskDescriptor *descriptors() {
-        return reinterpret_cast<PTO2TaskDescriptor *>(image.base() + off().descriptors);
-    }
-    PTO2TaskPayload *payloads() { return payload_at(0); }
+    TaskPayload *payload_at(uint64_t i) { return reinterpret_cast<TaskPayload *>(image.base() + off().payloads) + i; }
+    TaskDescriptor *descriptors() { return reinterpret_cast<TaskDescriptor *>(image.base() + off().descriptors); }
+    TaskPayload *payloads() { return payload_at(0); }
     ChipTaskSlotState *slot_states() { return reinterpret_cast<ChipTaskSlotState *>(image.base() + off().slot_states); }
     ChipTensor *tensor_pool() { return reinterpret_cast<ChipTensor *>(image.base() + off().tensor_pool); }
     std::atomic<uint8_t> *completion_flags() {
@@ -272,8 +266,8 @@ TEST(HbgSmCompaction, BindingsSurviveTheCopyToTheDevice) {
     // stop being true the moment a pool moved ahead of them.
     const auto off = compacted.off();
     auto *slots = reinterpret_cast<ChipTaskSlotState *>(landed.base() + off.slot_states);
-    auto *payloads = reinterpret_cast<PTO2TaskPayload *>(landed.base() + off.payloads);
-    auto *descriptors = reinterpret_cast<PTO2TaskDescriptor *>(landed.base() + off.descriptors);
+    auto *payloads = reinterpret_cast<TaskPayload *>(landed.base() + off.payloads);
+    auto *descriptors = reinterpret_cast<TaskDescriptor *>(landed.base() + off.descriptors);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         EXPECT_EQ(slots[i].payload.get(), &payloads[i]) << "slot " << i;
@@ -321,7 +315,7 @@ TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
     EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(WINDOW).end);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        PTO2TaskPayload *shipped = compacted.payload_at(i);
+        TaskPayload *shipped = compacted.payload_at(i);
         EXPECT_EQ(shipped->tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(shipped->scalar_count, SCALARS_PER_TASK) << "slot " << i;
         EXPECT_EQ(shipped->fanin_count, FANIN_PER_TASK) << "slot " << i;
@@ -358,7 +352,7 @@ TEST(HbgSmCompaction, RebindsEveryArgumentRegionInsideTheImage) {
     const char *fanin_end = fanin_begin + compacted.used.fanin_elems * sizeof(int32_t);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        PTO2TaskPayload *shipped = compacted.payload_at(i);
+        TaskPayload *shipped = compacted.payload_at(i);
         const char *t = reinterpret_cast<const char *>(shipped->tensor_data());
         const char *s = reinterpret_cast<const char *>(shipped->scalar_data());
         const char *f = reinterpret_cast<const char *>(shipped->fanin_data());
@@ -385,7 +379,7 @@ TEST(HbgSmCompaction, UnboundRegionsStayUnbound) {
 
     Compacted compacted(mirror);
 
-    PTO2TaskPayload *shipped = compacted.payload_at(GRAPH_SLOT);
+    TaskPayload *shipped = compacted.payload_at(GRAPH_SLOT);
     EXPECT_EQ(shipped->tensor_data(), nullptr);
     EXPECT_EQ(shipped->scalar_data(), nullptr);
     // Its fanin region still resolves, and still inside the image.

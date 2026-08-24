@@ -59,22 +59,22 @@ static_assert(
     "GLOBAL_CONTEXT_INDEX out of sync with intrinsic.h"
 );
 
-// Byte offsets into PTO2TaskPayload used by AICore to materialize args[] on the
+// Byte offsets into TaskPayload used by AICore to materialize args[] on the
 // not_ready (early-dispatch) path. The AICore .o does not include
 // runtime_types.h, so it reads tensor_count / scalar_count / tensors[] /
 // scalars[] through these constants. The AICPU side (scheduler_dispatch.cpp)
 // static_asserts them against offsetof where the full struct is visible, so any
-// PTO2TaskPayload layout drift fails the build rather than corrupting args[].
-constexpr uint32_t PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET = 0;
-constexpr uint32_t PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
+// TaskPayload layout drift fails the build rather than corrupting args[].
+constexpr uint32_t TASKPAYLOAD_TENSOR_COUNT_OFFSET = 0;
+constexpr uint32_t TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
 // Offsets of the fields that NAME the argument regions, not of the regions themselves:
 // a region's address is (src + <field offset>) + <the int32 delta stored there>.
-constexpr uint32_t PTO2_TASKPAYLOAD_TENSORS_DELTA_OFFSET = 12;
-constexpr uint32_t PTO2_TASKPAYLOAD_SCALARS_DELTA_OFFSET = 16;
+constexpr uint32_t TASKPAYLOAD_TENSORS_DELTA_OFFSET = 12;
+constexpr uint32_t TASKPAYLOAD_SCALARS_DELTA_OFFSET = 16;
 // Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate. Scalars follow it,
 // then tensors — the tensor array is last because it is the only region whose used
 // extent varies per task, so a task's read set is a contiguous prefix.
-constexpr uint32_t PTO2_TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
+constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(ChipTensor)
 
 /**
  * Per-core dispatch payload: function address + args[] + SPMD context.
@@ -93,7 +93,7 @@ struct alignas(64) PTO2DispatchPayload {
     // capacity are cold (prefilled once at init) but ride this hot line for free.
     // Sized to exactly 64B so both dispatch paths write one control line: the
     // ready path (src_payload = 0) then also fills args[0..num_args); the gated
-    // path (src_payload = &PTO2TaskPayload) leaves args[] to the idle AICore.
+    // path (src_payload = &TaskPayload) leaves args[] to the idle AICore.
     uint64_t function_bin_addr; /**< Kernel entry address in GM (set by Scheduler). */
 
     /** Per-dispatch context: block_idx/block_num (hot) + async_ctx (task_token hot,
@@ -103,7 +103,7 @@ struct alignas(64) PTO2DispatchPayload {
 
     /** Early-dispatch gate AND source pointer, folded into one field. 0 = ready:
      *  AICore executes on pickup (args[] already filled by the AICPU). Non-zero =
-     *  gated: the value is the source PTO2TaskPayload address; the AICore fills
+     *  gated: the value is the source TaskPayload address; the AICore fills
      *  args[0..num_args) from it, then waits for the doorbell (DATA_MAIN_BASE
      *  high 32 == this dispatch's reg_task_id) before executing. A payload address
      *  is never 0, so the gate flag is lossless. */

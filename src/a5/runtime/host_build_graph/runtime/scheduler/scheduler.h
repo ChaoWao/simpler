@@ -585,7 +585,7 @@ struct PTO2SchedulerState {
     // lists. The decision is terminal: tasks are never re-polled; a producer's
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     int classify_fanin_state(const ChipTaskSlotState *s) const {
-        const PTO2TaskPayload &p = *s->payload;
+        const TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         const int32_t *fanin = p.fanin_data();
         for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
@@ -757,7 +757,7 @@ struct PTO2SchedulerState {
         return true;
     }
 
-    static inline bool try_claim_early_dispatch_launch(PTO2TaskPayload &payload) {
+    static inline bool try_claim_early_dispatch_launch(TaskPayload &payload) {
         uint8_t expected = PTO2_EARLY_DISPATCH_LAUNCH_NONE;
         return payload.early_dispatch_launch_state.compare_exchange_strong(
             expected, PTO2_EARLY_DISPATCH_LAUNCH_RINGING, std::memory_order_seq_cst, std::memory_order_seq_cst
@@ -785,22 +785,22 @@ struct PTO2SchedulerState {
         }
     }
 
-    static inline bool try_claim_early_sync_drain(PTO2TaskPayload &payload) {
+    static inline bool try_claim_early_sync_drain(TaskPayload &payload) {
         uint8_t expected = PTO2_EARLY_SYNC_DRAIN_NONE;
         return payload.early_sync_drain_state.compare_exchange_strong(
             expected, PTO2_EARLY_SYNC_DRAIN_OWNER, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
     }
 
-    static inline bool owns_early_sync_drain(const PTO2TaskPayload &payload) {
+    static inline bool owns_early_sync_drain(const TaskPayload &payload) {
         return (payload.early_sync_drain_state.load(std::memory_order_acquire) & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
-    static inline void mark_early_sync_drain_armed(PTO2TaskPayload &payload) {
+    static inline void mark_early_sync_drain_armed(TaskPayload &payload) {
         payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_ARMED, std::memory_order_seq_cst);
     }
 
-    static inline bool publish_ready_to_early_sync_drain(PTO2TaskPayload &payload) {
+    static inline bool publish_ready_to_early_sync_drain(TaskPayload &payload) {
         uint8_t previous =
             payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_READY, std::memory_order_seq_cst);
         return (previous & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
@@ -819,7 +819,7 @@ struct PTO2SchedulerState {
         }
     }
 
-    static inline void finish_early_sync_drain(PTO2TaskPayload &payload) {
+    static inline void finish_early_sync_drain(TaskPayload &payload) {
         uint8_t state = payload.early_sync_drain_state.load(std::memory_order_seq_cst);
         while ((state & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0 && (state & PTO2_EARLY_SYNC_DRAIN_COMPLETE) == 0) {
             uint8_t desired = state | PTO2_EARLY_SYNC_DRAIN_COMPLETE;

@@ -40,7 +40,7 @@ Type changes:
 
 | Field | Before | After |
 | ----- | ------ | ----- |
-| `PTO2TaskDescriptor.task_id` | `int32_t` | `TaskId` |
+| `TaskDescriptor.task_id` | `int32_t` | `TaskId` |
 | `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
 | `ChipTaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
@@ -94,15 +94,15 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     uint64_t task_descriptors_offset;
 
     // Per-ring data pointers (host-side, set by setup_pointers)
-    PTO2TaskDescriptor *task_descriptors;
-    PTO2TaskPayload *task_payloads;
+    TaskDescriptor *task_descriptors;
+    TaskPayload *task_payloads;
     ChipTaskSlotState *slot_states;
 
     // Accessors (slot = local_id & task_window_mask)
-    PTO2TaskDescriptor &get_task_by_slot(int32_t slot);
-    PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id);
-    PTO2TaskPayload &get_payload_by_slot(int32_t slot);
-    PTO2TaskPayload &get_payload_by_task_id(int32_t local_id);
+    TaskDescriptor &get_task_by_slot(int32_t slot);
+    TaskDescriptor &get_task_by_task_id(int32_t local_id);
+    TaskPayload &get_payload_by_slot(int32_t slot);
+    TaskPayload &get_payload_by_task_id(int32_t local_id);
     ChipTaskSlotState &get_slot_state_by_slot(int32_t slot);
     ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id);
 };
@@ -166,7 +166,7 @@ bool entry_valid(const PTO2TensorMapEntry& e) {
 | Structure | Reason |
 | --------- | ------ |
 | `PTO2DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
-| `PTO2TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
+| `TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
 | `PTO2ReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
 | `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
 

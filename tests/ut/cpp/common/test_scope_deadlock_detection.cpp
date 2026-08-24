@@ -23,7 +23,7 @@ constexpr int32_t WINDOW_SIZE = 16;
 constexpr int32_t POOL_CAPACITY = 8;
 
 void make_head_match_old_structural_predicate(
-    ChipTaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
+    ChipTaskSlotState &head, TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
 ) {
     descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
@@ -44,7 +44,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     }
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
-    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
+    TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
@@ -76,7 +76,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     }
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
-    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
+    TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;

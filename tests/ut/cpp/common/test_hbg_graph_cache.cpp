@@ -252,8 +252,8 @@ public:
 private:
     size_t heap_bytes_{0};
     std::unique_ptr<AlignedStorage> storage_;
-    PTO2TaskDescriptor task_{};
-    PTO2TaskPayload payload_{};
+    TaskDescriptor task_{};
+    TaskPayload payload_{};
     ChipTaskSlotState slot_{};
     std::array<ChipTensor, TENSOR_SLOTS> boundary_tensors_{};
     std::array<uint64_t, SCALAR_SPAN> boundary_scalars_{};
@@ -452,7 +452,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(first_boundary.data()), 17);
     ASSERT_NE(execution, nullptr);
 
-    PTO2TaskDescriptor outer_task{};
+    TaskDescriptor outer_task{};
     outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
@@ -528,7 +528,7 @@ TEST(GraphExecutionReplay, MaterializesBoundaryScalarPoolWiderThanTaskPayload) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 21);
     ASSERT_NE(execution, nullptr);
 
-    PTO2TaskDescriptor outer_task{};
+    TaskDescriptor outer_task{};
     outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
@@ -735,7 +735,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17);
     ASSERT_NE(execution, nullptr);
 
-    PTO2TaskDescriptor outer_task{};
+    TaskDescriptor outer_task{};
     outer_task.task_id = TaskId::make(1, 5);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();

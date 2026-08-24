@@ -72,8 +72,8 @@ The shared image uses three per-slot structures:
 
 | Structure | Purpose |
 | --------- | ------- |
-| `PTO2TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
-| `PTO2TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
+| `TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
+| `TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
 | `ChipTaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
 
 The host/device boundary is POD and position-independent. Fanins are integer

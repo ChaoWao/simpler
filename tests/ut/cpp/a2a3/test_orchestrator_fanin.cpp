@@ -179,7 +179,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     auto &consumer_slot =
         sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
     ASSERT_NE(consumer_slot.payload, nullptr);
-    PTO2TaskPayload *payload = consumer_slot.payload;
+    TaskPayload *payload = consumer_slot.payload;
     EXPECT_EQ(payload->fanin_actual_count, kProducers);  // duplicate folded, not 66
 
     TaskId dup = producers.back().task_id();

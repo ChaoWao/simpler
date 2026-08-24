@@ -208,8 +208,8 @@ TEST(TaskTimingSlots, ResolveZeroesIncompleteAndUntagged) {
 TEST(TaskTimingSlots, DescriptorDoesNotGrow) {
     // The timing tag moved off the descriptor onto TaskAttrs; the descriptor
     // (shared-memory ABI) keeps its size and packed_buffer_base offset.
-    EXPECT_EQ(sizeof(PTO2TaskDescriptor), 40u);
-    EXPECT_EQ(offsetof(PTO2TaskDescriptor, packed_buffer_base), 24u);
+    EXPECT_EQ(sizeof(TaskDescriptor), 40u);
+    EXPECT_EQ(offsetof(TaskDescriptor, packed_buffer_base), 24u);
 }
 
 TEST(TaskTimingSlots, MarkersTimingRoundTrip) {

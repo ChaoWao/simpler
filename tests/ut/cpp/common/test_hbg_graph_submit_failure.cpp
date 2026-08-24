@@ -743,7 +743,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
         << "the shell's block sits above the ordinary task's, not before it";
     PTO2SharedMemoryRingHeader &ring = sm_handle->header->ring;
     const int32_t shell_slot = ring.get_slot_by_task_id(static_cast<int32_t>(graph.task_id.local()));
-    const PTO2TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
+    const TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
     EXPECT_GE(
@@ -863,14 +863,14 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
     EXPECT_LT(reinterpret_cast<uint64_t>(heap_resident) + nbytes, GRAPH_RECORD_VIRTUAL_BASE);
 }
 
-// A hidden-alloc task's payload passes through PTO2TaskPayload::init() and nothing
+// A hidden-alloc task's payload passes through TaskPayload::init() and nothing
 // else — unlike an ordinary ring task, no dispatch-predicate assignment follows it,
 // and unlike an outer GRAPH task, no graph_reset_outer_payload precedes it. So
 // init() is where its predicate has to acquire a defined value: the ring's payload
 // storage is reused raw memory that no constructor runs over, and compact_live_image
 // translates every submitted slot's predicate.addr as a graph-heap address.
 TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefined) {
-    PTO2TaskPayload *payloads = sm_handle->header->ring.task_payloads;
+    TaskPayload *payloads = sm_handle->header->ring.task_payloads;
     ASSERT_NE(payloads, nullptr);
     // 0x4A repeated has 01 as its top two bits, so read as an address it lands
     // inside [HEAP_VIRTUAL_BASE, GRAPH_RECORD_VIRTUAL_BASE) — the quarter of the

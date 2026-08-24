@@ -396,7 +396,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
                 if (cnt_running == 0) {
                     // Snapshot the non-atomic task pointer once: it can be null on a
                     // torn slot, and a concurrent writer may flip it mid-read.
-                    PTO2TaskDescriptor *task_ptr = slot_state.task;
+                    TaskDescriptor *task_ptr = slot_state.task;
                     cls.stuck_task_id = (task_ptr != nullptr) ? static_cast<int64_t>(task_ptr->task_id.raw) : -1;
                     cls.stuck_core = run_core;
                 }

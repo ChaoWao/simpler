@@ -7,7 +7,7 @@ Two runtime implementations live under `src/a5/runtime/`, each providing a diffe
 | Feature | host_build_graph | tensormap_and_ringbuffer |
 | ------- | ---------------- | ------------------------ |
 | Graph built on | Host CPU | AICPU (device) |
-| Task storage | Fixed `Task[]` array | Ring buffer (`PTO2TaskDescriptor[]`) |
+| Task storage | Fixed `Task[]` array | Ring buffer (`TaskDescriptor[]`) |
 | Dependencies | Explicit edges | Auto-derived via TensorMap |
 | Use case | Development, debugging | Production workloads |
 

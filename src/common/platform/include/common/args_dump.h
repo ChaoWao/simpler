@@ -263,7 +263,7 @@ struct DumpDataHeader {
 
 /**
  * Caller fills this struct from runtime-specific tensor types.
- * Platform layer is agnostic to runtime-specific types (ChipTensor, PTO2TaskPayload, etc.).
+ * Platform layer is agnostic to runtime-specific types (ChipTensor, TaskPayload, etc.).
  */
 struct ArgsDumpInfo {
     uint64_t task_id;

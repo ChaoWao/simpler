@@ -26,9 +26,9 @@ same mixed-task contract.
 
 The shared graph image separates stable task identity from scheduling state:
 
-- `PTO2TaskDescriptor` contains the task ID, kernel IDs, and packed-buffer
+- `TaskDescriptor` contains the task ID, kernel IDs, and packed-buffer
   addresses.
-- `PTO2TaskPayload` contains the argument counts, predicate, and a delta naming
+- `TaskPayload` contains the argument counts, predicate, and a delta naming
   each of its tensor, scalar and position-independent fanin-id regions. The
   arguments live in the pool segments, not in the payload.
 - `ChipTaskSlotState` contains the active mask, task attributes, logical block

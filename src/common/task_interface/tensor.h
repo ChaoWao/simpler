@@ -470,7 +470,7 @@ private:
     }
 
     // Friends that need to construct ChipTensors
-    friend struct PTO2TaskPayload;
+    friend struct TaskPayload;
     friend inline ChipTensor make_tensor_external(
         void *addr, const uint32_t shapes[], uint32_t ndims, DataType dtype, bool manual_dep, int32_t version,
         AddressSpace address_space

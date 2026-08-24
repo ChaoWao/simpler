@@ -1141,7 +1141,7 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
 struct PTO2FaninBuilder {
-    PTO2FaninBuilder(PTO2OrchestratorState *orch, PTO2TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
+    PTO2FaninBuilder(PTO2OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
         count(0),
         orch(orch),
         seen_epoch(seen_epoch),
@@ -1152,7 +1152,7 @@ struct PTO2FaninBuilder {
     PTO2OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
     int32_t self_local{0};
-    PTO2TaskPayload *payload{nullptr};
+    TaskPayload *payload{nullptr};
     // The payload's fanin region, resolved once: the appends below would otherwise
     // re-resolve the delta per producer. Requires the regions bound before construction.
     int32_t *slots{nullptr};
@@ -1216,11 +1216,11 @@ static bool append_fanin_or_fail(
     return true;
 }
 
-struct PTO2PreparedTask {
+struct PreparedTask {
     TaskId task_id = TaskId::invalid();
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
-    PTO2TaskDescriptor *task = nullptr;
-    PTO2TaskPayload *payload = nullptr;
+    TaskDescriptor *task = nullptr;
+    TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
 };
 
@@ -1240,7 +1240,7 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
 
 static bool prepare_task(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
-    TaskAttrs task_attrs, PTO2PreparedTask *out
+    TaskAttrs task_attrs, PreparedTask *out
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
     uint8_t ring_id = 0;
@@ -1308,7 +1308,7 @@ static bool prepare_task(
     out->slot_state->bind_buffers(out->payload, out->task);
 
     // prepare_task does NO payload writes: all payload content (tensors/scalars +
-    // early-dispatch fields) is initialized in PTO2TaskPayload::init, the
+    // early-dispatch fields) is initialized in TaskPayload::init, the
     // single payload-init point, which runs before Orch-side wiring publish.
 
     // Fields already zeroed by the reset_for_reuse() above:
@@ -1456,14 +1456,14 @@ static TaskOutputTensors submit_task_common(
     ORCH_PHASE_START();
     TaskOutputTensors result;
     PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
     PTO2SchedulerState *sched = orch->scheduler;
     TaskId task_id = prepared.task_id;
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
 
     // dep_gen capture point: open this task's graph entry before its dependency
@@ -1734,7 +1734,7 @@ bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &
     return true;
 }
 
-void graph_reset_outer_payload(PTO2TaskPayload &payload) {
+void graph_reset_outer_payload(TaskPayload &payload) {
     payload.tensor_count = 0;
     payload.scalar_count = 0;
     payload.fanin_count = 0;
@@ -1797,8 +1797,8 @@ bool graph_submit_outer(
     }
     const TaskId task_id = TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
     PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
-    PTO2TaskDescriptor &task = ring.task_descriptors[allocation.slot];
-    PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
+    TaskDescriptor &task = ring.task_descriptors[allocation.slot];
+    TaskPayload &payload = ring.task_payloads[allocation.slot];
     ChipTaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
 
     // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
@@ -2025,7 +2025,7 @@ TaskOutputTensors graph_record_submit_node(
     node.record_packed_base = packed_base_addr;
     node.total_output_size = aligned_output;
 
-    // Build the tensor list exactly as PTO2TaskPayload::init: inputs/inouts copy
+    // Build the tensor list exactly as TaskPayload::init: inputs/inouts copy
     // the caller's ChipTensor; outputs materialize from the create-info onto the
     // scratch buffer and carry this node's owner id.
     const int32_t tensor_count = args.tensor_count();
@@ -2694,15 +2694,15 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
     }
 
     PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time attributes. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).
     if (!prepare_task(orch, args, layout.total_output_size, ActiveMask{}, TaskAttrs{}, &prepared)) {
         return TaskOutputTensors{};
     }
 
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 

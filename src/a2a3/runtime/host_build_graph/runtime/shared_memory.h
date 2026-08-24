@@ -92,8 +92,8 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
 
     // Per-ring data pointers (host-side, set by setup_pointers)
-    PTO2TaskDescriptor *task_descriptors;
-    PTO2TaskPayload *task_payloads;
+    TaskDescriptor *task_descriptors;
+    TaskPayload *task_payloads;
     ChipTaskSlotState *slot_states;
 
     // Polling-completion state (device-addressed array, one byte per slot).
@@ -139,11 +139,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
     int32_t get_slot_by_task_id(int32_t local_task_id) { return local_task_id & task_window_mask; }
 
-    PTO2TaskDescriptor &get_task_by_slot(int32_t slot) { return task_descriptors[slot]; }
+    TaskDescriptor &get_task_by_slot(int32_t slot) { return task_descriptors[slot]; }
 
-    PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id) {
-        return task_descriptors[get_slot_by_task_id(local_id)];
-    }
+    TaskDescriptor &get_task_by_task_id(int32_t local_id) { return task_descriptors[get_slot_by_task_id(local_id)]; }
 
     // No get_payload_by_slot / get_payload_by_task_id here: a payload is reached
     // through its slot state's `payload` delta, which the image's restack rebinds to
@@ -350,9 +348,9 @@ inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) no
     uint64_t off = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
     PTO2RingSegmentOffsets o{};
     o.descriptors = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
     o.payloads = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
     o.slot_states = off;
     off += PTO2_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
     o.completion_flags = off;
@@ -371,7 +369,7 @@ inline PTO2RingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) no
     return ring_segment_offsets(mirror_extents(task_window_size));
 }
 
-// Every per-task region starts on a cache line, which PTO2TaskPayload::init's
+// Every per-task region starts on a cache line, which TaskPayload::init's
 // round-up scalar memcpy relies on. ChipTensor is 2 cache lines, so a tensor region
 // is aligned for any count; the fanin and scalar strides need it stated.
 static_assert(
@@ -490,10 +488,10 @@ inline uint64_t compact_live_image(
     out_ring.completion_flags = nullptr;
 
     const uint64_t nt = used.submitted_tasks;
-    std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(PTO2TaskDescriptor));
-    // One copy, not one per payload: PTO2TaskPayload is fixed-size, so the mirror and
+    std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(TaskDescriptor));
+    // One copy, not one per payload: TaskPayload is fixed-size, so the mirror and
     // the image share a stride. Each pool is likewise one copy of its own prefix.
-    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(PTO2TaskPayload));
+    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(TaskPayload));
     std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(ChipTaskSlotState));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
@@ -501,9 +499,9 @@ inline uint64_t compact_live_image(
     std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
     auto *out_slots = reinterpret_cast<ChipTaskSlotState *>(out_base + to.slot_states);
-    auto *out_descriptors = reinterpret_cast<PTO2TaskDescriptor *>(out_base + to.descriptors);
-    auto *out_payloads = reinterpret_cast<PTO2TaskPayload *>(out_base + to.payloads);
-    const auto *mirror_payloads = reinterpret_cast<const PTO2TaskPayload *>(mirror_base + from.payloads);
+    auto *out_descriptors = reinterpret_cast<TaskDescriptor *>(out_base + to.descriptors);
+    auto *out_payloads = reinterpret_cast<TaskPayload *>(out_base + to.payloads);
+    const auto *mirror_payloads = reinterpret_cast<const TaskPayload *>(mirror_base + from.payloads);
     auto *out_fanin = reinterpret_cast<int32_t *>(out_base + to.fanin_pool);
     auto *out_tensors = reinterpret_cast<ChipTensor *>(out_base + to.tensor_pool);
     auto *out_scalars = reinterpret_cast<uint64_t *>(out_base + to.scalar_pool);
@@ -517,7 +515,7 @@ inline uint64_t compact_live_image(
     // re-derived.
     for (uint64_t i = 0; i < nt; ++i) {
         out_slots[i].bind_buffers(&out_payloads[i], &out_descriptors[i]);
-        const PTO2TaskPayload &src = mirror_payloads[i];
+        const TaskPayload &src = mirror_payloads[i];
         const ChipTensor *src_tensors = src.tensor_data();
         const uint64_t *src_scalars = src.scalar_data();
         const int32_t *src_fanin = src.fanin_data();
@@ -554,7 +552,7 @@ inline uint64_t compact_live_image(
                 tensors[j].buffer.addr = rebased_heap_addr(tensors[j].buffer.addr, rebase);
             }
         }
-        PTO2TaskDescriptor &out_task = out_descriptors[i];
+        TaskDescriptor &out_task = out_descriptors[i];
         out_task.packed_buffer_base = reinterpret_cast<void *>(
             rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_base), rebase)
         );

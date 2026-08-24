@@ -29,7 +29,7 @@ An experiment build (not merged) that:
   filling from source, `src_payload` is always non-zero and can no longer
   double as the gate flag (the shipped design folds `not_ready` into
   `src_payload == 0`).
-- AICPU `build_payload` writes only `src_payload = &PTO2TaskPayload` and
+- AICPU `build_payload` writes only `src_payload = &TaskPayload` and
   `gated`, and **never** fills `args[]`.
 - AICore `aicore_executor` fills `args[0..num_args)` from `src_payload` for
   **every** task (moved out of the gate branch), then gates only when
@@ -51,7 +51,7 @@ tasks, a2a3 silicon) and read each task's AICore setup —
 Correctness held (`paged_attention_unroll` passes), so the AICore fill is
 functionally equivalent — it just costs ~1 µs. The fill is AICore GM work:
 after the per-task whole-cache `dcci(ENTIRE_DATA_CACHE)`, the first reads of
-the source `PTO2TaskPayload` (counts, scalars) miss to HBM, then the loop
+the source `TaskPayload` (counts, scalars) miss to HBM, then the loop
 computes `&tensors[i]` and writes `args[]` — all on a core whose GM-access
 latency is high. On the **ready** path there is no doorbell wait to overlap
 it with, so the whole ~1 µs lands on the `receive → start` setup.

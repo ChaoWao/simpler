@@ -7,7 +7,7 @@ Two runtime implementations live under `src/a2a3/runtime/`, each providing a dif
 | Feature | host_build_graph | tensormap_and_ringbuffer |
 | ------- | ---------------- | ------------------------ |
 | Graph built on | Host CPU | AICPU (device) |
-| Task storage | Fixed `Task[]` array | Ring buffer (`PTO2TaskDescriptor[]`) |
+| Task storage | Fixed `Task[]` array | Ring buffer (`TaskDescriptor[]`) |
 | Dependencies | Explicit edges | Auto-derived via TensorMap |
 | Memory management | Host-side | Ring buffer heap (GM) |
 | Concurrent build+schedule | No | Yes (always) |
@@ -30,7 +30,7 @@ See [host_build_graph/docs/RUNTIME_LOGIC.md](../runtime/host_build_graph/docs/RU
 
 The primary production runtime. Uses ring buffers for task slots and output memory, with a TensorMap for automatic dependency tracking.
 
-- Task storage: `PTO2TaskDescriptor[]` in shared memory ring buffer
+- Task storage: `TaskDescriptor[]` in shared memory ring buffer
 - Memory: GM Heap ring for output buffer allocation
 - Dependencies: automatically derived from tensor read/write patterns via TensorMap
 - Thread model: 3 scheduler threads + 1 orchestrator thread on AICPU

@@ -56,8 +56,8 @@
 // =============================================================================
 
 static void consume_up_to(
-    std::vector<PTO2TaskDescriptor> &descriptors, std::atomic<int32_t> &last_alive, void *heap_base,
-    int32_t window_size, int32_t new_last_alive, uint64_t heap_tail_offset
+    std::vector<TaskDescriptor> &descriptors, std::atomic<int32_t> &last_alive, void *heap_base, int32_t window_size,
+    int32_t new_last_alive, uint64_t heap_tail_offset
 ) {
     int32_t last_consumed = new_last_alive - 1;
     descriptors[last_consumed & (window_size - 1)].packed_buffer_end =
@@ -74,7 +74,7 @@ protected:
     static constexpr int32_t WINDOW_SIZE = 16;
     static constexpr uint64_t HEAP_SIZE = 4096;
 
-    std::vector<PTO2TaskDescriptor> descriptors;
+    std::vector<TaskDescriptor> descriptors;
     alignas(64) uint8_t heap_buf[HEAP_SIZE]{};
     std::atomic<int32_t> current_index{0};
     std::atomic<int32_t> last_alive{0};
@@ -82,7 +82,7 @@ protected:
     PTO2TaskAllocator allocator{};
 
     void SetUp() override {
-        descriptors.assign(WINDOW_SIZE, PTO2TaskDescriptor{});
+        descriptors.assign(WINDOW_SIZE, TaskDescriptor{});
         std::memset(heap_buf, 0, sizeof(heap_buf));
         current_index.store(0);
         last_alive.store(0);
