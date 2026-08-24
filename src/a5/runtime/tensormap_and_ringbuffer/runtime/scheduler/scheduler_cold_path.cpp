@@ -36,7 +36,7 @@
 // Returns true iff this call won the first-writer CAS for sched_error_code — the
 // caller may then write companion fields (e.g. the stall detail) knowing they
 // describe the same observation that owns the latched code.
-static bool latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
+static bool latch_scheduler_error(SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
     if (header == nullptr || error_code == SIMPLER_ERROR_NONE) {
         return false;
     }
@@ -53,7 +53,7 @@ static bool latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread
 }
 
 LoopAction SchedulerContext::handle_orchestrator_exit(
-    int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count
+    int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count
 ) {
     if (completed_.load(std::memory_order_acquire)) {
         return LoopAction::BREAK_LOOP;
@@ -94,8 +94,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     return LoopAction::NONE;
 }
 
-LoopAction
-SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime) {
+LoopAction SchedulerContext::check_idle_fatal_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime) {
     if (completed_.load(std::memory_order_acquire)) {
         return LoopAction::BREAK_LOOP;
     }
@@ -236,7 +235,7 @@ void SchedulerContext::log_stall_diagnostics(
     if (thread_idx == 0) {
         int32_t cnt_ready = 0, cnt_waiting = 0, cnt_running = 0, submitted_in_ring = 0;
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-            PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
+            SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
             int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
             submitted_in_ring += ring_task_count;
             // Scan only live task_ids [last_task_alive, current_task_index): slots
@@ -372,7 +371,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
     cls.stuck_core = -1;
     int32_t cnt_running = 0, cnt_ready = 0, cnt_waiting = 0;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
+        SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
         int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
         // Active task_ids live in [last_task_alive, current_task_index); slots wrap
         // (slot = task_id % window), so scanning from 0 re-reads each live slot once
@@ -423,7 +422,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
 }
 
 int32_t SchedulerContext::handle_timeout_exit(
-    int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t idle_iterations,
+    int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t idle_iterations,
     int32_t last_progress_count
 #if SIMPLER_DFX
     ,
@@ -1161,7 +1160,7 @@ int32_t SchedulerContext::pre_handshake_init(
     // hs_setup_done_, which zeroes these ring counters, so the read completes here
     // (on the leader, before any thread is released) rather than post-handshake.
     if (runtime->get_gm_sm_ptr()) {
-        auto *header = static_cast<PTO2SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
+        auto *header = static_cast<SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
         int64_t task_count = 0;
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             int32_t ring_tasks = header->rings[r].fc.current_task_index.load(std::memory_order_acquire);

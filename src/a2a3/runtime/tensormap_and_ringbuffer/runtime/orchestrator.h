@@ -64,7 +64,7 @@ struct PTO2OrchestratorLayout {
  */
 struct PTO2OrchestratorState {
     // === SHARED MEMORY ACCESS ===
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // === PER-RING RESOURCES ===
     PTO2RingSet rings[CHIP_MAX_RING_DEPTH];

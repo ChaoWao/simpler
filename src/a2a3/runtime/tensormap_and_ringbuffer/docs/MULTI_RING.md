@@ -72,7 +72,7 @@ PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
 
 Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 1)`.
 
-### 4.3 PTO2SharedMemoryHeader (modified)
+### 4.3 SharedMemoryHeader (modified)
 
 Per-ring flow control and per-ring layout info are grouped together:
 
@@ -84,7 +84,7 @@ struct PTO2RingFlowControl {
     std::atomic<uint64_t> heap_tail;          // heap reclaim pointer
 };
 
-struct alignas(64) PTO2SharedMemoryRingHeader {
+struct alignas(64) SharedMemoryRingHeader {
     PTO2RingFlowControl fc;
 
     // Layout metadata (set once at init)
@@ -108,20 +108,20 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 };
 
 // In header:
-PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
+SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 ```
 
-Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `PTO2SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
+Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
 
-### 4.4 PTO2SharedMemoryHandle (lifecycle-only)
+### 4.4 SharedMemoryHandle (lifecycle-only)
 
-Slimmed to lifecycle management only. Per-ring data pointers now live in `PTO2SharedMemoryRingHeader` (§4.3). Runtime components (orchestrator, scheduler) store `PTO2SharedMemoryHeader*` directly, eliminating one indirection on every per-ring access.
+Slimmed to lifecycle management only. Per-ring data pointers now live in `SharedMemoryRingHeader` (§4.3). Runtime components (orchestrator, scheduler) store `SharedMemoryHeader*` directly, eliminating one indirection on every per-ring access.
 
 ```cpp
-struct PTO2SharedMemoryHandle {
+struct SharedMemoryHandle {
     void *sm_base;
     uint64_t sm_size;
-    PTO2SharedMemoryHeader *header;
+    SharedMemoryHeader *header;
     bool is_owner;
 };
 ```
@@ -131,7 +131,7 @@ struct PTO2SharedMemoryHandle {
 ```cpp
 struct RingSchedState {
     // Cache Line 0: ring pointer (read-only) + hot path (read-write)
-    PTO2SharedMemoryRingHeader *ring;  // direct pointer, no indirection
+    SharedMemoryRingHeader *ring;  // direct pointer, no indirection
     int32_t last_task_alive;
     std::atomic<int32_t> advance_lock;  // multi-thread CAS
 

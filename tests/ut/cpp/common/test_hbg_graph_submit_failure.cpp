@@ -33,7 +33,7 @@ class HbgGraphSubmitFailureTest : public ::testing::Test {
 protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    SharedMemoryHandle *sm_handle = nullptr;
     PTO2OrchestratorState orch{};
     PTO2SchedulerState sched{};
     PTO2SchedulerLayout sched_layout{};
@@ -62,7 +62,7 @@ protected:
     }
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(HEAP_BYTES);
 
@@ -741,7 +741,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     EXPECT_FALSE(orch.fatal);
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
-    PTO2SharedMemoryRingHeader &ring = sm_handle->header->ring;
+    SharedMemoryRingHeader &ring = sm_handle->header->ring;
     const int32_t shell_slot = ring.get_slot_by_task_id(static_cast<int32_t>(graph.task_id.local()));
     const TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
     ASSERT_NE(shell, nullptr);

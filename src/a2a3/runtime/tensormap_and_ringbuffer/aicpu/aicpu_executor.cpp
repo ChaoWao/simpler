@@ -89,7 +89,7 @@ static int32_t read_runtime_status(Runtime *runtime) {
         return 0;
     }
 
-    auto *header = static_cast<PTO2SharedMemoryHeader *>(sm);
+    auto *header = static_cast<SharedMemoryHeader *>(sm);
     int32_t orch_error_code = header->orch_error_code.load(std::memory_order_acquire);
     int32_t sched_error_code = header->sched_error_code.load(std::memory_order_acquire);
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
@@ -611,7 +611,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // Wire every arena-internal pointer field (host wrote host-mirror
                 // addresses; we overwrite them with device addresses).
                 runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
-                sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.sizing.task_window_sizes);
+                sm_size = SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.sizing.task_window_sizes);
             }
 
             // Reset SM state. setup_pointers + init_header_per_ring restore

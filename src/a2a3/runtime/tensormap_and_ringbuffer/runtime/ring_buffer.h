@@ -533,9 +533,9 @@ struct PTO2FaninPool {
         error_code_ptr = in_error_code_ptr;
     }
 
-    void reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
+    void reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
 
-    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed);
+    bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed);
 
     PTO2FaninSpillEntry *alloc() {
         int32_t used = top - tail;
@@ -719,7 +719,7 @@ struct PTO2DepListPool {
      * @param ring             Ring header (for reading slot dep_pool_mark)
      * @param sm_last_task_alive Current last_task_alive from shared memory
      */
-    void reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
+    void reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
 
     /**
      * Ensure dep pool for a specific ring has at least `needed` entries available.
@@ -728,14 +728,14 @@ struct PTO2DepListPool {
      * reclaim watermark the same way PTO2TaskAllocator::alloc does: a structural
      * head-of-line check plus a wall-clock backstop, each emitting report_deadlock.
      */
-    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
+    bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
 
     /**
      * Structured dep-pool deadlock report, mirroring PTO2TaskAllocator::report_deadlock.
      * scope_gated marks the provable head-of-line case where the head is pinned
      * by an open scope on this ring, as opposed to the wall-clock backstop.
      */
-    void report_deadlock(PTO2SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated);
+    void report_deadlock(SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated);
 
     /**
      * Allocate a single entry from the pool (single-thread per pool instance)

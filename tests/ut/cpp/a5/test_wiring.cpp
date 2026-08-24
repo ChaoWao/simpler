@@ -41,7 +41,7 @@ class WiringTest : public ::testing::Test {
 protected:
     PTO2OrchestratorState orch{};
     PTO2SchedulerState sched{};
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
 
@@ -54,7 +54,7 @@ protected:
     int slot_payload_pool_idx_ = 0;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);
@@ -750,7 +750,7 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
 
     PTO2TaskAllocator allocator;
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 4, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 3, 0
@@ -780,7 +780,7 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
 
     alignas(64) char heap[64] = {};
     PTO2TaskAllocator allocator;
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 8, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 0, 0
@@ -859,7 +859,7 @@ TEST_F(WiringTest, FaninPoolReclaimsOnceWithheldProgressIsPublished) {
 
     PTO2FaninSpillEntry entries[4]{};
     PTO2FaninPool pool{};
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     pool.init(entries, 4, orch_err);
     pool.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask, 0);
     for (int i = 0; i < 4; i++) {
@@ -889,13 +889,13 @@ TEST_F(WiringTest, RingReuseResetsPublicationShadow) {
     rss.last_task_alive = 17;
     rss.last_published_to_sm = 16;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     rss.reset_for_reuse(sm_handle->sm_base, 0, orch_err);
 
     EXPECT_EQ(rss.last_task_alive, 0);
     EXPECT_EQ(rss.last_published_to_sm, 0);
     EXPECT_FALSE(rss.publication_batching_enabled);
-    EXPECT_EQ(rss.ring, pto2_sm_layout::ring_header_addr(sm_handle->sm_base, 0));
+    EXPECT_EQ(rss.ring, sm_layout::ring_header_addr(sm_handle->sm_base, 0));
 }
 
 TEST_F(WiringTest, AdvanceRingPointersStopsAtNonConsumed) {

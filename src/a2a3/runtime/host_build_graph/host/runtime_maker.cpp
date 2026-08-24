@@ -294,7 +294,7 @@ static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t 
     // A slot state reaches its payload and descriptor through a 32-bit
     // self-relative delta, so every pair of addresses in the shared-memory
     // image must be within INT32_MAX of each other.
-    const uint64_t sm_bytes = pto2_sm_layout::ring_segment_offsets(*eff_task_window_size).end;
+    const uint64_t sm_bytes = sm_layout::ring_segment_offsets(*eff_task_window_size).end;
     if (sm_bytes > static_cast<uint64_t>(INT32_MAX)) {
         LOG_ERROR(
             "ring_task_window=%" PRIu64 " needs a %" PRIu64 "-byte shared memory image, past the %d-byte limit "
@@ -307,7 +307,7 @@ static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t 
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PTO2SharedMemoryHeader *host_header) {
+static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || api == nullptr || host_header == nullptr) {
         return 0;
     }
@@ -317,7 +317,7 @@ static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PT
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(PTO2SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
         LOG_WARN("Failed to copy PTO2 header from device");
         return 0;
@@ -554,7 +554,7 @@ int32_t run_host_orchestration(
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
-    const pto2_sm_layout::PTO2RingSegmentOffsets sm_segs = pto2_sm_layout::ring_segment_offsets(eff_task_window_size);
+    const sm_layout::PTO2RingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
     // Over-allocated and rounded up: every segment offset is a multiple of
     // PTO2_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.
@@ -585,7 +585,7 @@ int32_t run_host_orchestration(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
-    PTO2SharedMemoryHandle host_sm_handle;
+    SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init(host_sm, sm_size, eff_task_window_size)) {
         LOG_ERROR("host-orch: host SM init failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -671,7 +671,7 @@ int32_t run_host_orchestration(
     // described — a heap or tensormap exhaustion drops tasks, a fanin overflow drops
     // edges. Uploading it would launch the device on an incomplete graph and surface
     // the cause as whatever the device notices second, usually a scheduler timeout.
-    const int32_t orch_error = pto2_sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t orch_error = sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
     if (orch_error != SIMPLER_ERROR_NONE || orchestrator.fatal) {
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
@@ -687,7 +687,7 @@ int32_t run_host_orchestration(
         return status;
     }
 
-    const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t total_tasks = sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     {
         char attrs[160];
         snprintf(
@@ -745,13 +745,13 @@ int32_t run_host_orchestration(
     // exact populated extent of each one — no scan of the mirror is needed, and the
     // image ships that much rather than the worst case the mirror is dimensioned for.
     const PTO2OrchestratorState &orch_state = orchestrator;
-    const pto2_sm_layout::BindUsage bind_usage{
+    const sm_layout::BindUsage bind_usage{
         nt,
         static_cast<uint64_t>(orch_state.fanin_pool_cursor),
         static_cast<uint64_t>(orch_state.tensor_pool_cursor),
         static_cast<uint64_t>(orch_state.scalar_pool_cursor),
     };
-    const uint64_t image_bytes = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(bind_usage)).end;
+    const uint64_t image_bytes = sm_layout::ring_segment_offsets(sm_layout::image_extents(bind_usage)).end;
     runtime->sm_image_bytes = image_bytes;
 
     // Only now are both sizes known, so this is where the two device regions are
@@ -832,7 +832,7 @@ int32_t run_host_orchestration(
         "a Graph node's storage alignment must be covered by the heap region's base alignment"
     );
     always_assert(reinterpret_cast<uint64_t>(gm_heap) % DeviceArena::kDefaultBaseAlign == 0);
-    const pto2_sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};
+    const sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};
 
     // One host source for one copy: the copied zone and shared-memory image at
     // exactly the offsets they occupy on the device.
@@ -852,7 +852,7 @@ int32_t run_host_orchestration(
     // the pointer goes early rather than at the guard's scope exit.
     rt->orchestrator = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
-    const uint64_t compacted = pto2_sm_layout::compact_live_image(
+    const uint64_t compacted = sm_layout::compact_live_image(
         static_cast<const char *>(host_sm), eff_task_window_size, bind_usage, heap_rebase, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
@@ -1157,7 +1157,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // runs — do NOT record in tensor_pairs_; the free is deferred to
     // DeviceRunner::finalize(). The runtime-arena size is determined by replaying
     // the reserve sequence on a host-side arena.
-    uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size(eff_task_window_size);
+    uint64_t sm_size = SharedMemoryHandle::calculate_size(eff_task_window_size);
 
     const int64_t t_arena_build_ns = bind_now_ns();
     DeviceArena host_arena;
@@ -1288,7 +1288,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
-    PTO2SharedMemoryHeader host_header;
+    SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {

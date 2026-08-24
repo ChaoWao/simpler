@@ -891,7 +891,7 @@ int32_t SchedulerContext::try_early_dispatch(
 // advanced) — the host's wait_for_consumers never observes a stranded prefix.
 int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread_idx) {
     always_assert(sched_ != nullptr);
-    PTO2SharedMemoryHeader *header = sched_->sm_header;
+    SharedMemoryHeader *header = sched_->sm_header;
     if (!header) {
         LOG_ERROR("PTO2 resolution: header is null");
         return -1;
@@ -1064,7 +1064,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     always_assert(sched_ != nullptr);
     CoreTracker &tracker = core_trackers_[thread_idx];
 
-    PTO2SharedMemoryHeader *header = sched_->sm_header;
+    SharedMemoryHeader *header = sched_->sm_header;
     if (!header) {
         LOG_ERROR("PTO2 dispatch: header is null");
         return -1;

@@ -965,7 +965,7 @@ static TaskOutputTensors submit_task_common(
             return result;
         }
         uint8_t dep_ring_id = dep_task_id.ring();
-        PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->rings[dep_ring_id];
+        SharedMemoryRingHeader &dep_ring = orch->sm_header->rings[dep_ring_id];
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
         int32_t dep_last_task_alive = dep_ring.fc.last_task_alive.load(std::memory_order_acquire);
         if (dep_local_task_id < dep_last_task_alive) {
@@ -989,7 +989,7 @@ static TaskOutputTensors submit_task_common(
 
     auto runtime_emit = [&](TaskId producer_task_id, DepFlags kind) -> bool {
         uint8_t prod_ring = producer_task_id.ring();
-        PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->rings[prod_ring];
+        SharedMemoryRingHeader &producer_ring = orch->sm_header->rings[prod_ring];
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
         ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
         return append_fanin_or_fail(

@@ -66,7 +66,7 @@ void ready_queue_destroy(PTO2ReadyQueue *queue) {
 bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
-    ring = pto2_sm_layout::ring_header_addr(sm_dev_base);
+    ring = sm_layout::ring_header_addr(sm_dev_base);
     advance_lock.store(0, std::memory_order_relaxed);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
@@ -107,7 +107,7 @@ bool PTO2SchedulerState::init_data_from_layout(
     const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base
 ) {
     PTO2SchedulerState *sched = this;
-    sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -208,12 +208,12 @@ bool PTO2OrchestratorState::init(
     // A power-of-two window lets pto2_task_slot() mask instead of dividing.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
 
-    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_base);
+    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
     orch->fatal = false;
     orch->scheduler = scheduler_arg;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_base);
-    auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_base);
+    auto *cur_idx_dev = sm_layout::ring_current_task_index_addr(sm_base);
 
     orch->task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
@@ -221,7 +221,7 @@ bool PTO2OrchestratorState::init(
     // so it holds for whichever SM this orchestrator was pointed at. The cursors
     // reset with the rest of the state above.
     auto *sm_bytes = static_cast<char *>(sm_base);
-    const auto pools = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::mirror_extents(task_window_size));
+    const auto pools = sm_layout::ring_segment_offsets(sm_layout::mirror_extents(task_window_size));
     orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
     orch->tensor_pool = reinterpret_cast<ChipTensor *>(sm_bytes + pools.tensor_pool);
     orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
@@ -263,7 +263,7 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
     //
     // The copied zone comes last of the two so the device's shared-memory tail can
     // begin where it ends, making the two adjacent and the upload one copy.
-    layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    layout.off_sm_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
     layout.off_scheduler = arena.reserve(sizeof(PTO2SchedulerState), alignof(PTO2SchedulerState));
     layout.sched = PTO2SchedulerState::reserve_layout(arena);
@@ -317,7 +317,7 @@ RuntimeContext *runtime_init_data_from_layout(
 }
 
 void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
-    rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
+    rt->sm_handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
     rt->scheduler = static_cast<PTO2SchedulerState *>(arena.region_ptr(layout.off_scheduler));
     rt->scheduler->wire_arena_pointers(layout.sched, arena);

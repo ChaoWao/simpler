@@ -91,7 +91,7 @@ TEST_F(FaninPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
-    PTO2SharedMemoryRingHeader ring{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.fc.current_task_index.store(POOL_CAP + 1, std::memory_order_release);
     ring.fc.last_task_alive.store(0, std::memory_order_release);

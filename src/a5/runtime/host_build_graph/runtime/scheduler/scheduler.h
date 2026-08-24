@@ -472,12 +472,12 @@ struct PTO2SchedulerLayout {
  */
 struct PTO2SchedulerState {
     // Shared memory access
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // Per-ring state
     struct alignas(64) RingSchedState {
         // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
-        PTO2SharedMemoryRingHeader *ring;
+        SharedMemoryRingHeader *ring;
         std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
         // Polling: no per-ring dep_pool. Readiness is derived from the SM ring's
@@ -586,7 +586,7 @@ struct PTO2SchedulerState {
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     int classify_fanin_state(const ChipTaskSlotState *s) const {
         const TaskPayload &p = *s->payload;
-        const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        const SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         const int32_t *fanin = p.fanin_data();
         for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
             if (!ring.is_completion_flag_set(fanin[i])) return i;
@@ -599,7 +599,7 @@ struct PTO2SchedulerState {
     // ready only when every fanin is met, else re-target the next unmet producer
     // and retry. Monotonic completion_flags guarantee termination.
     void register_wake(ChipTaskSlotState *producer, ChipTaskSlotState *consumer) {
-        PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         while (true) {
             ChipTaskSlotState *expected = producer->wake_list_head.load(std::memory_order_relaxed);
             while (expected != WAKE_LIST_SENTINEL) {
@@ -627,7 +627,7 @@ struct PTO2SchedulerState {
     // has no device slot reclaim, so no advance_ring_pointers here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
         const int32_t task_id = static_cast<int32_t>(slot_state.task->task_id.local());
-        PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        SharedMemoryRingHeader &ring = *ring_sched_state.ring;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
         ring.set_completion_flag(task_id);

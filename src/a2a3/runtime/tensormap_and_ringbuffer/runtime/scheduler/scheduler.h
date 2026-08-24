@@ -443,12 +443,12 @@ struct PTO2SchedulerLayout {
  */
 struct PTO2SchedulerState {
     // Shared memory access
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // Per-ring state
     struct alignas(64) RingSchedState {
         // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
-        PTO2SharedMemoryRingHeader *ring;
+        SharedMemoryRingHeader *ring;
         int32_t last_task_alive;
         std::atomic<int32_t> advance_lock;  // multi-thread CAS
 

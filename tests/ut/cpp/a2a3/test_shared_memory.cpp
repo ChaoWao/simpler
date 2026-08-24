@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2SharedMemory layout from shared_memory.h
+ * Unit tests for SharedMemory layout from shared_memory.h
  *
  * Tests creation, validation, per-ring independence, alignment, size
  * calculation, and error handling under the DeviceArena-backed init model:
@@ -29,13 +29,13 @@ namespace {
 
 // Reserve + commit a fresh handle + sm_base on `arena` and run init.
 // Returns the wrapper pointer (arena-owned) or nullptr on init failure.
-PTO2SharedMemoryHandle *make_handle(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
-    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size(task_window_size);
-    const size_t off_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+SharedMemoryHandle *make_handle(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
+    const uint64_t sm_size = SharedMemoryHandle::calculate_size(task_window_size);
+    const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), PTO2_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
 
-    auto *handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(off_handle));
+    auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
     std::memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     std::memset(buffer, 0, static_cast<size_t>(sm_size));
@@ -52,10 +52,10 @@ PTO2SharedMemoryHandle *make_handle(DeviceArena &arena, uint64_t task_window_siz
 class SharedMemoryTest : public ::testing::Test {
 protected:
     DeviceArena arena;
-    PTO2SharedMemoryHandle *handle = nullptr;
+    SharedMemoryHandle *handle = nullptr;
 
     void SetUp() override {
-        handle = PTO2SharedMemoryHandle::create_and_init_default(arena);
+        handle = SharedMemoryHandle::create_and_init_default(arena);
         ASSERT_NE(handle, nullptr);
     }
 
@@ -165,7 +165,7 @@ TEST_F(SharedMemoryTest, HeaderAlignment) {
 // Descriptor and payload regions don't overlap within or across rings.
 TEST(SharedMemoryLayout, RegionsNonOverlapping) {
     DeviceArena arena;
-    PTO2SharedMemoryHandle *h = make_handle(arena, /*ws=*/64, /*heap=*/4096);
+    SharedMemoryHandle *h = make_handle(arena, /*ws=*/64, /*heap=*/4096);
     ASSERT_NE(h, nullptr);
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
@@ -188,37 +188,37 @@ TEST(SharedMemoryLayout, RegionsNonOverlapping) {
 // =============================================================================
 
 TEST(SharedMemoryCalcSize, NonZero) {
-    uint64_t size = PTO2SharedMemoryHandle::calculate_size(PTO2_TASK_WINDOW_SIZE);
+    uint64_t size = SharedMemoryHandle::calculate_size(PTO2_TASK_WINDOW_SIZE);
     EXPECT_GT(size, 0u);
 }
 
 TEST(SharedMemoryCalcSize, LargerWindowGivesLargerSize) {
-    uint64_t small_size = PTO2SharedMemoryHandle::calculate_size(64);
-    uint64_t large_size = PTO2SharedMemoryHandle::calculate_size(256);
+    uint64_t small_size = SharedMemoryHandle::calculate_size(64);
+    uint64_t large_size = SharedMemoryHandle::calculate_size(256);
     EXPECT_GT(large_size, small_size);
 }
 
-TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(PTO2SharedMemoryHeader) % PTO2_ALIGN_SIZE, 0u); }
+TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(SharedMemoryHeader) % PTO2_ALIGN_SIZE, 0u); }
 
 TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
     uint64_t ws[CHIP_MAX_RING_DEPTH] = {128, 256, 512, 1024};
-    uint64_t size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
+    uint64_t size = SharedMemoryHandle::calculate_size_per_ring(ws);
 
-    uint64_t uniform_size = PTO2SharedMemoryHandle::calculate_size(128);
+    uint64_t uniform_size = SharedMemoryHandle::calculate_size(128);
     EXPECT_GT(size, uniform_size);
 }
 
 TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
     uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
     uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
-    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
+    const uint64_t sm_size = SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena arena;
-    const size_t off_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), PTO2_ALIGN_SIZE);
     ASSERT_NE(arena.commit(), nullptr);
 
-    auto *handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(off_handle));
+    auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
     std::memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     std::memset(buffer, 0, static_cast<size_t>(sm_size));
@@ -235,7 +235,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
     uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
     int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
-    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
+    const uint64_t sm_size = SharedMemoryHandle::calculate_size_per_ring(ws);
     uint64_t total_heap = 0;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         total_heap += heaps[r];
@@ -292,12 +292,12 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
 
 // Zero window size: all ring descriptor pointers collapse to the same address.
 TEST(SharedMemoryBoundary, ZeroWindowSize) {
-    uint64_t size = PTO2SharedMemoryHandle::calculate_size(0);
-    uint64_t header_size = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t size = SharedMemoryHandle::calculate_size(0);
+    uint64_t header_size = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
     EXPECT_EQ(size, header_size);
 
     DeviceArena arena;
-    PTO2SharedMemoryHandle *h = make_handle(arena, /*ws=*/0, /*heap=*/4096);
+    SharedMemoryHandle *h = make_handle(arena, /*ws=*/0, /*heap=*/4096);
     if (h) {
         for (int r = 0; r < CHIP_MAX_RING_DEPTH - 1; r++) {
             EXPECT_EQ(h->header->rings[r].task_descriptors, h->header->rings[r + 1].task_descriptors)
@@ -308,7 +308,7 @@ TEST(SharedMemoryBoundary, ZeroWindowSize) {
 
 TEST(SharedMemoryBoundary, ValidateDetectsCorruption) {
     DeviceArena arena;
-    PTO2SharedMemoryHandle *h = make_handle(arena, /*ws=*/256, /*heap=*/4096);
+    SharedMemoryHandle *h = make_handle(arena, /*ws=*/256, /*heap=*/4096);
     ASSERT_NE(h, nullptr);
     EXPECT_TRUE(h->validate());
 
@@ -318,7 +318,7 @@ TEST(SharedMemoryBoundary, ValidateDetectsCorruption) {
 
 TEST(SharedMemoryBoundary, InitRejectsUndersizedBuffer) {
     // init() must refuse an SM buffer smaller than calculate_size(window_size).
-    PTO2SharedMemoryHandle handle{};
+    SharedMemoryHandle handle{};
     char buf[64]{};
     EXPECT_FALSE(handle.init(buf, sizeof(buf), /*task_window_size=*/256, /*heap=*/4096));
 }

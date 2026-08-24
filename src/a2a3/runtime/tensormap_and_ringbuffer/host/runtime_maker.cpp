@@ -284,7 +284,7 @@ static bool resolve_ring_config(
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PTO2SharedMemoryHeader *host_header) {
+static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || host_header == nullptr) {
         return 0;
     }
@@ -294,7 +294,7 @@ static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PT
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(PTO2SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
         LOG_WARN("Failed to copy PTO2 header from device");
         return 0;
@@ -570,7 +570,7 @@ static bool derive_arena_static_sizes(const ArenaSizingConfig &sizing, ArenaStat
         }
         out->total_heap += sizing.heap_sizes[r];
     }
-    out->sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(sizing.task_window_sizes);
+    out->sm_size = SharedMemoryHandle::calculate_size_per_ring(sizing.task_window_sizes);
     return true;
 }
 
@@ -1017,7 +1017,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
-    PTO2SharedMemoryHeader host_header;
+    SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {

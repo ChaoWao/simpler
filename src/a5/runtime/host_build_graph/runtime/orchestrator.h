@@ -58,7 +58,7 @@ struct GraphHostState;
  */
 struct PTO2OrchestratorState {
     // === SHARED MEMORY ACCESS ===
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // === TASK / HEAP ALLOCATION ===
     // hbg is single-ring, so one allocator covers the whole graph.

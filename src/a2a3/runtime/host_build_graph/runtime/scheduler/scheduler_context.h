@@ -521,10 +521,10 @@ private:
     // =========================================================================
 
     __attribute__((noinline, cold)) LoopAction
-    handle_orchestrator_exit(int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count);
+    handle_orchestrator_exit(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count);
 
     __attribute__((noinline, cold)) LoopAction
-    check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime);
+    check_idle_fatal_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime);
 
     __attribute__((noinline, cold)) void
     log_stall_diagnostics(int32_t thread_idx, int32_t task_count, int32_t idle_iterations, int32_t last_progress_count);
@@ -554,7 +554,7 @@ private:
     bool no_thread_owns_running_task() const;
 
     __attribute__((noinline, cold)) int32_t handle_timeout_exit(
-        int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t idle_iterations,
+        int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t idle_iterations,
         int32_t last_progress_count
 #if SIMPLER_DFX
         ,

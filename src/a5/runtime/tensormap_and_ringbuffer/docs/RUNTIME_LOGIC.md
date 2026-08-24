@@ -146,7 +146,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 
 ```text
 ┌─────────────────────────────┐  offset 0
-│  PTO2SharedMemoryHeader     │  (per-ring flow control + layout, global flags)
+│  SharedMemoryHeader     │  (per-ring flow control + layout, global flags)
 ├─────────────────────────────┤  aligned
 │  Per-ring regions ×4:       │
 │    TaskDescriptor[N]    │  N = task_window_size per ring
@@ -164,8 +164,8 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 | `heap_top` | Orchestrator | Scheduler | Heap ring allocation pointer |
 | `heap_tail` | Scheduler | Orchestrator | Heap ring reclamation pointer |
 | `orchestrator_done` | Orchestrator | Scheduler | Signals orchestration completion |
-| `task_window_size` | Init | Both | Number of task slots (per-ring, in `PTO2SharedMemoryRingHeader`) |
-| `heap_size` | Init | Both | Heap total size (per-ring, in `PTO2SharedMemoryRingHeader`) |
+| `task_window_size` | Init | Both | Number of task slots (per-ring, in `SharedMemoryRingHeader`) |
+| `heap_size` | Init | Both | Heap total size (per-ring, in `SharedMemoryRingHeader`) |
 | `task_descriptors_offset` | Init | Both | Offset to TaskDescriptor array in SM (per-ring) |
 | `total_size` | Init | Both | Total shared memory size |
 
@@ -175,7 +175,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 total = ALIGN(Header)
       + Σ_ring [ ALIGN(window_size * sizeof(TaskDescriptor))
                + ALIGN(window_size * sizeof(TaskPayload))
-               + ALIGN(window_size * sizeof(TaskSlotState)) ]
+               + ALIGN(window_size * sizeof(ChipTaskSlotState)) ]
 ```
 
 Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).

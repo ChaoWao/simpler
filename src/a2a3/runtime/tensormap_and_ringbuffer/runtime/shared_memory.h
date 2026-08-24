@@ -14,19 +14,19 @@
  * Defines the shared memory structure for Orchestrator-Scheduler communication.
  *
  * Memory Layout (per-ring sections repeat for each ring 0..CHIP_MAX_RING_DEPTH-1):
- *   +---------------------------+
- *   | SharedMemoryHeader        |  (per-ring flow control + sync)
- *   +---------------------------+
- *   | Ring 0: TaskDescriptor[]  |
- *   | Ring 0: TaskPayload[]     |
- *   | Ring 0: TaskSlotState[]   |
- *   +---------------------------+
- *   | Ring 1: TaskDescriptor[]  |
- *   | Ring 1: TaskPayload[]     |
- *   | Ring 1: TaskSlotState[]   |
- *   +---------------------------+
- *   | ...                       |
- *   +---------------------------+
+ *   +-------------------------------+
+ *   | SharedMemoryHeader            |  (per-ring flow control + sync)
+ *   +-------------------------------+
+ *   | Ring 0: TaskDescriptor[]      |
+ *   | Ring 0: TaskPayload[]         |
+ *   | Ring 0: ChipTaskSlotState[]   |
+ *   +-------------------------------+
+ *   | Ring 1: TaskDescriptor[]      |
+ *   | Ring 1: TaskPayload[]         |
+ *   | Ring 1: ChipTaskSlotState[]   |
+ *   +-------------------------------+
+ *   | ...                           |
+ *   +-------------------------------+
  *
  * Design principles:
  * - Only data needed for Orchestrator<->Scheduler communication is here
@@ -47,7 +47,7 @@
 // Shared Memory Header
 // =============================================================================
 
-struct PTO2SharedMemoryHandle;
+struct SharedMemoryHandle;
 
 /**
  * Per-ring flow control state in shared memory.
@@ -72,7 +72,7 @@ struct alignas(64) PTO2RingFlowControl {
         last_task_alive.store(0, std::memory_order_relaxed);
     }
 
-    bool validate(PTO2SharedMemoryHandle *handle, int32_t ring_id) const;
+    bool validate(SharedMemoryHandle *handle, int32_t ring_id) const;
 };
 
 static_assert(sizeof(PTO2RingFlowControl) == 128, "PTO2RingFlowControl must be exactly 2 cache lines (128B)");
@@ -83,7 +83,7 @@ static_assert(sizeof(PTO2RingFlowControl) == 128, "PTO2RingFlowControl must be e
  * Groups flow-control, layout info, and per-ring data pointers for a single ring.
  * Pointers are host-side only (set by setup_pointers, invalid on device).
  */
-struct alignas(64) PTO2SharedMemoryRingHeader {
+struct alignas(64) SharedMemoryRingHeader {
     PTO2RingFlowControl fc;
 
     // Layout metadata (set once at init)
@@ -114,10 +114,10 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     }
 };
 
-static_assert(sizeof(PTO2SharedMemoryRingHeader) == 192, "PTO2SharedMemoryRingHeader layout drift");
+static_assert(sizeof(SharedMemoryRingHeader) == 192, "SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 152,
-    "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
+    offsetof(SharedMemoryRingHeader, task_descriptors_offset) == 152,
+    "SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 
 /**
@@ -125,9 +125,9 @@ static_assert(
  *
  * Contains per-ring flow control and global layout information.
  */
-struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
+struct alignas(PTO2_ALIGN_SIZE) SharedMemoryHeader {
     // === PER-RING FLOW CONTROL + LAYOUT INFO (set once at init) ===
-    PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
+    SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 
     // === GLOBAL FIELDS ===
     std::atomic<int32_t> orchestrator_done;  // Flag: orchestration complete
@@ -163,14 +163,11 @@ struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
     std::atomic<int32_t> sched_stall_core;         // S1: stuck core id (-1 if N/A)
 };
 
-static_assert(sizeof(PTO2SharedMemoryHeader) == 896, "PTO2SharedMemoryHeader layout drift");
-static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 776, "PTO2SharedMemoryHeader total_size layout drift");
+static_assert(sizeof(SharedMemoryHeader) == 896, "SharedMemoryHeader layout drift");
+static_assert(offsetof(SharedMemoryHeader, total_size) == 776, "SharedMemoryHeader total_size layout drift");
+static_assert(offsetof(SharedMemoryHeader, orch_error_code) == 784, "SharedMemoryHeader orch_error_code layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 784, "PTO2SharedMemoryHeader orch_error_code layout drift"
-);
-static_assert(
-    offsetof(PTO2SharedMemoryHeader, sched_stall_task_id) == 832,
-    "PTO2SharedMemoryHeader sched_stall_task_id layout drift"
+    offsetof(SharedMemoryHeader, sched_stall_task_id) == 832, "SharedMemoryHeader sched_stall_task_id layout drift"
 );
 
 // =============================================================================
@@ -179,13 +176,13 @@ static_assert(
 
 /**
  * Handle for shared memory lifecycle management (create/destroy).
- * Runtime components (orchestrator, scheduler) use PTO2SharedMemoryHeader* directly.
+ * Runtime components (orchestrator, scheduler) use SharedMemoryHeader* directly.
  */
-struct PTO2SharedMemoryHandle {
+struct SharedMemoryHandle {
     void *sm_base;     // Base address of shared memory
     uint64_t sm_size;  // Total size of shared memory
 
-    PTO2SharedMemoryHeader *header;
+    SharedMemoryHeader *header;
 
     // Ownership flag
     bool is_owner;  // True if this handle allocated the memory
@@ -199,7 +196,7 @@ struct PTO2SharedMemoryHandle {
     // using default PTO2_TASK_WINDOW_SIZE / PTO2_HEAP_SIZE. Only valid when the
     // arena is otherwise empty (the call performs the single commit). All
     // memory is owned by the arena — caller must not call destroy().
-    static PTO2SharedMemoryHandle *create_and_init_default(DeviceArena &arena);
+    static SharedMemoryHandle *create_and_init_default(DeviceArena &arena);
 
     // === Instance methods ===
 
@@ -238,33 +235,33 @@ private:
 //
 // These helpers compute those addresses by offset arithmetic on the SM
 // device base. Pure pointer math, no loads/stores; safe to call from host.
-// The same arithmetic happens on AICPU too (via PTO2SharedMemoryHandle's
+// The same arithmetic happens on AICPU too (via SharedMemoryHandle's
 // own setup_pointers), so values are guaranteed consistent across sides.
-namespace pto2_sm_layout {
+namespace sm_layout {
 
 inline std::atomic<int32_t> *orch_error_code_addr(void *sm_dev_base) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
-        static_cast<char *>(sm_dev_base) + offsetof(PTO2SharedMemoryHeader, orch_error_code)
+        static_cast<char *>(sm_dev_base) + offsetof(SharedMemoryHeader, orch_error_code)
     );
 }
 
-inline PTO2SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base, int ring_id) noexcept {
-    return reinterpret_cast<PTO2SharedMemoryRingHeader *>(
-        static_cast<char *>(sm_dev_base) + offsetof(PTO2SharedMemoryHeader, rings) +
-        static_cast<size_t>(ring_id) * sizeof(PTO2SharedMemoryRingHeader)
+inline SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base, int ring_id) noexcept {
+    return reinterpret_cast<SharedMemoryRingHeader *>(
+        static_cast<char *>(sm_dev_base) + offsetof(SharedMemoryHeader, rings) +
+        static_cast<size_t>(ring_id) * sizeof(SharedMemoryRingHeader)
     );
 }
 
 inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base, int ring_id) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
-        reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(PTO2SharedMemoryRingHeader, fc) +
+        reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(SharedMemoryRingHeader, fc) +
         offsetof(PTO2RingFlowControl, current_task_index)
     );
 }
 
 inline std::atomic<int32_t> *ring_last_task_alive_addr(void *sm_dev_base, int ring_id) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
-        reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(PTO2SharedMemoryRingHeader, fc) +
+        reinterpret_cast<char *>(ring_header_addr(sm_dev_base, ring_id)) + offsetof(SharedMemoryRingHeader, fc) +
         offsetof(PTO2RingFlowControl, last_task_alive)
     );
 }
@@ -287,8 +284,8 @@ struct PTO2RingSegmentOffsets {
 // layout walk can never silently disagree across call sites.
 inline PTO2RingSegmentOffsets
 ring_segment_offsets(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id) noexcept {
-    assert(ring_id >= 0 && ring_id < CHIP_MAX_RING_DEPTH && "pto2_sm_layout: ring_id out of range");
-    uint64_t off = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    assert(ring_id >= 0 && ring_id < CHIP_MAX_RING_DEPTH && "sm_layout: ring_id out of range");
+    uint64_t off = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
     for (int r = 0; r < ring_id; r++) {
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
@@ -323,4 +320,4 @@ ring_slot_states_addr(void *sm_dev_base, const uint64_t task_window_sizes[CHIP_M
     );
 }
 
-}  // namespace pto2_sm_layout
+}  // namespace sm_layout

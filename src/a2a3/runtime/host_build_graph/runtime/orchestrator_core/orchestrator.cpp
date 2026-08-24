@@ -1507,7 +1507,7 @@ static TaskOutputTensors submit_task_common(
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
         uint8_t dep_ring_id = dep_task_id.ring();
-        PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
         int32_t dep_slot = dep_ring.get_slot_by_task_id(dep_local_task_id);
         ChipTaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
@@ -1524,7 +1524,7 @@ static TaskOutputTensors submit_task_common(
 
     auto runtime_emit = [&](TaskId producer_task_id) -> bool {
         uint8_t prod_ring = producer_task_id.ring();
-        PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
         ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
         return append_fanin_or_fail(orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder);
@@ -1796,7 +1796,7 @@ bool graph_submit_outer(
         return false;
     }
     const TaskId task_id = TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
-    PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
+    SharedMemoryRingHeader &ring = orch->sm_header->ring;
     TaskDescriptor &task = ring.task_descriptors[allocation.slot];
     TaskPayload &payload = ring.task_payloads[allocation.slot];
     ChipTaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
@@ -2751,7 +2751,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         // every consumer register_wakes on a producer that never runs on device and
         // the run hangs. (The device watermark walk transparently steps past this
         // pre-set flag when a later on-device task completes.)
-        PTO2SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
         int32_t done_local = static_cast<int32_t>(prepared.task_id.local());
         done_ring.set_completion_flag(done_local);
     }

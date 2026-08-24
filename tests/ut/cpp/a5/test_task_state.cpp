@@ -34,7 +34,7 @@
 class TaskStateTest : public ::testing::Test {
 protected:
     PTO2SchedulerState sched;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
 
@@ -46,7 +46,7 @@ protected:
     int slot_payload_pool_idx_ = 0;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);

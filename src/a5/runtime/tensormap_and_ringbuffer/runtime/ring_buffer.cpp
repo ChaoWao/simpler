@@ -34,7 +34,7 @@ static void latch_pool_error(std::atomic<int32_t> *error_code_ptr, int32_t error
 // =============================================================================
 // Fanin Spill Pool Implementation
 // =============================================================================
-void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+void PTO2FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
     if (sm_last_task_alive <= reclaim_task_cursor) return;
 
     int32_t scan_end = sm_last_task_alive;
@@ -53,7 +53,7 @@ void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_ta
     reclaim_task_cursor = scan_end;
 }
 
-bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed) {
+bool PTO2FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
     if (available() >= needed) return true;
 
     int spin_count = 0;
@@ -137,7 +137,7 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
 // =============================================================================
 // Dependency List Pool Implementation
 // =============================================================================
-void PTO2DepListPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+void PTO2DepListPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
     if (sm_last_task_alive >= last_reclaimed + PTO2_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
         int32_t mark = ring.get_slot_state_by_task_id(sm_last_task_alive - 1).dep_pool_mark;
         if (mark > 0) {
@@ -148,7 +148,7 @@ void PTO2DepListPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_
 }
 
 void PTO2DepListPool::report_deadlock(
-    PTO2SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated
+    SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated
 ) {
     int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
     LOG_ERROR("========================================");
@@ -189,9 +189,7 @@ void PTO2DepListPool::report_deadlock(
     LOG_ERROR("========================================");
 }
 
-bool PTO2DepListPool::ensure_space(
-    PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task
-) {
+bool PTO2DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task) {
     if (available() >= needed) return true;
 
     int spin_count = 0;

@@ -69,9 +69,9 @@ private:
 class Mirror {
 public:
     Mirror() :
-        image_(pto2_sm_layout::ring_segment_offsets(WINDOW).end) {
-        const auto off = pto2_sm_layout::ring_segment_offsets(WINDOW);
-        auto *header = reinterpret_cast<PTO2SharedMemoryHeader *>(image_.base());
+        image_(sm_layout::ring_segment_offsets(WINDOW).end) {
+        const auto off = sm_layout::ring_segment_offsets(WINDOW);
+        auto *header = reinterpret_cast<SharedMemoryHeader *>(image_.base());
         auto &ring = header->ring;
         ring.task_window_size = WINDOW;
         ring.task_window_mask = static_cast<int32_t>(WINDOW - 1);
@@ -134,30 +134,28 @@ public:
     const char *base() const { return image_.base(); }
 
     TaskDescriptor *descriptors() {
-        return reinterpret_cast<TaskDescriptor *>(
-            image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).descriptors
-        );
+        return reinterpret_cast<TaskDescriptor *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).descriptors);
     }
     TaskPayload *payloads() {
-        return reinterpret_cast<TaskPayload *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).payloads);
+        return reinterpret_cast<TaskPayload *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).payloads);
     }
     ChipTensor *tensor_pool() {
-        return reinterpret_cast<ChipTensor *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).tensor_pool);
+        return reinterpret_cast<ChipTensor *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).tensor_pool);
     }
     uint64_t *scalar_pool() {
-        return reinterpret_cast<uint64_t *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).scalar_pool);
+        return reinterpret_cast<uint64_t *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).scalar_pool);
     }
     int32_t *fanin_pool() {
-        return reinterpret_cast<int32_t *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).fanin_pool);
+        return reinterpret_cast<int32_t *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).fanin_pool);
     }
     ChipTaskSlotState *slot_states() {
         return reinterpret_cast<ChipTaskSlotState *>(
-            image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).slot_states
+            image_.base() + sm_layout::ring_segment_offsets(WINDOW).slot_states
         );
     }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(
-            image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).completion_flags
+            image_.base() + sm_layout::ring_segment_offsets(WINDOW).completion_flags
         );
     }
 
@@ -167,8 +165,8 @@ private:
 
 // What a bind of `submitted` tasks put in the pools, given the per-task shape the
 // Mirror writes. This is the same arithmetic the orchestrator's cursors perform.
-inline pto2_sm_layout::BindUsage usage_for(uint64_t submitted) {
-    return pto2_sm_layout::BindUsage{
+inline sm_layout::BindUsage usage_for(uint64_t submitted) {
+    return sm_layout::BindUsage{
         submitted,
         submitted * static_cast<uint64_t>(FANIN_STRIDE),
         submitted * static_cast<uint64_t>(TENSORS_PER_TASK),
@@ -178,24 +176,24 @@ inline pto2_sm_layout::BindUsage usage_for(uint64_t submitted) {
 
 // A bind that allocated nothing out of the graph heap, so the restack has no
 // address to move. Every test that is not about the rebase passes this.
-inline constexpr pto2_sm_layout::HeapRebase kNoHeapAddresses{HEAP_VIRTUAL_BASE, 0};
+inline constexpr sm_layout::HeapRebase kNoHeapAddresses{HEAP_VIRTUAL_BASE, 0};
 
 struct Compacted {
     AlignedImage image;
     uint64_t bytes;
-    pto2_sm_layout::BindUsage used;
+    sm_layout::BindUsage used;
 
     explicit Compacted(
-        Mirror &mirror, uint64_t submitted = SUBMITTED, const pto2_sm_layout::HeapRebase &rebase = kNoHeapAddresses
+        Mirror &mirror, uint64_t submitted = SUBMITTED, const sm_layout::HeapRebase &rebase = kNoHeapAddresses
     ) :
-        image(pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
+        image(sm_layout::ring_segment_offsets(sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
         bytes(0),
         used(usage_for(submitted)) {
-        bytes = pto2_sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
+        bytes = sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
     }
 
-    pto2_sm_layout::PTO2RingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
-        return pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted)));
+    sm_layout::PTO2RingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
+        return sm_layout::ring_segment_offsets(sm_layout::image_extents(usage_for(submitted)));
     }
 
     TaskPayload *payload_at(uint64_t i) { return reinterpret_cast<TaskPayload *>(image.base() + off().payloads) + i; }
@@ -217,7 +215,7 @@ TEST(HbgSmCompaction, ShipsOnlyTheLivePrefix) {
     Compacted compacted(mirror);
 
     EXPECT_EQ(compacted.bytes, compacted.off().end);
-    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(WINDOW).end);
+    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(WINDOW).end);
 }
 
 TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
@@ -235,7 +233,7 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     }
     // The header's pitch-independent fields come across; the mirror slot past the
     // prefix does not.
-    auto &ring = reinterpret_cast<const PTO2SharedMemoryHeader *>(compacted.image.base())->ring;
+    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
     EXPECT_EQ(ring.task_window_size, WINDOW);
     EXPECT_EQ(ring.fc.current_task_index.load(std::memory_order_relaxed), static_cast<int32_t>(SUBMITTED));
 }
@@ -282,7 +280,7 @@ TEST(HbgSmCompaction, LeavesNoHostPointerInTheHeader) {
     Mirror mirror;
     Compacted compacted(mirror);
 
-    auto &ring = reinterpret_cast<const PTO2SharedMemoryHeader *>(compacted.image.base())->ring;
+    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
     EXPECT_EQ(ring.task_descriptors, nullptr);
     EXPECT_EQ(ring.task_payloads, nullptr);
     EXPECT_EQ(ring.slot_states, nullptr);
@@ -297,8 +295,8 @@ TEST(HbgSmCompaction, ZeroSubmittedShipsTheHeaderAlone) {
     Compacted compacted(mirror, /*submitted=*/0);
 
     EXPECT_EQ(compacted.bytes, compacted.off(0).end);
-    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(1).end);
-    auto &ring = reinterpret_cast<const PTO2SharedMemoryHeader *>(compacted.image.base())->ring;
+    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(1).end);
+    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
     EXPECT_EQ(ring.task_window_size, WINDOW);
     EXPECT_EQ(ring.task_descriptors, nullptr);
 }
@@ -312,7 +310,7 @@ TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
 
     // The mirror's pools cover WINDOW tasks at their full caps; the image's cover
     // SUBMITTED tasks at the shape they actually used.
-    EXPECT_LT(compacted.bytes, pto2_sm_layout::ring_segment_offsets(WINDOW).end);
+    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(WINDOW).end);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         TaskPayload *shipped = compacted.payload_at(i);
@@ -406,16 +404,16 @@ TEST(HbgSmCompaction, LayoutStaysWithinDeltaReach) {
     EXPECT_LT(compacted.bytes, static_cast<uint64_t>(INT32_MAX));
 
     constexpr uint64_t REACH = static_cast<uint64_t>(INT32_MAX);
-    EXPECT_LE(pto2_sm_layout::ring_segment_offsets(PTO2_TASK_WINDOW_SIZE).end, REACH);
+    EXPECT_LE(sm_layout::ring_segment_offsets(PTO2_TASK_WINDOW_SIZE).end, REACH);
 
     // The bound is a property of the layout, not of the capacity alone: there is a
     // capacity past which the mirror no longer fits, and it is above the default.
     uint64_t window = PTO2_TASK_WINDOW_SIZE;
-    while (window <= (UINT64_MAX / 2) && pto2_sm_layout::ring_segment_offsets(window).end <= REACH) {
+    while (window <= (UINT64_MAX / 2) && sm_layout::ring_segment_offsets(window).end <= REACH) {
         window *= 2;
     }
     EXPECT_GT(window, static_cast<uint64_t>(PTO2_TASK_WINDOW_SIZE));
-    EXPECT_GT(pto2_sm_layout::ring_segment_offsets(window).end, REACH);
+    EXPECT_GT(sm_layout::ring_segment_offsets(window).end, REACH);
 }
 
 // The graph heap's device region is committed after orchestration, so the

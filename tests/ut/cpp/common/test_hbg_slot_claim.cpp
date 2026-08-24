@@ -32,7 +32,7 @@ class HbgSlotClaimTest : public ::testing::Test {
 protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    SharedMemoryHandle *sm_handle = nullptr;
     PTO2OrchestratorState orch{};
     PTO2SchedulerState sched{};
     PTO2SchedulerLayout sched_layout{};
@@ -46,7 +46,7 @@ protected:
     static constexpr size_t STAGING_BYTES = 256 * 1024;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(HEAP_BYTES);
 

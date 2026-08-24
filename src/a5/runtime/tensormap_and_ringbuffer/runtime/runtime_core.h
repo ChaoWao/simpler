@@ -156,7 +156,7 @@ struct RuntimeContext {
     PTO2ScopeMode pending_scope_mode;
 
     // Components
-    PTO2SharedMemoryHandle *sm_handle;
+    SharedMemoryHandle *sm_handle;
     PTO2OrchestratorState orchestrator;
     PTO2SchedulerState scheduler;
     AICoreCompletionMailbox *aicore_mailbox;

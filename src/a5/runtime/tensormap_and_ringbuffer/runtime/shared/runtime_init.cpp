@@ -88,7 +88,7 @@ void ready_queue_destroy(PTO2ReadyQueue *queue) {
 bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base, int32_t ring_id) {
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
-    ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
+    ring = sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
     last_published_to_sm = 0;
     publication_batching_enabled = false;
@@ -99,7 +99,7 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
 #endif
 
     // Per-slot SM-side initialization (bind_ring + reset_for_reuse +
-    // fanin_count/active_mask zero) lives in PTO2SharedMemoryHandle::
+    // fanin_count/active_mask zero) lives in SharedMemoryHandle::
     // init_header_per_ring so the AICPU performs it during SM reset; host
     // prebuilt-arena init skips SM access here.
 
@@ -109,7 +109,7 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
 void PTO2SchedulerState::RingSchedState::reset_for_reuse(
     void *sm_dev_base, int32_t ring_id, std::atomic<int32_t> *orch_err
 ) {
-    ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
+    ring = sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
     last_published_to_sm = 0;
     publication_batching_enabled = false;
@@ -166,7 +166,7 @@ bool PTO2SchedulerState::init_data_from_layout(
     const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base
 ) {
     PTO2SchedulerState *sched = this;
-    sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
@@ -215,7 +215,7 @@ bool PTO2SchedulerState::init_data_from_layout(
         return false;
     }
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_dev_base);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto *dep_entries = static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
         memset(dep_entries, 0, static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(PTO2DepListEntry));
@@ -230,7 +230,7 @@ bool PTO2SchedulerState::init_data_from_layout(
 
 void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void *sm_dev_base) {
     PTO2SchedulerState *sched = this;
-    sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
@@ -239,7 +239,7 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
 #endif
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_dev_base);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         sched->ring_sched_states[r].reset_for_reuse(sm_dev_base, r, orch_err);
     }
@@ -381,7 +381,7 @@ bool PTO2OrchestratorState::init_data_from_layout(
     auto *orch = this;
     *orch = PTO2OrchestratorState{};
 
-    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     orch->gm_heap_base = gm_heap;
     uint64_t total_heap_size = 0;
     if (!sum_ring_heap_sizes(heap_sizes, &total_heap_size)) {
@@ -390,14 +390,14 @@ bool PTO2OrchestratorState::init_data_from_layout(
     orch->gm_heap_size = total_heap_size;
     orch->fatal = false;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_dev_base);
     uint64_t heap_offset = 0;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         void *ring_heap_base = reinterpret_cast<char *>(gm_heap) + heap_offset;
-        auto *task_descs_dev = pto2_sm_layout::ring_task_descriptors_addr(sm_dev_base, task_window_sizes, r);
-        auto *slot_states_dev = pto2_sm_layout::ring_slot_states_addr(sm_dev_base, task_window_sizes, r);
-        auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_dev_base, r);
-        auto *last_alive_dev = pto2_sm_layout::ring_last_task_alive_addr(sm_dev_base, r);
+        auto *task_descs_dev = sm_layout::ring_task_descriptors_addr(sm_dev_base, task_window_sizes, r);
+        auto *slot_states_dev = sm_layout::ring_slot_states_addr(sm_dev_base, task_window_sizes, r);
+        auto *cur_idx_dev = sm_layout::ring_current_task_index_addr(sm_dev_base, r);
+        auto *last_alive_dev = sm_layout::ring_last_task_alive_addr(sm_dev_base, r);
 
         orch->rings[r].task_allocator.init(
             task_descs_dev, static_cast<int32_t>(task_window_sizes[r]), cur_idx_dev, last_alive_dev, ring_heap_base,
@@ -438,7 +438,7 @@ bool PTO2OrchestratorState::reset_for_reuse(
     const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
 ) {
     auto *orch = this;
-    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
     orch->gm_heap_base = gm_heap;
     uint64_t total_heap_size = 0;
     if (!sum_ring_heap_sizes(heap_sizes, &total_heap_size)) {
@@ -460,14 +460,14 @@ bool PTO2OrchestratorState::reset_for_reuse(
     }
     orch->fanin_seen_current_epoch = next_epoch;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_dev_base);
     uint64_t heap_offset = 0;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         void *ring_heap_base = reinterpret_cast<char *>(gm_heap) + heap_offset;
-        auto *task_descs_dev = pto2_sm_layout::ring_task_descriptors_addr(sm_dev_base, task_window_sizes, r);
-        auto *slot_states_dev = pto2_sm_layout::ring_slot_states_addr(sm_dev_base, task_window_sizes, r);
-        auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_dev_base, r);
-        auto *last_alive_dev = pto2_sm_layout::ring_last_task_alive_addr(sm_dev_base, r);
+        auto *task_descs_dev = sm_layout::ring_task_descriptors_addr(sm_dev_base, task_window_sizes, r);
+        auto *slot_states_dev = sm_layout::ring_slot_states_addr(sm_dev_base, task_window_sizes, r);
+        auto *cur_idx_dev = sm_layout::ring_current_task_index_addr(sm_dev_base, r);
+        auto *last_alive_dev = sm_layout::ring_last_task_alive_addr(sm_dev_base, r);
 
         orch->rings[r].task_allocator.init(
             task_descs_dev, static_cast<int32_t>(task_window_sizes[r]), cur_idx_dev, last_alive_dev, ring_heap_base,
@@ -564,7 +564,7 @@ RuntimeArenaLayout runtime_reserve_layout(
         layout.sizing.dep_pool_capacities[r] = dep_pool_capacities[r];
     }
 
-    layout.offsets.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    layout.offsets.off_sm_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     int32_t task_window_sizes_i32[CHIP_MAX_RING_DEPTH];
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         task_window_sizes_i32[r] = static_cast<int32_t>(task_window_sizes[r]);
@@ -596,7 +596,7 @@ RuntimeContext *runtime_init_data_from_layout(
     RuntimeContext *rt = static_cast<RuntimeContext *>(arena.region_ptr(layout.offsets.off_runtime));
     memset(rt, 0, sizeof(*rt));
 
-    auto *sm_wrap = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
+    auto *sm_wrap = static_cast<SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
     memset(sm_wrap, 0, sizeof(*sm_wrap));
 
     // rt->ops is filled by the AICPU at boot.
@@ -651,7 +651,7 @@ static void enable_publication_batching_if_safe(RuntimeContext *rt) {
 
 void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
     rt->scheduler.set_publication_batching_enabled(false);
-    rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
+    rt->sm_handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.offsets.off_mailbox));
     rt->orchestrator.wire_arena_pointers(layout.offsets.orch, arena, &rt->scheduler);
     rt->scheduler.wire_arena_pointers(layout.offsets.sched, arena);

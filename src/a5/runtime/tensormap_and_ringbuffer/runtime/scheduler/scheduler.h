@@ -444,14 +444,14 @@ struct PTO2SchedulerLayout {
  */
 struct PTO2SchedulerState {
     // Shared memory access
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // Per-ring state
     struct alignas(64) RingSchedState {
         static constexpr int32_t PUBLISH_INTERVAL_K = 16;
 
         // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
-        PTO2SharedMemoryRingHeader *ring;
+        SharedMemoryRingHeader *ring;
         int32_t last_task_alive;
         // Publication may trail local reclamation by PUBLISH_INTERVAL_K - 1
         // tasks only while no reclaim consumer is blocked on the watermark.

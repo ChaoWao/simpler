@@ -27,29 +27,29 @@
 // Size Calculation
 // =============================================================================
 
-uint64_t PTO2SharedMemoryHandle::calculate_size(uint64_t task_window_size) {
+uint64_t SharedMemoryHandle::calculate_size(uint64_t task_window_size) {
     // Total SM size = offset just past the ring's slot_states, from the single
-    // source of truth for the layout (pto2_sm_layout::ring_segment_offsets).
-    return pto2_sm_layout::ring_segment_offsets(task_window_size).end;
+    // source of truth for the layout (sm_layout::ring_segment_offsets).
+    return sm_layout::ring_segment_offsets(task_window_size).end;
 }
 
 // =============================================================================
 // Creation and Destruction
 // =============================================================================
 
-void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
+void SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     char *base = (char *)sm_base;
-    header = (PTO2SharedMemoryHeader *)base;
+    header = (SharedMemoryHeader *)base;
 
     // Per-ring descriptors / payloads / slot_states — offsets from the single source
-    // of truth (pto2_sm_layout::ring_segment_offsets), so this setup and the
+    // of truth (sm_layout::ring_segment_offsets), so this setup and the
     // device-address helpers cannot drift.
     //
     // Only the four slot-pitched segments, and no argument pool: the pool extents
     // differ between the mirror and the image, while these four depend on the pitch
     // alone. The orchestrator holds the mirror's pool bases; the device resolves an
     // argument region through the payload's delta and needs no base at all.
-    auto off = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents({pitch, 0, 0, 0}));
+    auto off = sm_layout::ring_segment_offsets(sm_layout::image_extents({pitch, 0, 0, 0}));
     auto &ring = header->ring;
     ring.task_descriptors = (TaskDescriptor *)(base + off.descriptors);
     ring.task_payloads = (TaskPayload *)(base + off.payloads);
@@ -57,7 +57,7 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
-bool PTO2SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size) {
+bool SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
     const uint64_t mirror_bytes = calculate_size(task_window_size);
     // The mirror has to stay inside an int32 delta's reach: a payload names its
@@ -78,7 +78,7 @@ bool PTO2SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint6
     return true;
 }
 
-bool PTO2SharedMemoryHandle::attach_populated(
+bool SharedMemoryHandle::attach_populated(
     void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t live_slots, uint64_t image_bytes
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
@@ -91,7 +91,7 @@ bool PTO2SharedMemoryHandle::attach_populated(
     // that is its argument pools, whose extents are the bind's cursors and are not
     // recomputable here. The first pool's offset is exactly where those four end.
     const uint64_t slots_end =
-        pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
+        sm_layout::ring_segment_offsets(sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
     if (image_bytes < slots_end) return false;
     // The region holds the compacted image, so that is what has to fit — the ring
     // capacity is no longer its size.
@@ -110,13 +110,13 @@ bool PTO2SharedMemoryHandle::attach_populated(
     return true;
 }
 
-PTO2SharedMemoryHandle *PTO2SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
+SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
     const uint64_t buffer_size = calculate_size(PTO2_TASK_WINDOW_SIZE);
-    const size_t off_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), PTO2_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
 
-    auto *handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(off_handle));
+    auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
     memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     memset(buffer, 0, static_cast<size_t>(buffer_size));
@@ -124,7 +124,7 @@ PTO2SharedMemoryHandle *PTO2SharedMemoryHandle::create_and_init_default(DeviceAr
     return handle;
 }
 
-void PTO2SharedMemoryHandle::destroy() {
+void SharedMemoryHandle::destroy() {
     // Arena-owned wrappers (is_owner == false) are reclaimed by arena.release();
     // calling destroy on them is a no-op so existing callers stay safe.
     if (is_owner && sm_base) {
@@ -138,7 +138,7 @@ void PTO2SharedMemoryHandle::destroy() {
 // =============================================================================
 //
 // no need init data in pool, init pool data when used
-void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size) {
+void SharedMemoryHandle::init_header(uint64_t task_window_size) {
     // Flow control (starts at 0)
     header->ring.fc.init();
 
@@ -149,7 +149,7 @@ void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size) {
     header->orchestrator_done.store(0, std::memory_order_relaxed);
 
     // Ring layout info
-    uint64_t offset = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t offset = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
     header->ring.task_window_size = task_window_size;
     header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
     header->ring.task_descriptors_offset = offset;
@@ -176,10 +176,10 @@ void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size) {
 // Debug Utilities
 // =============================================================================
 
-void PTO2SharedMemoryHandle::print_layout() {
+void SharedMemoryHandle::print_layout() {
     if (!header) return;
 
-    PTO2SharedMemoryHeader *h = header;
+    SharedMemoryHeader *h = header;
 
     LOG_DEBUG("=== PTO2 Shared Memory Layout ===");
     LOG_DEBUG("Base address:       %p", sm_base);
@@ -200,22 +200,22 @@ void PTO2SharedMemoryHandle::print_layout() {
     LOG_DEBUG("================================");
 }
 
-bool PTO2SharedMemoryHandle::validate() {
+bool SharedMemoryHandle::validate() {
     if (!sm_base) return false;
     if (!header) return false;
 
-    PTO2SharedMemoryHeader *h = header;
+    SharedMemoryHeader *h = header;
 
     if (!h->ring.fc.validate(this)) return false;
 
     return true;
 }
 
-bool PTO2RingFlowControl::validate(PTO2SharedMemoryHandle *handle) const {
+bool PTO2RingFlowControl::validate(SharedMemoryHandle *handle) const {
     if (!handle) return false;
     if (!handle->header) return false;
 
-    const PTO2SharedMemoryHeader *h = handle->header;
+    const SharedMemoryHeader *h = handle->header;
 
     // Check that offsets are within bounds
     if (h->ring.task_descriptors_offset >= h->total_size) return false;

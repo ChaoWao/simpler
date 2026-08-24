@@ -298,7 +298,7 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionCopiesRuntimeStatus) {
     ArgDirection signature[1] = {ArgDirection::OUT};
 
     ASSERT_EQ(bind_runtime(runtime, api_, args, signature, 1), 0);
-    auto *header = static_cast<PTO2SharedMemoryHeader *>(runtime.get_gm_sm_ptr());
+    auto *header = static_cast<SharedMemoryHeader *>(runtime.get_gm_sm_ptr());
     ASSERT_NE(header, nullptr);
     header->orch_error_code.store(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, std::memory_order_relaxed);
 

@@ -45,7 +45,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
     TaskDescriptor task_descriptors[WINDOW_SIZE]{};
-    PTO2SharedMemoryRingHeader ring{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
     ring.task_window_mask = WINDOW_SIZE - 1;
@@ -77,7 +77,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
     TaskDescriptor task_descriptors[WINDOW_SIZE]{};
-    PTO2SharedMemoryRingHeader ring{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
     ring.task_window_mask = WINDOW_SIZE - 1;

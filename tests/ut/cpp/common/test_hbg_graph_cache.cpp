@@ -635,7 +635,7 @@ TEST(GraphExecutionErrors, ReadyQueueOverflowHasTriageText) {
 }
 
 TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
-    PTO2SharedMemoryHeader header{};
+    SharedMemoryHeader header{};
     PTO2SchedulerState scheduler{};
     scheduler.sm_header = &header;
     PTO2ReadyQueueSlot queue_slots[2]{};
@@ -659,7 +659,7 @@ TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
 }
 
 TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
-    PTO2SharedMemoryHeader header{};
+    SharedMemoryHeader header{};
     PTO2SchedulerState scheduler{};
     scheduler.sm_header = &header;
     PTO2ReadyQueueSlot queue_slots[2]{};

@@ -171,7 +171,7 @@ struct RuntimeContext {
     PTO2ScopeMode pending_scope_mode;
 
     // Components
-    PTO2SharedMemoryHandle *sm_handle;
+    SharedMemoryHandle *sm_handle;
     // Host-only, and by pointer so that this header stays trivially copyable:
     // the orchestrator runs on the host and owns non-trivial scratch. Null on the
     // device — bind drops it before the copied zone is uploaded, so no device code
