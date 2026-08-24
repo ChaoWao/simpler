@@ -95,7 +95,7 @@ bool SharedMemoryHandle::init_per_ring(
 }
 
 SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
-    const uint64_t buffer_size = calculate_size(PTO2_TASK_WINDOW_SIZE);
+    const uint64_t buffer_size = calculate_size(CHIP_TASK_WINDOW_SIZE);
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), CHIP_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
@@ -104,7 +104,7 @@ SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &are
     memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     memset(buffer, 0, static_cast<size_t>(buffer_size));
-    if (!handle->init(buffer, buffer_size, PTO2_TASK_WINDOW_SIZE, PTO2_HEAP_SIZE)) return nullptr;
+    if (!handle->init(buffer, buffer_size, CHIP_TASK_WINDOW_SIZE, CHIP_HEAP_SIZE)) return nullptr;
     return handle;
 }
 

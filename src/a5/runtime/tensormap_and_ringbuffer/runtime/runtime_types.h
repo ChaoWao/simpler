@@ -59,17 +59,17 @@
 // =============================================================================
 
 // Task management
-// NOTE: PTO2_TASK_WINDOW_SIZE is now a per-ring default value.
+// NOTE: CHIP_TASK_WINDOW_SIZE is now a per-ring default value.
 // Actual window size is passed at runtime to runtime_reserve_layout().
 // Use pto2_task_slot(sched, task_id) for slot calculation.
-#define PTO2_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
+#define CHIP_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
 // Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)
 // Scope depth maps to ring index via: min(scope_depth, CHIP_MAX_RING_DEPTH - 1)
 #define CHIP_MAX_RING_DEPTH 4
 
 // Memory pools (per-ring defaults; total = value × CHIP_MAX_RING_DEPTH)
-#define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
+#define CHIP_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
 #define CHIP_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
 #define CHIP_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
 #define CHIP_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
@@ -77,11 +77,11 @@
 // Scope management
 #define CHIP_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
 // Hard cap for the scope_tasks buffer. Equals the total in-flight ring slot
-// budget (PTO2_TASK_WINDOW_SIZE × CHIP_MAX_RING_DEPTH): once every ring slot
+// budget (CHIP_TASK_WINDOW_SIZE × CHIP_MAX_RING_DEPTH): once every ring slot
 // is in flight, no more tasks can ever be pushed regardless of buffer size.
 // scope_tasks_push fatals on overflow rather than growing the arena-owned
 // buffer (which would be UB on the arena's malloc'd backing).
-#define CHIP_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH)
+#define CHIP_SCOPE_TASKS_CAP (CHIP_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH)
 
 // Ready queue
 #define CHIP_READY_QUEUE_SIZE 65536  // Per-shape queue size
@@ -106,14 +106,14 @@
 #define CHIP_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
 
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
-// count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
+// count (TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
 // — its only user — by scaling with the platform counter frequency, like
 // SCHEDULER_TIMEOUT_CYCLES, so it reaps at the same wall-clock on every arch (a
 // fixed raw cycle count would be 15 s on a5 at 1 GHz but 300 s on a2a3 at 50 MHz).
 // PLATFORM_PROF_SYS_CNT_FREQ is deliberately NOT pulled into this header: it is
 // included by orchestrations that define that constant locally, so doing so caused
 // a redefinition conflict. See issue #1189.
-constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
+constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
 
 // =============================================================================
 // Task States
@@ -152,7 +152,7 @@ struct TaskAllocResult {
     bool failed() const { return task_id < 0; }
 };
 
-struct PTO2OutputLayout {
+struct OutputLayout {
     uint64_t offsets[MAX_TENSOR_ARGS] = {};
     uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
     int32_t total_output_size = 0;
@@ -375,7 +375,7 @@ struct TaskPayload {
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
     void
-    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, PTO2OutputLayout &layout) {
+    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 

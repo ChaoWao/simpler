@@ -33,7 +33,7 @@
 // =============================================================================
 
 namespace {
-inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
+inline constexpr int32_t DEFERRED_RELEASE_CAP = 256;
 }
 
 // Pure function: read register result -> SlotTransition (no side effects).
@@ -228,7 +228,7 @@ void SchedulerContext::complete_slot_task(
         }
         chip_swimlane.phase_complete_count++;
 #endif
-        if (deferred_release_count < PTO2_DEFERRED_RELEASE_CAP) {
+        if (deferred_release_count < DEFERRED_RELEASE_CAP) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
         } else {
             while (deferred_release_count > 0) {

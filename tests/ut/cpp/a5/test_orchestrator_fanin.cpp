@@ -37,7 +37,7 @@ protected:
 
         int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-            task_window_sizes[r] = static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE);
+            task_window_sizes[r] = static_cast<int32_t>(CHIP_TASK_WINDOW_SIZE);
         }
 
         orch_layout = OrchestratorState::reserve_layout(runtime_arena, task_window_sizes);
@@ -45,7 +45,7 @@ protected:
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
         ASSERT_TRUE(orch.init_data_from_layout(
-            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE
+            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, CHIP_TASK_WINDOW_SIZE
         ));
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
@@ -367,8 +367,8 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
 
     // Default window: cap == the old compile-time value (no behavior change).
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
-        windows[r] = PTO2_TASK_WINDOW_SIZE;
-    EXPECT_EQ(cap_for(windows), PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
+        windows[r] = CHIP_TASK_WINDOW_SIZE;
+    EXPECT_EQ(cap_for(windows), CHIP_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
     EXPECT_EQ(cap_for(windows), CHIP_SCOPE_TASKS_CAP);
 
     // Shrunk window: cap shrinks to the real budget (no over-allocation).
@@ -378,7 +378,7 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
 
     // Enlarged window past the compile default: cap grows to match the rings, so a
     // large scope no longer hits a premature SCOPE_TASKS_OVERFLOW (the bug fixed).
-    const int32_t big = PTO2_TASK_WINDOW_SIZE * 2;
+    const int32_t big = CHIP_TASK_WINDOW_SIZE * 2;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = big;
     EXPECT_EQ(cap_for(windows), big * CHIP_MAX_RING_DEPTH);

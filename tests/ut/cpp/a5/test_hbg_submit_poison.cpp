@@ -65,7 +65,7 @@ protected:
         // Same order the AICPU boots in: the slot arrays are not part of the
         // uploaded image, so nothing can push until they carry their ramp.
         sched.seed_queue_slots();
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, CHIP_TASK_WINDOW_SIZE, &sched));
     }
 
     void TearDown() override {

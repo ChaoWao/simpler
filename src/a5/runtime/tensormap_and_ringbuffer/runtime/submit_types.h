@@ -254,9 +254,9 @@ struct MixedKernels {
  * is expanded into at dispatch time.  Each block receives a unique
  * block_idx in [0, core_num) via the per-dispatch LocalContext.
  */
-class PTO2LaunchSpec {
+class LaunchSpec {
 public:
-    constexpr PTO2LaunchSpec() = default;
+    constexpr LaunchSpec() = default;
 
     int16_t core_num() const { return core_num_; }
     void set_core_num(int16_t n) { core_num_ = n; }

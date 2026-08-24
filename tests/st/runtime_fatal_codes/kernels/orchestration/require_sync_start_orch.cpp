@@ -26,7 +26,7 @@
 
 #define FUNC_NOOP_KERNEL 0
 
-// PTO2LaunchSpec spells the SPMD block-count setter differently per arch
+// LaunchSpec spells the SPMD block-count setter differently per arch
 // (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
 // one fixture compiles on both; keyed off the arch's types.h include guard,
 // which orchestration_api.h pulls in transitively.

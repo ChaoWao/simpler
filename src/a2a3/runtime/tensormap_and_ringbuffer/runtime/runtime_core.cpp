@@ -42,8 +42,7 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() { retur
 // that define PLATFORM_PROF_SYS_CNT_FREQ locally, so pulling the platform header into
 // it caused a redefinition conflict (#1189). Scaling MS by the counter frequency (like
 // SCHEDULER_TIMEOUT_CYCLES) keeps the data-wait wall-clock identical across arches.
-static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
-    (PTO2_TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
+static constexpr uint64_t TENSOR_DATA_TIMEOUT_CYCLES = (TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
 
 // =============================================================================
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
@@ -125,11 +124,11 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > PTO2_TENSOR_DATA_TIMEOUT_CYCLES) {
+                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
                         "Timeout (%llu cycles): producer (ring=%d, local=%d) not completed",
-                        (unsigned long long)PTO2_TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
                     );
                     failed = true;
                     return;
@@ -152,11 +151,11 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > PTO2_TENSOR_DATA_TIMEOUT_CYCLES) {
+                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
                         "Timeout (%llu cycles): consumers of producer (ring=%d, local=%d) not done",
-                        (unsigned long long)PTO2_TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
                     );
                     failed = true;
                     return;

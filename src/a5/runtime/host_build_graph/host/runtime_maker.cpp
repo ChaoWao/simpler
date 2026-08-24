@@ -277,7 +277,7 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 // reclaiming runtime's knobs; this function does not resolve them, and the caller
 // reads them only to warn that they reach nothing here.
 static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t *eff_task_window_size) {
-    *eff_task_window_size = PTO2_TASK_WINDOW_SIZE;
+    *eff_task_window_size = CHIP_TASK_WINDOW_SIZE;
 
     apply_env_ring_value("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_size);
 
@@ -307,7 +307,7 @@ static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t 
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
+static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || api == nullptr || host_header == nullptr) {
         return 0;
     }
@@ -636,7 +636,7 @@ int32_t run_host_orchestration(
     runtime_bind_ops(rt);
     orchestrator.total_cluster_count = block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM;
     orchestrator.total_aiv_count = block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM;
-    rt->mode = PTO2_MODE_EXECUTE;
+    rt->mode = MODE_EXECUTE;
     // get_tensor_data/set_tensor_data resolve buffer.addr through the host
     // views registered at staging time (runtime/host_tensor_access.h), so the
     // host orchestrator can read control tensors (e.g. paged_attention's
@@ -1210,7 +1210,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
     RuntimeContext *rt =
-        runtime_init_data_from_layout(host_arena, layout, PTO2_MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size);
+        runtime_init_data_from_layout(host_arena, layout, MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size);
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1315,7 +1315,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {
-        runtime_status = pto2_read_runtime_status(runtime, api, &host_header);
+        runtime_status = read_runtime_status(runtime, api, &host_header);
     }
     if (runtime_status != 0) {
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);

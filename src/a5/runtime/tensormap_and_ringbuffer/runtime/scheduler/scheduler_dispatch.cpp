@@ -38,7 +38,7 @@
 // =============================================================================
 
 namespace {
-inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
+inline constexpr int32_t DEFERRED_RELEASE_CAP = 256;
 }
 
 // AICore materializes args[] from src_payload on the gated path using these
@@ -865,7 +865,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     chip_swimlane.chip_swimlane_enabled = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
 #endif
 
-    ChipTaskSlotState *deferred_release_slot_states[PTO2_DEFERRED_RELEASE_CAP];
+    ChipTaskSlotState *deferred_release_slot_states[DEFERRED_RELEASE_CAP];
     int32_t deferred_release_count = 0;
 
     // PMU runs require single-issue dispatch — overlapping in-flight tasks
@@ -1045,8 +1045,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
-                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count,
-                PTO2_DEFERRED_RELEASE_CAP
+                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_CAP
 #if SIMPLER_SCHED_PROFILING
                 ,
                 thread_idx
@@ -1178,7 +1177,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 // beyond their own producers; release self-reference so the slot can
                 // reach CONSUMED once all consumers drain.
                 deferred_release_slot_states[deferred_release_count++] = &dummy_slot;
-                if (deferred_release_count >= PTO2_DEFERRED_RELEASE_CAP) {
+                if (deferred_release_count >= DEFERRED_RELEASE_CAP) {
                     while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
                         (void)sched_->on_task_release(

@@ -93,7 +93,7 @@
 #endif
 
 /** Number of extra pointer slots appended to the args[] tail (LocalContext + GlobalContext). */
-static constexpr int32_t PTO2_EXT_PARAMS_COUNT = 2;
+static constexpr int32_t EXT_PARAMS_COUNT = 2;
 
 /**
  * Args[] suffix indices for context pointers.

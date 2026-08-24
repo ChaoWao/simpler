@@ -1224,8 +1224,8 @@ struct PreparedTask {
     ChipTaskSlotState *slot_state = nullptr;
 };
 
-static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
-    PTO2OutputLayout layout;
+static OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
+    OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) != TensorArgType::OUTPUT) {
             continue;
@@ -1454,7 +1454,7 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_START();
     ORCH_PHASE_START();
     TaskOutputTensors result;
-    PTO2OutputLayout layout = calculate_output_layout(args);
+    OutputLayout layout = calculate_output_layout(args);
     PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
@@ -1980,7 +1980,7 @@ TaskOutputTensors graph_record_submit_node(
         recording.unsupported = true;
     }
 
-    const PTO2OutputLayout layout = calculate_output_layout(args);
+    const OutputLayout layout = calculate_output_layout(args);
     const uint64_t aligned_output =
         layout.total_output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), CHIP_ALIGN_SIZE) :
                                        0;
@@ -2690,7 +2690,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         );
     }
 
-    PTO2OutputLayout layout = calculate_output_layout(args);
+    OutputLayout layout = calculate_output_layout(args);
     PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time attributes. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).

@@ -55,9 +55,9 @@
  * Runtime execution mode
  */
 enum RuntimeMode {
-    PTO2_MODE_EXECUTE = 0,    // Execute tasks on workers
-    PTO2_MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
-    PTO2_MODE_GRAPH_ONLY = 2  // Build graph only, no execution
+    MODE_EXECUTE = 0,    // Execute tasks on workers
+    MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
+    MODE_GRAPH_ONLY = 2  // Build graph only, no execution
 };
 
 /**
@@ -339,8 +339,8 @@ void set_tensor_data(
  * Slim config struct exported by orchestration .so via aicpu_orchestration_config().
  * Shared definition with orchestration_api.h (same layout, guarded).
  */
-#ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
-#define PTO2_ORCHESTRATION_CONFIG_DEFINED
+#ifndef ORCHESTRATION_CONFIG_DEFINED
+#define ORCHESTRATION_CONFIG_DEFINED
 struct OrchestrationConfig {
     int expected_arg_count;
 };

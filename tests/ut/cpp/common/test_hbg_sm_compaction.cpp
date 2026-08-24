@@ -404,15 +404,15 @@ TEST(HbgSmCompaction, LayoutStaysWithinDeltaReach) {
     EXPECT_LT(compacted.bytes, static_cast<uint64_t>(INT32_MAX));
 
     constexpr uint64_t REACH = static_cast<uint64_t>(INT32_MAX);
-    EXPECT_LE(sm_layout::ring_segment_offsets(PTO2_TASK_WINDOW_SIZE).end, REACH);
+    EXPECT_LE(sm_layout::ring_segment_offsets(CHIP_TASK_WINDOW_SIZE).end, REACH);
 
     // The bound is a property of the layout, not of the capacity alone: there is a
     // capacity past which the mirror no longer fits, and it is above the default.
-    uint64_t window = PTO2_TASK_WINDOW_SIZE;
+    uint64_t window = CHIP_TASK_WINDOW_SIZE;
     while (window <= (UINT64_MAX / 2) && sm_layout::ring_segment_offsets(window).end <= REACH) {
         window *= 2;
     }
-    EXPECT_GT(window, static_cast<uint64_t>(PTO2_TASK_WINDOW_SIZE));
+    EXPECT_GT(window, static_cast<uint64_t>(CHIP_TASK_WINDOW_SIZE));
     EXPECT_GT(sm_layout::ring_segment_offsets(window).end, REACH);
 }
 

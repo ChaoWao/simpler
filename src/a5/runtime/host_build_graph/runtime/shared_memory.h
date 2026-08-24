@@ -214,7 +214,7 @@ struct SharedMemoryHandle {
     static uint64_t calculate_size(uint64_t task_window_size);
 
     // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init using
-    // default PTO2_TASK_WINDOW_SIZE. Only valid when the arena is otherwise empty
+    // default CHIP_TASK_WINDOW_SIZE. Only valid when the arena is otherwise empty
     // (the call performs the single commit). All memory is owned by the arena —
     // caller must not call destroy().
     static SharedMemoryHandle *create_and_init_default(DeviceArena &arena);

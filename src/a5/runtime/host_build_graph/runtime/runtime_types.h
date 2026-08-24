@@ -72,7 +72,7 @@
 // Task management
 // Actual window size is passed at runtime to runtime_create_from_sm().
 // Use pto2_task_slot(sched, task_id) for slot calculation.
-#define PTO2_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
+#define CHIP_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
 
 // host_build_graph has one ring, and carries no per-ring dimension anywhere:
 // host-orch builds the whole graph on the host, it fits that ring, and the
@@ -152,14 +152,14 @@ inline constexpr int32_t ARG_POOL_ALIGN = 64;
 #define CHIP_DEP_DEGREE_WARN_THRESHOLD 16
 
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
-// count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
+// count (TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
 // — its only user — by scaling with the platform counter frequency, like
 // SCHEDULER_TIMEOUT_CYCLES, so it reaps at the same wall-clock on every arch (a
 // fixed raw cycle count would be 15 s on a5 at 1 GHz but 300 s on a2a3 at 50 MHz).
 // PLATFORM_PROF_SYS_CNT_FREQ is deliberately NOT pulled into this header: it is
 // included by orchestrations that define that constant locally, so doing so caused
 // a redefinition conflict. See issue #1189.
-constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
+constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
 
 // =============================================================================
 // Task States
@@ -208,7 +208,7 @@ enum class TaskKind : uint8_t {
     GRAPH_NODE = 3,
 };
 
-struct PTO2OutputLayout {
+struct OutputLayout {
     uint64_t offsets[MAX_TENSOR_ARGS] = {};
     uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
     int32_t total_output_size = 0;
@@ -430,7 +430,7 @@ struct TaskPayload {
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
     void
-    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, PTO2OutputLayout &layout) {
+    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 

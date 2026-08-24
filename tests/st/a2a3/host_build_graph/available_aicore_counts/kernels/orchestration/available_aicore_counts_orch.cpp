@@ -31,7 +31,7 @@
 #define FUNC_SPMD_MIX_AIV0 1
 #define FUNC_SPMD_MIX_AIV1 2
 
-// PTO2LaunchSpec spells the SPMD block-count setter differently per arch
+// LaunchSpec spells the SPMD block-count setter differently per arch
 // (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
 // one fixture compiles on both; keyed off the arch's types.h include guard,
 // which orchestration_api.h pulls in transitively.
@@ -76,7 +76,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // straight through. Giving it one would hang host_build_graph: its
     // orchestrator runs to completion on the host before the device executes
     // anything, so a producer's task_state can never reach COMPLETED and
-    // wait_for_tensor_ready would spin to PTO2_TENSOR_DATA_TIMEOUT_CYCLES.
+    // wait_for_tensor_ready would spin to TENSOR_DATA_TIMEOUT_CYCLES.
     uint32_t idx[1] = {0};
     set_tensor_data<int32_t>(shape, 1, idx, cluster_count);
     idx[0] = 1;

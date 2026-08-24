@@ -545,8 +545,8 @@ struct PreparedTask {
     ChipTaskSlotState *slot_state = nullptr;
 };
 
-static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
-    PTO2OutputLayout layout;
+static OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
+    OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) != TensorArgType::OUTPUT) {
             continue;
@@ -583,7 +583,7 @@ static bool check_scope_can_accept_task(OrchestratorState *orch, TaskAllocator &
     LOG_ERROR("Solution:");
     LOG_ERROR("  1. Reduce tasks per scope (use batching/unroll)");
     LOG_ERROR("  2. Increase task window (current: %d)", allocator.window_size());
-    LOG_ERROR("     Compile-time: PTO2_TASK_WINDOW_SIZE in runtime_types.h");
+    LOG_ERROR("     Compile-time: CHIP_TASK_WINDOW_SIZE in runtime_types.h");
     LOG_ERROR("     Runtime env:  PTO2_RING_TASK_WINDOW=<power-of-2>");
     LOG_ERROR("  3. Split work across multiple scopes");
     LOG_ERROR("========================================");
@@ -886,7 +886,7 @@ static TaskOutputTensors submit_task_common(
 ) {
     CYCLE_COUNT_START();
     TaskOutputTensors result;
-    PTO2OutputLayout layout = calculate_output_layout(args);
+    OutputLayout layout = calculate_output_layout(args);
     PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
@@ -1289,7 +1289,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         return TaskOutputTensors{};
     }
 
-    PTO2OutputLayout layout = calculate_output_layout(args);
+    OutputLayout layout = calculate_output_layout(args);
     PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time markers. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).

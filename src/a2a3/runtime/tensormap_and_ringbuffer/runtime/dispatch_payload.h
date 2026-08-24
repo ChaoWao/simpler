@@ -44,7 +44,7 @@
 
 /** Max dispatch arguments: 16 scalars + up to 32 tensor pointers + ext params */
 #ifndef DISPATCH_MAX_ARGS
-#define DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + PTO2_EXT_PARAMS_COUNT)
+#define DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + EXT_PARAMS_COUNT)
 #endif
 
 #ifndef CHIP_ALIGN_UP

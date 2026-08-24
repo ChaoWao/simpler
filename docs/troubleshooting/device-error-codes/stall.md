@@ -62,7 +62,7 @@ exist) before reading. See the "Device logs" section of
 
 ## Code 8, specifically
 
-The tensor-data wait defaults to 15 s (`PTO2_TENSOR_DATA_TIMEOUT_MS`,
+The tensor-data wait defaults to 15 s (`TENSOR_DATA_TIMEOUT_MS`,
 frequency-scaled). It means either the producer never completed, or a consumer never
 released its fanout reference. Check for a hung producer first (that is S1 above),
 then verify the consumer really declares the dependency and exits. If the kernel is

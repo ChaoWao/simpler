@@ -71,7 +71,7 @@ protected:
 
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_TASK_WINDOW_SIZE, &sched));
 
         definition_staging.assign(STAGING_BYTES, std::byte{0});
         arena.base = definition_staging.data();
@@ -893,7 +893,7 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     ASSERT_TRUE(outputs.task_id().is_valid());
     ASSERT_FALSE(orch.fatal);
 
-    const uint64_t slot = outputs.task_id().local() & (PTO2_TASK_WINDOW_SIZE - 1);
+    const uint64_t slot = outputs.task_id().local() & (CHIP_TASK_WINDOW_SIZE - 1);
     ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
     EXPECT_EQ(payloads[slot].predicate.op, PredicateOp::NONE);
     EXPECT_EQ(payloads[slot].predicate.addr, 0u);

@@ -234,8 +234,8 @@ AICore uses `last_reg_val` to detect new dispatches — identical values cause s
 
 | Constant | Default | Total (×4 rings) |
 | -------- | ------- | ---------------- |
-| `PTO2_TASK_WINDOW_SIZE` | 16384 | 65536 |
-| `PTO2_HEAP_SIZE` | 256 MB | 1 GB |
+| `CHIP_TASK_WINDOW_SIZE` | 16384 | 65536 |
+| `CHIP_HEAP_SIZE` | 256 MB | 1 GB |
 | `CHIP_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
 
 ### 7.2 Runtime Overrides

@@ -911,12 +911,12 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         // Read at one-time boot init, before the SM is reset for the run, so a ring
         // not yet written holds uninitialized memory (0xbe... under ASAN's
         // malloc-fill). Only a plausible count is taken — (0,
-        // PTO2_TASK_WINDOW_SIZE], since the ring cannot hold more than its task
+        // CHIP_TASK_WINDOW_SIZE], since the ring cannot hold more than its task
         // window — so any garbage pattern, negative or positive, leaves the count
         // at 0, which is the correct value at boot.
         int32_t pto2_count = 0;
         int32_t ring_tasks = header->ring.fc.current_task_index.load(std::memory_order_acquire);
-        if (ring_tasks > 0 && ring_tasks <= PTO2_TASK_WINDOW_SIZE) pto2_count = ring_tasks;
+        if (ring_tasks > 0 && ring_tasks <= CHIP_TASK_WINDOW_SIZE) pto2_count = ring_tasks;
         total_tasks_ = pto2_count;
     } else {
         total_tasks_ = 0;

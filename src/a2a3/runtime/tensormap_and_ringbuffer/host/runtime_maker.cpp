@@ -240,8 +240,8 @@ static bool resolve_ring_config(
 ) {
     uint64_t dep_pool_values[CHIP_MAX_RING_DEPTH];
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        eff_task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
-        eff_heap_sizes[r] = PTO2_HEAP_SIZE;
+        eff_task_window_sizes[r] = CHIP_TASK_WINDOW_SIZE;
+        eff_heap_sizes[r] = CHIP_HEAP_SIZE;
         dep_pool_values[r] = CHIP_DEP_LIST_POOL_SIZE;
     }
 
@@ -284,7 +284,7 @@ static bool resolve_ring_config(
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
+static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || host_header == nullptr) {
         return 0;
     }
@@ -748,7 +748,7 @@ static bool build_runtime_image(
     }
 
     RuntimeContext *rt = runtime_init_data_from_layout(
-        *host_arena, layout, PTO2_MODE_EXECUTE, ptrs.gm_sm, sizes.sm_size, ptrs.gm_heap, sizing.heap_sizes
+        *host_arena, layout, MODE_EXECUTE, ptrs.gm_sm, sizes.sm_size, ptrs.gm_heap, sizing.heap_sizes
     );
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
@@ -1021,7 +1021,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {
-        runtime_status = pto2_read_runtime_status(runtime, api, &host_header);
+        runtime_status = read_runtime_status(runtime, api, &host_header);
     }
     if (runtime_status != 0) {
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);

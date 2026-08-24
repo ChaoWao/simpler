@@ -94,7 +94,7 @@ bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+            } else if (!watermark_synchronized && now - block_cycle0 >= CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                 publication_request.request();
             }
             if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
@@ -229,7 +229,7 @@ bool DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed, Chi
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+            } else if (!watermark_synchronized && now - block_cycle0 >= CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                 publication_request.request();
             }
             bool head_is_oldest_open_task = ring.slot_states != nullptr &&

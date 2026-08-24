@@ -188,7 +188,7 @@ TEST(SharedMemoryLayout, RegionsNonOverlapping) {
 // =============================================================================
 
 TEST(SharedMemoryCalcSize, NonZero) {
-    uint64_t size = SharedMemoryHandle::calculate_size(PTO2_TASK_WINDOW_SIZE);
+    uint64_t size = SharedMemoryHandle::calculate_size(CHIP_TASK_WINDOW_SIZE);
     EXPECT_GT(size, 0u);
 }
 
@@ -253,7 +253,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
 
     std::vector<char> gm(static_cast<size_t>(total_heap));
     RuntimeContext *rt =
-        runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
+        runtime_init_data_from_layout(runtime_arena, layout, MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
     ASSERT_NE(rt, nullptr);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_FALSE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
@@ -292,7 +292,7 @@ TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
     std::vector<char> sm(static_cast<size_t>(sm_size));
     std::vector<char> gm(100 * 1024);
     RuntimeContext *source_rt =
-        runtime_init_data_from_layout(source_arena, layout, PTO2_MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
+        runtime_init_data_from_layout(source_arena, layout, MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
     ASSERT_NE(source_rt, nullptr);
     runtime_wire_arena_pointers(source_arena, layout, source_rt);
 
@@ -327,7 +327,7 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
 
     char sm = 0;
     char gm = 0;
-    EXPECT_EQ(runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, &sm, 0, &gm, heaps), nullptr);
+    EXPECT_EQ(runtime_init_data_from_layout(runtime_arena, layout, MODE_EXECUTE, &sm, 0, &gm, heaps), nullptr);
 
     OrchestratorState orch{};
     EXPECT_FALSE(orch.init_data_from_layout(layout.offsets.orch, runtime_arena, &sm, &gm, heaps, ws));
