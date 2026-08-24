@@ -120,7 +120,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             if (chunk_bc > IN_CORE_BATCH) chunk_bc = IN_CORE_BATCH;
             uint64_t batch_start = chunk_idx * IN_CORE_BATCH;
 
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 uint32_t oi_acc_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t scalar_acc_shapes[1] = {static_cast<uint32_t>(chunk_bc * q_tile)};
                 TensorCreateInfo oi_batch_ci(oi_acc_shapes, 2, DataType::FLOAT32);
@@ -140,7 +140,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TensorCreateInfo oi_new_ci(oi_new_shapes, 2, DataType::FLOAT32);
 
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
-                    PTO2_SCOPE() {
+                    SIMPLER_SCOPE() {
                         CoreTaskArgs params_qk;
                         params_qk.add_input(query);
                         params_qk.add_input(key_cache);

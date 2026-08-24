@@ -48,7 +48,7 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 
 /**
  * Orchestration entry — runtime is bound implicitly by the framework.
- * The executor wraps this call in PTO2_SCOPE, so we are already inside
+ * The executor wraps this call in SIMPLER_SCOPE, so we are already inside
  * the outer scope on entry.
  */
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
@@ -73,7 +73,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // Inner scope: owns t1, t2, t3, t4; intermediates d, e, g release on scope end.
     // c flows in from outer scope (outer-scope tensors are visible to inner scopes).
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         // t1: d = c + 1 (kernel_id=1, kernel_add_scalar)
         CoreTaskArgs params_t1;
         params_t1.add_input(c);

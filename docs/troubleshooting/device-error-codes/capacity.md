@@ -23,7 +23,7 @@ resource and determines how strong that diagnosis is:
 
 Do not guess at the ring sizes from the error code alone. Turn on `scope_stats`,
 which records the high-water mark of all four resources (task-window slots, heap
-bytes, dep-pool entries, tensormap entries) per `PTO2_SCOPE`:
+bytes, dep-pool entries, tensormap entries) per `SIMPLER_SCOPE`:
 
 ```python
 cfg = CallConfig()

@@ -73,7 +73,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     for (int batch = 0; batch < BATCH; batch++) {
         for (int m_idx = 0; m_idx < GRID_M; m_idx++) {
             for (int n_idx = 0; n_idx < GRID_N; n_idx++) {
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     uint32_t c_elem_offset = (static_cast<uint32_t>(batch) * GRID_M * GRID_N +
                                               static_cast<uint32_t>(m_idx) * GRID_N + static_cast<uint32_t>(n_idx)) *
                                              TILE_ELEMS;

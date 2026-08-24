@@ -48,7 +48,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         TaskId producers[PRODUCER_COUNT];
         for (int32_t i = 0; i < PRODUCER_COUNT; i++) {
             CoreTaskArgs args;

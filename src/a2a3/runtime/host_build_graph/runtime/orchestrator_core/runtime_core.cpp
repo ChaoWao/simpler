@@ -378,7 +378,7 @@ void set_tensor_data(
     }
 }
 
-// Ops-table entry that hands the call-site captured by PTO2ScopeGuard to the
+// Ops-table entry that hands the call-site captured by ScopeGuard to the
 // [ScopeStats] collector. The slot is always present in the struct to keep
 // the layout stable; at SIMPLER_DFX=0 we fill nullptr so the orchestration
 // .so's null-check skips it.

@@ -32,7 +32,7 @@ Validate `arg_count` in `aicpu_orchestration_config` and interpret pointers as d
 
 ## Building The Graph
 
-1. Wrap orchestration in scopes with `PTO2_SCOPE()` to control tensor lifetimes.
+1. Wrap orchestration in scopes with `SIMPLER_SCOPE()` to control tensor lifetimes.
 2. Use `make_tensor_external` for existing device buffers and `TensorCreateInfo` + `add_output(...)` for runtime-created intermediates.
 3. Use `add_inout(...)` for existing tensors that a kernel writes.
 4. Build `CoreTaskArgs` with `add_input`, `add_output`, `add_inout` for tensors and `add_scalar` for scalars.

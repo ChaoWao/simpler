@@ -103,7 +103,7 @@ struct PTO2RuntimeOps {
     void (*graph_abort)(PTO2Runtime *rt, void *recording_handle);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
-    // Stash the call-site captured by PTO2ScopeGuard into the [ScopeStats]
+    // Stash the call-site captured by ScopeGuard into the [ScopeStats]
     // collector. Always present in the struct to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
@@ -307,7 +307,7 @@ void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
  * every submit inside it bypass TensorMap discovery and take its fanin from
  * CoreTaskArgs::set_dependencies() instead; an AUTO scope nested inside a MANUAL
  * one is rejected. The mode is read from PTO2Runtime::pending_scope_mode, which
- * PTO2_SCOPE sets immediately before this call.
+ * SIMPLER_SCOPE sets immediately before this call.
  */
 void rt_scope_begin(PTO2Runtime *rt);
 

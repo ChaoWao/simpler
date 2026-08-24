@@ -96,7 +96,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
     const ChipTensor &ori_slot_mapping_inline614 = args.tensor(45).ref();
     const ChipTensor &swa_indices_inline636 = args.tensor(46).ref();
     const ChipTensor &x_attn_csa_inline721 = args.tensor(47).ref();
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline10524_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline10524_ci(x_mixed_inline10524_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_t_inline10558_ci_shapes[2] = {8, 4};
@@ -1093,7 +1093,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline2079_inline10609[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
-        PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline2162_inline10271 = 0; g_inline2162_inline10271 < 8; g_inline2162_inline10271 += 1) {
                 int64_t row_base_o_inline2078_inline10745 = (g_inline2162_inline10271 * 8);
                 int64_t out_col_g_inline2181_inline10439 = (g_inline2162_inline10271 * 1024);
@@ -1269,7 +1269,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
     uint64_t recv_aux_ctx = args.scalar(9);
     uint64_t recv_route_ctx = args.scalar(10);
     uint64_t routed_y_buf_ctx = args.scalar(11);
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline11049_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11049_ci(x_mixed_inline11049_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_ffn_inline11048_ci_shapes[2] = {8, 4};
@@ -1735,7 +1735,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
         params_t187.set_dependencies(params_t187_deps, params_t187_deps_count);
         TaskOutputTensors task_187_outs = rt_submit_aiv_task(194, params_t187);
         TaskId dispatch_push_tid_inline11245 = _push_tid_inline2710_inline11085;
-        PTO2_SCOPE() {
+        SIMPLER_SCOPE() {
             uint32_t recv_y_inline11016_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline11016_ci(recv_y_inline11016_ci_shapes, 3, DataType::BFLOAT16);
             uint32_t ffn_out_inline10948_ci_shapes[2] = {8, 4096};
@@ -1749,7 +1749,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
             uint32_t recv_x_flat_inline2781_inline11205_shapes[2] = {512, 4096};
             ChipTensor recv_x_flat_inline2781_inline11205 =
                 recv_x_out_inline11043.reshape(recv_x_flat_inline2781_inline11205_shapes, 2);
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline11141_ci_shapes[2] = {512, 2048};
                 TensorCreateInfo h_i8_inline2773_inline11141_ci(
                     h_i8_inline2773_inline11141_ci_shapes, 2, DataType::INT8
@@ -1780,7 +1780,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                         expert_rows_pred.target = t0_inline2784_inline11251;
                         int64_t flat_t0_inline2786_inline11215 =
                             (flat_base_inline2774_inline11027 + t0_inline2784_inline11251);
-                        PTO2_SCOPE() {
+                        SIMPLER_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline11102_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline11102_ci(
                                 gate_tile_i32_inline2749_inline11102_ci_shapes, 2, DataType::INT32
@@ -1891,7 +1891,7 @@ void csa_moe_block(const GraphTaskArgs &args, bool route_by_hash) {
                         }
                     }
                 }
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     for (int64_t local_e_inline2742_inline11189 = 0; local_e_inline2742_inline11189 < 32;
                          local_e_inline2742_inline11189 += 1) {
                         int64_t e_flat_base_inline2746_inline11067 = (local_e_inline2742_inline11189 * 16);
@@ -2124,7 +2124,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
     const ChipTensor &swa_indices_inline636 = args.tensor(30).ref();
     const ChipTensor &x_attn_hca_inline723 = args.tensor(31).ref();
     const ChipTensor &hidden_mid_inline726 = args.tensor(32).ref();
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline11578_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11578_ci(x_mixed_inline11578_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_t_inline11780_ci_shapes[2] = {8, 4};
@@ -2804,7 +2804,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline1519_inline11335[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
-        PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline1480_inline11801 = 0; g_inline1480_inline11801 < 8; g_inline1480_inline11801 += 1) {
                 int64_t row_base_o_inline1525_inline11698 = (g_inline1480_inline11801 * 8);
                 int64_t out_col_g_inline1609_inline11551 = (g_inline1480_inline11801 * 1024);
@@ -2977,7 +2977,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
     uint64_t recv_aux_ctx = args.scalar(8);
     uint64_t recv_route_ctx = args.scalar(9);
     uint64_t routed_y_buf_ctx = args.scalar(10);
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline11928_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline11928_ci(x_mixed_inline11928_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_ffn_inline11927_ci_shapes[2] = {8, 4};
@@ -3422,7 +3422,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
         params_t251.set_dependencies(params_t251_deps, params_t251_deps_count);
         TaskOutputTensors task_251_outs = rt_submit_aiv_task(260, params_t251);
         TaskId dispatch_push_tid_inline12124 = _push_tid_inline2710_inline11964;
-        PTO2_SCOPE() {
+        SIMPLER_SCOPE() {
             uint32_t recv_y_inline11895_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline11895_ci(recv_y_inline11895_ci_shapes, 3, DataType::BFLOAT16);
             uint32_t ffn_out_inline11827_ci_shapes[2] = {8, 4096};
@@ -3436,7 +3436,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
             uint32_t recv_x_flat_inline2781_inline12084_shapes[2] = {512, 4096};
             ChipTensor recv_x_flat_inline2781_inline12084 =
                 recv_x_out_inline11922.reshape(recv_x_flat_inline2781_inline12084_shapes, 2);
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline12020_ci_shapes[2] = {512, 2048};
                 TensorCreateInfo h_i8_inline2773_inline12020_ci(
                     h_i8_inline2773_inline12020_ci_shapes, 2, DataType::INT8
@@ -3467,7 +3467,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                         expert_rows_pred.target = t0_inline2784_inline12130;
                         int64_t flat_t0_inline2786_inline12094 =
                             (flat_base_inline2774_inline11906 + t0_inline2784_inline12130);
-                        PTO2_SCOPE() {
+                        SIMPLER_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline11981_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline11981_ci(
                                 gate_tile_i32_inline2749_inline11981_ci_shapes, 2, DataType::INT32
@@ -3578,7 +3578,7 @@ void hca_moe_block(const GraphTaskArgs &args) {
                         }
                     }
                 }
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     for (int64_t local_e_inline2742_inline12068 = 0; local_e_inline2742_inline12068 < 32;
                          local_e_inline2742_inline12068 += 1) {
                         int64_t e_flat_base_inline2746_inline11946 = (local_e_inline2742_inline12068 * 16);
@@ -3801,7 +3801,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
     const ChipTensor &wo_b_l0_inline643 = args.tensor(20).ref();
     const ChipTensor &wo_b_scale_l0_inline653 = args.tensor(21).ref();
     const ChipTensor &x_attn0_inline706 = args.tensor(22).ref();
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline8888_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline8888_ci(x_mixed_inline8888_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_t_inline8947_ci_shapes[2] = {8, 4};
@@ -4315,7 +4315,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
         TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
         ChipTensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
-        PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline8746 = 0; g_inline978_inline8746 < 8; g_inline978_inline8746 += 1) {
                 int64_t row_base_o_inline1126_inline8745 = (g_inline978_inline8746 * 8);
                 int64_t out_col_g_inline1092_inline8900 = (g_inline978_inline8746 * 1024);
@@ -4483,7 +4483,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
     uint64_t data_arrived_ctx = args.scalar(7);
     uint64_t routed_y_buf_ctx = args.scalar(8);
     uint64_t combine_arrived_ctx = args.scalar(9);
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline9242_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline9242_ci(x_mixed_inline9242_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_ffn_inline9241_ci_shapes[2] = {8, 4};
@@ -4916,7 +4916,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
         params_t50.set_dependencies(params_t50_deps, params_t50_deps_count);
         TaskOutputTensors task_50_outs = rt_submit_aiv_task(52, params_t50);
         TaskId dispatch_push_tid_inline9438 = _push_tid_inline2710_inline9278;
-        PTO2_SCOPE() {
+        SIMPLER_SCOPE() {
             uint32_t recv_y_inline9209_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline9209_ci(recv_y_inline9209_ci_shapes, 3, DataType::BFLOAT16);
             uint32_t ffn_out_inline9141_ci_shapes[2] = {8, 4096};
@@ -4930,7 +4930,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
             uint32_t recv_x_flat_inline2781_inline9398_shapes[2] = {512, 4096};
             ChipTensor recv_x_flat_inline2781_inline9398 =
                 recv_x_out_inline9236.reshape(recv_x_flat_inline2781_inline9398_shapes, 2);
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline9334_ci_shapes[2] = {512, 2048};
                 TensorCreateInfo h_i8_inline2773_inline9334_ci(h_i8_inline2773_inline9334_ci_shapes, 2, DataType::INT8);
                 uint32_t h_scale_dq_inline2766_inline9425_ci_shapes[2] = {512, 1};
@@ -4959,7 +4959,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                         expert_rows_pred.target = t0_inline2784_inline9444;
                         int64_t flat_t0_inline2786_inline9408 =
                             (flat_base_inline2774_inline9220 + t0_inline2784_inline9444);
-                        PTO2_SCOPE() {
+                        SIMPLER_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline9295_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline9295_ci(
                                 gate_tile_i32_inline2749_inline9295_ci_shapes, 2, DataType::INT32
@@ -5070,7 +5070,7 @@ void hash_moe_l0_block(const GraphTaskArgs &args) {
                         }
                     }
                 }
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     for (int64_t local_e_inline2742_inline9382 = 0; local_e_inline2742_inline9382 < 32;
                          local_e_inline2742_inline9382 += 1) {
                         int64_t e_flat_base_inline2746_inline9260 = (local_e_inline2742_inline9382 * 16);
@@ -5307,7 +5307,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
     uint64_t data_arrived_ctx = args.scalar(7);
     uint64_t routed_y_buf_ctx = args.scalar(8);
     uint64_t combine_arrived_ctx = args.scalar(9);
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t x_mixed_inline10004_ci_shapes[2] = {8, 4096};
         TensorCreateInfo x_mixed_inline10004_ci(x_mixed_inline10004_ci_shapes, 2, DataType::BFLOAT16);
         uint32_t post_ffn_inline10003_ci_shapes[2] = {8, 4};
@@ -5746,7 +5746,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
         params_t107.set_dependencies(params_t107_deps, params_t107_deps_count);
         TaskOutputTensors task_107_outs = rt_submit_aiv_task(111, params_t107);
         TaskId dispatch_push_tid_inline10200 = _push_tid_inline2710_inline10040;
-        PTO2_SCOPE() {
+        SIMPLER_SCOPE() {
             uint32_t recv_y_inline9971_ci_shapes[3] = {32, 16, 4096};
             TensorCreateInfo recv_y_inline9971_ci(recv_y_inline9971_ci_shapes, 3, DataType::BFLOAT16);
             uint32_t ffn_out_inline9903_ci_shapes[2] = {8, 4096};
@@ -5760,7 +5760,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
             uint32_t recv_x_flat_inline2781_inline10160_shapes[2] = {512, 4096};
             ChipTensor recv_x_flat_inline2781_inline10160 =
                 recv_x_out_inline9998.reshape(recv_x_flat_inline2781_inline10160_shapes, 2);
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 uint32_t h_i8_inline2773_inline10096_ci_shapes[2] = {512, 2048};
                 TensorCreateInfo h_i8_inline2773_inline10096_ci(
                     h_i8_inline2773_inline10096_ci_shapes, 2, DataType::INT8
@@ -5791,7 +5791,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                         expert_rows_pred.target = t0_inline2784_inline10206;
                         int64_t flat_t0_inline2786_inline10170 =
                             (flat_base_inline2774_inline9982 + t0_inline2784_inline10206);
-                        PTO2_SCOPE() {
+                        SIMPLER_SCOPE() {
                             uint32_t gate_tile_i32_inline2749_inline10057_ci_shapes[2] = {16, 2048};
                             TensorCreateInfo gate_tile_i32_inline2749_inline10057_ci(
                                 gate_tile_i32_inline2749_inline10057_ci_shapes, 2, DataType::INT32
@@ -5902,7 +5902,7 @@ void hash_moe_l1_block(const GraphTaskArgs &args) {
                         }
                     }
                 }
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     for (int64_t local_e_inline2742_inline10144 = 0; local_e_inline2742_inline10144 < 32;
                          local_e_inline2742_inline10144 += 1) {
                         int64_t e_flat_base_inline2746_inline10022 = (local_e_inline2742_inline10144 * 16);
@@ -8584,7 +8584,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     params_t341.add_scalar(data_arrived_ctx);
     params_t341.add_scalar(combine_arrived_ctx);
     rt_submit_aiv_task(353, params_t341);
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t selected_hidden_inline51_inline13294_ci_shapes[2] = {8, 4096};
         TensorCreateInfo selected_hidden_inline51_inline13294_ci(
             selected_hidden_inline51_inline13294_ci_shapes, 2, DataType::BFLOAT16

@@ -217,7 +217,7 @@ TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit
 
     int body_calls = 0;
     for (uint64_t graph_key = 0x1800; graph_key < 0x1804; ++graph_key) {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         const GraphSubmitResult result = rt_submit_graph_impl(graph_key, args, [&](const GraphTaskArgs &) {
             std::lock_guard<std::mutex> lock(fake.mutex);
             body_calls++;
@@ -250,7 +250,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     const std::thread::id caller = std::this_thread::get_id();
     GraphSubmitResult first;
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             // An explicit commit reached from a Graph body must not make the
             // recorder wait for its own in-flight job.
@@ -268,7 +268,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     }
     GraphSubmitResult second;
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
@@ -283,7 +283,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
         fake.overlapped = false;
     }
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             rt_graph_commit();
             std::unique_lock<std::mutex> lock(fake.mutex);
@@ -298,7 +298,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
         });
     }
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
@@ -349,7 +349,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
     fake.later_submit_entered = true;
 
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         (void)rt_submit_graph_impl(0x1719, args, [](const GraphTaskArgs &) {});
     }
     rt_graph_commit();

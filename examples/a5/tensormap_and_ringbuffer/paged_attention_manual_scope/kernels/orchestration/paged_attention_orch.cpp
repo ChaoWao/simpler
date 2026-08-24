@@ -148,7 +148,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
         uint64_t cur_seq = static_cast<uint64_t>(get_tensor_data<int32_t>(context_lens, 1, cl_idx));
         uint64_t bn_this_batch = (cur_seq + block_size - 1) / block_size;
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
-            PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+            SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
                 CYCLE_COUNT_LAP(prof_scope);
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 

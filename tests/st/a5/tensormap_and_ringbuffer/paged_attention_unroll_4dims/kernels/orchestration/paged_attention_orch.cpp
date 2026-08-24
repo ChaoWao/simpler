@@ -96,7 +96,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             __builtin_prefetch(&host_context_lens[b_idx + 1], 0, 3);
         }
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 // 4D views into query/out, matching (1, 1, q_tile, head_dim).
                 uint32_t view_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)head_dim};
                 uint32_t view_offsets[4] = {(uint32_t)b_idx, 0, (uint32_t)(q_idx * q_tile), 0};

@@ -58,7 +58,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int total_add = 0;
 
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
-        PTO2_SCOPE_GUARD();
+        SIMPLER_SCOPE_GUARD();
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
         uint32_t c_view_offsets[1] = {c_elem_offset};

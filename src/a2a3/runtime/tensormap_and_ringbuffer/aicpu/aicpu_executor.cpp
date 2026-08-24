@@ -32,7 +32,7 @@
 #include "runtime.h"
 #include "spin_hint.h"
 
-// Runtime headers (full struct definition for create/destroy + PTO2_SCOPE)
+// Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
 #include "runtime_core.h"
 #include "runtime_types.h"
 #include "shared_memory.h"

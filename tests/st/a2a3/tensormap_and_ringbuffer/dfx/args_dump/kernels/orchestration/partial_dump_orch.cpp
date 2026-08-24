@@ -38,7 +38,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TaskOutputTensors outs_t0 = rt_submit_aiv_task(0, params_t0);
     const ChipTensor &c = outs_t0.get_ref(0);
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         CoreTaskArgs params_t1;
         params_t1.add_input(c);
         params_t1.add_output(inter_ci);

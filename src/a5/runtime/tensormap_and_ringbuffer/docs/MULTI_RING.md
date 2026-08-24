@@ -330,4 +330,4 @@ first line of `scope_stats/scope_stats.jsonl` includes `task_window_max`,
 - `heap` must accommodate peak output buffer allocation across all in-flight tasks on that ring
 - `dep_pool` must be ≥ total dependency entries for all in-flight tasks on that ring
 - On hardware, back-pressure latency is higher than in simulation — size conservatively
-- Adding inner `PTO2_SCOPE` reduces peak per-ring usage, enabling smaller sizes
+- Adding inner `SIMPLER_SCOPE` reduces peak per-ring usage, enabling smaller sizes

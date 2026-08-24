@@ -79,7 +79,7 @@ extern "C" {
 // Field order keeps the uint64 heap pointers 8-byte aligned with no internal
 // padding.
 struct ScopeStatsRecord {
-    char site_file_basename[32];  // NUL-terminated basename of the PTO2_SCOPE site,
+    char site_file_basename[32];  // NUL-terminated basename of the SIMPLER_SCOPE site,
                                   // captured at append time so the host JSON has a
                                   // human-readable path without dereferencing a
                                   // device pointer (the string table lives in the

@@ -45,7 +45,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         get_dtype_name(ext_bs.dtype), get_dtype_name(ext_c.dtype)
     );
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         CoreTaskArgs args;
         args.add_input(ext_a);
         args.add_input(ext_as);

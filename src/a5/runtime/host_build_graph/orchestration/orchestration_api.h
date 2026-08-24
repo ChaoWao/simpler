@@ -110,7 +110,7 @@ typedef struct PTO2RuntimeOps {
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
 
-    // Stash the call-site of the next PTO2ScopeGuard so the [ScopeStats]
+    // Stash the call-site of the next ScopeGuard so the [ScopeStats]
     // collector can log it. Always present to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
@@ -690,9 +690,9 @@ static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, con
 /**
  * RAII Scope Guard (calls through ops table)
  */
-class PTO2ScopeGuard {
+class ScopeGuard {
 public:
-    explicit PTO2ScopeGuard(
+    explicit ScopeGuard(
         PTO2ScopeMode mode = PTO2ScopeMode::AUTO, const char *file = __builtin_FILE(), int line = __builtin_LINE()
     ) :
         rt_(current_runtime()) {
@@ -702,7 +702,7 @@ public:
             rt_->ops->scope_begin(rt_);
         }
     }
-    ~PTO2ScopeGuard() {
+    ~ScopeGuard() {
         if (!rt_->ops->is_fatal(rt_)) {
             rt_->ops->scope_end(rt_);
         }
@@ -858,18 +858,18 @@ rt_submit_graph(GraphFunctionWithConfig<Config...> function, const GraphTaskArgs
     return rt_submit_graph(rt_graph_function_id(function), function, args, config...);
 }
 
-#define _PTO2_CONCATENATE_IMPL(x, y) x##y
-#define _PTO2_CONCATENATE(x, y) _PTO2_CONCATENATE_IMPL(x, y)
+#define _SIMPLER_CONCATENATE_IMPL(x, y) x##y
+#define _SIMPLER_CONCATENATE(x, y) _SIMPLER_CONCATENATE_IMPL(x, y)
 
-#define PTO2_SCOPE_GUARD() [[maybe_unused]] PTO2ScopeGuard _PTO2_CONCATENATE(scope_guard_, __COUNTER__)
+#define SIMPLER_SCOPE_GUARD() [[maybe_unused]] ScopeGuard _SIMPLER_CONCATENATE(scope_guard_, __COUNTER__)
 
 /**
  * Scoped block macro:
- *   PTO2_SCOPE() {
+ *   SIMPLER_SCOPE() {
  *       rt_submit_task(...);
  *   }
  */
-#define PTO2_SCOPE(...) if (PTO2ScopeGuard _PTO2_CONCATENATE(scope_guard_, __COUNTER__){__VA_ARGS__}; true)
+#define SIMPLER_SCOPE(...) if (ScopeGuard _SIMPLER_CONCATENATE(scope_guard_, __COUNTER__){__VA_ARGS__}; true)
 
 // =============================================================================
 // Orchestration Config

@@ -150,7 +150,7 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
     rt_scope_begin();
     rt_scope_end();
     {
-        PTO2ScopeGuard guard;
+        ScopeGuard guard;
         (void)guard;
     }
 
@@ -190,7 +190,7 @@ TEST(A5Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     runtime.pending_scope_mode = PTO2ScopeMode::MANUAL;
 
     {
-        PTO2_SCOPE_GUARD();
+        SIMPLER_SCOPE_GUARD();
         EXPECT_EQ(runtime.scope_begin_calls, 1);
         EXPECT_EQ(runtime.scope_end_calls, 0);
         EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::AUTO);
@@ -199,7 +199,7 @@ TEST(A5Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     EXPECT_EQ(runtime.scope_end_calls, 1);
 
     {
-        PTO2_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
+        SIMPLER_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
         EXPECT_EQ(runtime.scope_begin_calls, 2);
         EXPECT_EQ(runtime.scope_end_calls, 1);
         EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::MANUAL);
