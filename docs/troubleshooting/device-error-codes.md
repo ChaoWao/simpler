@@ -108,7 +108,19 @@ layer to go looking in, which is what these columns are for.
 | 101 | ASYNC_COMPLETION_INVALID | kernel (async) |
 | 102 | ASYNC_WAIT_OVERFLOW | kernel (async) |
 | 103 | ASYNC_REGISTRATION_FAILED | runtime-internal |
-| 104 | READY_QUEUE_OVERFLOW | runtime-internal / config |
+| 104 | READY_QUEUE_OVERFLOW | host bind / runtime-internal / config |
+
+### READY_QUEUE_OVERFLOW origins
+
+Code 104 can be reported before or after device execution starts:
+
+- **Host bind:** one ready queue has more than 32768 reachable tasks. This is
+  the supported single-queue population ceiling; larger graphs are rejected
+  during bind and never reach the device. Split the graph or reduce the number
+  of tasks routed to that queue.
+- **Device scheduler:** a queue push found no free slot after bind accepted the
+  graph. Use the reported queue and occupancy details to investigate a runtime
+  accounting error or an incompatible configuration.
 
 ### SCHEDULER_TIMEOUT sub-classes
 

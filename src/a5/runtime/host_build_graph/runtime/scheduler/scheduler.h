@@ -438,6 +438,14 @@ void ready_queue_init_data_from_layout(ChipReadyQueue *queue, uint64_t capacity)
 void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off);
 void ready_queue_destroy(ChipReadyQueue *queue);
 
+struct ReadyQueueCapacities {
+    uint64_t ready[NUM_RESOURCE_SHAPES]{};
+    uint64_t ready_sync[NUM_RESOURCE_SHAPES]{};
+    uint64_t dummy{0};
+    uint64_t graph_ready{0};
+    uint64_t graph_prepare{0};
+};
+
 /**
  * Statistics returned by mixed-task completion processing
  */
@@ -461,7 +469,7 @@ struct SchedulerLayout {
     size_t off_graph_prepare_queue_slots;
     size_t off_early_dispatch_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
-    uint64_t ready_queue_capacity;
+    ReadyQueueCapacities capacities;
 };
 
 /**
@@ -558,8 +566,8 @@ struct SchedulerState {
             }
         }
         // Every ready / sync / dummy / graph task routes to exactly one queue. A
-        // false push means that queue's peak concurrent occupancy exceeded
-        // CHIP_READY_QUEUE_SIZE — a capacity mis-sizing, not a normal condition.
+        // false push means that queue's peak concurrent occupancy exceeded its
+        // bind-time capacity — a capacity mis-sizing, not a normal condition.
         // Silently dropping the task would stall the run, so latch a named error
         // (surfaces as READY_QUEUE_OVERFLOW rather than an anonymous
         // forward-progress timeout). The graph_ready push is checked identically

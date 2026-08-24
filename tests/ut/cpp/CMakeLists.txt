@@ -887,6 +887,7 @@ target_sources(test_a5_hbg_scheduler_drain PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/device_phase_aicpu.cpp
 )
 target_sources(test_hbg_ready_queue_seed PRIVATE
+    ${HBG_RUNTIME_DIR}/../host/ready_queue_sizing.cpp
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
@@ -987,6 +988,7 @@ add_a5_hbg_runtime_test(test_a5_hbg_mailbox_init common/test_hbg_mailbox_init.cp
 add_a5_hbg_runtime_test(test_a5_hbg_self_relative_ptr common/test_hbg_self_relative_ptr.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_sm_compaction common/test_hbg_sm_compaction.cpp)
 target_sources(test_a5_hbg_ready_queue_seed PRIVATE
+    ${A5_HBG_RUNTIME_DIR}/../host/ready_queue_sizing.cpp
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
