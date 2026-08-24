@@ -12,13 +12,13 @@
  * Scalar Data Dependency Test Orchestration
  *
  * End-to-end test for get_tensor_data, set_tensor_data, and add_inout
- * with runtime-created outputs and initial value support.
+ * with runtime-created outputs.
  *
  * Flow:
  *   1. c = a + b           (kernel_add, runtime-created tensor)
  *   2. get_tensor_data(c, {0})   → check[0] = 2.0
  *   3. get_tensor_data(c, {100}) → check[1] = 102.0
- *   4. scalar_tensor = add_output(TensorCreateInfo, 77.0f), submit noop
+ *   4. scalar_tensor = alloc_tensors(TensorCreateInfo), set_tensor_data(77.0f)
  *   5. get_tensor_data(scalar_tensor, {0}) → check[2] = 77.0
  *   6. add_inout(scalar_tensor) (INOUT path), submit noop
  *   7. get_tensor_data(scalar_tensor, {0}) → check[3] = 77.0
@@ -94,18 +94,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     set_tensor_data(ext_check, 1, check_idx, c100_val);
 
     // =========================================================
-    // Step 4: Runtime-created scalar output with initial value
-    //   Runtime allocates HeapRing buffer, writes 77.0 to element [0]
+    // Step 4: Runtime-created scalar output, seeded by orchestration
+    //   Runtime allocates HeapRing buffer; set_tensor_data writes 77.0 to
+    //   element [0]. No producer or consumer exists yet, so the write
+    //   runs without waiting.
     // =========================================================
     uint32_t scalar_shapes[1] = {1};
     TensorCreateInfo scalar_ci(scalar_shapes, 1, DataType::FLOAT32);
-    scalar_ci.set_initial_value(77.0f);
     TaskOutputTensors scalar_alloc_outs = alloc_tensors(scalar_ci);
     const ChipTensor &scalar_tensor = scalar_alloc_outs.get_ref(0);
+    uint32_t scalar_idx[1] = {0};
+    set_tensor_data(scalar_tensor, 1, scalar_idx, 77.0f);
 
     // =========================================================
     // Step 5: get_tensor_data(scalar_tensor, {0}) → check[2]
-    //   Verifies initial value was written correctly
+    //   Verifies the seeded value was written correctly
     // =========================================================
     idx[0] = 0;
     float s0_val = get_tensor_data<float>(scalar_tensor, 1, idx);
