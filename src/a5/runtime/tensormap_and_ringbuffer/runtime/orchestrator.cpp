@@ -1198,8 +1198,8 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
         // Deadlock check: block_num >= total available slots of the required type.
         // For MIX/AIC: limit is total_cluster_count (one AIC per cluster).
         // For AIV:     limit is total_aiv_count.
-        PTO2ResourceShape shape = active_mask.to_shape();
-        int32_t limit = (shape == PTO2ResourceShape::AIV) ? orch->total_aiv_count : orch->total_cluster_count;
+        ResourceShape shape = active_mask.to_shape();
+        int32_t limit = (shape == ResourceShape::AIV) ? orch->total_aiv_count : orch->total_cluster_count;
         if (limit > 0 && block_num > limit) {
             report_fatal(
                 SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID, __FUNCTION__,

@@ -281,7 +281,7 @@ private:
     // Dispatch (scheduler_dispatch.cpp)
     // =========================================================================
 
-    static const char *shape_name(PTO2ResourceShape shape);
+    static const char *shape_name(ResourceShape shape);
 
     // Lower-case rendering of PTO2SubtaskSlot, used by dispatch and stall logs.
     // Kept lower-case to match the `kernels=[aic:N aiv0:N aiv1:N]` field
@@ -299,7 +299,7 @@ private:
     }
 
     int pop_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+        PTO2ReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
     );
 
     void build_payload(
@@ -380,12 +380,12 @@ private:
     // Fan out one block's subtasks (1 for AIC/AIV, 1-3 for MIX) into the
     // caller-supplied handles buffer. Returns the number of handles written.
     int prepare_block_for_dispatch(
-        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2ResourceShape shape,
-        bool to_pending, int32_t block_idx, PublishHandle *out_handles, bool force_gate = false
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, ResourceShape shape, bool to_pending,
+        int32_t block_idx, PublishHandle *out_handles, bool force_gate = false
     );
 
     void dispatch_shape(
-        int32_t thread_idx, PTO2ReadyQueue *disp_queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
+        int32_t thread_idx, PTO2ReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
         CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
     );
 
@@ -407,7 +407,7 @@ private:
     // concurrently with peers (mirrors the normal SPMD dispatch path). Returns the
     // number of blocks staged.
     int32_t stage_consumer_blocks(
-        int32_t thread_idx, ChipTaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+        int32_t thread_idx, ChipTaskSlotState *c, ResourceShape shape, int32_t start, int32_t count,
         CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
     );
 
@@ -416,7 +416,7 @@ private:
     // given phase (IDLE -> onto idle cores in the RUNNING slot; PENDING -> onto a
     // running core's gated pending slot). Pop is sized to the shape's capacity exactly
     // as dispatch_shape sizes normal dispatch. Returns the number of blocks staged.
-    int32_t early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase);
+    int32_t early_dispatch_shape(int32_t thread_idx, ResourceShape shape, CoreTracker::DispatchPhase phase);
 
     // One pass of "Phase 4" in the resolve_and_dispatch loop: IDLE-stage dispatch
     // for MIX then (if no mix residual) AIC/AIV; then PENDING-stage dispatch with
@@ -448,22 +448,20 @@ private:
     // matching `shape`. Used as a scheduling hint on the PENDING dispatch path
     // — see the implementation in scheduler_dispatch.cpp for the hint-semantics
     // rationale and the safety argument against the drain worker.
-    bool has_idle_in_other_threads(int32_t self_thread_idx, PTO2ResourceShape shape) const;
+    bool has_idle_in_other_threads(int32_t self_thread_idx, ResourceShape shape) const;
 
     // True if mix tasks remain in the global MIX ready queue. Approximate —
     // PTO2ReadyQueue::size() (see scheduler.h) snapshots its enqueue/dequeue
     // positions with std::memory_order_relaxed and may interleave with concurrent
     // push/pop. A stale read here causes at most one
     // extra/missed AIC/AIV skip and self-corrects on the next loop iteration.
-    bool has_residual_mix() const {
-        return sched_->ready_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
-    }
+    bool has_residual_mix() const { return sched_->ready_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0; }
 
     // Tier-0 analog of has_residual_mix for the ready sync_start lane: true if MIX
     // sync_start cohorts remain queued, so the Tier-0 pass keeps MIX strict priority
     // over its own AIC/AIV sync work. Same relaxed-size snapshot caveat.
     bool has_residual_sync_mix() const {
-        return sched_->ready_sync_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+        return sched_->ready_sync_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0;
     }
 
     // Early-dispatch analog of has_residual_mix: true if MIX early-dispatch candidates
@@ -472,7 +470,7 @@ private:
     // empty), so early-dispatch MIX priority needs its own residual check against
     // early_dispatch_queues[MIX]. Same relaxed-size snapshot caveat as has_residual_mix.
     bool has_residual_early_mix() const {
-        return sched_->early_dispatch_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+        return sched_->early_dispatch_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0;
     }
 
     // =========================================================================
@@ -501,7 +499,7 @@ private:
     );
 
     bool enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num);
-    int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
+    int32_t count_global_available(ResourceShape shape, uint8_t core_mask, bool include_pending = false);
     struct SyncStartStageResult {
         int32_t staged_blocks{0};
         int32_t running_cores{0};

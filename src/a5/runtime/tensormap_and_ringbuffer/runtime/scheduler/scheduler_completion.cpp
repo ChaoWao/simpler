@@ -470,7 +470,7 @@ bool SchedulerContext::enter_drain_mode(ChipTaskSlotState *slot_state, int32_t b
 }
 
 // Count total available resources across all scheduler threads for a given shape.
-int32_t SchedulerContext::count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) {
+int32_t SchedulerContext::count_global_available(ResourceShape shape, uint8_t core_mask, bool include_pending) {
     int32_t total = 0;
     for (int32_t t = 0; t < active_sched_threads_; t++) {
         total += core_trackers_[t].count_available_blocks(shape, core_mask, include_pending);
@@ -488,9 +488,9 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
     [[maybe_unused]] bool record_drain_phases
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
-    PTO2ResourceShape shape = slot_state->active_mask.to_shape();
+    ResourceShape shape = slot_state->active_mask.to_shape();
     uint8_t core_mask = slot_state->active_mask.core_mask();
-    bool mix_split = gated && shape == PTO2ResourceShape::MIX;
+    bool mix_split = gated && shape == ResourceShape::MIX;
     SyncStartStageResult result;
 
     auto stage = [&](CoreTracker::BitStates valid, bool to_pending) {
@@ -511,7 +511,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                 claimed[b] = valid.pop_first();
             for (int32_t b = 0; b < claim; b++) {
                 auto core_offset = claimed[b];
-                if (shape == PTO2ResourceShape::MIX) {
+                if (shape == ResourceShape::MIX) {
                     result.running_cores += tracker.mix_cluster_idle_core_count(core_offset, core_mask);
                 }
                 handle_count += prepare_block_for_dispatch(
@@ -559,15 +559,15 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
             }
 #endif
             sched_->record_published_blocks(*slot_state, claim);
-            if (gated && shape != PTO2ResourceShape::MIX && !to_pending) result.running_cores += handle_count;
+            if (gated && shape != ResourceShape::MIX && !to_pending) result.running_cores += handle_count;
         }
     };
 
     if (mix_split) {
         stage(tracker.get_mix_split_cluster_offset_states(core_mask), /*to_pending=*/true);
     } else {
-        auto idle = (shape == PTO2ResourceShape::MIX) ? tracker.get_mix_running_cluster_offset_states(core_mask) :
-                                                        tracker.get_idle_core_offset_states(shape);
+        auto idle = (shape == ResourceShape::MIX) ? tracker.get_mix_running_cluster_offset_states(core_mask) :
+                                                    tracker.get_idle_core_offset_states(shape);
         stage(idle, /*to_pending=*/false);
         if (gated) {
             stage(tracker.get_pending_core_offset_states(shape), /*to_pending=*/true);
@@ -620,7 +620,7 @@ void SchedulerContext::handle_drain_mode(
     bool gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
 
     if (coordinator) {
-        PTO2ResourceShape shape = slot_state->active_mask.to_shape();
+        ResourceShape shape = slot_state->active_mask.to_shape();
         int32_t available =
             count_global_available(shape, slot_state->active_mask.core_mask(), /*include_pending=*/gated);
         if (available < block_num) {

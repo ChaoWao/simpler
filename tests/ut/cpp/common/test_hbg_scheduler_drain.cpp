@@ -28,7 +28,7 @@ extern "C" uint64_t get_platform_pmu_reg_addrs() { return 0; }
 extern "C" uint64_t get_platform_regs() { return 0; }
 
 int SchedulerContext::prepare_block_for_dispatch(
-    int32_t, int32_t, ChipTaskSlotState &, PTO2ResourceShape, bool, int32_t, PublishHandle *, bool
+    int32_t, int32_t, ChipTaskSlotState &, ResourceShape, bool, int32_t, PublishHandle *, bool
 ) {
     return 0;
 }

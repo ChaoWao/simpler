@@ -100,7 +100,7 @@ void PTO2SchedulerState::print_queues() {
 
     const char *shape_names[] = {"AIC", "AIV", "MIX"};
 
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         LOG_DEBUG("  %s: count=%" PRIu64, shape_names[i], sched->ready_queues[i].size());
     }
     LOG_DEBUG("  DUMMY: count=%" PRIu64, sched->dummy_ready_queue.size());

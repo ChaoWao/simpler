@@ -288,15 +288,15 @@ public:
 
     // --- Cluster matching ---
 
-    BitStates get_valid_cluster_offset_states(PTO2ResourceShape shape) const {
+    BitStates get_valid_cluster_offset_states(ResourceShape shape) const {
         switch (shape) {
-        case PTO2ResourceShape::AIC:
+        case ResourceShape::AIC:
             return core_states_ & aic_mask_;
-        case PTO2ResourceShape::AIV:
+        case ResourceShape::AIV:
             return ((core_states_ >> 1) | (core_states_ >> 2)) & aic_mask_;
-        case PTO2ResourceShape::MIX:
+        case ResourceShape::MIX:
             return (core_states_ >> 1) & (core_states_ >> 2) & core_states_ & aic_mask_;
-        case PTO2ResourceShape::DUMMY:
+        case ResourceShape::DUMMY:
             // DUMMY tasks never reach the core-tracker dispatch path; they are
             // completed inline by resolve_and_dispatch via dummy_ready_queue.
             return {};
@@ -345,11 +345,11 @@ public:
     // always have pending_occupied=0, so AIV/MIX need no extra filtering.
     // Skipping the AIC-centric filter also fixes a latent bug where a running+pending AIC core
     // would incorrectly block AIV idle dispatch on the same cluster.
-    BitStates get_idle_core_offset_states(PTO2ResourceShape shape) const {
-        if (shape == PTO2ResourceShape::AIC) {
+    BitStates get_idle_core_offset_states(ResourceShape shape) const {
+        if (shape == ResourceShape::AIC) {
             return get_valid_cluster_offset_states(shape) & ~(pending_occupied_ & aic_mask_);
         }
-        if (shape == PTO2ResourceShape::AIV) {
+        if (shape == ResourceShape::AIV) {
             return core_states_ & aiv_mask_;
         }
         return get_valid_cluster_offset_states(shape);  // MIX: cluster-level
@@ -461,11 +461,11 @@ public:
     // staging. AIC/AIV count cores; MIX counts clusters because one logical MIX
     // block may occupy multiple cores in the same cluster. Gated early staging
     // includes pending slots, while ready staging is restricted to idle slots.
-    int32_t count_available_blocks(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) const {
-        if (shape == PTO2ResourceShape::MIX) {
+    int32_t count_available_blocks(ResourceShape shape, uint8_t core_mask, bool include_pending) const {
+        if (shape == ResourceShape::MIX) {
             return include_pending ? count_mix_split_clusters(core_mask) : count_mix_running_clusters(core_mask);
         }
-        if (shape == PTO2ResourceShape::DUMMY) return 0;
+        if (shape == ResourceShape::DUMMY) return 0;
 
         int32_t available = get_idle_core_offset_states(shape).count();
         if (include_pending) {
@@ -474,8 +474,8 @@ public:
         return available;
     }
 
-    BitStates get_pending_core_offset_states(PTO2ResourceShape shape) const {
-        if (shape == PTO2ResourceShape::MIX) {
+    BitStates get_pending_core_offset_states(ResourceShape shape) const {
+        if (shape == ResourceShape::MIX) {
             // Shape-level query kept conservative for legacy callers/tests.
             // The real MIX dispatch path applies active_mask in classify_mix_cluster().
             // Any core without a pending payload can accept a dispatch (idle or running).
@@ -489,7 +489,7 @@ public:
                 (running & aic_mask_) & ((running >> 1) & aic_mask_) & ((running >> 2) & aic_mask_);
             return mix_available & cluster_all_running;
         }
-        if (shape == PTO2ResourceShape::AIC) {
+        if (shape == ResourceShape::AIC) {
             return (~core_states_) & aic_mask_ & ~(pending_occupied_ & aic_mask_);
         }
         // AIV
@@ -500,7 +500,7 @@ public:
 
     enum class DispatchPhase : uint8_t { IDLE, PENDING };
 
-    BitStates get_dispatchable_cores(PTO2ResourceShape shape, DispatchPhase phase) const {
+    BitStates get_dispatchable_cores(ResourceShape shape, DispatchPhase phase) const {
         return (phase == DispatchPhase::IDLE) ? get_idle_core_offset_states(shape) :
                                                 get_pending_core_offset_states(shape);
     }

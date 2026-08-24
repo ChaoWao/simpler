@@ -61,21 +61,21 @@ static_assert(
     "staged_core_mask too small for RUNTIME_MAX_WORKER cores"
 );
 
-const char *SchedulerContext::shape_name(PTO2ResourceShape shape) {
+const char *SchedulerContext::shape_name(ResourceShape shape) {
     switch (shape) {
-    case PTO2ResourceShape::AIC:
+    case ResourceShape::AIC:
         return "AIC";
-    case PTO2ResourceShape::AIV:
+    case ResourceShape::AIV:
         return "AIV";
-    case PTO2ResourceShape::MIX:
+    case ResourceShape::MIX:
         return "MIX";
-    case PTO2ResourceShape::DUMMY:
+    case ResourceShape::DUMMY:
         return "DUMMY";
     }
     return "UNKNOWN";
 }
 
-bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, PTO2ResourceShape shape) const {
+bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, ResourceShape shape) const {
     // Cross-thread read of peer trackers without explicit synchronization. The
     // backing `core_states_` is a naturally aligned uint64_t; aarch64 guarantees
     // single-copy atomicity for an 8-byte aligned load, so no torn read. The
@@ -94,7 +94,7 @@ bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, PTO2Re
 }
 
 int SchedulerContext::pop_ready_tasks_batch(
-    PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+    PTO2ReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
 ) {
 #if SIMPLER_DFX
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -238,7 +238,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
 }
 
 int SchedulerContext::prepare_block_for_dispatch(
-    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2ResourceShape shape, bool to_pending,
+    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, ResourceShape shape, bool to_pending,
     int32_t block_idx, PublishHandle *out_handles, bool force_gate
 ) {
 #if SIMPLER_DFX
@@ -255,7 +255,7 @@ int SchedulerContext::prepare_block_for_dispatch(
     }
 #endif
     CoreTracker &tracker = core_trackers_[thread_idx];
-    if (shape == PTO2ResourceShape::MIX) {
+    if (shape == ResourceShape::MIX) {
         uint8_t cmask = slot_state.active_mask.core_mask();
         int n = 0;
         // Per-core slot placement (#1308): an idle used core takes its running slot
@@ -288,7 +288,7 @@ int SchedulerContext::prepare_block_for_dispatch(
         sched_chip_swimlane_[thread_idx].phase_dispatch_count += __builtin_popcount(cmask);
 #endif
         return n;
-    } else if (shape == PTO2ResourceShape::AIC) {
+    } else if (shape == ResourceShape::AIC) {
         out_handles[0] = prepare_subtask_to_core(
             thread_idx, core_offset, slot_state, PTO2SubtaskSlot::AIC, to_pending, block_idx, force_gate
         );
@@ -308,7 +308,7 @@ int SchedulerContext::prepare_block_for_dispatch(
 }
 
 void SchedulerContext::dispatch_shape(
-    int32_t thread_idx, PTO2ReadyQueue *disp_queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
+    int32_t thread_idx, PTO2ReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
     CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
 ) {
 #if SIMPLER_SCHED_PROFILING
@@ -317,7 +317,7 @@ void SchedulerContext::dispatch_shape(
     if (entered_drain) return;
 
     bool is_pending = (phase == CoreTracker::DispatchPhase::PENDING);
-    bool is_mix = (shape == PTO2ResourceShape::MIX);
+    bool is_mix = (shape == ResourceShape::MIX);
     auto cores = is_mix ? tracker.get_cluster_offset_states() : tracker.get_dispatchable_cores(shape, phase);
     if (!cores.has_value()) return;
 
@@ -509,14 +509,14 @@ void SchedulerContext::run_staging_order(
     // MIX is handled explicitly at the top of each stage; only AIC/AIV cycle
     // through this 2-elem array, with order toggled by thread parity for
     // shape-level load balancing across threads.
-    static constexpr PTO2ResourceShape kAicAivOrder[2][2] = {
-        {PTO2ResourceShape::AIC, PTO2ResourceShape::AIV},
-        {PTO2ResourceShape::AIV, PTO2ResourceShape::AIC},
+    static constexpr ResourceShape kAicAivOrder[2][2] = {
+        {ResourceShape::AIC, ResourceShape::AIV},
+        {ResourceShape::AIV, ResourceShape::AIC},
     };
-    const PTO2ResourceShape *aic_aiv = kAicAivOrder[thread_idx & 1];
+    const ResourceShape *aic_aiv = kAicAivOrder[thread_idx & 1];
 
     // ===== IDLE stage =====
-    if (stage(PTO2ResourceShape::MIX, Phase::IDLE)) return;
+    if (stage(ResourceShape::MIX, Phase::IDLE)) return;
 
     // MIX-IDLE residual: AIC/AIV (both IDLE and PENDING) yield for this pass.
     // MIX-PENDING below still runs — that is the core of "mix strict priority":
@@ -540,8 +540,8 @@ void SchedulerContext::run_staging_order(
     //
     // The gate is NOT subject to skip_aic_aiv — residual mix continues to drain
     // via pending slots on this thread when no peer is idle.
-    if (!has_idle_in_other_threads(thread_idx, PTO2ResourceShape::MIX)) {
-        if (stage(PTO2ResourceShape::MIX, Phase::PENDING)) return;
+    if (!has_idle_in_other_threads(thread_idx, ResourceShape::MIX)) {
+        if (stage(ResourceShape::MIX, Phase::PENDING)) return;
     }
 
     // Re-check after MIX-PENDING. If MIX-IDLE already set skip_aic_aiv, leave
@@ -555,7 +555,7 @@ void SchedulerContext::run_staging_order(
     // AIC/AIV-PENDING gate: a peer-idle skip is a delay, not a loss — the peer
     // will pull from the global queue on its next IDLE pass.
     for (int i = 0; i < 2; i++) {
-        PTO2ResourceShape s = aic_aiv[i];
+        ResourceShape s = aic_aiv[i];
         if (has_idle_in_other_threads(thread_idx, s)) continue;
         if (stage(s, Phase::PENDING)) return;
     }
@@ -574,7 +574,7 @@ void SchedulerContext::dispatch_ready_tasks(
     // (entered_drain), which also short-circuits the regular tier below.
     run_staging_order(
         thread_idx, pmu_active,
-        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+        [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
             dispatch_shape(
                 thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
             );
@@ -589,7 +589,7 @@ void SchedulerContext::dispatch_ready_tasks(
     // Tier 1: regular ready work.
     run_staging_order(
         thread_idx, pmu_active,
-        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+        [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
             dispatch_shape(
                 thread_idx, sched_->ready_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
             );
@@ -621,7 +621,7 @@ void SchedulerContext::dispatch_ready_tasks(
 // those release did not take and rings them from its immutable local handles.
 // The seq_cst order guarantees every gated core has exactly one writer.
 int32_t SchedulerContext::stage_consumer_blocks(
-    int32_t thread_idx, ChipTaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+    int32_t thread_idx, ChipTaskSlotState *c, ResourceShape shape, int32_t start, int32_t count,
     CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -707,10 +707,10 @@ int32_t SchedulerContext::stage_consumer_blocks(
 // shape's queue when dispatch_fanin becomes complete, so the shape is the queue
 // index (no per-consumer to_shape()). Returns the number of blocks staged.
 int32_t
-SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, CoreTracker::DispatchPhase phase) {
     CoreTracker &tracker = core_trackers_[thread_idx];
     int32_t s = static_cast<int32_t>(shape);
-    bool is_mix = (shape == PTO2ResourceShape::MIX);
+    bool is_mix = (shape == ResourceShape::MIX);
     bool is_idle = (phase == CoreTracker::DispatchPhase::IDLE);
 
     // Size the pop exactly as dispatch_shape does: MIX to the cluster count, else the
@@ -815,7 +815,7 @@ int32_t SchedulerContext::try_early_dispatch(
     //     regular ready_queues) strictly precedes early — there is no real ready task
     //     to delay only when every normal queue is drained.
     if (pmu_active || !tracker.has_any_free_slot()) return 0;
-    for (int s = 0; s < PTO2_NUM_RESOURCE_SHAPES; s++) {
+    for (int s = 0; s < NUM_RESOURCE_SHAPES; s++) {
         if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0) return 0;
     }
 
@@ -867,7 +867,7 @@ int32_t SchedulerContext::try_early_dispatch(
     // enters drain, so the stage callback always reports "no stop".
     run_staging_order(
         thread_idx, pmu_active,
-        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+        [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
             total_staged += early_dispatch_shape(thread_idx, shape, phase);
             return false;
         },
@@ -940,7 +940,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     // snapshot so the next phase's "at_start" equals the previous phase's
     // "at_end".
     //
-    // CHIP_SWIMLANE_NUM_QUEUE_SHAPES (3) matches PTO2_NUM_RESOURCE_SHAPES: AIC/AIV/MIX.
+    // CHIP_SWIMLANE_NUM_QUEUE_SHAPES (3) matches NUM_RESOURCE_SHAPES: AIC/AIV/MIX.
     //
     // **Hot-path cost discipline.** Shared depth (PTO2ReadyQueue::size) is two
     // atomic relaxed loads against cache lines that all peer sched threads also
@@ -951,7 +951,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     // complete-emit and dispatch-emit in the same iter both reuse the same
     // shared sample.
     static_assert(
-        CHIP_SWIMLANE_NUM_QUEUE_SHAPES == PTO2_NUM_RESOURCE_SHAPES,
+        CHIP_SWIMLANE_NUM_QUEUE_SHAPES == NUM_RESOURCE_SHAPES,
         "queue snapshot width must match runtime resource shape count"
     );
     int16_t phase_start_shared[CHIP_SWIMLANE_NUM_QUEUE_SHAPES] = {0};

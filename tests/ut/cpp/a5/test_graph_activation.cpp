@@ -89,7 +89,7 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
     sched.register_graph_wake(exec, &nodes[0].slot, &nodes[1].slot);
 
     ChipTaskSlotState *out[2];
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 2), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 2), 1)
         << "consumer must route to ready, not hang on the SENTINEL wake list";
     EXPECT_EQ(out[0], &nodes[1].slot);
 }
@@ -115,13 +115,13 @@ TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPe
     EXPECT_EQ(exec.published_nodes.load(), 4);
 
     ChipTaskSlotState *out[4];
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4), 1)
         << "only the consumer whose producers are all COMPLETED routes at publish time";
     EXPECT_EQ(out[0], &nodes[2].slot);
 
     nodes[1].slot.task_state.store(PTO2_TASK_COMPLETED);
     sched.drain_graph_wake_list(exec, nodes[1].slot);
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4), 1)
         << "the wake-chained consumer must route once its pending producer completes";
     EXPECT_EQ(out[0], &nodes[3].slot);
 }

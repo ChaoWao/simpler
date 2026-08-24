@@ -77,7 +77,7 @@ void PTO2SchedulerState::print_stats() {
 void PTO2SchedulerState::print_queues() {
     PTO2SchedulerState *sched = this;
     const char *shape_names[] = {"AIC", "AIV", "MIX"};
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         LOG_TIMING(
             "QPROBE rq[%s] pushes=%llu maxocc=%llu cap=%llu", shape_names[i],
             (unsigned long long)sched->ready_queues[i].enqueue_pos.load(std::memory_order_relaxed),

@@ -85,14 +85,14 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
     // Fixed-capacity early-dispatch queues first, then the PTO2_READY_QUEUE_SIZE
     // ones. The big nine are the arena's last reservations so that the bytes bind
     // uploads stay one contiguous range no matter how much of them is in use.
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }
     layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
     layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
@@ -117,16 +117,16 @@ bool PTO2SchedulerState::init_data_from_layout(
         return false;
     }
 
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->ready_queues[i], layout.ready_queue_capacity);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->ready_sync_queues[i], layout.ready_queue_capacity);
     }
     ready_queue_init_data_from_layout(&sched->dummy_ready_queue, layout.ready_queue_capacity);
     ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.ready_queue_capacity);
     ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.ready_queue_capacity);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }
     ready_queue_init_data_from_layout(&sched->early_sync_start_queue, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
@@ -143,16 +143,16 @@ bool PTO2SchedulerState::init_data_from_layout(
 // sequence already equals the position being claimed.
 void PTO2SchedulerState::seed_queue_slots() {
     PTO2SchedulerState *sched = this;
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_queues[i].seed_slots();
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_sync_queues[i].seed_slots();
     }
     sched->dummy_ready_queue.seed_slots();
     sched->graph_ready_queue.seed_slots();
     sched->graph_prepare_queue.seed_slots();
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->early_dispatch_queues[i].seed_slots();
     }
     sched->early_sync_start_queue.seed_slots();
@@ -160,16 +160,16 @@ void PTO2SchedulerState::seed_queue_slots() {
 
 void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
     PTO2SchedulerState *sched = this;
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
     }
     ready_queue_wire_arena_pointers(&sched->dummy_ready_queue, arena, layout.off_dummy_ready_queue_slots);
     ready_queue_wire_arena_pointers(&sched->graph_ready_queue, arena, layout.off_graph_ready_queue_slots);
     ready_queue_wire_arena_pointers(&sched->graph_prepare_queue, arena, layout.off_graph_prepare_queue_slots);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(
             &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i]
         );
@@ -180,16 +180,16 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
 void PTO2SchedulerState::destroy() {
     PTO2SchedulerState *sched = this;
     sched->ring_sched_state.destroy();
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
     }
     ready_queue_destroy(&sched->dummy_ready_queue);
     ready_queue_destroy(&sched->graph_ready_queue);
     ready_queue_destroy(&sched->graph_prepare_queue);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
     }
     ready_queue_destroy(&sched->early_sync_start_queue);

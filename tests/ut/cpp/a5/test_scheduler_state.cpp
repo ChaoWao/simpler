@@ -417,7 +417,7 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_b));
 
     ChipTaskSlotState *out[4];
-    int count = sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4);
+    int count = sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4);
 
     EXPECT_EQ(count, 2);
     // Shared queue is FIFO, so slot_a (pushed first) comes first.
@@ -433,8 +433,8 @@ TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot));
 
     ChipTaskSlotState *out[1];
-    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 1), 0);
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_sync_queues, PTO2ResourceShape::AIC, out, 1), 1);
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 1), 0);
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_sync_queues, ResourceShape::AIC, out, 1), 1);
     EXPECT_EQ(out[0], &slot);
 }
 
@@ -460,7 +460,7 @@ TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {
 
     // Not all used cores are idle, so the IDLE phase skips this cluster; it is
     // consumed by the PENDING phase.
-    auto idle = tracker.get_idle_core_offset_states(PTO2ResourceShape::MIX);
+    auto idle = tracker.get_idle_core_offset_states(ResourceShape::MIX);
     EXPECT_FALSE(idle.has_value());
 }
 
@@ -477,7 +477,7 @@ TEST(CoreTrackerTest, MixPendingAcceptsFullyRunningClusterWithFreePendingSlots) 
     tracker.clear_pending_occupied(cluster_offset + 1);
     tracker.clear_pending_occupied(cluster_offset + 2);
 
-    auto pending = tracker.get_pending_core_offset_states(PTO2ResourceShape::MIX);
+    auto pending = tracker.get_pending_core_offset_states(ResourceShape::MIX);
     EXPECT_TRUE(pending.has_value());
     EXPECT_EQ(pending.count(), 1);
 }
@@ -493,7 +493,7 @@ TEST(CoreTrackerTest, MixPendingRejectsFullyRunningClusterWithOccupiedPendingSlo
     tracker.change_core_state(cluster_offset + 2);
     tracker.set_pending_occupied(cluster_offset + 1);
 
-    auto pending = tracker.get_pending_core_offset_states(PTO2ResourceShape::MIX);
+    auto pending = tracker.get_pending_core_offset_states(ResourceShape::MIX);
     EXPECT_FALSE(pending.has_value());
 }
 
@@ -502,11 +502,11 @@ TEST(CoreTrackerTest, MixIdleAndPendingDoNotDoubleAdmitFullyIdleCluster) {
     tracker.init(1);
     tracker.set_cluster(0, 0, 1, 2);
 
-    auto idle = tracker.get_idle_core_offset_states(PTO2ResourceShape::MIX);
+    auto idle = tracker.get_idle_core_offset_states(ResourceShape::MIX);
     EXPECT_TRUE(idle.has_value());
     EXPECT_EQ(idle.count(), 1);
 
-    auto pending = tracker.get_pending_core_offset_states(PTO2ResourceShape::MIX);
+    auto pending = tracker.get_pending_core_offset_states(ResourceShape::MIX);
     EXPECT_FALSE(pending.has_value());
 }
 
@@ -575,7 +575,7 @@ TEST(CoreTrackerTest, MixRunningClusterHelpersUseActiveMask) {
 
     constexpr uint8_t used_mask = PTO2_SUBTASK_MASK_AIC | PTO2_SUBTASK_MASK_AIV0;
 
-    EXPECT_EQ(tracker.get_idle_core_offset_states(PTO2ResourceShape::MIX).count(), 0);
+    EXPECT_EQ(tracker.get_idle_core_offset_states(ResourceShape::MIX).count(), 0);
     EXPECT_EQ(tracker.count_mix_running_clusters(used_mask), 2);
     EXPECT_EQ(tracker.get_mix_running_cluster_offset_states(used_mask).count(), 2);
 }
@@ -602,11 +602,11 @@ TEST(CoreTrackerTest, CountAvailableBlocksAivIncludesFreePendingSlots) {
 
     constexpr uint8_t aiv_mask = PTO2_SUBTASK_MASK_AIV0;
     constexpr int32_t exact_fit = 4;
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, false), 2);
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, true), exact_fit);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::AIV, aiv_mask, false), 2);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::AIV, aiv_mask, true), exact_fit);
 
     tracker.set_pending_occupied(4);
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, true), exact_fit - 1);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::AIV, aiv_mask, true), exact_fit - 1);
 }
 
 TEST(CoreTrackerTest, CountAvailableBlocksMixCountsLogicalClusters) {
@@ -618,8 +618,8 @@ TEST(CoreTrackerTest, CountAvailableBlocksMixCountsLogicalClusters) {
     tracker.change_core_state(4);
 
     constexpr uint8_t used_mask = PTO2_SUBTASK_MASK_AIC | PTO2_SUBTASK_MASK_AIV0 | PTO2_SUBTASK_MASK_AIV1;
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 1);
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 2);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, false), 1);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, true), 2);
 }
 
 TEST(CoreTrackerTest, CountAvailableBlocksMixRejectsOccupiedUsedPendingSlot) {
@@ -631,8 +631,8 @@ TEST(CoreTrackerTest, CountAvailableBlocksMixRejectsOccupiedUsedPendingSlot) {
     tracker.change_core_state(1);
     tracker.set_pending_occupied(1);
 
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 0);
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 0);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, false), 0);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, true), 0);
 }
 
 TEST(CoreTrackerTest, CountAvailableBlocksMixIgnoresUnavailableUnusedCore) {
@@ -644,6 +644,6 @@ TEST(CoreTrackerTest, CountAvailableBlocksMixIgnoresUnavailableUnusedCore) {
     tracker.change_core_state(2);
     tracker.set_pending_occupied(2);
 
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 1);
-    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 1);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, false), 1);
+    EXPECT_EQ(tracker.count_available_blocks(ResourceShape::MIX, used_mask, true), 1);
 }

@@ -453,12 +453,12 @@ struct CompletionStats {
  * capacities used at layout time (init_from_layout reuses them).
  */
 struct PTO2SchedulerLayout {
-    size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
-    size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
+    size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
     size_t off_graph_ready_queue_slots;
     size_t off_graph_prepare_queue_slots;
-    size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_early_dispatch_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
     uint64_t ready_queue_capacity;
 };
@@ -489,14 +489,14 @@ struct PTO2SchedulerState {
     } ring_sched_state;
 
     // Ready queues remain global (scheduling is ring-agnostic)
-    PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
     // reusing the same per-shape dispatch_shape machinery (fits-local inline vs
     // stop-the-world drain, per-core MIX placement, head-start spacing).
-    PTO2ReadyQueue ready_sync_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
 
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
@@ -548,8 +548,8 @@ struct PTO2SchedulerState {
         if (slot_state->task_kind == TaskKind::GRAPH) {
             pushed = graph_ready_queue.push(slot_state);
         } else {
-            PTO2ResourceShape shape = slot_state->active_mask.to_shape();
-            if (shape == PTO2ResourceShape::DUMMY ||
+            ResourceShape shape = slot_state->active_mask.to_shape();
+            if (shape == ResourceShape::DUMMY ||
                 (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
                 pushed = dummy_ready_queue.push(slot_state);
             } else if (slot_state->task_attrs.requires_sync_start()) {
@@ -707,7 +707,7 @@ struct PTO2SchedulerState {
     // the ready queue (scheduler_dispatch: pop -> claim -> re-push). A stale/released
     // entry fails the STAGING check on pop and is dropped; a push that overflows is
     // logged and the consumer's blocks fall back to normal dispatch.
-    PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue early_dispatch_queues[NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
     // they need an atomic all-or-nothing stage, not early_dispatch_shape's
@@ -879,13 +879,13 @@ struct PTO2SchedulerState {
     // ready_sync_queues (unaffected).
     void propagate_dispatch_fanin(ChipTaskSlotState & /*p*/) {}
 
-    int get_ready_tasks_batch(PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
+        PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);

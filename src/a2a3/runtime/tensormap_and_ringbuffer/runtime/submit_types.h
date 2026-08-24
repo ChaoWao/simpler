@@ -105,7 +105,7 @@ struct DispatchPredicate {
  * with an empty core_mask route to a dedicated DUMMY ready queue and are
  * completed inline by the scheduler dispatch loop, bypassing core allocation.
  */
-enum class PTO2ResourceShape : uint8_t {
+enum class ResourceShape : uint8_t {
     AIC = 0,    // Single AIC
     AIV = 1,    // Single AIV
     MIX = 2,    // Full cluster (dispatch uses active_mask)
@@ -115,7 +115,7 @@ enum class PTO2ResourceShape : uint8_t {
 // Number of *dispatchable* resource shapes (AIC, AIV, MIX). DUMMY does not
 // allocate a per-shape ready_queue entry / local buffer — it lives in a
 // dedicated queue inside PTO2SchedulerState.
-inline constexpr int32_t PTO2_NUM_RESOURCE_SHAPES = 3;
+inline constexpr int32_t NUM_RESOURCE_SHAPES = 3;
 
 /**
  * Bitmask of active subtask slots (AIC/AIV0/AIV1), sizeof == 1.
@@ -136,13 +136,13 @@ public:
 
     uint8_t core_mask() const { return raw_ & 0x07u; }
 
-    PTO2ResourceShape to_shape() const {
+    ResourceShape to_shape() const {
         uint8_t cmask = core_mask();
-        if (cmask == 0) return PTO2ResourceShape::DUMMY;
+        if (cmask == 0) return ResourceShape::DUMMY;
         int bit_count = __builtin_popcount(cmask);
-        if (bit_count >= 2) return PTO2ResourceShape::MIX;
-        if (cmask & PTO2_SUBTASK_MASK_AIC) return PTO2ResourceShape::AIC;
-        return PTO2ResourceShape::AIV;
+        if (bit_count >= 2) return ResourceShape::MIX;
+        if (cmask & PTO2_SUBTASK_MASK_AIC) return ResourceShape::AIC;
+        return ResourceShape::AIV;
     }
 
     bool operator==(ActiveMask other) const { return raw_ == other.raw_; }

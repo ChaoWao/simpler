@@ -156,7 +156,7 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
     EXPECT_EQ(task_slot.fanin_refcount.load(), 1);
 
     // Task should be in ready queue
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
@@ -194,7 +194,7 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
     EXPECT_GE(task_slot.fanin_refcount.load(), task_slot.fanin_count);
 
     // Task should be in ready queue
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
@@ -231,7 +231,7 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
     EXPECT_LT(task_slot.fanin_refcount.load(), task_slot.fanin_count);
 
     // Ready queue should be empty
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, nullptr);
 
@@ -446,7 +446,7 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
     EXPECT_EQ(consumer2.fanin_refcount.load(), 2);
 
     // Both consumers should be ready (fanin_refcount == fanin_count)
-    PTO2ResourceShape shape = consumer1.active_mask.to_shape();
+    ResourceShape shape = consumer1.active_mask.to_shape();
     auto *r1 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     auto *r2 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_TRUE((r1 == &consumer1 && r2 == &consumer2) || (r1 == &consumer2 && r2 == &consumer1));
@@ -994,7 +994,7 @@ TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
 
-    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    ResourceShape shape = consumer.active_mask.to_shape();
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(shape)];
     for (uint64_t i = 0; i < queue.capacity; i++) {
         ASSERT_TRUE(queue.push_tagged(&filler, i));
@@ -1028,7 +1028,7 @@ TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue)
 
     // A sync_start cohort that never reached its drain falls back to the
     // shape's sync ready queue, not the plain one.
-    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    ResourceShape shape = consumer.active_mask.to_shape();
     EXPECT_TRUE(sched.route_ready_once(consumer));
     EXPECT_EQ(sched.ready_sync_queues[static_cast<int32_t>(shape)].pop(), &consumer);
 }

@@ -424,10 +424,10 @@ struct CompletionStats {
  * capacities used at layout time (init_data_from_layout reuses them).
  */
 struct PTO2SchedulerLayout {
-    size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
-    size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
+    size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
-    size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_early_dispatch_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
     size_t off_dep_pool_entries[CHIP_MAX_RING_DEPTH];
     uint64_t ready_queue_capacity;
@@ -512,14 +512,14 @@ struct PTO2SchedulerState {
     alignas(64) std::atomic<uint32_t> advance_pending_mask;
 
     // Ready queues remain global (scheduling is ring-agnostic)
-    PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
     // reusing the same per-shape dispatch_shape machinery (fits-local inline vs
     // stop-the-world drain, per-core MIX placement, head-start spacing).
-    PTO2ReadyQueue ready_sync_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
 
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
@@ -542,8 +542,8 @@ struct PTO2SchedulerState {
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
     void push_ready_routed(ChipTaskSlotState *slot_state) {
-        PTO2ResourceShape shape = slot_state->active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state->active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
             dummy_ready_queue.push(slot_state);
         } else if (slot_state->task_attrs.requires_sync_start()) {
@@ -756,7 +756,7 @@ struct PTO2SchedulerState {
     // staged and sends the rest to ready_queues. An initial push that overflows also
     // rolls STAGING back to NONE, since nothing is staged yet and a task with no
     // claim should not read as speculatively claimed.
-    PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue early_dispatch_queues[NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
     // they need an atomic all-or-nothing owner stage, not early_dispatch_shape's
@@ -924,8 +924,8 @@ struct PTO2SchedulerState {
         // Predicated tasks resolve at the ready point, never early-dispatch. The
         // wiring caller has no separate predicate filter, so the gate lives here.
         if (consumer.task_attrs.has_predicate()) return;
-        PTO2ResourceShape shape = consumer.active_mask.to_shape();
-        if (shape != PTO2ResourceShape::AIC && shape != PTO2ResourceShape::AIV && shape != PTO2ResourceShape::MIX) {
+        ResourceShape shape = consumer.active_mask.to_shape();
+        if (shape != ResourceShape::AIC && shape != ResourceShape::AIV && shape != ResourceShape::MIX) {
             return;
         }
 
@@ -1098,8 +1098,8 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state.active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state);
         } else if (slot_state.task_attrs.requires_sync_start()) {
@@ -1139,8 +1139,8 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state.active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);
         } else if (slot_state.task_attrs.requires_sync_start()) {
@@ -1179,13 +1179,13 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    int get_ready_tasks_batch(PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
+        PTO2ReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);
