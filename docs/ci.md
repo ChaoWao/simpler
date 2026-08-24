@@ -20,7 +20,7 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 | Category | github-hosted (no hardware) | a2a3 runner | a5 runner |
 | -------- | --------------------------- | ----------- | --------- |
 | **ut** | `ut` (py + cpp) | `ut-a2a3` (py + cpp) | `ut-a5` (py) |
-| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3`, `st-network1-onboard-a2a3` | `st-onboard-a5` |
+| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3`, `st-network1-onboard-a2a3`, `st-deepseek-onboard-a2a3` | `st-onboard-a5` |
 
 ## GitHub Actions Jobs
 
@@ -30,7 +30,8 @@ shape. The executable job bodies live in reusable workflows:
 `_detect-changes.yml`, `_pre-commit.yml`, `_ut-no-hardware.yml`,
 `_packaging.yml`, `_profiling-flags-smoke.yml`, `_st-sim-a2a3.yml`,
 `_st-sim-a5.yml`, `_ut-npu-a2a3.yml`, `_ut-npu-a5.yml`,
-`_st-npu-a2a3.yml`, `_st-npu-a5.yml`, and `_st-network1.yml`. The scene-test and
+`_st-npu-a2a3.yml`, `_st-npu-a5.yml`, `_st-network1.yml`, and
+`_st-deepseek-a2a3.yml`. The scene-test and
 NPU unit-test bodies are split one workflow per architecture so each job
 renders only its own steps. Shared step scaffolding that is safe to run
 after checkout lives in composite actions under `.github/actions/`
@@ -68,6 +69,7 @@ PullRequest
   ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [needs ut_affected]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — a2a3_changed && st_affected
   ├── st-network1-onboard-a2a3    (a2a3pod pair)          — a2a3_changed && st_affected
+  ├── st-deepseek-onboard-a2a3    (a2a3 self-hosted)      — a2a3_changed && st_affected
   ├── ut-a5                  (a5 self-hosted)        — Python UT, a5 hardware [needs ut_affected]
   └── st-onboard-a5          (a5 self-hosted)        — a5_changed && st_affected
 ```
@@ -82,6 +84,7 @@ PullRequest
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
 | `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --exclude-level 4 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
 | `st-network1-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st --level 4 --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
+| `st-deepseek-onboard-a2a3` | a2a3 self-hosted | `pytest <the two deepseek_v4_flash_decode dirs> --platform a2a3 --manual only --device ...`, both 2-device cases concurrently, in parallel with `st-onboard-a2a3` |
 
 ### Multi-machine network1 jobs
 

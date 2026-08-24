@@ -127,6 +127,18 @@ jobs:
       # either spelling.
       runs_on: '["self-hosted","Linux","ARM64","a2a3pod"]'
 
+  # The two DeepSeek smoke cases stay manual, so the main sweep (--manual
+  # exclude) never picks them up; this job selects them with --manual only and
+  # runs on its own devices in parallel with st-onboard-a2a3, keeping their
+  # ~9 min of device time off the main sweep's critical path. Gates exactly as
+  # st-onboard-a2a3 does, per .claude/rules/ci-change-detection.md.
+  st-deepseek-onboard-a2a3:
+    needs: [detect-changes, pre-commit]
+    if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
+    uses: ./.github/workflows/_st-deepseek-a2a3.yml
+    with:
+      runs_on: '["self-hosted","a2a3"]'
+
   ut-a5:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'

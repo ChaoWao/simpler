@@ -1,0 +1,80 @@
+name: NPU DeepSeek Smokes (a2a3)
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+      ref:
+        required: false
+        type: string
+      runs_on:
+        required: true
+        type: string
+
+jobs:
+  run:
+    name: st-deepseek-onboard-a2a3
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 30
+    env:
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
+      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
+      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      # Own key family, separate from _st-npu-a2a3.yml's: the main sweep
+      # compiles with --manual exclude and never builds these kernels, while
+      # this job compiles only the two DS directories. Sharing the main key
+      # would let this partial compilation win the immutable-cache save race
+      # and starve the main sweep's cache.
+      - name: Restore scene-test kernel cache (a2a3)
+        uses: actions/cache@v5
+        with:
+          path: build/cache/kernels
+          key: scene-kernels-a2a3-ds-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-${{ inputs.ref || github.sha }}
+          restore-keys: |
+            scene-kernels-a2a3-ds-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-
+
+      - name: Set up environment
+        uses: ./.github/actions/setup-venv
+        with:
+          build-packages: "scikit-build-core nanobind<3 cmake>=3.15"
+          packages: "--no-build-isolation --config-settings=build.targets=build_package_a2a3 .[test]"
+          install-torch: "false"
+          system-site-packages: "true"
+          source-cann: "true"
+
+      - name: Compile DeepSeek scene-test kernels (a2a3)
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          .venv/bin/python -m simpler_setup.tools.scene_test_compile \
+            examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
+            examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode \
+            --platform a2a3 --require-pto-isa --compile-workers 8 -q --manual only
+
+      # The DS cases are the only manual cases under these two directories, so
+      # --manual only selects exactly the two smoke classes. They stay manual:
+      # the main sweep runs --manual exclude and must not adopt them back.
+      # Each case needs 2 devices (EP world size); 4 devices let both run
+      # concurrently.
+      - name: Run DeepSeek pytest smokes (a2a3)
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          DS_TESTS="examples/a2a3/host_build_graph/deepseek_v4_flash_decode examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            .venv/bin/python -m pytest $DS_TESTS -m "not sdma" --platform a2a3 --exclude-level 4 --manual only --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 4 \
+              --run ".venv/bin/python -m pytest $DS_TESTS -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
+          fi

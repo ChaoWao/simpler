@@ -31,16 +31,17 @@ Host construction, Graph recording (129 host submissions) and device replay all
 complete, both ranks ``outcome=0``. See README.md for the measurements and for
 the fixes that got the replay running.
 
+The case is manual: Per-PR CI runs it in the dedicated `st-deepseek-onboard-a2a3`
+job instead of the main sweep.
+
     python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\\
-test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1>
+test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
 """
 
 import copy
 import importlib.util
 import sys
 from pathlib import Path
-
-import pytest
 
 from simpler_setup import SceneTestCase, scene_test
 from simpler_setup.goldens.deepseek_v4_flash_decode import N_RANKS, generate_inputs
@@ -93,7 +94,6 @@ def _host_build_graph_callable():
     return callable_config
 
 
-@pytest.mark.resource_last
 @scene_test(level=3, runtime="host_build_graph")
 class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
     """DSv4 FLASH EP2/TP2 decode with the orchestration built on the host."""
@@ -103,6 +103,7 @@ class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
         {
             "name": "DecodeFwdEP2TP2",
             "platforms": ["a2a3"],
+            "manual": True,
             "skip_golden": True,
             "config": {
                 "device_count": N_RANKS,

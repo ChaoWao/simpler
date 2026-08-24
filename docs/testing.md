@@ -371,14 +371,6 @@ This matters on CPU-constrained CI runners. Example: an L3 case needs `device_co
 
 A single file can declare both L2 and L3 classes; they're grouped by `(runtime, level)` internally. L3 classes run in the Resource phase (subprocess-per-case, alongside standalone resource-marked functions), L2 classes run in the L2 phase (shared Worker per device).
 
-### Resource-phase tail ordering
-
-Mark an L3 class or standalone resource test with
-`@pytest.mark.resource_last` when it must run after every ordinary Resource and
-L2 job. The dispatcher runs marked jobs in a final Resource subphase inside the
-same pytest invocation, so the enclosing `task-submit` allocation remains held
-and no second queue submission is needed.
-
 ### Profiling under parallelism
 
 Each test case sets its own `CallConfig.output_prefix` (chosen by `scene_test.py::_build_output_prefix` as `outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>/`). The C++ runtime writes all diagnostic artifacts under that prefix with fixed filenames:
@@ -767,7 +759,9 @@ Dedicated DFX steps are the exception: they use `--manual include` in normal
 Per-PR and Daily jobs, so marking a case under their target path removes only
 its duplicate main-sweep execution. A caller selecting `--manual only` keeps
 that mode in the DFX steps. The A2/A3 `network1` cases run in the same Daily
-workflow through their existing two-machine job.
+workflow through their existing two-machine job, and the DeepSeek smokes run
+Per-PR in their own parallel job (`st-deepseek-onboard-a2a3`, `--manual only`
+over the two `deepseek_v4_flash_decode` directories).
 
 To move only selected platforms, pass the platform list to the same marker:
 use `@pytest.mark.manual(["a2a3sim", "a5sim"])` (or the equivalent
