@@ -2,7 +2,7 @@
 
 ← [Device Error Codes](../device-error-codes.md)
 
-Three codes and three stall sub-classes have no ST — not from neglect, but because
+Four codes and three stall sub-classes have no ST — not from neglect, but because
 they cannot be provoked. Recording why, so the next person does not re-derive it
 (the argument lives in `tests/st/runtime_fatal_codes/test_runtime_fatal_codes.py`):
 
@@ -17,6 +17,11 @@ they cannot be provoked. Recording why, so the next person does not re-derive it
   so all rings together top out at `cap - CHIP_MAX_RING_DEPTH`, strictly below the cap.
   The rings always fill first and latch 1 or 3. Shrinking the window shrinks both, so
   the gap holds. The number stays reserved in both runtimes' code tables.
+- **1 SCOPE_DEADLOCK** likewise has no raise site in `host_build_graph`. It reports
+  "one scope submitted more tasks than the ring holds", which presumes reclaim at scope
+  end; hbg is whole-graph-resident and reclaims nothing, so overrunning the ring latches
+  **2 HEAP_RING_DEADLOCK** or the ring's own exhaustion code instead. Reserved in hbg's
+  table, raised only by `tensormap_and_ringbuffer`.
 - **11 TENSORMAP_OVERFLOW** needs the 65536-entry pool (`PTO2_TENSORMAP_POOL_SIZE`,
   compile-time, not tunable via `runtime_env`) flooded *and* a stalled producer
   holding entries.
@@ -33,3 +38,8 @@ the one that would otherwise print as a bare number on the day it finally fires.
 
 If you do hit 10, 11, 103, S4, S5 or unknown, it is a runtime bug. Keep the device
 log and report it.
+
+Code 1 is the one entry above that is unreachable in only *one* runtime. Latched by
+`tensormap_and_ringbuffer` it is an ordinary capacity error carrying its own remedy
+("raise `ring_task_window` or split the scope"), so treat it as a runtime bug only
+when `host_build_graph` reports it.

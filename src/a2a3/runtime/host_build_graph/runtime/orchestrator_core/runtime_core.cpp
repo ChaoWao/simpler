@@ -32,9 +32,6 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_tensor_access.h"
-#if SIMPLER_DFX
-#include "aicpu/scope_stats_collector_aicpu.h"
-#endif
 
 // ChipTensor-byte access for a caller that can load a device address directly.
 // The AICPU build compiles this translation unit and links these; the host
@@ -113,9 +110,9 @@ static void graph_abort_impl(RuntimeContext *rt, void *recording_handle) {
 static bool graph_end_impl(RuntimeContext *rt) { return rt != nullptr && rt->orchestrator->graph_end(); }
 
 // The orchestration .so's phases arrive already bracketed, so this only forwards them
-// to the same pool the runtime's own records go to. Defined only at SIMPLER_DFX=1, like
-// scope_set_site_impl below: the slot stays in the struct either way, but a definition
-// the table does not reference is an unused-function error on the AICPU build.
+// to the same pool the runtime's own records go to. Defined only at SIMPLER_DFX=1: the
+// slot stays in the struct either way, but a definition the table does not reference is
+// an unused-function error on the AICPU build.
 #if SIMPLER_DFX
 static void record_orch_phase_impl(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
     host_phase_record(start_ns, end_ns, kind, detail, 0);
@@ -378,14 +375,6 @@ void set_tensor_data(
     }
 }
 
-// Ops-table entry that hands the call-site captured by ScopeGuard to the
-// [ScopeStats] collector. The slot is always present in the struct to keep
-// the layout stable; at SIMPLER_DFX=0 we fill nullptr so the orchestration
-// .so's null-check skips it.
-#if SIMPLER_DFX
-static void scope_set_site_impl(const char *file, int line) { scope_stats_set_pending_site(file, line); }
-#endif
-
 static int32_t available_cluster_count_impl(RuntimeContext *rt) { return rt->orchestrator->total_cluster_count; }
 static int32_t available_aiv_count_impl(RuntimeContext *rt) { return rt->orchestrator->total_aiv_count; }
 
@@ -413,10 +402,8 @@ static const RuntimeOps s_runtime_ops = {
     .graph_end = graph_end_impl,
     .graph_commit = graph_commit_impl,
 #if SIMPLER_DFX
-    .scope_set_site = scope_set_site_impl,
     .record_orch_phase = record_orch_phase_impl,
 #else
-    .scope_set_site = nullptr,
     .record_orch_phase = nullptr,
 #endif
 };

@@ -110,13 +110,10 @@ typedef struct RuntimeOps {
     bool (*graph_end)(RuntimeContext *rt);
     void (*graph_commit)(RuntimeContext *rt);
 
-    // Stash the call-site of the next ScopeGuard so the [ScopeStats]
-    // collector can log it. Always present to keep ops-table layout stable
-    // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
-    void (*scope_set_site)(const char *file, int line);
     // Record one orchestration-side phase. The submission segments this carries are
     // measured here and invisible to the runtime, which sees only what it is called
-    // for. Same convention as scope_set_site: always present, nullptr when DFX is off.
+    // for. Always present to keep ops-table layout stable across SIMPLER_DFX
+    // settings; nullptr when DFX is off.
     //
     // This struct is declared twice — here and in the runtime's runtime_core.h — and
     // the two must stay in lockstep field for field, since the runtime fills the table
@@ -692,13 +689,10 @@ static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, con
  */
 class ScopeGuard {
 public:
-    explicit ScopeGuard(
-        PTO2ScopeMode mode = PTO2ScopeMode::AUTO, const char *file = __builtin_FILE(), int line = __builtin_LINE()
-    ) :
+    explicit ScopeGuard(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) :
         rt_(current_runtime()) {
         if (!rt_->ops->is_fatal(rt_)) {
             rt_->pending_scope_mode = mode;
-            if (rt_->ops->scope_set_site) rt_->ops->scope_set_site(file, line);
             rt_->ops->scope_begin(rt_);
         }
     }

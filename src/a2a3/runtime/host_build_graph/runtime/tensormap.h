@@ -368,10 +368,8 @@ struct PTO2TensorMap {
 
     uint32_t get_task_local_id_slot(uint32_t task_local_id) const { return task_local_id & (task_window_size - 1); }
 
-    // Accessors read by scope_stats_collector. Declared unconditionally so the
-    // collector .cpp compiles at SIMPLER_DFX=0 (collector is unconditional —
-    // setter symbols must export for host dlsym; the probe call sites that use
-    // these accessors stay gated by SIMPLER_DFX).
+    // Pool occupancy, read by the tensormap-exhaustion diagnostic and by the
+    // Graph recording's capacity precheck.
     int32_t current_used() const { return next_entry_idx - free_num; }
     int32_t pool_capacity() const { return pool_size; }
     int32_t free_entries() const { return pool_size - current_used(); }
