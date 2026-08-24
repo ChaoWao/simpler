@@ -54,17 +54,16 @@
 class WorkerManager;
 
 // ---------------------------------------------------------------------------
-// SubmitResult — C++ internal slot id
+// TaskHandle — run-scoped producer handle
 // ---------------------------------------------------------------------------
 //
 // Downstream consumers reference outputs by their own tensor pointers (the
 // tensors live in the HeapRing allocated by the Worker), and tensormap.lookup
 // finds the producer slot from the data pointer. No outputs[] field needed.
-// This is intentionally not exposed through the Python facade.
+// The Python facade exposes this as an opaque handle for TaskArgs.add_dep()
+// and TaskArgs.add_dep_wait().
 
-struct SubmitResult {
-    TaskSlot task_slot{INVALID_SLOT};
-};
+using SubmitResult = TaskHandle;
 
 // Deterministic seams for exception-safety unit tests. Production workers
 // leave the callback unset.
@@ -281,16 +280,23 @@ private:
         std::vector<TaskArgs> &args_list, const std::vector<RemoteTaskArgsSidecar> &remote_sidecars
     );
 
+    struct ProducerDependency {
+        TaskSlot slot{INVALID_SLOT};
+        bool retain{false};
+    };
+
     // Walk the tags of each TaskArgs in `args_list`, accumulating producer
-    // slots (for INPUT/INOUT tags) and registering outputs in the tensormap
-    // (for OUTPUT/INOUT/OUTPUT_EXISTING tags). NO_DEP tags are skipped.
+    // edges (explicit wait/retain deps plus retained INPUT/INOUT deps) and
+    // registering outputs in the tensormap (for
+    // OUTPUT/INOUT/OUTPUT_EXISTING tags). NO_DEP tags are skipped.
     // `target_worker_ids` maps NEXT_LEVEL args_list[i] to its exact worker for
     // TensorKey construction. It is empty for SUB tasks.
     void infer_deps(
         TaskSlot slot, const std::vector<TaskArgs> &args_list, const std::vector<int32_t> &target_worker_ids,
-        const std::vector<RemoteTaskArgsSidecar> &remote_sidecars, std::vector<TaskSlot> &producers,
+        const std::vector<RemoteTaskArgsSidecar> &remote_sidecars, std::vector<ProducerDependency> &producers,
         std::vector<TensorKey> &output_keys
     );
+    void validate_explicit_deps(RunId run_id, const std::vector<TaskArgs> &args_list) const;
     void validate_worker_eligibility(
         WorkerType worker_type, size_t args_count, const std::vector<int32_t> &target_worker_ids,
         const std::vector<std::vector<int32_t>> &eligible_worker_ids

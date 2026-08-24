@@ -27,6 +27,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     CoreCallable,
     DataType,
     TaskArgs,
+    TaskHandle,
     TaskState,
     TensorArgType,
     arg_direction_name,
@@ -499,6 +500,18 @@ class TestTaskArgs:
         assert args.scalar_count() == 1
         assert args.tensor_count() == 0
         assert len(args) == 1
+
+    def test_task_handle_is_opaque_and_dependency_methods_require_one(self):
+        with pytest.raises(TypeError):
+            TaskHandle()
+
+        args = TaskArgs()
+        for method_name in ("add_dep", "add_dep_wait"):
+            method = getattr(args, method_name)
+            with pytest.raises(ValueError, match="at least one"):
+                method()
+            with pytest.raises(TypeError):
+                method(object())
 
     def test_mixed_with_tags(self):
         args = TaskArgs()

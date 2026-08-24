@@ -25,7 +25,7 @@ import pytest
 from _task_interface import DataType
 from simpler.buffer import mint_owner_instance_id, wrap_device_malloc
 from simpler.callable_identity import CallableHandle
-from simpler.task_interface import CallConfig, TaskArgs
+from simpler.task_interface import CallConfig, TaskArgs, TaskHandle
 from simpler.worker import Worker
 
 from ._harness import (
@@ -323,6 +323,38 @@ class TestL4ToL3SingleDispatch:
 
 
 class TestL4ToL3MultipleDispatches:
+    @pytest.mark.parametrize("dep_method", ["add_dep", "add_dep_wait"])
+    def test_l4_explicit_task_dependency_uses_returned_handle(self, dep_method):
+        counter_shm, counter_buf = _make_shared_counter()
+
+        try:
+            l3 = Worker(level=3, num_sub_workers=1)
+            l3_sub_handle = l3.register(lambda args: _increment_counter(counter_buf))
+
+            def l3_orch(orch, args, config):
+                orch.submit_sub(l3_sub_handle)
+
+            w4 = Worker(level=4, num_sub_workers=0)
+            l3_handle = w4.register(l3_orch)
+            l3_worker_id = w4.add_worker(l3)
+            w4.init()
+
+            def l4_orch(orch, args, config):
+                producer = orch.submit_next_level(l3_handle, TaskArgs(), CallConfig(), worker=l3_worker_id)
+                assert isinstance(producer, TaskHandle)
+                consumer_args = TaskArgs()
+                getattr(consumer_args, dep_method)(producer)
+                consumer = orch.submit_next_level(l3_handle, consumer_args, CallConfig(), worker=l3_worker_id)
+                assert isinstance(consumer, TaskHandle)
+
+            w4.run(l4_orch)
+            w4.close()
+
+            assert _read_counter(counter_buf) == 2
+        finally:
+            counter_shm.close()
+            counter_shm.unlink()
+
     def test_l4_dispatches_three_times(self):
         """L4 orch submits 3 tasks to L3 child, each running a sub callable."""
         counter_shm, counter_buf = _make_shared_counter()

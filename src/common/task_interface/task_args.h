@@ -24,7 +24,8 @@
  *
  * Concrete user-facing types (typedefs at the bottom):
  *   - TaskArgs            — vector-backed + TensorArgType tags (the unified
- *                           builder used by Orchestrator.submit_*)
+ *                           builder used by Orchestrator.submit_*), with
+ *                           host-graph explicit dependency handles
  *   - ChipStorageTaskArgs — fixed POD matching the runtime.so ABI byte-for-byte
  *
  * Wire / dispatch helpers:
@@ -45,6 +46,18 @@
 #include "arg_direction.h"
 #include "buffer.h"  // Tensor wire type + TENSOR_BLOB_MAGIC for the blob envelope
 #include "tensor.h"  // ChipTensor (device POD) + TensorArgType, the tag TaskArgs carries
+
+// Opaque at the Python surface. The run id prevents a slot from being reused
+// as a dependency after the parent-side Ring resets its monotonic slot ids.
+struct TaskHandle {
+    uint64_t run_id{0};
+    int32_t task_slot{-1};
+};
+
+struct ExplicitTaskDependency {
+    TaskHandle task;
+    bool retain{false};
+};
 
 // ============================================================================
 // TensorTagMixin — conditionally provides per-tensor tag storage
@@ -128,6 +141,7 @@ template <typename T, typename S, typename TensorTag>
 struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
     std::vector<T> tensors_;
     std::vector<S> scalars_;
+    std::vector<ExplicitTaskDependency> explicit_deps_;
 
     void add_tensor(const T &t) {
         if (!scalars_.empty()) throw std::logic_error("TaskArgs: cannot add tensor after scalar");
@@ -147,6 +161,9 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 
     void add_scalar(S s) { scalars_.push_back(s); }
 
+    void add_dep(const TaskHandle &task) { explicit_deps_.push_back(ExplicitTaskDependency{task, true}); }
+    void add_dep_wait(const TaskHandle &task) { explicit_deps_.push_back(ExplicitTaskDependency{task, false}); }
+
     const T &tensor(int32_t i) const { return tensors_[static_cast<size_t>(i)]; }
     T &tensor(int32_t i) { return tensors_[static_cast<size_t>(i)]; }
 
@@ -158,10 +175,14 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 
     int32_t tensor_count() const { return static_cast<int32_t>(tensors_.size()); }
     int32_t scalar_count() const { return static_cast<int32_t>(scalars_.size()); }
+    int32_t explicit_dep_count() const { return static_cast<int32_t>(explicit_deps_.size()); }
+    const TaskHandle &explicit_dep(int32_t i) const { return explicit_deps_[static_cast<size_t>(i)].task; }
+    bool explicit_dep_retain(int32_t i) const { return explicit_deps_[static_cast<size_t>(i)].retain; }
 
     void clear() {
         tensors_.clear();
         scalars_.clear();
+        explicit_deps_.clear();
         if constexpr (!std::is_void_v<TensorTag>) {
             this->tags_.clear();
         }

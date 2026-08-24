@@ -7241,7 +7241,7 @@ class TestParallelSubWorkers:
 
 
 # ---------------------------------------------------------------------------
-# Test: submit_* returns None at the Python facade; task slots stay internal.
+# Test: SUB submit returns None at the Python facade.
 # ---------------------------------------------------------------------------
 
 

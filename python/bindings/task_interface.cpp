@@ -2215,6 +2215,8 @@ NB_MODULE(_task_interface, m) {
         .value("OUTPUT_EXISTING", TensorArgType::OUTPUT_EXISTING)
         .value("NO_DEP", TensorArgType::NO_DEP);
 
+    nb::class_<TaskHandle>(m, "TaskHandle");
+
     // --- TaskArgs (unified vector-backed builder with per-tensor TensorArgType tags) ---
     nb::class_<TaskArgs>(m, "TaskArgs", nb::is_weak_referenceable())
         .def(nb::init<>())
@@ -2234,6 +2236,42 @@ NB_MODULE(_task_interface, m) {
         .def(
             "add_scalar", &TaskArgs::add_scalar, nb::arg("s"),
             "Add a uint64_t scalar. After this, add_tensor() is no longer allowed."
+        )
+
+        .def(
+            "add_dep",
+            [](TaskArgs &self, nb::args deps) {
+                if (deps.size() == 0) {
+                    throw std::invalid_argument("TaskArgs.add_dep requires at least one TaskHandle");
+                }
+                for (nb::handle dep : deps) {
+                    if (!nb::isinstance<TaskHandle>(dep)) {
+                        throw nb::type_error("TaskArgs.add_dep arguments must be TaskHandle objects");
+                    }
+                }
+                for (nb::handle dep : deps) {
+                    self.add_dep(nb::cast<const TaskHandle &>(dep));
+                }
+            },
+            "Add dependencies that retain each producer until this task completes."
+        )
+
+        .def(
+            "add_dep_wait",
+            [](TaskArgs &self, nb::args deps) {
+                if (deps.size() == 0) {
+                    throw std::invalid_argument("TaskArgs.add_dep_wait requires at least one TaskHandle");
+                }
+                for (nb::handle dep : deps) {
+                    if (!nb::isinstance<TaskHandle>(dep)) {
+                        throw nb::type_error("TaskArgs.add_dep_wait arguments must be TaskHandle objects");
+                    }
+                }
+                for (nb::handle dep : deps) {
+                    self.add_dep_wait(nb::cast<const TaskHandle &>(dep));
+                }
+            },
+            "Add one or more ordering-only dependencies returned by an Orchestrator submit."
         )
 
         .def(
