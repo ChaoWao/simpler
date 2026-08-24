@@ -263,6 +263,7 @@ class _FakeNativeRunImpl:
         self.finalized = [threading.Event(), threading.Event()]
         self.launch_errors: dict[tuple[int, int], BaseException] = {}
         self.prepare_errors: dict[tuple[int, int], BaseException] = {}
+        self.prepare_gates: dict[int, tuple[threading.Event, threading.Event]] = {}
         self.poll_errors: dict[tuple[int, int], BaseException] = {}
         self.finalize_errors: dict[tuple[int, int], BaseException] = {}
         self.prepare_identities: list[tuple[int, int, int, int]] = []
@@ -293,6 +294,11 @@ class _FakeNativeRunImpl:
         self.prepare_identities.append((slot, int(generation), int(_run_id), int(_dispatch_id)))
         token = SimpleNamespace(slot_id=slot, generation=int(generation), run_epoch=slot + 1)
         self.events.append(("prepare", slot))
+        gate = self.prepare_gates.get(slot)
+        if gate is not None:
+            entered, release = gate
+            entered.set()
+            assert release.wait(5.0)
         self.prepared[slot].set()
         return token
 
@@ -323,6 +329,11 @@ class _FakeNativeRunImpl:
             self._polled_slots.add(slot)
             self.events.append(("poll", slot))
         return self.completed[slot].is_set()
+
+    def _wait_native_run(self, token) -> None:
+        slot = int(token.slot_id)
+        self.events.append(("wait", slot))
+        assert self.completed[slot].wait(5.0)
 
     def _finalize_native_run(self, token) -> None:
         slot = int(token.slot_id)
@@ -556,6 +567,8 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
         assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
         harness.cw._impl.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
+        assert ("wait", 0) in harness.cw._impl.events
+        assert ("poll", 0) not in harness.cw._impl.events
 
         lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [
@@ -567,6 +580,48 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
             ("finalize", 1),
         ]
     finally:
+        harness.close()
+
+
+def test_two_frame_hbg_finalizes_active_while_successor_prepare_is_blocked():
+    harness = _TwoFrameLoopHarness(
+        supports_concurrent_native_prepare=True,
+        chip_runtime="host_build_graph",
+    )
+    prepare_entered = threading.Event()
+    release_prepare = threading.Event()
+    harness.cw._impl.prepare_gates[1] = (prepare_entered, release_prepare)
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish(1, 2, state=worker_mod._PREPARE_READY)
+        assert prepare_entered.wait(5.0)
+        harness.cw._impl.completed[0].set()
+        assert harness.cw._impl.finalized[0].wait(5.0)
+        assert not release_prepare.is_set()
+        assert not harness.cw._impl.launched[1].is_set()
+
+        release_prepare.set()
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[1].wait(5.0)
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+
+        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        expected_lifecycle = [
+            ("prepare", 0),
+            ("launch", 0),
+            ("prepare", 1),
+            ("finalize", 0),
+            ("launch", 1),
+            ("finalize", 1),
+        ]
+        assert lifecycle == expected_lifecycle
+    finally:
+        release_prepare.set()
         harness.close()
 
 
@@ -599,7 +654,7 @@ def test_two_frame_hbg_waits_for_first_token_to_launch_before_preparing_second()
 
         assert harness.cw._impl.launched[0].wait(5.0)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[1].is_set()
+        assert harness.cw._impl.prepared[1].wait(5.0)
         assert not harness.cw._impl.finalized[0].is_set()
         assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 0),
@@ -659,7 +714,7 @@ def test_two_frame_hbg_does_not_prepare_high_dispatch_successor_before_active_fr
 
         assert harness.cw._impl.launched[1].wait(5.0)
         harness.wait_state(0, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[0].is_set()
+        assert harness.cw._impl.prepared[0].wait(5.0)
         assert not harness.cw._impl.launched[0].is_set()
         assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 1),
@@ -991,7 +1046,7 @@ def test_two_frame_shutdown_finalizes_backend_prepared_successor_once():
         assert harness.cw._impl.prepared[1].is_set()
 
         _mailbox_store_i32(harness.mailbox_addr + _OFF_STATE, worker_mod._SHUTDOWN)
-        harness.thread.join(5.0)
+        harness.thread.join(10.0)
         assert not harness.thread.is_alive()
         assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
         assert not harness.cw._impl.launched[1].is_set()

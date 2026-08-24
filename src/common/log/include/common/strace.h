@@ -59,8 +59,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 
 #include <unistd.h>
 
@@ -112,6 +114,62 @@ inline long strace_tid() {
 #endif
 }
 
+/**
+ * Emit one host marker.  Profiling can redirect markers to one fully-buffered
+ * file per process with SIMPLER_HOST_STRACE_DIR.  This avoids making every
+ * short scope synchronously flush the shared stderr pipe -- at eight ranks the
+ * observer itself otherwise creates millisecond scheduling holes between
+ * adjacent tensor copies.  The outermost marker flushes the private file once
+ * per invocation, so a completed invocation is always available to the parser.
+ */
+inline void write_span(
+    const char *name, long long ts_ns, long long dur_ns, int depth, unsigned inv, uint64_t hid, const char *attrs
+) {
+    const char *directory = std::getenv("SIMPLER_HOST_STRACE_DIR");
+    if (directory == nullptr || directory[0] == '\0') {
+        LOG_TIMING(
+            "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s",
+            static_cast<int>(getpid()), strace_tid(), inv, static_cast<unsigned long long>(hid), depth, name, ts_ns,
+            dur_ns, attrs
+        );
+        return;
+    }
+
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    static FILE *stream = nullptr;
+    static pid_t stream_pid = -1;
+    pthread_mutex_lock(&mutex);
+    const pid_t pid = getpid();
+    if (stream == nullptr || stream_pid != pid) {
+        // Do not close a stream inherited across fork: another stdio object may
+        // still own the copied buffer.  Each child switches to its own PID file.
+        char path[4096];
+        const int count = std::snprintf(path, sizeof(path), "%s/host-strace.%d.log", directory, pid);
+        if (count > 0 && static_cast<size_t>(count) < sizeof(path)) {
+            stream = std::fopen(path, "a");
+            if (stream != nullptr) {
+                std::setvbuf(stream, nullptr, _IOFBF, 1U << 20U);
+                stream_pid = pid;
+            }
+        }
+    }
+    if (stream != nullptr && stream_pid == pid) {
+        std::fprintf(
+            stream, "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s\n",
+            static_cast<int>(pid), strace_tid(), inv, static_cast<unsigned long long>(hid), depth, name, ts_ns, dur_ns,
+            attrs
+        );
+        if (depth == 0) std::fflush(stream);
+        pthread_mutex_unlock(&mutex);
+        return;
+    }
+    pthread_mutex_unlock(&mutex);
+    LOG_TIMING(
+        "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s", static_cast<int>(pid),
+        strace_tid(), inv, static_cast<unsigned long long>(hid), depth, name, ts_ns, dur_ns, attrs
+    );
+}
+
 class StraceScope {
 public:
     explicit StraceScope(const char *name, const char *attrs = "") :
@@ -131,11 +189,7 @@ public:
         // depth printed is the scope's own level (post-decrement so the
         // outermost scope prints depth=0).
         const int d = --depth();
-        LOG_TIMING(
-            "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s",
-            static_cast<int>(getpid()), strace_tid(), inv(), static_cast<unsigned long long>(hid()), d, name_, ts, dur,
-            attrs_
-        );
+        write_span(name_, ts, dur, d, inv(), hid(), attrs_);
     }
 
     StraceScope(const StraceScope &) = delete;
@@ -208,6 +262,13 @@ inline long long strace_now_ns() {
     );
 }
 
+/** Current per-thread CPU clock; diagnostic companion to wall-clock spans. */
+inline long long strace_thread_cpu_now_ns() {
+    struct timespec value{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+    return static_cast<long long>(value.tv_sec) * 1000000000LL + value.tv_nsec;
+}
+
 /**
  * Emit a marker for a span whose duration was measured elsewhere (e.g. a device
  * phase: AICPU cycles → ns). Shares the current thread's inv/hid grouping so the
@@ -220,11 +281,7 @@ inline long long strace_now_ns() {
  */
 inline void
 emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, const char *attrs = "clk=dev") {
-    LOG_TIMING(
-        "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s", static_cast<int>(getpid()),
-        strace_tid(), StraceScope::current_inv(), static_cast<unsigned long long>(StraceScope::current_hid()), depth,
-        name, ts_ns, dur_ns, attrs
-    );
+    write_span(name, ts_ns, dur_ns, depth, StraceScope::current_inv(), StraceScope::current_hid(), attrs);
 }
 
 /** Emit an explicitly timed host-domain span in the active invocation. */
@@ -253,6 +310,7 @@ inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_n
     ::simpler::strace::StraceContextScope STRACE_CAT(_strace_context_, __LINE__)((inv), (hid), (depth))
 /** Read the current host monotonic clock in nanoseconds. */
 #define STRACE_NOW_NS() ::simpler::strace::strace_now_ns()
+#define STRACE_THREAD_CPU_NOW_NS() ::simpler::strace::strace_thread_cpu_now_ns()
 /** Emit a host-domain span measured across disjoint API calls. */
 #define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) \
     ::simpler::strace::emit_host_span_at((name), (ts_ns), (dur_ns), (depth))
@@ -272,6 +330,7 @@ inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_n
 #define STRACE_SET_HID(h) ((void)0)
 #define STRACE_CONTEXT(inv, hid, depth) ((void)0)
 #define STRACE_NOW_NS() 0LL
+#define STRACE_THREAD_CPU_NOW_NS() 0LL
 #define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)
 #define STRACE_HOST_SPAN_AT_A(name, ts_ns, dur_ns, depth, attrs) ((void)0)
 #define STRACE_DEV_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)

@@ -40,6 +40,7 @@
 #include "callable_protocol.h"
 #include "call_config.h"
 #include "chip_callable_layout.h"
+#include "common/strace.h"
 #include "utils/elf_build_id.h"
 #include "host/host_regs.h"  // Register address retrieval
 #include "host/raii_scope_guard.h"
@@ -241,13 +242,18 @@ int DeviceRunner::abandon_native_run_resources(uint32_t pipeline_slot) {
     return retire_run_aicore_stream(pipeline_slot);
 }
 
+int DeviceRunner::complete_native_run_resources(uint32_t pipeline_slot) {
+    return retire_run_aicore_stream_async(pipeline_slot);
+}
+
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     const unsigned selected_pipeline_slot = pipeline_slot();
     // The AICore stream is created during native prepare so its provisioning
-    // can overlap the predecessor's execution. Once run() is entered, every
-    // exit owns retirement; the success path reports destroy failure, while
-    // early-error paths keep the original error and leave a failed-destroy
-    // handle in the slot so it cannot be reused.
+    // can overlap the predecessor's execution. Early-error paths retire it
+    // synchronously and leave a failed-destroy handle in the slot. Success
+    // hands ownership back to native finalize: only after output D2H completes
+    // may it start asynchronous retire/replenish. This prevents CANN stream
+    // control calls from contending with validate's rtMemcpy.
     bool aicore_stream_retired = false;
     auto aicore_stream_retire = RAIIScopeGuard([this, selected_pipeline_slot, &aicore_stream_retired]() {
         if (!aicore_stream_retired) (void)retire_run_aicore_stream(selected_pipeline_slot);
@@ -300,6 +306,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // before the allocs so that an alloc-failure early-return still triggers
     // cleanup of previously-allocated buffers (the predicates no-op on 0).
     auto regs_cleanup = RAIIScopeGuard([this]() {
+        STRACE("simpler_run.runner_run.cleanup.regs");
         if (kernel_args_.args.regs != 0) {
             mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.regs));
             kernel_args_.args.regs = 0;
@@ -307,6 +314,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     });
 
     auto pmu_regs_cleanup = RAIIScopeGuard([this]() {
+        STRACE("simpler_run.runner_run.cleanup.pmu_regs");
         if (kernel_args_.args.pmu_reg_addrs != 0) {
             mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.pmu_reg_addrs));
             kernel_args_.args.pmu_reg_addrs = 0;
@@ -401,6 +409,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     }
 
     auto runtime_args_cleanup = RAIIScopeGuard([this]() {
+        STRACE("simpler_run.runner_run.cleanup.runtime_args");
         kernel_args_.finalize_device_kernel_args();
         kernel_args_.finalize_runtime_args();
     });
@@ -455,6 +464,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
     // otherwise re-enter init_l2_swimlane() with stale state still allocated.
     auto perf_cleanup = RAIIScopeGuard([this]() {
+        STRACE("simpler_run.runner_run.cleanup.collectors");
         finalize_collectors();
     });
 
@@ -507,21 +517,27 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         l2_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
     }
 
-    rc = launch_run(runtime, num_aicore, launch_aicpu_num, selected_pipeline_slot);
+    {
+        STRACE("simpler_run.runner_run.launch_device");
+        rc = launch_run(runtime, num_aicore, launch_aicpu_num, selected_pipeline_slot);
+    }
     if (rc != 0) return rc;
 
-    rc = reap_run(selected_pipeline_slot);
+    {
+        STRACE("simpler_run.runner_run.reap_device");
+        rc = reap_run(selected_pipeline_slot);
+    }
     if (rc != 0) return rc;
 
-    // The run owns its AICore stream, so a destroy this run cannot complete is
-    // this run's failure: reporting success would leave the caller believing a
-    // slot is reusable that the next prepare will now refuse.
+    // Reap has established that no device work remains on this run's AICore
+    // stream. Native finalize owns its retire/replenish after output D2H.
     aicore_stream_retired = true;
-    rc = retire_run_aicore_stream(selected_pipeline_slot);
-    if (rc != 0) return rc;
 
     // Print handshake results (reads from device memory, must be before free)
-    print_handshake_results();
+    {
+        STRACE("simpler_run.runner_run.print_handshake");
+        print_handshake_results();
+    }
 
     return 0;
 }
@@ -539,6 +555,36 @@ int DeviceRunner::retire_run_aicore_stream(unsigned slot) {
     int rc = run_stream_slots_.retire_aicore(slot);
     if (rc != 0) {
         LOG_ERROR("rtStreamDestroy (run AICore slot %u) failed: %d, slot is now unusable", slot, rc);
+    }
+    return rc;
+}
+
+int DeviceRunner::retire_run_aicore_stream_async(unsigned slot) {
+    const unsigned trace_inv = simpler::strace::StraceScope::current_inv();
+    const uint64_t trace_hid = simpler::strace::StraceScope::current_hid();
+    int rc = run_stream_slots_.retire_aicore_async(
+        slot,
+        [this](std::function<void()> fn) {
+            return create_thread(std::move(fn));
+        },
+        [trace_inv, trace_hid](std::function<void()> fn) {
+            return [fn = std::move(fn), trace_inv, trace_hid]() {
+                STRACE_CONTEXT(trace_inv, trace_hid, 2);
+                const long long wall_start = STRACE_NOW_NS();
+                const long long cpu_start = STRACE_THREAD_CPU_NOW_NS();
+                {
+                    STRACE("simpler_run.runner_run.async_destroy_aicore_stream");
+                    fn();
+                }
+                STRACE_HOST_SPAN_AT(
+                    "simpler_run.runner_run.async_destroy_aicore_stream.thread_cpu", wall_start,
+                    STRACE_THREAD_CPU_NOW_NS() - cpu_start, 3
+                );
+            };
+        }
+    );
+    if (rc != 0) {
+        LOG_ERROR("async rtStreamDestroy launch (run AICore slot %u) failed: %d", slot, rc);
     }
     return rc;
 }
@@ -619,7 +665,11 @@ int DeviceRunner::reap_run(unsigned slot) {
         LOG_ERROR("reap_run: invalid stream set %u", slot);
         return -1;
     }
-    int rc = sync_stream_pair(run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot));
+    int rc = 0;
+    {
+        STRACE("simpler_run.runner_run.native_fence_wait");
+        rc = sync_stream_pair(run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot));
+    }
     if (rc != 0) {
         // The pair wait surfaces the AICore op-timeout (STARS-reaped op ->
         // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout
@@ -639,11 +689,17 @@ int DeviceRunner::reap_run(unsigned slot) {
         return rc;
     }
 
-    read_device_wall_ns();
+    {
+        STRACE("simpler_run.runner_run.read_device_wall");
+        read_device_wall_ns();
+    }
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
-    teardown_shared_collectors_after_run();
+    {
+        STRACE("simpler_run.runner_run.teardown_collectors");
+        teardown_shared_collectors_after_run();
+    }
 
     // a2a3-only dep_gen teardown: host-orch emits the graph snapshot adopted
     // from the prepare thread; device-orch stops the collector, reconciles the

@@ -981,13 +981,9 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     int rc = 0;
 
-    LOG_INFO("=== Copying Results Back to Host ===");
-
     // Copy all recorded tensors from device back to host
     TensorLease *tensor_leases = runtime->tensor_leases_.data();
     int tensor_lease_count = static_cast<int>(runtime->tensor_leases_.size());
-
-    LOG_INFO("Tensor leases to process: %d", tensor_lease_count);
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
@@ -1024,6 +1020,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     if (skip_tensor_copy_back) {
         LOG_WARN("Skipping tensor copy-back because execution failed");
     } else {
+        STRACE("simpler_run.validate.copy_back");
         for (int i = 0; i < tensor_lease_count; i++) {
             const TensorLease &lease = tensor_leases[i];
 
@@ -1047,6 +1044,9 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
                 continue;
             }
 
+            char copy_attrs[96];
+            std::snprintf(copy_attrs, sizeof(copy_attrs), "index=%d bytes=%zu", i, lease.size);
+            STRACE_A("simpler_run.validate.copy_back.tensor", copy_attrs);
             int copy_rc = api->copy_from_device(lease.host_ptr, lease.dev_ptr, lease.size);
             if (copy_rc != 0) {
                 LOG_ERROR("Failed to copy tensor %d from device: %d", i, copy_rc);
@@ -1058,10 +1058,10 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     }
 
     // Cleanup device tensors
-    LOG_INFO("=== Cleaning Up ===");
-    release_tensor_leases(runtime, api);
-
-    LOG_INFO("=== Finalize Complete ===");
+    {
+        STRACE("simpler_run.validate.release_leases");
+        release_tensor_leases(runtime, api);
+    }
 
     if (rc == 0 && runtime_status != 0) {
         rc = runtime_status;

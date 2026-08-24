@@ -11,7 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 #include "host/run_stream_slots.h"
@@ -69,6 +72,12 @@ RunStreamSlots make_slots(FakeStreams &fake) {
     );
 }
 
+RunStreamSlots::ThreadFactory thread_factory() {
+    return [](std::function<void()> fn) {
+        return std::thread(std::move(fn));
+    };
+}
+
 // The AICPU stream is the slot's for the runner's lifetime; the AICore stream
 // belongs to one run, so the count advances once per acquire.
 TEST(RunStreamSlots, EveryAcquireCreatesAnAicoreStreamAndKeepsTheAicpuOne) {
@@ -89,6 +98,85 @@ TEST(RunStreamSlots, EveryAcquireCreatesAnAicoreStreamAndKeepsTheAicpuOne) {
     EXPECT_EQ(slots.aicpu(0), aicpu) << "the AICPU stream must not be recreated";
     EXPECT_NE(slots.aicore(0), first_aicore) << "the AICore stream must be a new one";
     EXPECT_EQ(slots.created_count(), 2u);
+}
+
+TEST(RunStreamSlots, AsyncRetireReplenishesTheNextFreshStreamOffTheAcquirePath) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    void *first_aicore = slots.aicore(0);
+    ASSERT_EQ(slots.retire_aicore_async(0, thread_factory()), 0);
+    EXPECT_FALSE(slots.ready(0));
+    EXPECT_EQ(slots.aicore(0), first_aicore) << "the in-flight destroy retains ownership";
+
+    ASSERT_EQ(slots.acquire(0), 0) << "acquire joins the pending replenish";
+    EXPECT_TRUE(slots.ready(0));
+    EXPECT_NE(slots.aicore(0), first_aicore);
+    EXPECT_EQ(slots.created_count(), 2u);
+}
+
+TEST(RunStreamSlots, AsyncRetireUsesOneResidentSerialWorkerAcrossSlots) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+
+    std::atomic<int> workers_created{0};
+    std::atomic<int> active_jobs{0};
+    std::atomic<int> max_active_jobs{0};
+    RunStreamSlots::ThreadFactory factory = [&workers_created](std::function<void()> fn) {
+        workers_created.fetch_add(1);
+        return std::thread(std::move(fn));
+    };
+    RunStreamSlots::JobWrapper wrapper = [&active_jobs, &max_active_jobs](std::function<void()> fn) {
+        return [fn = std::move(fn), &active_jobs, &max_active_jobs]() {
+            int active = active_jobs.fetch_add(1) + 1;
+            int observed = max_active_jobs.load();
+            while (active > observed && !max_active_jobs.compare_exchange_weak(observed, active)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            fn();
+            active_jobs.fetch_sub(1);
+        };
+    };
+
+    ASSERT_EQ(slots.retire_aicore_async(0, factory, wrapper), 0);
+    ASSERT_EQ(slots.retire_aicore_async(1, factory, wrapper), 0);
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+    EXPECT_EQ(workers_created.load(), 1);
+    EXPECT_EQ(max_active_jobs.load(), 1);
+}
+
+TEST(RunStreamSlots, AsyncReplenishCreateFailureLeavesTheSlotEmpty) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    fake.fail_next_creates(1);
+    ASSERT_EQ(slots.retire_aicore_async(0, thread_factory()), 0);
+
+    EXPECT_EQ(slots.acquire(0), -7);
+    EXPECT_EQ(slots.aicore(0), nullptr);
+    EXPECT_EQ(slots.created_count(), 1u);
+    EXPECT_EQ(slots.destroy_all(), 0);
+    EXPECT_EQ(fake.live_count(), 0u);
+}
+
+TEST(RunStreamSlots, AsyncDestroyFailureLocksTheSlotUntilTeardownRetriesIt) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    void *stranded = slots.aicore(0);
+    fake.fail_next_destroys(1);
+    ASSERT_EQ(slots.retire_aicore_async(0, thread_factory()), 0);
+
+    EXPECT_EQ(slots.acquire(0), -13);
+    EXPECT_EQ(slots.aicore(0), stranded);
+    EXPECT_EQ(slots.created_count(), 1u);
+    EXPECT_EQ(slots.destroy_all(), 0);
+    EXPECT_EQ(fake.live_count(), 0u);
 }
 
 // The three consequences a failed destroy must have.

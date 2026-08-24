@@ -12,6 +12,7 @@
 #ifndef SRC_COMMON_WORKER_NATIVE_RUN_LAUNCH_SIGNAL_H_
 #define SRC_COMMON_WORKER_NATIVE_RUN_LAUNCH_SIGNAL_H_
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -35,6 +36,13 @@ public:
             notified_ = true;
         }
         cv_.notify_one();
+    }
+
+    bool wait_for(std::chrono::microseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this]() {
+            return notified_;
+        });
     }
 
 private:

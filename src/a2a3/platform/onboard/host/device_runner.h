@@ -119,6 +119,7 @@ public:
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
     int provision_native_run_resources(uint32_t pipeline_slot) override;
     int abandon_native_run_resources(uint32_t pipeline_slot) override;
+    int complete_native_run_resources(uint32_t pipeline_slot) override;
 
     // Map/unmap a device buffer into host address space via
     // halHostRegister(DEV_SVM_MAP_HOST) / halHostUnregister. The returned host
@@ -264,6 +265,7 @@ private:
     // image's instructions, so the slot must refuse the next run until finalize
     // reclaims it.
     int retire_run_aicore_stream(unsigned slot);
+    int retire_run_aicore_stream_async(unsigned slot);
     int destroy_run_stream_sets();
 
     // The kernel submission boundary is separate from the stream wait and the

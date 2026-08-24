@@ -44,7 +44,10 @@ struct NativeRunState {
         trace_hid(trace_hid_in) {}
 
     ~NativeRunState() {
+        executor_cancelled.store(true, std::memory_order_release);
+        executor_start_signal.notify();
         if (executor.joinable()) executor.join();
+        if (executor_submitted) executor_task_done_signal.wait();
         if (host_thread_state != nullptr) {
             runner->destroy_native_run_thread_state(host_thread_state);
         }
@@ -69,6 +72,13 @@ struct NativeRunState {
     std::atomic<bool> execution_done{false};
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
     NativeRunLaunchSignal launch_signal{};
+    NativeRunLaunchSignal completion_signal{};
+    NativeRunLaunchSignal executor_ready_signal{};
+    NativeRunLaunchSignal executor_start_signal{};
+    NativeRunLaunchSignal executor_task_done_signal{};
+    std::atomic<int> executor_attach_rc{-1};
+    std::atomic<bool> executor_cancelled{false};
+    bool executor_submitted{false};
     void *host_thread_state{nullptr};
     uint64_t run_id{0};
     uint64_t generation{0};

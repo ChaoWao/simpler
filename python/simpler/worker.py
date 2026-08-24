@@ -75,6 +75,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
@@ -2444,11 +2445,39 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             activated: bool
             native_run: Any = None
             published: bool = False
+            prepare_future: Future[None] | None = None
+            prepare_done: threading.Event = field(default_factory=threading.Event)
+            prepare_error: BaseException | None = None
+            completion_future: Future[None] | None = None
+            completion_start: threading.Event = field(default_factory=threading.Event)
+            completion_cancel: threading.Event = field(default_factory=threading.Event)
+            completion_done: threading.Event = field(default_factory=threading.Event)
+            completion_error: BaseException | None = None
 
         supports_concurrent_native_prepare = bool(cw._impl.supports_concurrent_native_prepare)
         staged_frames: dict[int, _StagedFrame] = {}
         active_frame: _StagedFrame | None = None
         active_run: Any = None
+        prepare_pool = ThreadPoolExecutor(
+            max_workers=_TASK_FRAME_COUNT,
+            thread_name_prefix=f"simpler-prepare-dev{device_id}",
+        )
+        completion_pool = ThreadPoolExecutor(
+            max_workers=_TASK_FRAME_COUNT,
+            thread_name_prefix=f"simpler-complete-dev{device_id}",
+        )
+
+        def prestart_pool(pool: ThreadPoolExecutor) -> None:
+            # ThreadPoolExecutor starts workers lazily. Hold one task on each
+            # worker so all pthread creation is paid before the first frame.
+            barrier = threading.Barrier(_TASK_FRAME_COUNT + 1)
+            futures = [pool.submit(barrier.wait) for _ in range(_TASK_FRAME_COUNT)]
+            barrier.wait()
+            for future in futures:
+                future.result()
+
+        prestart_pool(prepare_pool)
+        prestart_pool(completion_pool)
 
         def config_has_diagnostics(config: CallConfig) -> bool:
             # Mirrors CallConfig::diagnostics_any(); these modes share native
@@ -2462,7 +2491,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             )
 
         def has_backend_prepared_frame() -> bool:
-            return any(frame.native_run is not None for frame in staged_frames.values())
+            return any(
+                frame.native_run is not None or (frame.prepare_future is not None and not frame.prepare_done.is_set())
+                for frame in staged_frames.values()
+            )
 
         def read_identity(frame_buf: memoryview) -> tuple[int, int, int, int, int]:
             return (
@@ -2507,7 +2539,91 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             )
             return frame.native_run
 
+        def start_frame_native_prepare(frame: _StagedFrame) -> None:
+            if frame.native_run is not None or frame.prepare_future is not None:
+                return
+
+            def prepare() -> None:
+                try:
+                    native_run = prepare_frame_native_run(frame)
+                    start_frame_completion_waiter(frame, native_run)
+                except BaseException as error:  # noqa: BLE001 - progress owner publishes this failure
+                    frame.prepare_error = error
+                finally:
+                    frame.prepare_done.set()
+
+            frame.prepare_done.clear()
+            frame.prepare_future = prepare_pool.submit(prepare)
+
+        def start_frame_completion_waiter(frame: _StagedFrame, native_run: Any) -> None:
+            if frame.completion_future is not None:
+                return
+
+            def complete() -> None:
+                frame.completion_start.wait()
+                if frame.completion_cancel.is_set():
+                    frame.completion_done.set()
+                    return
+                try:
+                    cw._impl._wait_native_run(native_run)
+                except BaseException as error:  # noqa: BLE001 - progress owner publishes this failure
+                    frame.completion_error = error
+                    # A failed wait may still leave a live native token. Make
+                    # one cleanup attempt here because ownership transferred
+                    # to this waiter when completion_start was signalled.
+                    try:
+                        cw._impl._finalize_native_run(native_run)
+                    except BaseException as finalize_error:  # noqa: BLE001
+                        if finalize_error is not error:
+                            frame.completion_error = RuntimeError(f"{error}; native finalize: {finalize_error}")
+                else:
+                    try:
+                        cw._impl._finalize_native_run(native_run)
+                    except BaseException as error:  # noqa: BLE001 - progress owner publishes this failure
+                        frame.completion_error = error
+                finally:
+                    frame.completion_done.set()
+
+            frame.completion_future = completion_pool.submit(complete)
+
+        def finish_frame_native_prepare(frame: _StagedFrame) -> None:
+            future = frame.prepare_future
+            if future is None:
+                return
+            future.result()
+            if frame.prepare_error is not None:
+                error = frame.prepare_error
+                frame.prepare_error = None
+                raise error
+
+        def cancel_frame_completion_waiter(frame: _StagedFrame) -> None:
+            future = frame.completion_future
+            if future is None or frame.completion_start.is_set():
+                return
+            frame.completion_cancel.set()
+            frame.completion_start.set()
+            future.result()
+
+        def finish_frame_native_completion(frame: _StagedFrame, *, block: bool) -> bool:
+            future = frame.completion_future
+            if future is None:
+                return False
+            if not block and not frame.completion_done.is_set():
+                return False
+            future.result()
+            if frame.completion_error is not None:
+                error = frame.completion_error
+                frame.completion_error = None
+                raise error
+            return True
+
         def finalize_frame_native_run(frame: _StagedFrame) -> None:
+            finish_frame_native_prepare(frame)
+            if frame.completion_future is not None:
+                if frame.completion_start.is_set() and not frame.completion_cancel.is_set():
+                    finish_frame_native_completion(frame, block=True)
+                    return
+                cancel_frame_completion_waiter(frame)
             native_run = frame.native_run
             if native_run is None:
                 return
@@ -2635,57 +2751,24 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 if stop_after_frame_scan:
                     break
 
-                next_active = None
-                if active_frame is None:
-                    activated_frames = [frame for frame in staged_frames.values() if frame.activated]
-                    if activated_frames:
-                        next_active = min(activated_frames, key=lambda frame: frame.identity[4])
-
-                for staged in sorted(staged_frames.values(), key=lambda frame: frame.identity[4]):
-                    # A frame published before any active claim is validation-only.
-                    # Keep considering it so activation or a later predecessor
-                    # claim can add the missing native token.
-                    native_prepare_now = (
-                        staged.native_run is None
-                        and supports_concurrent_native_prepare
-                        and not config_has_diagnostics(staged.config)
-                        and (
-                            (active_frame is None and staged is next_active)
-                            or (
-                                active_frame is not None
-                                and staged is not active_frame
-                                and not config_has_diagnostics(active_frame.config)
-                            )
-                        )
-                    )
-                    if staged.published and not native_prepare_now:
-                        continue
-                    try:
-                        if native_prepare_now:
-                            prepare_frame_native_run(staged)
-                        if not staged.published:
-                            publish_frame_staged(staged)
-                    except Exception as e:  # noqa: BLE001
-                        prepare_message = _format_exc(f"chip_process dev={device_id}: native prepare", e)
-                        finalize_failed = False
-                        try:
-                            finalize_frame_native_run(staged)
-                        except Exception as finalize_error:  # noqa: BLE001
-                            finalize_failed = True
-                            prepare_message += "; " + _format_exc("native finalize", finalize_error)
-                        fail_frame(staged, prepare_message)
-                        staged_frames.pop(staged.index, None)
-                        if finalize_failed:
-                            shutdown_message = prepare_message
-                            stop_after_frame_scan = True
-                            break
-
-                if stop_after_frame_scan:
-                    break
-
+                # Retire a completed active run before doing potentially slow
+                # native preparation for its successor.  Preparing the staged
+                # frame first can spend milliseconds in stream/resource setup
+                # after the active device work has already finished, turning
+                # successor setup jitter into predecessor finalize/validate
+                # tail latency.  When the active run is still executing we
+                # continue below and overlap that same preparation with it.
                 if active_frame is not None:
                     try:
-                        run_complete = bool(cw._impl._poll_native_run(active_run))
+                        if active_frame.completion_future is not None:
+                            # The dedicated waiter is notified by the native
+                            # executor and performs validate/retirement itself.
+                            # Keep this bounded wait so mailbox/control progress
+                            # remains responsive while avoiding a busy spin.
+                            active_frame.completion_done.wait(0.0001)
+                            run_complete = finish_frame_native_completion(active_frame, block=False)
+                        else:
+                            run_complete = bool(cw._impl._poll_native_run(active_run))
                     except Exception as e:  # noqa: BLE001
                         poll_message = _format_exc(f"chip_process dev={device_id}: native poll", e)
                         try:
@@ -2735,9 +2818,66 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                 shutdown_message = msg
                                 break
 
+                next_active = None
+                if active_frame is None:
+                    activated_frames = [frame for frame in staged_frames.values() if frame.activated]
+                    if activated_frames:
+                        next_active = min(activated_frames, key=lambda frame: frame.identity[4])
+
+                for staged in sorted(staged_frames.values(), key=lambda frame: frame.identity[4]):
+                    # A frame published before any active claim is validation-only.
+                    # Keep considering it so activation or a later predecessor
+                    # claim can add the missing native token.
+                    native_prepare_now = (
+                        staged.native_run is None
+                        and supports_concurrent_native_prepare
+                        and not config_has_diagnostics(staged.config)
+                        and (
+                            (active_frame is None and staged is next_active)
+                            or (
+                                active_frame is not None
+                                and staged is not active_frame
+                                and not config_has_diagnostics(active_frame.config)
+                            )
+                        )
+                    )
+                    if staged.published and not native_prepare_now:
+                        continue
+                    try:
+                        if native_prepare_now:
+                            start_frame_native_prepare(staged)
+                            if not staged.prepare_done.is_set():
+                                continue
+                            finish_frame_native_prepare(staged)
+                        if not staged.published:
+                            publish_frame_staged(staged)
+                    except Exception as e:  # noqa: BLE001
+                        prepare_message = _format_exc(f"chip_process dev={device_id}: native prepare", e)
+                        finalize_failed = False
+                        try:
+                            finalize_frame_native_run(staged)
+                        except Exception as finalize_error:  # noqa: BLE001
+                            finalize_failed = True
+                            prepare_message += "; " + _format_exc("native finalize", finalize_error)
+                        fail_frame(staged, prepare_message)
+                        staged_frames.pop(staged.index, None)
+                        if finalize_failed:
+                            shutdown_message = prepare_message
+                            stop_after_frame_scan = True
+                            break
+
+                if stop_after_frame_scan:
+                    break
+
                 if active_frame is None:
                     eligible = sorted(
-                        (frame for frame in staged_frames.values() if frame.activated and frame.published),
+                        (
+                            frame
+                            for frame in staged_frames.values()
+                            if frame is next_active
+                            and frame.published
+                            and (frame.prepare_future is None or frame.prepare_done.is_set())
+                        ),
                         key=lambda frame: frame.identity[4],
                     )
                     if eligible:
@@ -2787,6 +2927,11 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                     shutdown_message = launch_message
                                     break
                             else:
+                                if next_frame.completion_future is not None:
+                                    # Transfer sole ownership of the launched
+                                    # token to the already-parked waiter.
+                                    next_frame.native_run = None
+                                    next_frame.completion_start.set()
                                 active_frame = next_frame
                                 active_run = native_run
                                 _mailbox_store_i32(next_frame.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
@@ -2826,6 +2971,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     _mailbox_store_i32(frame_state_addr, _TASK_FAILED)
             for frame_buf in frame_bufs:
                 frame_buf.release()
+            prepare_pool.shutdown(wait=True)
+            completion_pool.shutdown(wait=True)
 
     try:
         if task_frame_count >= 2:

@@ -542,6 +542,9 @@ public:
     /** Provision/abandon platform resources owned by one prepared native run. */
     virtual int provision_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
     virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
+    virtual int complete_native_run_resources(uint32_t pipeline_slot) {
+        return abandon_native_run_resources(pipeline_slot);
+    }
 
     /**
      * Execute a Runtime. Each arch implements its own `run()` — the bodies

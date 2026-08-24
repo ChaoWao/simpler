@@ -43,6 +43,7 @@
 #include "callable.h"
 #include "callable_protocol.h"
 #include "call_config.h"
+#include "common/strace.h"
 #include "chip_callable_layout.h"
 #include "common/core_type.h"
 #include "common/host_api.h"
@@ -1409,7 +1410,11 @@ int DeviceRunnerBase::sync_run_streams() { return sync_stream_pair(stream_aicpu_
 
 int DeviceRunnerBase::sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream) {
     LOG_INFO("=== aclrtSynchronizeStreamWithTimeout AICPU stream ===");
-    int rc = aclrtSynchronizeStreamWithTimeout(aicpu_stream, timeout_config_.stream_sync_timeout_ms);
+    int rc = 0;
+    {
+        STRACE("simpler_run.runner_run.native_fence_wait.aicpu");
+        rc = aclrtSynchronizeStreamWithTimeout(aicpu_stream, timeout_config_.stream_sync_timeout_ms);
+    }
     if (rc == ACL_ERROR_RT_STREAM_SYNC_TIMEOUT) {
         LOG_ERROR(
             "Stream sync timeout: stream=AICPU timeout_ms=%d device_id=%d block_dim=%d",
@@ -1425,7 +1430,10 @@ int DeviceRunnerBase::sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicor
     }
 
     LOG_INFO("=== aclrtSynchronizeStreamWithTimeout AICore stream ===");
-    rc = aclrtSynchronizeStreamWithTimeout(aicore_stream, timeout_config_.stream_sync_timeout_ms);
+    {
+        STRACE("simpler_run.runner_run.native_fence_wait.aicore");
+        rc = aclrtSynchronizeStreamWithTimeout(aicore_stream, timeout_config_.stream_sync_timeout_ms);
+    }
     if (rc == ACL_ERROR_RT_STREAM_SYNC_TIMEOUT) {
         LOG_ERROR(
             "Stream sync timeout: stream=AICore timeout_ms=%d device_id=%d block_dim=%d",

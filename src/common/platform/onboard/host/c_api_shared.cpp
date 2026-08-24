@@ -36,10 +36,15 @@
 #include <pthread.h>
 
 #include <cstdlib>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <new>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -59,6 +64,115 @@ using OnboardNativeRunState = NativeRunState<DeviceRunnerBase>;
 // Phase entry points validate raw caller storage before beginning object
 // lifetime, so the on-storage magic must remain the leading bytes.
 static_assert(__builtin_offsetof(OnboardNativeRunState, magic) == 0, "native-run magic must lead runtime storage");
+
+namespace {
+
+// Keep two device-bound host executors resident for the depth-two pipeline.
+// Per-run std::thread construction occasionally stalls all ranks for tens of
+// milliseconds; if one rank stalls longer, the other ranks enter the device
+// collective early and the same host jitter merely appears inside runner_run.
+class NativeExecutorPool {
+public:
+    explicit NativeExecutorPool(DeviceRunnerBase *runner) :
+        runner_(runner) {
+        for (unsigned i = 0; i < PTO_PIPELINE_MAX_DEPTH; ++i) {
+            workers_.push_back(runner_->create_thread([this]() {
+                worker_loop();
+            }));
+        }
+    }
+
+    ~NativeExecutorPool() { stop(); }
+
+    NativeExecutorPool(const NativeExecutorPool &) = delete;
+    NativeExecutorPool &operator=(const NativeExecutorPool &) = delete;
+
+    bool submit(std::function<void()> fn) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return false;
+            queue_.push_back(std::move(fn));
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return;
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (std::thread &worker : workers_) {
+            if (worker.joinable()) worker.join();
+        }
+        workers_.clear();
+    }
+
+private:
+    void worker_loop() {
+        for (;;) {
+            std::function<void()> fn;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() {
+                    return stopping_ || !queue_.empty();
+                });
+                if (stopping_ && queue_.empty()) return;
+                fn = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            try {
+                fn();
+            } catch (...) {
+                // Per-run closures publish their own failure. Never let one
+                // malformed run permanently shrink the resident pool.
+            }
+        }
+    }
+
+    DeviceRunnerBase *runner_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<std::function<void()>> queue_;
+    std::vector<std::thread> workers_;
+    bool stopping_{false};
+};
+
+std::mutex g_native_executor_pools_mutex;
+std::unordered_map<DeviceContextHandle, std::unique_ptr<NativeExecutorPool>> g_native_executor_pools;
+
+NativeExecutorPool *get_native_executor_pool(DeviceContextHandle ctx) {
+    std::lock_guard<std::mutex> lock(g_native_executor_pools_mutex);
+    auto it = g_native_executor_pools.find(ctx);
+    return it == g_native_executor_pools.end() ? nullptr : it->second.get();
+}
+
+bool install_native_executor_pool(DeviceContextHandle ctx, DeviceRunnerBase *runner) {
+    std::unique_ptr<NativeExecutorPool> pool;
+    try {
+        pool = std::make_unique<NativeExecutorPool>(runner);
+    } catch (...) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_native_executor_pools_mutex);
+    return g_native_executor_pools.emplace(ctx, std::move(pool)).second;
+}
+
+void remove_native_executor_pool(DeviceContextHandle ctx) {
+    std::unique_ptr<NativeExecutorPool> pool;
+    {
+        std::lock_guard<std::mutex> lock(g_native_executor_pools_mutex);
+        auto it = g_native_executor_pools.find(ctx);
+        if (it == g_native_executor_pools.end()) return;
+        pool = std::move(it->second);
+        g_native_executor_pools.erase(it);
+    }
+    pool->stop();
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -264,6 +378,7 @@ void destroy_device_context(DeviceContextHandle ctx) {
         LOG_ERROR("destroy_device_context: refusing to destroy a context with an unfinalized native run");
         return;
     }
+    remove_native_executor_pool(ctx);
     delete runner;
 }
 
@@ -313,6 +428,7 @@ int finalize_device(DeviceContextHandle ctx) {
             LOG_ERROR("finalize_device: native run must be finalized first");
             return -1;
         }
+        remove_native_executor_pool(ctx);
         return runner->finalize();
     } catch (...) {
         return -1;
@@ -403,6 +519,10 @@ int simpler_init(
             return -1;
         }
         if (rc != 0) return rc;
+    }
+    if (!install_native_executor_pool(ctx, runner)) {
+        LOG_ERROR("simpler_init: failed to create resident native executor pool");
+        return -1;
     }
     return 0;
 }
@@ -505,6 +625,18 @@ static bool device_profiling_enabled() {
     return enabled;
 }
 
+static uint64_t device_profiling_min_wall_ns() {
+    static const uint64_t min_wall_ns = [] {
+        const char *value = std::getenv("SIMPLER_DEVICE_STRACE_MIN_WALL_US");
+        if (value == nullptr || *value == '\0') return UINT64_C(0);
+        char *end = nullptr;
+        unsigned long long us = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0') return UINT64_C(0);
+        return static_cast<uint64_t>(us) * UINT64_C(1000);
+    }();
+    return min_wall_ns;
+}
+
 // Emit device-domain trace markers for the AICPU phases. RunWall (the whole
 // on-NPU wall, i.e. the former RunTiming.device_wall) is emitted at depth 2
 // under runner_run; its preamble/so_load/graph_build/post_orch subdivisions are
@@ -517,6 +649,11 @@ static void emit_device_phase_markers(DeviceRunnerBase *runner) {
     if (run_wall_ns != 0) {
         STRACE_DEV_SPAN_AT("simpler_run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
     }
+    // A single RunWall marker per run is cheap and is required to distinguish
+    // real device tails from a host waiter that resumed late. Detailed phase
+    // and task-slot markers remain thresholded to avoid perturbing normal D2H
+    // and stream-retirement paths.
+    if (run_wall_ns < device_profiling_min_wall_ns()) return;
     struct PhaseName {
         AicpuPhase phase;
         const char *name;
@@ -705,20 +842,33 @@ int simpler_prepare_run(
         state->trace_start_ns = trace_start_ns;
         STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
-        int rc = runner->attach_current_thread(runner->device_id());
+        int rc = -1;
+        {
+            STRACE("simpler_run.prepare.attach");
+            rc = runner->attach_current_thread(runner->device_id());
+        }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
         state->runner_resources_owned = true;
-        rc = runner->provision_native_run_resources(state->pipeline_slot);
+        {
+            STRACE("simpler_run.prepare.resources");
+            rc = runner->provision_native_run_resources(state->pipeline_slot);
+        }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
-        rc = runner->prepare_launch_shape(state->runtime, state->config);
+        {
+            STRACE("simpler_run.prepare.launch_shape");
+            rc = runner->prepare_launch_shape(state->runtime, state->config);
+        }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
         // Diagnostic binding reads runner-global collector configuration. It
         // is depth-one, while concurrent HBG preparation must leave the active
         // run's configuration untouched until launch.
-        if (!overlaps_active_run) runner->apply_call_config(state->config);
+        if (!overlaps_active_run) {
+            STRACE("simpler_run.prepare.apply_config");
+            runner->apply_call_config(state->config);
+        }
 
         {
             STRACE("simpler_run.bind");
@@ -728,7 +878,95 @@ int simpler_prepare_run(
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
-        state->host_thread_state = runner->take_native_run_thread_state();
+        {
+            STRACE("simpler_run.prepare.take_thread_state");
+            state->host_thread_state = runner->take_native_run_thread_state();
+        }
+
+        // Create and attach the blocking executor while this successor is
+        // prepared. In the two-frame HBG path prepare runs independently from
+        // the progress owner, so thread startup overlaps the active device run
+        // instead of delaying the successor after the execution claim opens.
+        {
+            STRACE("simpler_run.prepare.create_executor");
+            NativeExecutorPool *executor_pool = get_native_executor_pool(ctx);
+            if (executor_pool == nullptr) return cleanup_failed_prepare(state, -1, true);
+            const DeviceRunnerBase::NativeRunThreadSelection executor_selection =
+                state->runner->capture_native_run_thread_selection();
+            state->executor_submitted = executor_pool->submit([state, ctx, executor_selection]() {
+                auto task_done_guard = RAIIScopeGuard([state]() {
+                    state->executor_task_done_signal.notify();
+                });
+                pthread_once(&g_runner_key_once, create_runner_key);
+                pthread_setspecific(g_runner_key, ctx);
+                state->runner->restore_native_run_thread_selection(executor_selection);
+                STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
+                int rc = -1;
+                bool entered_run = false;
+                int attach_rc = -1;
+                try {
+                    {
+                        STRACE("simpler_run.prepare.executor_attach");
+                        attach_rc = state->runner->attach_current_thread(state->runner->device_id());
+                    }
+                } catch (...) {
+                    attach_rc = -1;
+                }
+                state->executor_attach_rc.store(attach_rc, std::memory_order_release);
+                state->executor_ready_signal.notify();
+                state->executor_start_signal.wait();
+                if (state->executor_cancelled.load(std::memory_order_acquire)) {
+                    pthread_setspecific(g_runner_key, nullptr);
+                    return;
+                }
+                try {
+                    if (attach_rc == 0) {
+                        {
+                            STRACE("simpler_run.launch.adopt_thread_state");
+                            state->adopt_host_thread_state();
+                        }
+                        {
+                            STRACE("simpler_run.launch.activate_shape");
+                            state->runner->activate_launch_shape(state->runtime);
+                        }
+                        {
+                            STRACE("simpler_run.runner_run");
+                            entered_run = true;
+                            rc = state->runner->run(state->runtime, state->config);
+                        }
+                    } else {
+                        rc = attach_rc;
+                    }
+                } catch (...) {
+                    rc = -1;
+                }
+                if (entered_run && rc != 0) {
+                    // Error exits retire synchronously inside DeviceRunner::run.
+                    // A successful run keeps ownership until finalize has
+                    // completed output D2H, then starts async replenish.
+                    state->runner_resources_owned = false;
+                } else if (!entered_run && state->runner_resources_owned) {
+                    int resources_rc = -1;
+                    try {
+                        resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+                    } catch (...) {}
+                    state->runner_resources_owned = false;
+                    if (rc == 0) rc = resources_rc;
+                }
+                pthread_setspecific(g_runner_key, nullptr);
+                state->execution_rc.store(rc, std::memory_order_relaxed);
+                state->execution_done.store(true, std::memory_order_release);
+                state->completion_signal.notify();
+                state->launch_signal.notify();
+            });
+            if (!state->executor_submitted) return cleanup_failed_prepare(state, -1, true);
+        }
+        {
+            STRACE("simpler_run.prepare.executor_ready_wait");
+            state->executor_ready_signal.wait();
+        }
+        rc = state->executor_attach_rc.load(std::memory_order_acquire);
+        if (rc != 0) return cleanup_failed_prepare(state, rc, true);
         return 0;
     } catch (...) {
         if (state != nullptr) return cleanup_failed_prepare(state, -1, true);
@@ -740,7 +978,13 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunState *state = native_run_state(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
     if (!state->runner->can_accept_run() || !state->runner_reserved) return -1;
-    if (!state->runner->try_acquire_native_run(state, &state->launch_signal)) {
+    STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
+    bool acquired = false;
+    {
+        STRACE("simpler_run.launch.claim");
+        acquired = state->runner->try_acquire_native_run(state, &state->launch_signal);
+    }
+    if (!acquired) {
         LOG_ERROR("simpler_launch_run: execution claim is occupied (%s)", state->trace_attrs);
         return -1;
     }
@@ -761,8 +1005,15 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     auto selection_guard = RAIIScopeGuard([runner = state->runner, caller_selection]() {
         runner->restore_native_run_thread_selection(caller_selection);
     });
-    if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
-        state->runner->select_arena_bank(state->arena_bank) != 0) {
+    int select_rc = 0;
+    {
+        STRACE("simpler_run.launch.select_resources");
+        if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
+            state->runner->select_arena_bank(state->arena_bank) != 0) {
+            select_rc = -1;
+        }
+    }
+    if (select_rc != 0) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
         return -1;
@@ -770,55 +1021,11 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 
     state->phase.store(NativeRunPhase::Launching, std::memory_order_release);
 
-    try {
-        // The compatibility backend uses one blocking executor per run. The
-        // prepare-through-finalize runner claim limits it to one per context.
-        state->executor = state->runner->create_thread([state, ctx]() {
-            pthread_once(&g_runner_key_once, create_runner_key);
-            pthread_setspecific(g_runner_key, ctx);
-            STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
-            int rc = -1;
-            bool entered_run = false;
-            try {
-                int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
-                if (attach_rc == 0) {
-                    state->adopt_host_thread_state();
-                    state->runner->activate_launch_shape(state->runtime);
-                    {
-                        STRACE("simpler_run.runner_run");
-                        entered_run = true;
-                        rc = state->runner->run(state->runtime, state->config);
-                    }
-                } else {
-                    rc = attach_rc;
-                }
-            } catch (...) {
-                rc = -1;
-            }
-            if (entered_run) {
-                // run() owns stream retirement on every exit once entered.
-                state->runner_resources_owned = false;
-            } else if (state->runner_resources_owned) {
-                int resources_rc = -1;
-                try {
-                    resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
-                } catch (...) {}
-                state->runner_resources_owned = false;
-                if (rc == 0) rc = resources_rc;
-            }
-            pthread_setspecific(g_runner_key, nullptr);
-            state->execution_rc.store(rc, std::memory_order_relaxed);
-            state->execution_done.store(true, std::memory_order_release);
-            state->launch_signal.notify();
-        });
-    } catch (...) {
-        state->runner->release_native_run(state);
-        state->runner_claimed = false;
-        state->phase.store(NativeRunPhase::Prepared, std::memory_order_release);
-        return -1;
+    state->executor_start_signal.notify();
+    {
+        STRACE("simpler_run.launch.handoff_wait");
+        state->launch_signal.wait();
     }
-
-    state->launch_signal.wait();
     if (state->execution_done.load(std::memory_order_acquire)) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return state->execution_rc.load(std::memory_order_relaxed);
@@ -836,6 +1043,17 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
     }
+    // Keep mailbox progress responsive while avoiding a Python-side busy loop.
+    // The executor wakes this wait immediately on completion; the timeout is a
+    // bound for control/shutdown scans, not an added completion latency.
+    // The 100 us timeout keeps control/shutdown latency bounded. A 1 ms
+    // experiment reduced finalize polling but moved large tails into successor
+    // resource preparation and launch, so it is intentionally not used.
+    state->completion_signal.wait_for(std::chrono::microseconds(100));
+    if (state->execution_done.load(std::memory_order_acquire)) {
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
     return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
 }
 
@@ -844,7 +1062,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared || phase == NativeRunPhase::Launching) return -1;
-    if (state->executor.joinable()) state->executor.join();
+    state->completion_signal.wait();
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     return state->execution_rc.load(std::memory_order_relaxed);
 }
@@ -875,22 +1093,32 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     auto selection_guard = RAIIScopeGuard([runner = state->runner, caller_selection]() {
         runner->restore_native_run_thread_selection(caller_selection);
     });
-    if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
-        state->runner->select_arena_bank(state->arena_bank) != 0) {
-        return -1;
+    {
+        STRACE("simpler_run.finalize.select_resources");
+        if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
+            state->runner->select_arena_bank(state->arena_bank) != 0) {
+            return -1;
+        }
     }
 
     int execution_rc = -1;
     const bool launched = phase != NativeRunPhase::Prepared;
     if (launched) {
-        if (state->executor.joinable()) state->executor.join();
+        {
+            STRACE("simpler_run.finalize.join_executor");
+            state->completion_signal.wait();
+        }
         execution_rc = state->execution_rc.load(std::memory_order_relaxed);
     }
 
     int validation_rc = -1;
     try {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
-        int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
+        int attach_rc = -1;
+        {
+            STRACE("simpler_run.finalize.attach_thread");
+            attach_rc = state->runner->attach_current_thread(state->runner->device_id());
+        }
         if (attach_rc == 0) {
             {
                 STRACE("simpler_run.validate");
@@ -905,9 +1133,14 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     }
 
     int resources_rc = 0;
-    if (!launched && state->runner_resources_owned) {
+    if (state->runner_resources_owned) {
         try {
-            resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+            if (launched && execution_rc == 0) {
+                STRACE("simpler_run.finalize.retire_resources");
+                resources_rc = state->runner->complete_native_run_resources(state->pipeline_slot);
+            } else if (!launched) {
+                resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+            }
         } catch (...) {
             resources_rc = -1;
         }
@@ -915,14 +1148,23 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     }
 
     if (state->runner_claimed) {
-        state->runner->release_native_run(state);
+        {
+            STRACE("simpler_run.finalize.release_claim");
+            state->runner->release_native_run(state);
+        }
         state->runner_claimed = false;
     }
     if (state->runner_reserved) {
-        state->runner->release_native_run_reservation(state);
+        {
+            STRACE("simpler_run.finalize.release_reservation");
+            state->runner->release_native_run_reservation(state);
+        }
         state->runner_reserved = false;
     }
-    destroy_native_run_state(state);
+    {
+        STRACE("simpler_run.finalize.destroy_state");
+        destroy_native_run_state(state);
+    }
     emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
     if (validation_rc != 0) return validation_rc;
     if (resources_rc != 0) return resources_rc;
