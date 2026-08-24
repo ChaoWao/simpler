@@ -28,27 +28,16 @@
 // =============================================================================
 
 uint64_t PTO2SharedMemoryHandle::calculate_size(uint64_t task_window_size) {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = task_window_size;
-    }
-    return calculate_size_per_ring(task_window_sizes);
-}
-
-uint64_t PTO2SharedMemoryHandle::calculate_size_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]) {
     // Total SM size = offset just past the ring's slot_states, from the single
     // source of truth for the layout (pto2_sm_layout::ring_segment_offsets).
-    return pto2_sm_layout::ring_segment_offsets(task_window_sizes[0]).end;
+    return pto2_sm_layout::ring_segment_offsets(task_window_size).end;
 }
 
 // =============================================================================
 // Creation and Destruction
 // =============================================================================
 
-void PTO2SharedMemoryHandle::setup_pointers_per_ring(
-    const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t pitch
-) {
-    (void)task_window_sizes;
+void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     char *base = (char *)sm_base;
     header = (PTO2SharedMemoryHeader *)base;
 
@@ -68,32 +57,11 @@ void PTO2SharedMemoryHandle::setup_pointers_per_ring(
     ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
-void PTO2SharedMemoryHandle::setup_pointers(uint64_t task_window_size) {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = task_window_size;
-    }
-    setup_pointers_per_ring(task_window_sizes, task_window_size);
-}
-
 bool PTO2SharedMemoryHandle::init(
     void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t heap_size
 ) {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = task_window_size;
-        heap_sizes[r] = heap_size;
-    }
-    return init_per_ring(sm_base_arg, sm_size_arg, task_window_sizes, heap_sizes);
-}
-
-bool PTO2SharedMemoryHandle::init_per_ring(
-    void *sm_base_arg, uint64_t sm_size_arg, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
-    const uint64_t mirror_bytes = calculate_size_per_ring(task_window_sizes);
+    const uint64_t mirror_bytes = calculate_size(task_window_size);
     // The mirror has to stay inside an int32 delta's reach: a payload names its
     // argument regions that way, and set() leaves a field unbound rather than
     // truncating, so a pool out of reach would read back as null and be dereferenced
@@ -107,21 +75,20 @@ bool PTO2SharedMemoryHandle::init_per_ring(
     sm_base = sm_base_arg;
     sm_size = sm_size_arg;
     is_owner = false;
-    setup_pointers_per_ring(task_window_sizes, task_window_sizes[0]);
-    init_header_per_ring(task_window_sizes, heap_sizes);
+    setup_pointers(task_window_size);
+    init_header(task_window_size, heap_size);
     return true;
 }
 
 bool PTO2SharedMemoryHandle::attach_populated(
-    void *sm_base_arg, uint64_t sm_size_arg, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t live_slots,
-    uint64_t image_bytes
+    void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t live_slots, uint64_t image_bytes
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
     // A pitch above the capacity would name a slot the ring cannot address, and one
     // below what the host used would place every segment past the descriptors
     // short. This is the whole contract between the two sides, checked once at
     // attach rather than trusted.
-    if (live_slots == 0 || live_slots > task_window_sizes[0]) return false;
+    if (live_slots == 0 || live_slots > task_window_size) return false;
     // The image must at least hold the four slot-pitched segments; anything beyond
     // that is its argument pools, whose extents are the bind's cursors and are not
     // recomputable here. The first pool's offset is exactly where those four end.
@@ -139,9 +106,9 @@ bool PTO2SharedMemoryHandle::attach_populated(
     sm_base = sm_base_arg;
     sm_size = sm_size_arg;
     is_owner = false;
-    setup_pointers_per_ring(task_window_sizes, live_slots);
-    // Deliberately NO init_header_per_ring: the SM already holds the host
-    // orchestrator's task graph (descriptors, slot states, ring counters).
+    setup_pointers(live_slots);
+    // Deliberately NO init_header: the SM already holds the host orchestrator's
+    // task graph (descriptors, slot states, ring counters).
     return true;
 }
 
@@ -174,18 +141,6 @@ void PTO2SharedMemoryHandle::destroy() {
 //
 // no need init data in pool, init pool data when used
 void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size, uint64_t heap_size) {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = task_window_size;
-        heap_sizes[r] = heap_size;
-    }
-    init_header_per_ring(task_window_sizes, heap_sizes);
-}
-
-void PTO2SharedMemoryHandle::init_header_per_ring(
-    const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-) {
     // Flow control (starts at 0)
     header->ring.fc.init();
 
@@ -197,13 +152,13 @@ void PTO2SharedMemoryHandle::init_header_per_ring(
 
     // Ring layout info
     uint64_t offset = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
-    header->ring.task_window_size = task_window_sizes[0];
-    header->ring.task_window_mask = static_cast<int32_t>(task_window_sizes[0] - 1);
-    header->ring.heap_size = heap_sizes[0];
+    header->ring.task_window_size = task_window_size;
+    header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
+    header->ring.heap_size = heap_size;
     header->ring.task_descriptors_offset = offset;
-    offset += PTO2_ALIGN_UP(task_window_sizes[0] * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_sizes[0] * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_sizes[0] * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
 
     header->total_size = sm_size;
 
@@ -232,17 +187,14 @@ void PTO2SharedMemoryHandle::print_layout() {
     LOG_DEBUG("=== PTO2 Shared Memory Layout ===");
     LOG_DEBUG("Base address:       %p", sm_base);
     LOG_DEBUG("Total size:         %" PRIu64 " bytes", h->total_size);
-    LOG_DEBUG("Ring depth:         %d", PTO2_MAX_RING_DEPTH);
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        LOG_DEBUG("Ring %d:", r);
-        LOG_DEBUG("  task_window_size: %" PRIu64, h->ring.task_window_size);
-        LOG_DEBUG("  heap_size:        %" PRIu64 " bytes", h->ring.heap_size);
-        LOG_DEBUG(
-            "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->ring.task_descriptors_offset,
-            h->ring.task_descriptors_offset
-        );
-        LOG_DEBUG("  current_task_idx: %d", h->ring.fc.current_task_index.load(std::memory_order_acquire));
-    }
+    LOG_DEBUG("Ring:");
+    LOG_DEBUG("  task_window_size: %" PRIu64, h->ring.task_window_size);
+    LOG_DEBUG("  heap_size:        %" PRIu64 " bytes", h->ring.heap_size);
+    LOG_DEBUG(
+        "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->ring.task_descriptors_offset,
+        h->ring.task_descriptors_offset
+    );
+    LOG_DEBUG("  current_task_idx: %d", h->ring.fc.current_task_index.load(std::memory_order_acquire));
     LOG_DEBUG("orchestrator_done:  %d", h->orchestrator_done.load(std::memory_order_acquire));
     LOG_DEBUG("Error state:");
     LOG_DEBUG("  orch_error_code:    %d", h->orch_error_code.load(std::memory_order_relaxed));
@@ -258,17 +210,14 @@ bool PTO2SharedMemoryHandle::validate() {
 
     PTO2SharedMemoryHeader *h = header;
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        if (!h->ring.fc.validate(this, r)) return false;
-    }
+    if (!h->ring.fc.validate(this)) return false;
 
     return true;
 }
 
-bool PTO2RingFlowControl::validate(PTO2SharedMemoryHandle *handle, int32_t ring_id) const {
+bool PTO2RingFlowControl::validate(PTO2SharedMemoryHandle *handle) const {
     if (!handle) return false;
     if (!handle->header) return false;
-    if (ring_id < 0 || ring_id >= PTO2_MAX_RING_DEPTH) return false;
 
     const PTO2SharedMemoryHeader *h = handle->header;
 

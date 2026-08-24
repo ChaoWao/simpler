@@ -42,7 +42,7 @@ protected:
     void SetUp() override {
         sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        gm_heap.resize(HEAP_BYTES * PTO2_MAX_RING_DEPTH);
+        gm_heap.resize(HEAP_BYTES);
 
         sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
@@ -135,7 +135,7 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
     node_args.add_input(boundary);
     ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
-    ASSERT_EQ(orch.ring.task_allocator.active_count(), 1);
+    ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
     PTO2TaskSlotState &outer = sm_handle->header->ring.get_slot_state_by_slot(0);
     ASSERT_EQ(outer.task_kind, TaskKind::GRAPH);

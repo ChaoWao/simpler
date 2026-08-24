@@ -11,23 +11,11 @@
 /**
  * PTO Runtime2 - Ring Buffer Data Structures
  *
- * Implements ring buffer designs for zero-overhead memory management:
- *
- * 1. TaskAllocator - Unified task slot + output buffer allocation
- *    - Combines task ring (slot allocation) and heap ring (output buffer allocation)
- *    - O(1) forward bump allocation for both task slots and heap buffers
- *    - Neither resource is reclaimed during a run, so exhaustion of either is a
- *      capacity error reported on the spot, never back-pressure to wait on
- *
- * 2. FaninPool - Fanin spill entry allocation
- *    - Ring buffer for spilled fanin entries
- *    - O(1) append allocation
- *    - Implicit reclamation with task ring
- *
- * 3. DepListPool - Dependency list entry allocation
- *    - Ring buffer for linked list entries
- *    - O(1) prepend operation
- *    - Implicit reclamation with task ring
+ * TaskAllocator - Unified task slot + output buffer allocation
+ *   - Combines task ring (slot allocation) and heap ring (output buffer allocation)
+ *   - O(1) forward bump allocation for both task slots and heap buffers
+ *   - Neither resource is reclaimed during a run, so exhaustion of either is a
+ *     capacity error reported on the spot, never back-pressure to wait on
  *
  * Based on: docs/RUNTIME_LOGIC.md
  */
@@ -49,9 +37,6 @@
 // offsets. That classification is only sound while the range is disjoint from
 // every real heap address, which PTO2TaskAllocator::init() asserts.
 inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
-
-// Dep pool spin limit - if exceeded, dep pool capacity too small for workload
-#define PTO2_DEP_POOL_SPIN_LIMIT 100000
 
 // =============================================================================
 // Task Allocator (unified task slot + heap buffer allocation)
@@ -268,16 +253,4 @@ private:
             error_code_ptr_->store(code, std::memory_order_release);
         }
     }
-};
-
-// =============================================================================
-// Ring Set (per-depth aggregate)
-// =============================================================================
-
-/**
- * Groups the per-depth allocator state into one unit; PTO2_MAX_RING_DEPTH
- * instances exist, one per scope depth.
- */
-struct PTO2RingSet {
-    PTO2TaskAllocator task_allocator;
 };

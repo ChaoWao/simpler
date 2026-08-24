@@ -232,79 +232,77 @@ void SchedulerContext::log_stall_diagnostics(
     // produce identical TASK lines once per scheduler thread.
     if (thread_idx == 0) {
         int32_t cnt_ready = 0, cnt_waiting = 0, cnt_running = 0, submitted_in_ring = 0;
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-            PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
-            int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
-            submitted_in_ring += ring_task_count;
-            for (int32_t si = 0; si < ring_task_count; si++) {
-                PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
-                PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
-                // Polling: no fanin_refcount. Recompute met/total from the inline
-                // fanin ids vs the ring completion_flags (rc = satisfied producers,
-                // fi = raw producer count) so the stall dump still shows readiness.
-                int32_t fi = slot_state.payload != nullptr ? slot_state.payload->fanin_count : 0;
-                int32_t rc = 0;
-                if (slot_state.payload != nullptr) {
-                    const int32_t *fanin = slot_state.payload->fanin_data();
-                    for (int32_t k = 0; k < fi; k++) {
-                        if (ring.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
-                    }
+        PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
+        int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
+        submitted_in_ring += ring_task_count;
+        for (int32_t si = 0; si < ring_task_count; si++) {
+            PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+            PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
+            // Polling: no fanin_refcount. Recompute met/total from the inline
+            // fanin ids vs the ring completion_flags (rc = satisfied producers,
+            // fi = raw producer count) so the stall dump still shows readiness.
+            int32_t fi = slot_state.payload != nullptr ? slot_state.payload->fanin_count : 0;
+            int32_t rc = 0;
+            if (slot_state.payload != nullptr) {
+                const int32_t *fanin = slot_state.payload->fanin_data();
+                for (int32_t k = 0; k < fi; k++) {
+                    if (ring.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
                 }
-                int32_t kid_aic = slot_state.task->kernel_id[0];
-                int32_t kid_aiv0 = slot_state.task->kernel_id[1];
-                int32_t kid_aiv1 = slot_state.task->kernel_id[2];
-                int64_t task_id = static_cast<int64_t>(slot_state.task->task_id.raw);
-                if (st >= PTO2_TASK_COMPLETED) continue;
-                // task_state has no intermediate ready/running value — it
-                // stays PENDING until the worker stores COMPLETED. Classify
-                // by the ground truth instead: a slot is RUNNING iff some
-                // core has it as running_slot_state. A task occupies at most
-                // 3 cores (one cluster), all under the same owner thread by
-                // construction of assign_cores_to_threads.
-                char running_on[192] = {0};
-                int32_t owner = -1;
-                int32_t pos = 0;
-                bool is_running = false;
-                for (int32_t cid = 0; cid < cores_total_num_ && pos + 32 < (int32_t)sizeof(running_on); cid++) {
-                    if (core_exec_states_[cid].running_slot_state != &slot_state) continue;
-                    is_running = true;
-                    if (owner < 0) owner = find_core_owner_thread(cid);
-                    const char *sname = subslot_name(core_exec_states_[cid].running_subslot);
-                    int32_t written = snprintf(
-                        running_on + pos, sizeof(running_on) - pos, "%score=%d(%s)", pos == 0 ? "" : " ", cid, sname
-                    );
-                    if (written > 0) pos += written;
-                }
+            }
+            int32_t kid_aic = slot_state.task->kernel_id[0];
+            int32_t kid_aiv0 = slot_state.task->kernel_id[1];
+            int32_t kid_aiv1 = slot_state.task->kernel_id[2];
+            int64_t task_id = static_cast<int64_t>(slot_state.task->task_id.raw);
+            if (st >= PTO2_TASK_COMPLETED) continue;
+            // task_state has no intermediate ready/running value — it
+            // stays PENDING until the worker stores COMPLETED. Classify
+            // by the ground truth instead: a slot is RUNNING iff some
+            // core has it as running_slot_state. A task occupies at most
+            // 3 cores (one cluster), all under the same owner thread by
+            // construction of assign_cores_to_threads.
+            char running_on[192] = {0};
+            int32_t owner = -1;
+            int32_t pos = 0;
+            bool is_running = false;
+            for (int32_t cid = 0; cid < cores_total_num_ && pos + 32 < (int32_t)sizeof(running_on); cid++) {
+                if (core_exec_states_[cid].running_slot_state != &slot_state) continue;
+                is_running = true;
+                if (owner < 0) owner = find_core_owner_thread(cid);
+                const char *sname = subslot_name(core_exec_states_[cid].running_subslot);
+                int32_t written = snprintf(
+                    running_on + pos, sizeof(running_on) - pos, "%score=%d(%s)", pos == 0 ? "" : " ", cid, sname
+                );
+                if (written > 0) pos += written;
+            }
 
-                if (is_running) {
-                    cnt_running++;
-                    if (cnt_running > STALL_DUMP_READY_MAX) continue;
-                    LOG_INFO(
-                        "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
-                        " state=RUNNING fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] "
-                        "running_on=[owner_thread=%d cores=[%s]]",
-                        thread_idx, idle_iterations, r, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, owner, running_on
-                    );
-                    continue;
-                }
-                if (rc >= fi) {
-                    cnt_ready++;
-                    if (cnt_ready > STALL_DUMP_READY_MAX) continue;
-                    LOG_INFO(
-                        "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
-                        " state=READY   fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d]",
-                        thread_idx, idle_iterations, r, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1
-                    );
-                    continue;
-                }
-                cnt_waiting++;
-                if (cnt_waiting > STALL_DUMP_WAIT_MAX) continue;
+            if (is_running) {
+                cnt_running++;
+                if (cnt_running > STALL_DUMP_READY_MAX) continue;
                 LOG_INFO(
                     "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
-                    " state=WAIT    fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] missing_deps=%d",
-                    thread_idx, idle_iterations, r, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, fi - rc
+                    " state=RUNNING fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] "
+                    "running_on=[owner_thread=%d cores=[%s]]",
+                    thread_idx, idle_iterations, 0, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, owner, running_on
                 );
+                continue;
             }
+            if (rc >= fi) {
+                cnt_ready++;
+                if (cnt_ready > STALL_DUMP_READY_MAX) continue;
+                LOG_INFO(
+                    "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
+                    " state=READY   fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d]",
+                    thread_idx, idle_iterations, 0, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1
+                );
+                continue;
+            }
+            cnt_waiting++;
+            if (cnt_waiting > STALL_DUMP_WAIT_MAX) continue;
+            LOG_INFO(
+                "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
+                " state=WAIT    fanin_met=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] missing_deps=%d",
+                thread_idx, idle_iterations, 0, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, fi - rc
+            );
         }
         int32_t effective_total = task_count > 0 ? task_count : submitted_in_ring;
         int32_t c = completed_tasks_.load(std::memory_order_relaxed);
@@ -918,12 +916,10 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         // more than the scope cap. This rejects any garbage pattern (negative
         // or positive), so uninitialized rings contribute 0 (the correct boot
         // count) while valid counts still add up, with no signed overflow.
-        int64_t pto2_count = 0;
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-            int32_t ring_tasks = header->ring.fc.current_task_index.load(std::memory_order_acquire);
-            if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) pto2_count += ring_tasks;
-        }
-        total_tasks_ = static_cast<int32_t>(pto2_count);
+        int32_t pto2_count = 0;
+        int32_t ring_tasks = header->ring.fc.current_task_index.load(std::memory_order_acquire);
+        if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) pto2_count = ring_tasks;
+        total_tasks_ = pto2_count;
     } else {
         total_tasks_ = 0;
     }

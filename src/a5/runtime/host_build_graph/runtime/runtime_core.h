@@ -153,9 +153,10 @@ struct PTO2RuntimeArenaLayout {
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
 
-    // Cached parameters (re-used by init_data + wire stages).
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]{};
+    // Cached parameters (re-used by init_data + wire stages). hbg is single-ring,
+    // so these are the one ring's.
+    uint64_t task_window_size{0};
+    uint64_t heap_size{0};
 
     // Total arena byte size post-commit. Used by host to size the prebuilt
     // image buffer and as the rtMemcpy length, and requested of the device as
@@ -241,11 +242,7 @@ static_assert(
  * device memory and may run on host. Returns the layout descriptor; caller
  * commits/attaches the arena before Phase 2/3.
  */
-PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size);
-PTO2RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
-);
+PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size = 0);
 
 /**
  * Phase 2 — write the data half of the runtime arena: standalone fields,
@@ -267,10 +264,6 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
     void *gm_heap_dev_base, uint64_t heap_size
-);
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
-    void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
 );
 
 /**

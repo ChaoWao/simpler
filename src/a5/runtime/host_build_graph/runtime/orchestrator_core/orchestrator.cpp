@@ -966,7 +966,13 @@ struct PTO2FaninBuilder {
     int32_t *slots{nullptr};
 
     bool mark_seen(uint8_t prod_ring, int32_t prod_slot) {
-        if (prod_ring >= PTO2_MAX_RING_DEPTH || prod_slot < 0) {
+        // Dedup only: a producer this orchestrator did not place has no slot in the
+        // epoch table, so it is reported as not-yet-seen and the caller appends it
+        // rather than rejecting it. hbg places every task on its one ring, so the
+        // assert is the invariant; enforcing it on the caller's side would be a new
+        // fatal path.
+        debug_assert(prod_ring == 0 && "hbg places every task on its one ring");
+        if (prod_ring != 0 || prod_slot < 0) {
             return false;
         }
         uint32_t *seen = orch->fanin_seen_epoch.get();
@@ -1048,7 +1054,7 @@ static bool prepare_task(
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
     uint8_t ring_id = 0;
-    auto &allocator = orch->ring.task_allocator;
+    auto &allocator = orch->task_allocator;
 
     int16_t block_num = args.launch_spec.block_num();
     int32_t active_subtasks_per_block = __builtin_popcount(active_mask.core_mask());
@@ -1208,7 +1214,7 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
     // task/heap start-end and tensormap usage at the scope boundary.
     if (is_scope_stats_enabled()) {
         uint8_t ring_id = 0;
-        auto &alloc = orch->ring.task_allocator;
+        auto &alloc = orch->task_allocator;
         // Polling: no dep_pool to report (readiness is via completion_flags).
         int32_t dep_pool_tail = 0;
         int32_t dep_pool_top = 0;
@@ -1247,7 +1253,7 @@ void PTO2OrchestratorState::end_scope() {
     // emits the end-boundary record and tears down bookkeeping.
     if (is_scope_stats_enabled()) {
         uint8_t ring_id = 0;
-        auto &alloc = orch->ring.task_allocator;
+        auto &alloc = orch->task_allocator;
         // Polling: no dep_pool to report (readiness is via completion_flags).
         int32_t dep_pool_tail = 0;
         int32_t dep_pool_top = 0;
@@ -1630,7 +1636,7 @@ bool graph_submit_outer(
     bool defer_heap, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
-    auto &allocator = orch->ring.task_allocator;
+    auto &allocator = orch->task_allocator;
     if (allocator.active_count() >= allocator.window_size() ||
         (!defer_heap && static_cast<uint64_t>(owned_heap) > allocator.heap_available())) {
         LOG_WARN("%s", "[GraphExecution] task-window/heap preflight failed; using ordinary path");
@@ -1816,9 +1822,7 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
         }
         void *packed_base = nullptr;
         void *packed_end = nullptr;
-        if (!orch->ring.task_allocator.reserve_deferred_heap(
-                static_cast<int32_t>(owned_heap), &packed_base, &packed_end
-            )) {
+        if (!orch->task_allocator.reserve_deferred_heap(static_cast<int32_t>(owned_heap), &packed_base, &packed_end)) {
             if (failed_key != nullptr) *failed_key = pending.full_key;
             return false;
         }
@@ -2171,7 +2175,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
 
     auto recording = std::make_unique<GraphRecording>();
     recording->full_key = full_key;
-    recording->start_local_task_id = orch->ring.task_allocator.active_count();
+    recording->start_local_task_id = orch->task_allocator.active_count();
     if (!graph_recording_init_tensor_map(*recording)) {
         LOG_WARN("[GraphExecution] recording hazard map allocation failed; using ordinary path");
         return result;
@@ -2611,11 +2615,9 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
 
 void PTO2OrchestratorState::mark_done() {
     auto *orch = this;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        int32_t total_tasks = orch->ring.task_allocator.active_count();
-        if (total_tasks > 0) {
-            LOG_DEBUG("=== [Orchestrator] ring %d: total_tasks=%d ===", r, total_tasks);
-        }
+    int32_t total_tasks = orch->task_allocator.active_count();
+    if (total_tasks > 0) {
+        LOG_DEBUG("=== [Orchestrator] total_tasks=%d ===", total_tasks);
     }
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_tasks_size = 0;
