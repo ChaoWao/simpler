@@ -140,7 +140,7 @@ struct RuntimeArenaLayout {
     // therefore not known when this layout is built. bind grows the device region
     // to cover it once orchestration ends.
     //
-    // The copied zone is padded to a PTO2_ALIGN_SIZE boundary, so that tail begins
+    // The copied zone is padded to a CHIP_ALIGN_SIZE boundary, so that tail begins
     // exactly at off_copied_end: the copied zone and the shared-memory image are
     // adjacent on the device and travel as one copy.
     //

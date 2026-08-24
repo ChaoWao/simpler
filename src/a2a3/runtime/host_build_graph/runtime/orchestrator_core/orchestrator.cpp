@@ -971,7 +971,7 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
             return false;
         }
         node_offsets[i] = required_heap;
-        const uint64_t output_bytes = PTO2_ALIGN_UP(source.total_output_size, PTO2_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(source.total_output_size, CHIP_ALIGN_SIZE);
         if (required_heap > UINT64_MAX - output_bytes) return false;
         required_heap += output_bytes;
 
@@ -1231,8 +1231,7 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
             continue;
         }
         layout.offsets[i] = layout.total_output_size;
-        layout.buffer_sizes[i] =
-            PTO2_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
+        layout.buffer_sizes[i] = CHIP_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PACKED_OUTPUT_ALIGN);
         layout.total_output_size += layout.buffer_sizes[i];
     }
     return layout;
@@ -1276,7 +1275,7 @@ static bool prepare_task(
     // ChipTensor being two cache lines. The fanin cursor advances at publish, not
     // here — see the comment where it does.
     const uint64_t window = orch->sm_header->ring.task_window_size;
-    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
     debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= window * MAX_TENSOR_ARGS);
     debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
     debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + CHIP_MAX_FANIN <= window * CHIP_MAX_FANIN);
@@ -1614,7 +1613,7 @@ static TaskOutputTensors submit_task_common(
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     (void)sched;
 
@@ -1773,7 +1772,7 @@ bool graph_submit_outer(
     const uint64_t task_window = orch->sm_header->ring.task_window_size;
     const int32_t tensor_slots =
         static_cast<int32_t>(graph_boundary_tensor_pool_slots(static_cast<uint32_t>(args.tensor_count())));
-    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
     if (static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots > task_window * MAX_TENSOR_ARGS ||
         static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span > task_window * MAX_SCALAR_ARGS) {
         LOG_WARN("%s", "[GraphExecution] boundary exceeds the argument pools; using ordinary path");
@@ -1841,7 +1840,7 @@ bool graph_submit_outer(
     if (args.scalar_count() != 0) {
         std::memcpy(
             payload.scalar_data(), args.scalar_data(),
-            PTO2_ALIGN_UP(static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t), ARG_POOL_ALIGN)
+            CHIP_ALIGN_UP(static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t), ARG_POOL_ALIGN)
         );
     }
 
@@ -1884,7 +1883,7 @@ bool graph_submit_outer(
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(pending);
@@ -1983,7 +1982,7 @@ TaskOutputTensors graph_record_submit_node(
 
     const PTO2OutputLayout layout = calculate_output_layout(args);
     const uint64_t aligned_output =
-        layout.total_output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), PTO2_ALIGN_SIZE) :
+        layout.total_output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), CHIP_ALIGN_SIZE) :
                                        0;
     if (recording.next_virtual_offset > GRAPH_RECORD_VIRTUAL_BASE - aligned_output) {
         recording.unsupported = true;

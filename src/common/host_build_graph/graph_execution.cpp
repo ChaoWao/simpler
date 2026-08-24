@@ -113,7 +113,7 @@ bool bind_graph_topology(GraphExecution &execution) {
             const bool active = (node.active_mask & (1U << slot)) != 0;
             if (active != (node.kernel_id[slot] != INVALID_KERNEL_ID)) return false;
         }
-        const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(node.total_output_size), PTO2_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(node.total_output_size), CHIP_ALIGN_SIZE);
         if (output_bytes > definition.required_heap - required_heap) return false;
         required_heap += output_bytes;
     }
@@ -443,7 +443,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         task.task_id = TaskId::make(1, synthetic_local);
         const GraphNodeDefinition &source = nodes[i];
         const uint64_t node_offset = node_offsets[i];
-        const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), PTO2_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), CHIP_ALIGN_SIZE);
         for (int k = 0; k < SUBTASK_SLOT_COUNT; ++k)
             task.kernel_id[k] = source.kernel_id[k];
         task.packed_buffer_base = reinterpret_cast<void *>(outer_base + node_offset);

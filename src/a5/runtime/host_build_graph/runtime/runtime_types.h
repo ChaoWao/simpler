@@ -458,7 +458,7 @@ struct TaskPayload {
         // cache lines (ARG_POOL_ALIGN), so the rounded copy stays inside this
         // task's own region. Eliminates branches; extra bytes within the same CL have
         // zero additional cost.
-        memcpy(scalar_data(), args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
+        memcpy(scalar_data(), args.scalars(), CHIP_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
         // The ring's payload storage is reused raw memory that no constructor runs
         // over, so an unset predicate reads back as whatever the slot last held —

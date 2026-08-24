@@ -62,7 +62,7 @@
 
 #include "types.h"
 
-// User-facing output alignment (Strict-3; matches L2 PTO2_PACKED_OUTPUT_ALIGN).
+// User-facing output alignment (Strict-3; matches L2 PACKED_OUTPUT_ALIGN).
 static constexpr uint64_t HEAP_ALIGN = 1024;
 
 // Default PER-RING heap size. Total VA reservation is this value times

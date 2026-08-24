@@ -407,7 +407,7 @@ exception so users can enlarge `heap_ring_size` on the `Worker` instead
 of deadlocking.
 
 **Alignment**: every heap allocation is rounded up to `HEAP_ALIGN = 1024 B`
-(matches L2's `PTO2_PACKED_OUTPUT_ALIGN`, Strict-3).
+(matches L2's `PACKED_OUTPUT_ALIGN`, Strict-3).
 
 **FIFO reclamation per ring**: each `alloc()` appends the slot's
 `heap_end_offset` onto the selected ring's `slot_heap_end[]` vector, and

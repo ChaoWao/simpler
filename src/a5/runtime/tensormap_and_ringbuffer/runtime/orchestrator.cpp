@@ -544,8 +544,7 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
             continue;
         }
         layout.offsets[i] = layout.total_output_size;
-        layout.buffer_sizes[i] =
-            PTO2_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
+        layout.buffer_sizes[i] = CHIP_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PACKED_OUTPUT_ALIGN);
         layout.total_output_size += layout.buffer_sizes[i];
     }
     return layout;

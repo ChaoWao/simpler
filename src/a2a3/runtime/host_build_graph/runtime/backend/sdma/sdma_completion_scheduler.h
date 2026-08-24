@@ -20,7 +20,7 @@
 #include "runtime_status.h"
 
 inline uintptr_t sdma_completion_cache_line(const volatile void *addr) {
-    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
 }
 
 // PTO-ISA stores the latest completed post ID as a monotonic uint64_t in one
@@ -32,7 +32,7 @@ inline CompletionPollResult poll_sdma_post_done_record(uint64_t record_addr, uin
         return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
     volatile uint64_t *record = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(record_addr));
-    cache_invalidate_range(reinterpret_cast<const void *>(sdma_completion_cache_line(record)), PTO2_ALIGN_SIZE);
+    cache_invalidate_range(reinterpret_cast<const void *>(sdma_completion_cache_line(record)), CHIP_ALIGN_SIZE);
     uint64_t completed_post_id = __atomic_load_n(record, __ATOMIC_ACQUIRE);
     return {
         completed_post_id >= expected_post_id ? CompletionPollState::READY : CompletionPollState::PENDING,

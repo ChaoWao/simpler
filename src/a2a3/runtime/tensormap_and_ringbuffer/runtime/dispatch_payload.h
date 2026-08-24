@@ -47,8 +47,8 @@
 #define DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + PTO2_EXT_PARAMS_COUNT)
 #endif
 
-#ifndef PTO2_ALIGN_UP
-#define PTO2_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
+#ifndef CHIP_ALIGN_UP
+#define CHIP_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
 #endif
 
 // Verify hardcoded indices in intrinsic.h match the computed values.
@@ -122,7 +122,7 @@ struct alignas(64) DispatchPayload {
 
     static_assert(sizeof(args[0]) == 8);
     static_assert(
-        PTO2_ALIGN_UP((MAX_TENSOR_ARGS + MAX_SCALAR_ARGS) * sizeof(args[0]), 64) ==
+        CHIP_ALIGN_UP((MAX_TENSOR_ARGS + MAX_SCALAR_ARGS) * sizeof(args[0]), 64) ==
         (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS) * sizeof(args[0])
     );
 };

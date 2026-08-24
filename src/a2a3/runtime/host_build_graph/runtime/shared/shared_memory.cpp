@@ -113,7 +113,7 @@ bool SharedMemoryHandle::attach_populated(
 SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
     const uint64_t buffer_size = calculate_size(PTO2_TASK_WINDOW_SIZE);
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
-    const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), PTO2_ALIGN_SIZE);
+    const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), CHIP_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
 
     auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
@@ -149,13 +149,13 @@ void SharedMemoryHandle::init_header(uint64_t task_window_size) {
     header->orchestrator_done.store(0, std::memory_order_relaxed);
 
     // Ring layout info
-    uint64_t offset = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t offset = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     header->ring.task_window_size = task_window_size;
     header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
     header->ring.task_descriptors_offset = offset;
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+    offset += CHIP_ALIGN_UP(task_window_size * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
+    offset += CHIP_ALIGN_UP(task_window_size * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
+    offset += CHIP_ALIGN_UP(task_window_size * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
 
     header->total_size = sm_size;
 
@@ -221,7 +221,7 @@ bool ChipRingFlowControl::validate(SharedMemoryHandle *handle) const {
     if (h->ring.task_descriptors_offset >= h->total_size) return false;
 
     // Check pointer alignment
-    if ((uintptr_t)h->ring.task_descriptors % PTO2_ALIGN_SIZE != 0) return false;
+    if ((uintptr_t)h->ring.task_descriptors % CHIP_ALIGN_SIZE != 0) return false;
 
     // Check flow control pointer sanity
     int32_t current = current_task_index.load(std::memory_order_acquire);

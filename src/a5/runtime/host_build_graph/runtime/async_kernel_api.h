@@ -38,7 +38,7 @@ namespace pto2::detail {
 inline __aicore__ void defer_load_slab(AsyncCtx &ctx) {
     if (ctx.completion_count == nullptr) return;
 #if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
-    uintptr_t line = reinterpret_cast<uintptr_t>(ctx.completion_count) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    uintptr_t line = reinterpret_cast<uintptr_t>(ctx.completion_count) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
     dcci((__gm__ int32_t *)line, SINGLE_CACHE_LINE);
 #else
     __asm__ __volatile__("" ::: "memory");
@@ -54,10 +54,10 @@ inline __aicore__ void defer_error(AsyncCtx &ctx, int32_t error_code) {
 inline __aicore__ void defer_flush_range(volatile __gm__ void *addr, uint32_t size_bytes) {
     if (addr == nullptr || size_bytes == 0) return;
 #if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
-    uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
     uintptr_t end =
-        (reinterpret_cast<uintptr_t>(addr) + size_bytes + PTO2_ALIGN_SIZE - 1u) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
-    for (uintptr_t p = start; p < end; p += PTO2_ALIGN_SIZE) {
+        (reinterpret_cast<uintptr_t>(addr) + size_bytes + CHIP_ALIGN_SIZE - 1u) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
+    for (uintptr_t p = start; p < end; p += CHIP_ALIGN_SIZE) {
         dcci((__gm__ int32_t *)p, SINGLE_CACHE_LINE, CACHELINE_OUT);
     }
 #else

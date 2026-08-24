@@ -125,7 +125,7 @@ static_assert(
  *
  * Contains per-ring flow control and global layout information.
  */
-struct alignas(PTO2_ALIGN_SIZE) SharedMemoryHeader {
+struct alignas(CHIP_ALIGN_SIZE) SharedMemoryHeader {
     // === PER-RING FLOW CONTROL + LAYOUT INFO (set once at init) ===
     SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 
@@ -268,7 +268,7 @@ inline std::atomic<int32_t> *ring_last_task_alive_addr(void *sm_dev_base, int ri
 
 // Byte offsets (from the SM base) of one ring's three segments. The per-ring
 // layout is: header, then for each ring descriptors -> payloads -> slot_states,
-// every segment PTO2_ALIGN_UP-padded.
+// every segment CHIP_ALIGN_UP-padded.
 struct ChipRingSegmentOffsets {
     uint64_t descriptors;
     uint64_t payloads;
@@ -285,19 +285,19 @@ struct ChipRingSegmentOffsets {
 inline ChipRingSegmentOffsets
 ring_segment_offsets(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id) noexcept {
     assert(ring_id >= 0 && ring_id < CHIP_MAX_RING_DEPTH && "sm_layout: ring_id out of range");
-    uint64_t off = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t off = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     for (int r = 0; r < ring_id; r++) {
-        off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
-        off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
-        off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+        off += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
+        off += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
+        off += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
     }
     ChipRingSegmentOffsets o{};
     o.descriptors = off;
-    off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(task_window_sizes[ring_id] * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
     o.payloads = off;
-    off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(task_window_sizes[ring_id] * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(task_window_sizes[ring_id] * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
     o.end = off;
     return o;
 }

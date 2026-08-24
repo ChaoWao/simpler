@@ -52,7 +52,7 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
     // first slot cannot false-share with whatever region sits in front of us
     // (e.g. orchestrator tensormap heads written by the orch thread).
-    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), PTO2_ALIGN_SIZE);
+    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), CHIP_ALIGN_SIZE);
 }
 
 bool ready_queue_init_data_from_layout(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity) {
@@ -150,7 +150,7 @@ SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capaci
         // Force a cache-line base so Orch-side dep_pool writes do not invalidate
         // adjacent multi-threaded regions like ready_queue.slots.
         layout.off_dep_pool_entries[r] =
-            arena.reserve(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(DepListEntry), PTO2_ALIGN_SIZE);
+            arena.reserve(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(DepListEntry), CHIP_ALIGN_SIZE);
     }
     return layout;
 }
@@ -326,13 +326,13 @@ OrchestratorLayout OrchestratorState::reserve_layout(
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         const size_t fanin_pool_bytes =
-            PTO2_ALIGN_UP(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(FaninSpillEntry), PTO2_ALIGN_SIZE);
-        layout.off_fanin_pool[r] = arena.reserve(fanin_pool_bytes, PTO2_ALIGN_SIZE);
+            CHIP_ALIGN_UP(static_cast<size_t>(dep_pool_capacities[r]) * sizeof(FaninSpillEntry), CHIP_ALIGN_SIZE);
+        layout.off_fanin_pool[r] = arena.reserve(fanin_pool_bytes, CHIP_ALIGN_SIZE);
 
         always_assert(task_window_sizes[r] > 0 && (task_window_sizes[r] & (task_window_sizes[r] - 1)) == 0);
         const size_t seen_epoch_bytes =
-            PTO2_ALIGN_UP(static_cast<size_t>(task_window_sizes[r]) * sizeof(uint32_t), PTO2_ALIGN_SIZE);
-        layout.off_fanin_seen_epoch[r] = arena.reserve(seen_epoch_bytes, PTO2_ALIGN_SIZE);
+            CHIP_ALIGN_UP(static_cast<size_t>(task_window_sizes[r]) * sizeof(uint32_t), CHIP_ALIGN_SIZE);
+        layout.off_fanin_seen_epoch[r] = arena.reserve(seen_epoch_bytes, CHIP_ALIGN_SIZE);
     }
     layout.off_scope_tasks =
         arena.reserve(static_cast<size_t>(layout.scope_tasks_cap) * sizeof(uintptr_t), alignof(ChipTaskSlotState *));
@@ -386,15 +386,15 @@ bool OrchestratorState::init_data_from_layout(
         );
         heap_offset += heap_sizes[r];
 
-        const size_t fanin_pool_bytes = PTO2_ALIGN_UP(
-            static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(FaninSpillEntry), PTO2_ALIGN_SIZE
+        const size_t fanin_pool_bytes = CHIP_ALIGN_UP(
+            static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(FaninSpillEntry), CHIP_ALIGN_SIZE
         );
         auto *fanin_entries = static_cast<FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
         memset(fanin_entries, 0, fanin_pool_bytes);
         orch->rings[r].fanin_pool.init(fanin_entries, layout.dep_pool_capacities[r], orch_err);
 
-        const size_t seen_epoch_bytes = PTO2_ALIGN_UP(
-            static_cast<size_t>(layout.tensor_map.task_window_sizes[r]) * sizeof(uint32_t), PTO2_ALIGN_SIZE
+        const size_t seen_epoch_bytes = CHIP_ALIGN_UP(
+            static_cast<size_t>(layout.tensor_map.task_window_sizes[r]) * sizeof(uint32_t), CHIP_ALIGN_SIZE
         );
         auto *seen_epoch = static_cast<uint32_t *>(arena.region_ptr(layout.off_fanin_seen_epoch[r]));
         memset(seen_epoch, 0, seen_epoch_bytes);
@@ -536,7 +536,7 @@ RuntimeArenaLayout runtime_reserve_layout(
     }
     layout.offsets.orch = OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
     layout.offsets.sched = SchedulerState::reserve_layout(arena, dep_pool_capacities);
-    layout.offsets.off_runtime = arena.reserve(sizeof(RuntimeContext), PTO2_ALIGN_SIZE);
+    layout.offsets.off_runtime = arena.reserve(sizeof(RuntimeContext), CHIP_ALIGN_SIZE);
     layout.offsets.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
 
     layout.offsets.arena_size = arena.total_size();

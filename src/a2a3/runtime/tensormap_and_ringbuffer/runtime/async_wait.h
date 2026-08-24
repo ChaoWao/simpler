@@ -34,7 +34,7 @@ inline constexpr int32_t MAX_ASYNC_WAITS = 64;
 // application layer: translating drained messages into wait-list state.
 
 inline uintptr_t mailbox_cache_line(const volatile void *addr) {
-    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
 }
 
 struct CompletionCondition;

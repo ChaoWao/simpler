@@ -55,14 +55,14 @@ struct DeferredCompletionEntry {
 
 static_assert(sizeof(DeferredCompletionEntry) == 32, "DeferredCompletionEntry layout drift");
 
-struct alignas(PTO2_ALIGN_SIZE) DeferredCompletionSlab {
+struct alignas(CHIP_ALIGN_SIZE) DeferredCompletionSlab {
     volatile uint32_t count;
     volatile int32_t error_code;
     DeferredCompletionEntry entries[MAX_COMPLETIONS_PER_TASK];
 };
 
 static_assert(
-    sizeof(DeferredCompletionSlab) % PTO2_ALIGN_SIZE == 0,
+    sizeof(DeferredCompletionSlab) % CHIP_ALIGN_SIZE == 0,
     "DeferredCompletionSlab size must preserve array element cache-line boundaries"
 );
 

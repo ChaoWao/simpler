@@ -141,7 +141,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     ASSERT_EQ(definitions.entries[0].full_key, first_upload->full_key);
     const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
-        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+        CHIP_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, CHIP_ALIGN_SIZE);
     EXPECT_EQ(static_cast<uint64_t>(first_end - first_base), expected_extent);
     EXPECT_EQ(static_cast<uint64_t>(second_end - second_base), expected_extent);
     EXPECT_TRUE(first_end <= second_base || second_end <= first_base) << "two shells must not share heap bytes";
@@ -250,7 +250,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     ASSERT_EQ(definitions.entries.size(), 1u);
     const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
-        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+        CHIP_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, CHIP_ALIGN_SIZE);
 
     std::vector<std::pair<const char *, const char *>> ranges;
     for (size_t i = 0; i < 3; ++i) {

@@ -178,7 +178,7 @@ total = ALIGN(Header)
                + ALIGN(window_size * sizeof(ChipTaskSlotState)) ]
 ```
 
-Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).
+Alignment is 64 bytes (`CHIP_ALIGN_SIZE`).
 
 ---
 

@@ -63,7 +63,7 @@ struct AICoreCompletionMailboxMessage {
     uint32_t _pad[3];
 };
 
-static_assert(sizeof(AICoreCompletionMailboxMessage) == PTO2_ALIGN_SIZE, "AICoreCompletionMailboxMessage layout drift");
+static_assert(sizeof(AICoreCompletionMailboxMessage) == CHIP_ALIGN_SIZE, "AICoreCompletionMailboxMessage layout drift");
 static_assert(
     sizeof(std::atomic<uint64_t>) == sizeof(uint64_t),
     "std::atomic<uint64_t> must be layout-compatible with uint64_t for the message slot layout to hold"
@@ -89,11 +89,11 @@ struct AICoreCompletionMsgView {
 struct AICoreCompletionMailbox {
     // head and tail live on their own cache lines so producer CAS contention
     // on head can't false-share with the consumer's tail updates.
-    alignas(PTO2_ALIGN_SIZE) std::atomic<uint64_t> head;
-    uint8_t _head_pad[PTO2_ALIGN_SIZE - sizeof(uint64_t)];
-    alignas(PTO2_ALIGN_SIZE) std::atomic<uint64_t> tail;
-    uint8_t _tail_pad[PTO2_ALIGN_SIZE - sizeof(uint64_t)];
-    alignas(PTO2_ALIGN_SIZE) AICoreCompletionMailboxMessage entries[AICORE_COMPLETION_MAILBOX_CAPACITY];
+    alignas(CHIP_ALIGN_SIZE) std::atomic<uint64_t> head;
+    uint8_t _head_pad[CHIP_ALIGN_SIZE - sizeof(uint64_t)];
+    alignas(CHIP_ALIGN_SIZE) std::atomic<uint64_t> tail;
+    uint8_t _tail_pad[CHIP_ALIGN_SIZE - sizeof(uint64_t)];
+    alignas(CHIP_ALIGN_SIZE) AICoreCompletionMailboxMessage entries[AICORE_COMPLETION_MAILBOX_CAPACITY];
 
     // Cheap, lock-free pending hint. Callers may invoke this outside the
     // consumer lock; a stale answer only over/under-triggers a drain attempt.
@@ -218,5 +218,5 @@ struct AICoreCompletionMailbox {
 };
 
 static_assert(
-    sizeof(AICoreCompletionMailbox) % PTO2_ALIGN_SIZE == 0, "AICoreCompletionMailbox size must be cache-line aligned"
+    sizeof(AICoreCompletionMailbox) % CHIP_ALIGN_SIZE == 0, "AICoreCompletionMailbox size must be cache-line aligned"
 );

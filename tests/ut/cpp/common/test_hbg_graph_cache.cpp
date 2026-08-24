@@ -32,7 +32,7 @@ namespace {
 template <typename T>
 uint32_t append_section(std::vector<std::byte> &image, const std::vector<T> &values) {
     if (values.empty()) return 0;
-    const size_t offset = PTO2_ALIGN_UP(image.size(), alignof(T));
+    const size_t offset = CHIP_ALIGN_UP(image.size(), alignof(T));
     image.resize(offset + values.size() * sizeof(T));
     std::memcpy(image.data() + offset, values.data(), values.size() * sizeof(T));
     return static_cast<uint32_t>(offset);
@@ -201,7 +201,7 @@ class OuterHeap {
 public:
     static constexpr size_t TENSOR_SLOTS = graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS);
     static constexpr size_t SCALAR_SPAN =
-        PTO2_ALIGN_UP(static_cast<size_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / sizeof(uint64_t));
+        CHIP_ALIGN_UP(static_cast<size_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / sizeof(uint64_t));
 
     OuterHeap(const std::vector<std::byte> &definition_image, uint8_t fill = 0) {
         const auto *definition = reinterpret_cast<const GraphDefinition *>(definition_image.data());
@@ -403,7 +403,7 @@ TEST(GraphBoundaryPool, WidestBoundaryExceedsOneSlotBudget) {
     EXPECT_GT(graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS), static_cast<size_t>(MAX_TENSOR_ARGS));
     EXPECT_GT(
         static_cast<size_t>(
-            PTO2_ALIGN_UP(static_cast<int32_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t))
+            CHIP_ALIGN_UP(static_cast<int32_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t))
         ),
         static_cast<size_t>(MAX_SCALAR_ARGS)
     );

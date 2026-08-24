@@ -165,7 +165,7 @@ static_assert(
  *
  * Contains per-ring flow control and global layout information.
  */
-struct alignas(PTO2_ALIGN_SIZE) SharedMemoryHeader {
+struct alignas(CHIP_ALIGN_SIZE) SharedMemoryHeader {
     // === RING FLOW CONTROL + LAYOUT INFO (single ring, set once at init) ===
     SharedMemoryRingHeader ring;
 
@@ -299,7 +299,7 @@ inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noe
 
 // Byte offsets (from the SM base) of the ring's segments. The layout is: header, then
 // descriptors -> payloads -> slot_states -> completion_flags -> the three argument
-// pools, every segment PTO2_ALIGN_UP-padded. RingImageExtents dimensions them: the
+// pools, every segment CHIP_ALIGN_UP-padded. RingImageExtents dimensions them: the
 // mirror for the worst case the API allows, the image for what this bind holds, which
 // is what makes the live prefixes contiguous and the upload one copy.
 //
@@ -343,22 +343,22 @@ inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
 // or reordering a segment is a one-line edit here; every consumer follows
 // automatically, so the layout walk can never silently disagree across call sites.
 inline ChipRingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
-    uint64_t off = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t off = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     ChipRingSegmentOffsets o{};
     o.descriptors = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
     o.payloads = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
     o.completion_flags = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), CHIP_ALIGN_SIZE);
     o.fanin_pool = off;
-    off += PTO2_ALIGN_UP(e.fanin_elems * sizeof(int32_t), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.fanin_elems * sizeof(int32_t), CHIP_ALIGN_SIZE);
     o.tensor_pool = off;
-    off += PTO2_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), CHIP_ALIGN_SIZE);
     o.scalar_pool = off;
-    off += PTO2_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), CHIP_ALIGN_SIZE);
     o.end = off;
     return o;
 }
@@ -436,7 +436,7 @@ inline uint64_t rebased_heap_addr(uint64_t addr, const HeapRebase &rebase) noexc
 // orchestrator wrote into an image dimensioned for what this bind holds, where the
 // prefixes are contiguous and can travel as one copy.
 //
-// `out_base` must be PTO2_ALIGN_SIZE-aligned and hold
+// `out_base` must be CHIP_ALIGN_SIZE-aligned and hold
 // `ring_segment_offsets(image_extents(used)).end` bytes. Returns that byte count.
 //
 // Three things the restack has to fix up, all because the image is not the mirror:

@@ -395,7 +395,7 @@ struct TaskPayload {
         }
         // Round up to cache line boundary. Both arrays are 128B so no overrun.
         // Eliminates branches; extra bytes within the same CL have zero additional cost.
-        memcpy(scalars, args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
+        memcpy(scalars, args.scalars(), CHIP_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
         // reset_for_reuse deliberately skips this cold payload. These fields
         // are consumer-side state and must be initialized on every submit even

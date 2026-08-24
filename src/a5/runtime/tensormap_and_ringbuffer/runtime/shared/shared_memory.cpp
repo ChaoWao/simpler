@@ -97,7 +97,7 @@ bool SharedMemoryHandle::init_per_ring(
 SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
     const uint64_t buffer_size = calculate_size(PTO2_TASK_WINDOW_SIZE);
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
-    const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), PTO2_ALIGN_SIZE);
+    const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), CHIP_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
 
     auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
@@ -143,15 +143,15 @@ void SharedMemoryHandle::init_header_per_ring(
     header->orchestrator_done.store(0, std::memory_order_relaxed);
 
     // Per-ring layout info
-    uint64_t offset = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t offset = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         header->rings[r].task_window_size = task_window_sizes[r];
         header->rings[r].task_window_mask = static_cast<int32_t>(task_window_sizes[r] - 1);
         header->rings[r].heap_size = heap_sizes[r];
         header->rings[r].task_descriptors_offset = offset;
-        offset += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskDescriptor), PTO2_ALIGN_SIZE);
-        offset += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), PTO2_ALIGN_SIZE);
-        offset += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+        offset += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
+        offset += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
+        offset += CHIP_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
     }
 
     header->total_size = sm_size;
@@ -234,7 +234,7 @@ bool ChipRingFlowControl::validate(SharedMemoryHandle *handle, int32_t ring_id) 
     if (h->rings[ring_id].task_descriptors_offset >= h->total_size) return false;
 
     // Check pointer alignment
-    if ((uintptr_t)h->rings[ring_id].task_descriptors % PTO2_ALIGN_SIZE != 0) return false;
+    if ((uintptr_t)h->rings[ring_id].task_descriptors % CHIP_ALIGN_SIZE != 0) return false;
 
     // Check flow control pointer sanity
     int32_t current = current_task_index.load(std::memory_order_acquire);

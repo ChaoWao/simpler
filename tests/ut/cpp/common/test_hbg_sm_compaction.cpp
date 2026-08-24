@@ -43,14 +43,14 @@ constexpr int32_t FANIN_STRIDE = static_cast<int32_t>(ARG_POOL_ALIGN / sizeof(in
 
 // A buffer aligned the way both the arena mirror and the device SM base are;
 // ChipTaskSlotState is alignas(64) and every segment offset is a multiple of
-// PTO2_ALIGN_SIZE.
+// CHIP_ALIGN_SIZE.
 class AlignedImage {
 public:
     explicit AlignedImage(uint64_t bytes, uint8_t fill = 0) :
-        storage_(bytes + PTO2_ALIGN_SIZE, std::byte{0}) {
+        storage_(bytes + CHIP_ALIGN_SIZE, std::byte{0}) {
         base_ = reinterpret_cast<char *>(
-            (reinterpret_cast<uintptr_t>(storage_.data()) + PTO2_ALIGN_SIZE - 1) &
-            ~static_cast<uintptr_t>(PTO2_ALIGN_SIZE - 1)
+            (reinterpret_cast<uintptr_t>(storage_.data()) + CHIP_ALIGN_SIZE - 1) &
+            ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
         );
         if (fill != 0) std::memset(base_, fill, bytes);
     }

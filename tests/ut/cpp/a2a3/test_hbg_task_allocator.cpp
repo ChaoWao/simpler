@@ -75,7 +75,7 @@ TEST_F(HbgTaskAllocatorTest, AllocNonZeroSize) {
     EXPECT_EQ(result.task_id, 0);
     EXPECT_EQ(result.slot, 0);
     EXPECT_NE(result.packed_base, nullptr);
-    uint64_t expected_aligned = PTO2_ALIGN_UP(100u, PTO2_ALIGN_SIZE);
+    uint64_t expected_aligned = CHIP_ALIGN_UP(100u, CHIP_ALIGN_SIZE);
     EXPECT_EQ(expected_aligned, 128u);
     EXPECT_EQ(allocator.heap_top(), expected_aligned);
     EXPECT_EQ(

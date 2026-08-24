@@ -36,7 +36,7 @@
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
     // first slot cannot false-share with whatever region sits in front of us.
-    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), PTO2_ALIGN_SIZE);
+    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), CHIP_ALIGN_SIZE);
 }
 
 // Initialize the queue header only. slots[] carries the sequence ramp push
@@ -267,9 +267,9 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
     layout.sched = SchedulerState::reserve_layout(arena);
 
     layout.off_copied_begin = arena.total_size();
-    // Padded to a PTO2_ALIGN_SIZE boundary: the shared-memory image starts at
+    // Padded to a CHIP_ALIGN_SIZE boundary: the shared-memory image starts at
     // off_copied_end on the device and its segment offsets are aligned from there.
-    layout.off_runtime = arena.reserve(PTO2_ALIGN_UP(sizeof(RuntimeContext), PTO2_ALIGN_SIZE), PTO2_ALIGN_SIZE);
+    layout.off_runtime = arena.reserve(CHIP_ALIGN_UP(sizeof(RuntimeContext), CHIP_ALIGN_SIZE), CHIP_ALIGN_SIZE);
     layout.off_copied_end = arena.total_size();
 
     layout.arena_size = arena.total_size();

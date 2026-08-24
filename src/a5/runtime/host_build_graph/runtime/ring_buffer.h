@@ -102,7 +102,7 @@ public:
      */
     TaskAllocResult alloc(int32_t output_size) {
         uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+            output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
 
         if (error_code_ptr_ != nullptr && error_code_ptr_->load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
             return {-1, -1, nullptr, nullptr};
@@ -128,7 +128,7 @@ public:
             return false;
         }
         const uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+            output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
         void *base = try_bump_heap(aligned_size);
         if (base == nullptr) return false;
         *packed_base = base;

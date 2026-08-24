@@ -32,7 +32,7 @@ namespace {
 SharedMemoryHandle *make_handle(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
     const uint64_t sm_size = SharedMemoryHandle::calculate_size(task_window_size);
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
-    const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), PTO2_ALIGN_SIZE);
+    const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), CHIP_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
 
     auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
@@ -153,13 +153,13 @@ TEST_F(SharedMemoryTest, PerRingIndependence) {
 TEST_F(SharedMemoryTest, PointerAlignment) {
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto addr = reinterpret_cast<uintptr_t>(handle->header->rings[r].task_descriptors);
-        EXPECT_EQ(addr % PTO2_ALIGN_SIZE, 0u) << "Ring " << r << " descriptors not aligned";
+        EXPECT_EQ(addr % CHIP_ALIGN_SIZE, 0u) << "Ring " << r << " descriptors not aligned";
     }
 }
 
 TEST_F(SharedMemoryTest, HeaderAlignment) {
     uintptr_t header_addr = (uintptr_t)handle->header;
-    EXPECT_EQ(header_addr % PTO2_ALIGN_SIZE, 0u) << "Header must be cache-line aligned";
+    EXPECT_EQ(header_addr % CHIP_ALIGN_SIZE, 0u) << "Header must be cache-line aligned";
 }
 
 // Descriptor and payload regions don't overlap within or across rings.
@@ -198,7 +198,7 @@ TEST(SharedMemoryCalcSize, LargerWindowGivesLargerSize) {
     EXPECT_GT(large_size, small_size);
 }
 
-TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(SharedMemoryHeader) % PTO2_ALIGN_SIZE, 0u); }
+TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(SharedMemoryHeader) % CHIP_ALIGN_SIZE, 0u); }
 
 TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
     uint64_t ws[CHIP_MAX_RING_DEPTH] = {128, 256, 512, 1024};
@@ -215,7 +215,7 @@ TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
 
     DeviceArena arena;
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
-    const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), PTO2_ALIGN_SIZE);
+    const size_t off_buffer = arena.reserve(static_cast<size_t>(sm_size), CHIP_ALIGN_SIZE);
     ASSERT_NE(arena.commit(), nullptr);
 
     auto *handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(off_handle));
@@ -246,7 +246,7 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     DeviceArena sm_arena;
-    const size_t sm_off = sm_arena.reserve(static_cast<size_t>(sm_size), PTO2_ALIGN_SIZE);
+    const size_t sm_off = sm_arena.reserve(static_cast<size_t>(sm_size), CHIP_ALIGN_SIZE);
     ASSERT_NE(sm_arena.commit(), nullptr);
     void *sm = sm_arena.region_ptr(sm_off);
     std::memset(sm, 0, static_cast<size_t>(sm_size));
@@ -340,7 +340,7 @@ TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
 // Zero window size: all ring descriptor pointers collapse to the same address.
 TEST(SharedMemoryBoundary, ZeroWindowSize) {
     uint64_t size = SharedMemoryHandle::calculate_size(0);
-    uint64_t header_size = PTO2_ALIGN_UP(sizeof(SharedMemoryHeader), PTO2_ALIGN_SIZE);
+    uint64_t header_size = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     EXPECT_EQ(size, header_size);
 
     DeviceArena arena;

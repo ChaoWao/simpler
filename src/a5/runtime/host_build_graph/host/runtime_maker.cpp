@@ -562,12 +562,12 @@ int32_t run_host_orchestration(
     // orch::prepare_task and shipped bounded to total_tasks below.
     const sm_layout::ChipRingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
     // Over-allocated and rounded up: every segment offset is a multiple of
-    // PTO2_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
+    // CHIP_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.
-    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + PTO2_ALIGN_SIZE]);
+    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + CHIP_ALIGN_SIZE]);
     void *host_sm = reinterpret_cast<void *>(
-        (reinterpret_cast<uintptr_t>(host_sm_buf.get()) + PTO2_ALIGN_SIZE - 1) &
-        ~static_cast<uintptr_t>(PTO2_ALIGN_SIZE - 1)
+        (reinterpret_cast<uintptr_t>(host_sm_buf.get()) + CHIP_ALIGN_SIZE - 1) &
+        ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
     );
     std::memset(host_sm, 0, sm_segs.descriptors);
 
@@ -789,8 +789,8 @@ int32_t run_host_orchestration(
     // same boundary it starts on, so an access at the tail of the last packed buffer
     // stays inside the region even when its width exceeds the bytes that buffer
     // asked for.
-    const uint64_t heap_bytes = PTO2_ALIGN_UP(
-        std::max<uint64_t>(orchestrator.task_allocator.heap_used_bytes(), PTO2_ALIGN_SIZE),
+    const uint64_t heap_bytes = CHIP_ALIGN_UP(
+        std::max<uint64_t>(orchestrator.task_allocator.heap_used_bytes(), CHIP_ALIGN_SIZE),
         DeviceArena::kDefaultBaseAlign
     );
     if (api->setup_static_arena(heap_bytes, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
@@ -853,14 +853,14 @@ int32_t run_host_orchestration(
     // One host source for one copy: the copied zone and shared-memory image at
     // exactly the offsets they occupy on the device.
     // Over-allocated and rounded up because every segment offset is
-    // PTO2_ALIGN_SIZE-aligned and ChipTaskSlotState is alignas(64), which a byte
+    // CHIP_ALIGN_SIZE-aligned and ChipTaskSlotState is alignas(64), which a byte
     // vector's data() is not.
     const uint64_t copied_bytes = layout.off_copied_end - layout.off_copied_begin;
     const uint64_t upload_bytes = copied_bytes + image_bytes;
-    std::vector<std::byte> storage(upload_bytes + PTO2_ALIGN_SIZE, std::byte{0});
+    std::vector<std::byte> storage(upload_bytes + CHIP_ALIGN_SIZE, std::byte{0});
     char *upload_base = reinterpret_cast<char *>(
-        (reinterpret_cast<uintptr_t>(storage.data()) + PTO2_ALIGN_SIZE - 1) &
-        ~static_cast<uintptr_t>(PTO2_ALIGN_SIZE - 1)
+        (reinterpret_cast<uintptr_t>(storage.data()) + CHIP_ALIGN_SIZE - 1) &
+        ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
     );
 
     // The copied zone carries no host address: the orchestrator is host-only and

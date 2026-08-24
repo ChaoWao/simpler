@@ -83,13 +83,13 @@ inline void decode_urma_event_handle(uint64_t handle, uint32_t &remote_rank, uin
 }
 
 inline uintptr_t cache_line(const volatile void *addr) {
-    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
 }
 
 inline void invalidate_object(const volatile void *addr, std::size_t size) {
     const uintptr_t object_addr = reinterpret_cast<uintptr_t>(addr);
     const uintptr_t begin = cache_line(addr);
-    const uintptr_t end = (object_addr + size + PTO2_ALIGN_SIZE - 1u) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    const uintptr_t end = (object_addr + size + CHIP_ALIGN_SIZE - 1u) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);
     cache_invalidate_range(reinterpret_cast<const void *>(begin), end - begin);
 }
 
@@ -114,7 +114,7 @@ inline void store_device_u32(uint64_t addr, uint32_t value) {
 
 inline uint32_t load_cqe_dw0(uint64_t cqe_addr) {
     auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(cqe_addr));
-    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(ptr)), PTO2_ALIGN_SIZE);
+    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(ptr)), CHIP_ALIGN_SIZE);
     return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
 }
 
