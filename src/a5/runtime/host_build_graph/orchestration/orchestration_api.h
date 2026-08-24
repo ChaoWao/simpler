@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -113,6 +114,14 @@ typedef struct PTO2RuntimeOps {
     // collector can log it. Always present to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
+    // Record one orchestration-side phase. The submission segments this carries are
+    // measured here and invisible to the runtime, which sees only what it is called
+    // for. Same convention as scope_set_site: always present, nullptr when DFX is off.
+    //
+    // This struct is declared twice — here and in the runtime's runtime_core.h — and
+    // the two must stay in lockstep field for field, since the runtime fills the table
+    // and this .so calls through it.
+    void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
 } PTO2RuntimeOps;
 
 /**
@@ -371,6 +380,24 @@ inline GraphAsyncRecordingState &rt_graph_async_recording() {
 // =============================================================================
 
 static inline PTO2Runtime *current_runtime() { return framework_current_runtime(); }
+
+// Where the previous submission on this thread left off, so the generated code's own
+// work between two submissions can be named rather than showing as an unattributed gap.
+// Per thread because a recording worker submits from its own thread.
+//
+// Cleared by rt_orchestration_done(), which is the actual boundary: a value carried into
+// the next orchestration would name a span that includes the device run and the next
+// bind's staging, and the record would be filed in the next bind's pool.
+struct RtSubmitPhaseState {
+    uint64_t prev_exit_ns;
+    uint64_t count;
+};
+
+inline RtSubmitPhaseState &rt_submit_phase_state() {
+    static thread_local RtSubmitPhaseState state{};
+    return state;
+}
+
 static inline void rt_graph_commit();
 
 // An ordinary submission depends on nothing a recording produces. The outer
@@ -530,6 +557,7 @@ static inline void rt_scope_end() {
 
 static inline void rt_orchestration_done() {
     rt_graph_commit();
+    rt_submit_phase_state() = RtSubmitPhaseState{};
     PTO2Runtime *rt = current_runtime();
     rt->ops->orchestration_done(rt);
 }
@@ -563,6 +591,43 @@ static inline bool rt_is_fatal() {
 
 #define LOG_ERROR(fmt, ...) current_runtime()->ops->log_error(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...) current_runtime()->ops->log_warn(__FUNCTION__, fmt, ##__VA_ARGS__)
+
+// ============================================================================
+// Submission-gap probe — diagnostic only, nothing branches on it.
+//
+// A graph_begin phase record covers only what the runtime does. The time between two
+// such records is this function's own pre/post work plus whatever the generated
+// orchestration code does between submissions, and no existing marker separates them.
+// These accumulators do, in the .so where that code actually runs.
+// ============================================================================
+// The three submission segments the runtime cannot see, spelled as plain integers for
+// the same reason the orchestrator core does it: this .so cannot include the platform's
+// profiling header. Pinned against HostPhaseKind by static_asserts in host_phase_trace.
+enum class RtOrchPhase : uint32_t {
+    SubmitAdmit = 20,
+    RecordHandoff = 21,
+    GeneratedArgs = 22,
+};
+
+inline void rt_record_orch_phase(RtOrchPhase phase, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
+    const PTO2RuntimeOps *ops = current_runtime()->ops;
+    if (ops->record_orch_phase != nullptr) {
+        ops->record_orch_phase(static_cast<uint32_t>(phase), start_ns, end_ns, detail);
+    }
+}
+
+// Monotonic nanoseconds, or 0 when nothing collects the records — the same convention
+// host_phase_now_ns() uses on the runtime side, and the same clock, so a record emitted
+// here nests under the bind's span with no conversion. The runtime's clock is not
+// reachable from this header, which resolves no runtime symbols of its own, so the
+// gate is the ops entry that rt_record_orch_phase would call.
+inline uint64_t rt_orch_phase_now_ns() {
+    if (current_runtime()->ops->record_orch_phase == nullptr) return 0;
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+}
+
 #define LOG_TIMING(fmt, ...) current_runtime()->ops->log_timing(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...) current_runtime()->ops->log_info(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) current_runtime()->ops->log_debug(__FUNCTION__, fmt, ##__VA_ARGS__)
@@ -683,11 +748,29 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
             "Runtime-allocated TensorCreateInfo is not supported at the Graph boundary"
         );
     }
+    RtSubmitPhaseState &_phase = rt_submit_phase_state();
+    const uint64_t _entry_ns = rt_orch_phase_now_ns();
+    // Only a gap inside one orchestration is this .so's own work.
+    // rt_orchestration_done() clears the state, so the submitting thread cannot carry a
+    // value across that boundary at all. The duration test below is the backstop for a
+    // thread that submits without ever reaching that call — a recording worker, or an
+    // orchestration that fails before completing — where the state is thread_local and
+    // outlives the bind. Real gaps here are single-digit microseconds, so a millisecond
+    // separates the two cases by three orders of magnitude.
+    constexpr uint64_t kBindBoundaryNs = 1000000;
+    const uint64_t _between = _phase.prev_exit_ns == 0 ? 0 : _entry_ns - _phase.prev_exit_ns;
+    if (_between != 0 && _between < kBindBoundaryNs) {
+        rt_record_orch_phase(RtOrchPhase::GeneratedArgs, _phase.prev_exit_ns, _entry_ns, _phase.count);
+    }
     if (!rt_graph_args_cacheable(args)) {
         invoke(args);
+        _phase.prev_exit_ns = rt_orch_phase_now_ns();
         return GraphSubmitResult{};
     }
+    const uint64_t _admitted_ns = rt_orch_phase_now_ns();
+    rt_record_orch_phase(RtOrchPhase::SubmitAdmit, _entry_ns, _admitted_ns, graph_key);
     GraphScopeResult result = rt_graph_begin(graph_key, args);
+    const uint64_t _begun_ns = rt_orch_phase_now_ns();
     if (result.recording) {
         GraphAsyncRecordingState &async = rt_graph_async_recording();
         void *handle = result.recording_handle;
@@ -722,6 +805,16 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
     }
     // A cache hit or an in-flight hit skips the body. Every in-flight Graph task
     // is finalized at orchestration completion.
+    const uint64_t _exit_ns = rt_orch_phase_now_ns();
+    if (result.recording) {
+        // Handing the recording to a worker. Measured at 10-75 us per start and covered
+        // by no other record: it runs after rt_graph_begin returns, so a swimlane shows
+        // it as a gap with no recorder active — which is what it is, the recorder has
+        // not reached its first node yet.
+        rt_record_orch_phase(RtOrchPhase::RecordHandoff, _begun_ns, _exit_ns, graph_key);
+    }
+    _phase.count++;
+    _phase.prev_exit_ns = _exit_ns;
     return result;
 }
 

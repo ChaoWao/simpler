@@ -107,6 +107,11 @@ struct PTO2RuntimeOps {
     // collector. Always present in the struct to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
+    // Record one orchestration-side phase on the calling thread. The submission
+    // segments this carries are measured in the orchestration .so, which reaches the
+    // runtime only through this table. Same convention as scope_set_site: always in
+    // the struct so the layout does not move with SIMPLER_DFX, nullptr when off.
+    void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
 };
 
 /**

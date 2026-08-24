@@ -170,11 +170,11 @@ constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
  *
  * Sized for its own producers rather than the sched/orch pools': a scheduler
  * thread emits tens of thousands of records per run, while one host orchestration
- * pass emits a few hundred per producer (a 40-layer decode: 12 bind segments +
+ * bind emits a few hundred per producer (a 40-layer decode: 12 bind segments +
  * ~325 submit-level operations). Inheriting PLATFORM_PHASE_RECORDS_PER_THREAD
  * here would allocate 4 MB to hold 11 KB.
  *
- * A pass has one producer per thread that records: the submitting thread plus one
+ * A bind has one producer per thread that records: the submitting thread plus one
  * per concurrently-recorded Graph Definition. Each claims whole buffers and fills
  * them alone, so `PLATFORM_HOST_PHASE_BUFFERS` must exceed the producer count or
  * a producer is denied a buffer and its records are dropped. The recorder pool
@@ -182,7 +182,7 @@ constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
  * ceiling; the buffer count is above that so a producer whose first buffer fills
  * can chain another.
  *
- * Per-buffer capacity is what a producer holds before chaining, not what a pass
+ * Per-buffer capacity is what a producer holds before chaining, not what a bind
  * needs: the widest observed single producer is a 1-Definition workload's lone
  * recorder at ~1900 records, which chains four 512-record buffers.
  */

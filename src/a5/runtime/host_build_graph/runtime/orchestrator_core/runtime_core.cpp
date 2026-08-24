@@ -17,6 +17,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
+#include "host_phase_trace.h"
 #include "runtime_core.h"
 
 #include <stdarg.h>
@@ -110,6 +111,16 @@ static void graph_abort_impl(PTO2Runtime *rt, void *recording_handle) {
 }
 
 static bool graph_end_impl(PTO2Runtime *rt) { return rt != nullptr && rt->orchestrator->graph_end(); }
+
+// The orchestration .so's phases arrive already bracketed, so this only forwards them
+// to the same pool the runtime's own records go to. Defined only at SIMPLER_DFX=1, like
+// scope_set_site_impl below: the slot stays in the struct either way, but a definition
+// the table does not reference is an unused-function error on the AICPU build.
+#if SIMPLER_DFX
+static void record_orch_phase_impl(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
+    host_phase_record(start_ns, end_ns, kind, detail, 0);
+}
+#endif
 
 static void graph_commit_impl(PTO2Runtime *rt) {
     if (rt != nullptr) rt->orchestrator->graph_commit();
@@ -403,8 +414,10 @@ static const PTO2RuntimeOps s_runtime_ops = {
     .graph_commit = graph_commit_impl,
 #if SIMPLER_DFX
     .scope_set_site = scope_set_site_impl,
+    .record_orch_phase = record_orch_phase_impl,
 #else
     .scope_set_site = nullptr,
+    .record_orch_phase = nullptr,
 #endif
 };
 

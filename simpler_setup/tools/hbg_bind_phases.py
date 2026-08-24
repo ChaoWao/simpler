@@ -11,7 +11,7 @@
 
 Reads the log a `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 --rounds N` run leaves
 behind and reports each bind phase's minimum, median and maximum across the warm
-passes, plus the control-plane total.
+binds, plus the control-plane total.
 
 What the phases are, and how to compare two runs:
 docs/dfx/hbg-bind-phases.md.
@@ -48,14 +48,14 @@ PHASE_ORDER = (
     "host_view_close",
 )
 
-# The last segment of a pass, and so what closes one: the segments are not
+# The last segment of a bind, and so what closes one: the segments are not
 # contiguous in time, so timestamp order does not group them.
-PASS_CLOSING_PHASE = "arena_h2d"
+BIND_CLOSING_PHASE = "arena_h2d"
 
 
-def parse_passes(path: str) -> list[dict[str, float]]:
-    """Group `bind phase=` lines into passes, in milliseconds."""
-    passes: list[dict[str, float]] = []
+def parse_binds(path: str) -> list[dict[str, float]]:
+    """Group `bind phase=` lines into binds, in milliseconds."""
+    binds: list[dict[str, float]] = []
     current: dict[str, float] = {}
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -64,13 +64,13 @@ def parse_passes(path: str) -> list[dict[str, float]]:
                 continue
             phase, _start_ns, dur_ns = match.group(1), int(match.group(2)), int(match.group(3))
             current[phase] = dur_ns / 1e6
-            if phase == PASS_CLOSING_PHASE:
-                passes.append(current)
+            if phase == BIND_CLOSING_PHASE:
+                binds.append(current)
                 current = {}
     if current:
-        passes.append(current)
-    # A group without `host_orch` is not a bind pass.
-    return [p for p in passes if "host_orch" in p]
+        binds.append(current)
+    # A group without `host_orch` is not a bind.
+    return [b for b in binds if "host_orch" in b]
 
 
 def parse_stamp(path: str) -> str:
@@ -95,16 +95,16 @@ def main() -> int:
         "--ranks",
         type=int,
         default=None,
-        help="ranks in the run; the first pass of each is warm-up and is dropped. "
-        "Default: inferred as the number of passes divided by the round count when "
+        help="ranks in the run; the first bind of each is warm-up and is dropped. "
+        "Default: inferred as the number of binds divided by the round count when "
         "--rounds is given, else 1.",
     )
     parser.add_argument("--rounds", type=int, default=None, help="rounds the run was given, to infer --ranks")
-    parser.add_argument("--keep-first", action="store_true", help="keep the cold pass in the statistics")
+    parser.add_argument("--keep-first", action="store_true", help="keep the cold bind in the statistics")
     args = parser.parse_args()
 
-    passes = parse_passes(args.log)
-    if not passes:
+    binds = parse_binds(args.log)
+    if not binds:
         print(
             f"{args.log}: no `bind phase=` lines. SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 and "
             "SIMPLER_LOG_LEVEL=TIMING must both be set, and a multi-device case must be "
@@ -115,14 +115,14 @@ def main() -> int:
 
     ranks = args.ranks
     if ranks is None:
-        ranks = max(1, len(passes) // args.rounds) if args.rounds else 1
-    dropped = 0 if args.keep_first else min(ranks, len(passes))
-    warm = passes[dropped:]
+        ranks = max(1, len(binds) // args.rounds) if args.rounds else 1
+    dropped = 0 if args.keep_first else min(ranks, len(binds))
+    warm = binds[dropped:]
     if not warm:
         print(
-            f"{args.log}: {len(passes)} pass(es) over {ranks} rank(s), all of them cold. The first "
-            "pass of each rank is warm-up, so a warm pass needs --rounds 2 or more; --keep-first "
-            "reports the cold passes instead.",
+            f"{args.log}: {len(binds)} bind(s) over {ranks} rank(s), all of them cold. The first "
+            "bind of each rank is warm-up, so a warm bind needs --rounds 2 or more; --keep-first "
+            "reports the cold binds instead.",
             file=sys.stderr,
         )
         return 1
@@ -134,45 +134,45 @@ def main() -> int:
     else:
         print("  (no `[stamp]` line: the command and commit behind these numbers have")
         print("   to be established by hand before comparing them to anything)")
-    print(f"  {len(passes)} passes, {len(warm)} warm ({dropped} cold dropped, ranks={ranks})\n")
+    print(f"  {len(binds)} binds, {len(warm)} warm ({dropped} cold dropped, ranks={ranks})\n")
     print(f"  {'phase':<18}{'min':>10}{'median':>10}{'max':>10}   n")
     for phase in PHASE_ORDER:
-        values = [p[phase] for p in warm if phase in p]
+        values = [b[phase] for b in warm if phase in b]
         if not values:
             continue
         low, mid, high = spread(values)
         mark = "*" if phase in CONTROL_PLANE else " "
         print(f" {mark}{phase:<18}{low:>10.3f}{mid:>10.3f}{high:>10.3f}  {len(values):3d}")
 
-    unknown = sorted({k for p in warm for k in p} - set(PHASE_ORDER))
+    unknown = sorted({k for b in warm for k in b} - set(PHASE_ORDER))
     if unknown:
         print(f"\n  phases this tool does not know about: {', '.join(unknown)}")
         print("  (add them to PHASE_ORDER, and to CONTROL_PLANE if a dispatch change can move them)")
 
     # The control-plane set is not fixed: a change can retire a phase outright, so
     # the total covers the phases this run has and names the ones absent from every
-    # pass. Absent from only some passes is a truncated log rather than a retired
-    # phase, and would understate a pass, so those passes are excluded and warned
+    # bind. Absent from only some binds is a truncated log rather than a retired
+    # phase, and would understate a bind, so those binds are excluded and warned
     # about.
-    present = [k for k in CONTROL_PLANE if any(k in p for k in [k] for p in warm)]
-    partial = [k for k in present if not all(k in p for p in warm)]
+    present = [k for k in CONTROL_PLANE if any(k in b for b in warm)]
+    partial = [k for k in present if not all(k in b for b in warm)]
     retired = [k for k in CONTROL_PLANE if k not in present]
-    complete = [p for p in warm if all(k in p for k in present)]
+    complete = [b for b in warm if all(k in b for k in present)]
     if complete:
-        totals = [sum(p[k] for k in present) for p in complete]
+        totals = [sum(b[k] for k in present) for b in complete]
         low, mid, high = spread(totals)
-        print("\n  * = control plane, summed within each pass and then:")
+        print("\n  * = control plane, summed within each bind and then:")
         print(f"    total{'':<13}{low:>10.3f}{mid:>10.3f}{high:>10.3f}  {len(totals):3d}   (ms)")
         if retired:
             print(f"    over {len(present)} of {len(CONTROL_PLANE)} phases; absent from every")
-            print(f"    pass: {', '.join(retired)}")
+            print(f"    bind: {', '.join(retired)}")
         if partial:
-            print(f"    WARNING: {', '.join(partial)} is missing from some passes but not all;")
-            print("    those passes are excluded, and the total may not describe the run")
+            print(f"    WARNING: {', '.join(partial)} is missing from some binds but not all;")
+            print("    those binds are excluded, and the total may not describe the run")
         print("\n  Compare by min, over the same phase set, against a log with the same")
         print("  stamp; see docs/dfx/hbg-bind-phases.md 'Comparing two branches'.")
     else:
-        print(f"\n  no pass carries any of {CONTROL_PLANE}; the control-plane total is not computable")
+        print(f"\n  no bind carries any of {CONTROL_PLANE}; the control-plane total is not computable")
     return 0
 
 
