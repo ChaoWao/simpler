@@ -108,6 +108,7 @@ class TestPagedAttentionUnroll(SceneTestCase):
     ]
 
     def generate_args(self, params):
+        params = {**params, "variant": "paged_attention_unroll"}
         result = _pa_generate_inputs(params)
         specs = []
         for name, value in result:
