@@ -859,13 +859,11 @@ std::vector<uint8_t> ready_mpi_mailbox(int32_t world_size) {
     using namespace mpi_group_mailbox;
     std::vector<uint8_t> mailbox(MAILBOX_BYTES, 0);
     std::memcpy(mailbox.data() + OFF_MAGIC, MAGIC, sizeof(MAGIC));
-    const uint32_t version = PROTOCOL_VERSION;
     const uint32_t header_bytes = HEADER_BYTES;
     const uint64_t mailbox_bytes = MAILBOX_BYTES;
     const uint32_t size = static_cast<uint32_t>(world_size);
     const int32_t ready = static_cast<int32_t>(GroupState::READY);
     const int32_t idle = static_cast<int32_t>(RequestState::IDLE);
-    std::memcpy(mailbox.data() + OFF_PROTOCOL_VERSION, &version, sizeof(version));
     std::memcpy(mailbox.data() + OFF_HEADER_BYTES, &header_bytes, sizeof(header_bytes));
     std::memcpy(mailbox.data() + OFF_MAILBOX_BYTES, &mailbox_bytes, sizeof(mailbox_bytes));
     std::memcpy(mailbox.data() + OFF_WORLD_SIZE, &size, sizeof(size));

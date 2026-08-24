@@ -727,7 +727,7 @@ MpiGroupMailboxChannel::MpiGroupMailboxChannel(
     if (std::memcmp(mailbox_ + OFF_MAGIC, MAGIC, sizeof(MAGIC)) != 0) {
         throw std::invalid_argument("MpiGroupMailboxChannel: mailbox magic mismatch");
     }
-    if (read_u32(OFF_PROTOCOL_VERSION) != PROTOCOL_VERSION || read_u32(OFF_HEADER_BYTES) != HEADER_BYTES) {
+    if (read_u32(OFF_HEADER_BYTES) != HEADER_BYTES) {
         throw std::invalid_argument("MpiGroupMailboxChannel: mailbox protocol mismatch");
     }
     if (read_u64(OFF_MAILBOX_BYTES) != MAILBOX_BYTES ||

@@ -27,7 +27,6 @@
 namespace mpi_group_mailbox {
 
 inline constexpr uint8_t MAGIC[8] = {'S', 'M', 'P', 'I', 'B', 'O', 'X', '\0'};
-inline constexpr uint32_t PROTOCOL_VERSION = 1;
 inline constexpr size_t HEADER_BYTES = 256;
 inline constexpr size_t PAYLOAD_BYTES = 16U * 1024U * 1024U;
 inline constexpr size_t ERROR_BYTES = 64U * 1024U;
@@ -37,7 +36,6 @@ inline constexpr size_t ERROR_OFFSET = RESPONSE_OFFSET + PAYLOAD_BYTES;
 inline constexpr size_t MAILBOX_BYTES = ERROR_OFFSET + ERROR_BYTES;
 
 inline constexpr size_t OFF_MAGIC = 0;
-inline constexpr size_t OFF_PROTOCOL_VERSION = 8;
 inline constexpr size_t OFF_HEADER_BYTES = 12;
 inline constexpr size_t OFF_MAILBOX_BYTES = 16;
 inline constexpr size_t OFF_WORLD_SIZE = 24;
@@ -52,9 +50,10 @@ inline constexpr size_t OFF_REQUEST_BYTES = 64;
 inline constexpr size_t OFF_RESPONSE_COUNT = 68;
 inline constexpr size_t OFF_RESPONSE_BYTES = 72;
 inline constexpr size_t OFF_ERROR_BYTES = 76;
-// Header bytes [RESERVED_OFFSET, HEADER_BYTES) are reserved in protocol
-// version 1: the creator zeroes them and every attach path rejects a mailbox
-// whose reserved bytes are non-zero, so a future version can assign them.
+// Header bytes [RESERVED_OFFSET, HEADER_BYTES) are reserved: the creator zeroes
+// them and every attach path rejects a mailbox whose reserved bytes are
+// non-zero, so a later field can claim them. The word at offset 8 is likewise
+// unclaimed and left zero.
 inline constexpr size_t RESERVED_OFFSET = 80;
 
 // The request-state word doubles as a shared futex: the mailbox is mapped by
