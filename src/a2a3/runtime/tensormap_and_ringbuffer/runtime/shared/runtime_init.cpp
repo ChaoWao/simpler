@@ -143,9 +143,9 @@ SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capaci
     }
     layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         // Force a cache-line base so Orch-side dep_pool writes do not invalidate
         // adjacent multi-threaded regions like ready_queue.slots.
@@ -192,14 +192,14 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         if (!ready_queue_init_data_from_layout(
                 &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i],
-                PTO2_EARLY_DISPATCH_QUEUE_SIZE
+                CHIP_EARLY_DISPATCH_QUEUE_SIZE
             )) {
             return false;
         }
     }
     if (!ready_queue_init_data_from_layout(
             &sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots,
-            PTO2_EARLY_DISPATCH_QUEUE_SIZE
+            CHIP_EARLY_DISPATCH_QUEUE_SIZE
         )) {
         return false;
     }

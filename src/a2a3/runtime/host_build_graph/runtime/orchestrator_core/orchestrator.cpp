@@ -1739,15 +1739,15 @@ void graph_reset_outer_payload(TaskPayload &payload) {
     payload.scalar_count = 0;
     payload.fanin_count = 0;
     payload.predicate = DispatchPredicate{};
-    payload.early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
     for (auto &word : payload.staged_core_mask)
         word.store(0, std::memory_order_relaxed);
     payload.dispatch_fanin.store(0, std::memory_order_relaxed);
     payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
-    payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);
-    payload.early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+    payload.early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
 }
 
 bool graph_submit_outer(

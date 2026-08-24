@@ -45,16 +45,16 @@ GraphExecution *acquire_execution_storage(
 void reset_graph_payload(TaskPayload &payload) {
     payload.fanin_count = 0;
     payload.predicate = DispatchPredicate{};
-    payload.early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
-    for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; ++w) {
+    payload.early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+    for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; ++w) {
         payload.staged_core_mask[w].store(0, std::memory_order_relaxed);
     }
     payload.dispatch_fanin.store(0, std::memory_order_relaxed);
     payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
-    payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);
-    payload.early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+    payload.early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
 }
 
 bool bind_graph_topology(GraphExecution &execution) {

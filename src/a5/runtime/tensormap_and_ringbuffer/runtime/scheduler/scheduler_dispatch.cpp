@@ -48,7 +48,7 @@ static_assert(offsetof(TaskPayload, scalar_count) == TASKPAYLOAD_SCALAR_COUNT_OF
 static_assert(offsetof(TaskPayload, tensors) == TASKPAYLOAD_TENSORS_OFFSET);
 static_assert(offsetof(TaskPayload, scalars) == TASKPAYLOAD_SCALARS_OFFSET);
 static_assert(sizeof(ChipTensor) == TASKPAYLOAD_TENSOR_STRIDE);
-static_assert(RUNTIME_MAX_WORKER <= PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64);
+static_assert(RUNTIME_MAX_WORKER <= EARLY_DISPATCH_CORE_MASK_WORDS * 64);
 
 const char *SchedulerContext::shape_name(ResourceShape shape) {
     switch (shape) {
@@ -584,7 +584,7 @@ int32_t SchedulerContext::stage_consumer_blocks(
     // Stamp the real pre-stage time (NOT 0) so the swimlane shows these blocks
     // dispatched during the producer's run, not at trace start.
     uint64_t early_dispatch_ts = get_sys_cnt_aicpu();
-    uint64_t my_cores[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};  // cores gated by this staging pass
+    uint64_t my_cores[EARLY_DISPATCH_CORE_MASK_WORDS] = {0};  // cores gated by this staging pass
     int32_t staged = 0;
     int32_t block = start;
     // Mirror the normal flush_publish (scheduler_dispatch.cpp wmb()+publish loop):
@@ -621,20 +621,20 @@ int32_t SchedulerContext::stage_consumer_blocks(
     }
     // Publish all this thread's gated cores into the shared mask in one OR per word
     // (vs one per subtask) so release sees them; seq_cst keeps the self-ring order.
-    for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
+    for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
         if (my_cores[w] != 0) c->payload->staged_core_mask[w].fetch_or(my_cores[w], std::memory_order_seq_cst);
 
     // Full publication and release are independent events. The seq_cst
     // state/launch/count operations form a two-sided handshake. A released
     // block must ring before contributing to the publication count.
-    bool released = staged > 0 &&
-                    c->payload->early_dispatch_state.load(std::memory_order_seq_cst) == PTO2_EARLY_DISPATCH_DISPATCHED;
+    bool released =
+        staged > 0 && c->payload->early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_DISPATCHED;
 
     // Claim only bits the release path did not take. Local handles remain valid
     // even if the shared per-core table is reused before this thread resumes.
     if (released) {
-        uint64_t owned[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+        uint64_t owned[EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             if (my_cores[w] != 0) {
                 owned[w] =
                     SchedulerState::claim_late_staged_doorbell_bits(c->payload->staged_core_mask[w], my_cores[w]);
@@ -693,7 +693,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, 
     for (int bi = 0; bi < got; bi++) {
         ChipTaskSlotState *c = batch[bi];
         if (static_cast<uint64_t>(c->task->task_id.raw) != task_id_snapshots[bi]) continue;
-        if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != PTO2_EARLY_DISPATCH_STAGING)
+        if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != EARLY_DISPATCH_STAGING)
             continue;  // released
 
         // The single free-core bucket for this phase. For MIX, an active-mask-aware
@@ -786,7 +786,7 @@ int32_t SchedulerContext::try_early_dispatch(
         bool current_sync_task =
             static_cast<uint64_t>(c->task->task_id.raw) == sync_task_id_snapshot && c->task_attrs.requires_sync_start();
         if (current_sync_task && SchedulerState::try_claim_early_sync_drain(*c->payload)) {
-            if (c->payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_STAGING) {
+            if (c->payload->early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_STAGING) {
                 sched_->cancel_early_sync_drain(*c);
             } else if (drain_state_.sync_start_pending.load(std::memory_order_acquire) == 0 &&
                        tracker.count_available_blocks(

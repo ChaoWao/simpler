@@ -283,7 +283,7 @@ TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
     TaskPayload payload{};
 
     for (int iteration = 0; iteration < 1000; iteration++) {
-        payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+        payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
         std::atomic<bool> start{false};
         bool first_won = false;
         bool second_won = false;
@@ -302,9 +302,7 @@ TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
         second.join();
 
         EXPECT_NE(first_won, second_won);
-        EXPECT_EQ(
-            payload.early_dispatch_launch_state.load(std::memory_order_acquire), PTO2_EARLY_DISPATCH_LAUNCH_RINGING
-        );
+        EXPECT_EQ(payload.early_dispatch_launch_state.load(std::memory_order_acquire), EARLY_DISPATCH_LAUNCH_RINGING);
     }
 }
 
@@ -321,7 +319,7 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     sched.record_published_blocks(sync_consumer, sync_consumer.logical_block_num);
     sync_consumer.payload->staged_core_mask[0].store(0b11, std::memory_order_relaxed);
     sync_consumer.payload->running_slot_count.store(0, std::memory_order_relaxed);
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
     DepListEntry dep{};
@@ -329,13 +327,13 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     sync_consumer.fanout_head = &dep;
 
     EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_NONE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_NONE);
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 0);
 
     sync_consumer.payload->running_slot_count.store(2, std::memory_order_seq_cst);
     EXPECT_TRUE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_COMPLETE);
     EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 
@@ -356,7 +354,7 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
     sched.record_published_blocks(sync_consumer, sync_consumer.logical_block_num);
     sync_consumer.payload->staged_core_mask[0].store(0b11, std::memory_order_relaxed);
     sync_consumer.payload->running_slot_count.store(2, std::memory_order_relaxed);
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
     DepListEntry dep{};
@@ -365,8 +363,8 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
 
     EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
     EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_COMPLETE);
     EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 
@@ -380,7 +378,7 @@ TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState)
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
     sync_consumer.logical_block_num = 2;
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     ASSERT_TRUE(SchedulerState::try_claim_early_sync_drain(*sync_consumer.payload));
     SchedulerState::mark_early_sync_drain_armed(*sync_consumer.payload);
@@ -392,8 +390,7 @@ TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState)
     EXPECT_TRUE(SchedulerState::publish_ready_to_early_sync_drain(*sync_consumer.payload));
     EXPECT_EQ(
         sync_consumer.payload->early_sync_drain_state.load(),
-        PTO2_EARLY_SYNC_DRAIN_OWNER | PTO2_EARLY_SYNC_DRAIN_ARMED | PTO2_EARLY_SYNC_DRAIN_READY |
-            PTO2_EARLY_SYNC_DRAIN_COMPLETE
+        EARLY_SYNC_DRAIN_OWNER | EARLY_SYNC_DRAIN_ARMED | EARLY_SYNC_DRAIN_READY | EARLY_SYNC_DRAIN_COMPLETE
     );
 }
 
@@ -1001,12 +998,12 @@ TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
     }
 
     sched.try_enqueue_early_dispatch_candidate(consumer);
-    ASSERT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    ASSERT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_NONE);
 
     // The overflowed candidate carries no early-dispatch claim, so the producer
     // release routes every block through the ordinary ready queue.
     EXPECT_TRUE(sched.route_ready_once(consumer));
-    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
     EXPECT_EQ(sched.ready_queues[static_cast<int32_t>(shape)].pop(), &consumer);
 }
 
@@ -1023,7 +1020,7 @@ TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue)
     }
 
     sched.try_enqueue_early_dispatch_candidate(consumer);
-    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_NONE);
     EXPECT_EQ(queue.size(), queue.capacity);
 
     // A sync_start cohort that never reached its drain falls back to the

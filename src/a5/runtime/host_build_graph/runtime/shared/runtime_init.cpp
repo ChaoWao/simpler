@@ -86,9 +86,9 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     // ones. The big nine are the arena's last reservations so that the bytes bind
     // uploads stay one contiguous range no matter how much of them is in use.
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
@@ -125,9 +125,9 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.ready_queue_capacity);
     ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.ready_queue_capacity);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+        ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    ready_queue_init_data_from_layout(&sched->early_sync_start_queue, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    ready_queue_init_data_from_layout(&sched->early_sync_start_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
 
     // Polling: no dep_pool arena region to initialize.
     (void)arena;

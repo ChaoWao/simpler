@@ -274,7 +274,7 @@ void SchedulerContext::check_running_cores_for_completion(
         {
             ChipTaskSlotState *rs = core.running_slot_state;
             if (rs != nullptr && rs->payload != nullptr &&
-                rs->payload->early_dispatch_state.load(std::memory_order_relaxed) == PTO2_EARLY_DISPATCH_STAGING) {
+                rs->payload->early_dispatch_state.load(std::memory_order_relaxed) == EARLY_DISPATCH_STAGING) {
                 continue;
             }
         }
@@ -314,12 +314,11 @@ void SchedulerContext::check_running_cores_for_completion(
         uint8_t pending_ss =
             (core.pending_slot_state != nullptr && core.pending_slot_state->payload != nullptr) ?
                 core.pending_slot_state->payload->early_dispatch_state.load(std::memory_order_relaxed) :
-                static_cast<uint8_t>(PTO2_EARLY_DISPATCH_NONE);
+                static_cast<uint8_t>(EARLY_DISPATCH_NONE);
         bool pending_gated =
             (core.pending_slot_state != nullptr && core.pending_slot_state->payload != nullptr &&
-             (pending_ss == PTO2_EARLY_DISPATCH_STAGING ||
-              (pending_ss == PTO2_EARLY_DISPATCH_DISPATCHED &&
-               core.pending_slot_state->task_attrs.requires_sync_start())));
+             (pending_ss == EARLY_DISPATCH_STAGING ||
+              (pending_ss == EARLY_DISPATCH_DISPATCHED && core.pending_slot_state->task_attrs.requires_sync_start())));
         SlotTransition t = decide_slot_transition(
             reg_task_id, reg_state, core.running_reg_task_id, core.pending_reg_task_id, pending_gated
         );
@@ -552,7 +551,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
             // per-write atomic contends across all drain threads on the same 2 words and was
             // ~half the publish cost. The doorbell-table writes stay per-core (unique cid, no
             // contention).
-            uint64_t my_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
+            uint64_t my_mask[EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
             for (int i = 0; i < handle_count; i++) {
                 publish_subtask_to_core(handles[i], dispatch_ts, thread_idx);
                 if (gated) {
@@ -563,7 +562,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                 }
             }
             if (gated) {
-                for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+                for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                     if (my_mask[w] != 0) {
                         slot_state->payload->staged_core_mask[w].fetch_or(my_mask[w], std::memory_order_seq_cst);
                     }

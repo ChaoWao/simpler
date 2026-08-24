@@ -91,7 +91,7 @@
 // capacity tracks the publication burst rather than the simultaneously
 // stageable cohort: a 128-token EP8 routed-expert layer bursts 128 gate/up MM
 // candidates onto one shape, and this holds 2x that.
-#define PTO2_EARLY_DISPATCH_QUEUE_SIZE 256
+#define CHIP_EARLY_DISPATCH_QUEUE_SIZE 256
 
 // Fanin storage
 #define CHIP_FANIN_INLINE_CAP 64
@@ -237,25 +237,25 @@ static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer
 // =============================================================================
 
 // Early-dispatch claim states for TaskPayload::early_dispatch_state.
-enum PTO2EarlyDispatchState : uint8_t {
-    PTO2_EARLY_DISPATCH_NONE = 0,       // not pre-staged
-    PTO2_EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
-    PTO2_EARLY_DISPATCH_STAGED = 2,     // reserved
-    PTO2_EARLY_DISPATCH_DISPATCHED = 3  // producers released; staged blocks may still be gated
+enum EarlyDispatchState : uint8_t {
+    EARLY_DISPATCH_NONE = 0,       // not pre-staged
+    EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
+    EARLY_DISPATCH_STAGED = 2,     // reserved
+    EARLY_DISPATCH_DISPATCHED = 3  // producers released; staged blocks may still be gated
 };
 
-enum PTO2EarlyDispatchLaunchState : uint8_t {
-    PTO2_EARLY_DISPATCH_LAUNCH_NONE = 0,
-    PTO2_EARLY_DISPATCH_LAUNCH_RINGING = 1,
-    PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE = 2,
+enum EarlyDispatchLaunchState : uint8_t {
+    EARLY_DISPATCH_LAUNCH_NONE = 0,
+    EARLY_DISPATCH_LAUNCH_RINGING = 1,
+    EARLY_DISPATCH_LAUNCH_COMPLETE = 2,
 };
 
-enum PTO2EarlySyncDrainState : uint8_t {
-    PTO2_EARLY_SYNC_DRAIN_NONE = 0,
-    PTO2_EARLY_SYNC_DRAIN_OWNER = 1 << 0,
-    PTO2_EARLY_SYNC_DRAIN_ARMED = 1 << 1,
-    PTO2_EARLY_SYNC_DRAIN_READY = 1 << 2,
-    PTO2_EARLY_SYNC_DRAIN_COMPLETE = 1 << 3,
+enum EarlySyncDrainState : uint8_t {
+    EARLY_SYNC_DRAIN_NONE = 0,
+    EARLY_SYNC_DRAIN_OWNER = 1 << 0,
+    EARLY_SYNC_DRAIN_ARMED = 1 << 1,
+    EARLY_SYNC_DRAIN_READY = 1 << 2,
+    EARLY_SYNC_DRAIN_COMPLETE = 1 << 3,
 };
 
 // A pre-staged consumer occupies one core per gated subtask block. WHICH cores
@@ -265,7 +265,7 @@ enum PTO2EarlySyncDrainState : uint8_t {
 // chip's core count (RUNTIME_MAX_WORKER = 108 on a5; no two-level pre-dispatch means
 // gated cores in flight <= core count), NOT by block_num — so a wide SPMD
 // consumer can pre-stage all its idle cores. 2 words = 128 bits >= 108.
-inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
+inline constexpr int EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
 /**
  * Task payload data (cold path - only accessed during orchestration and dispatch)
@@ -295,7 +295,7 @@ struct TaskPayload {
     // consumer destructively splits those bits between release and late-stager
     // owners; a sync_start cohort keeps the completed mask stable for one launch
     // owner across both local staging and the global-drain fallback.
-    std::atomic<uint64_t> staged_core_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS]{};
+    std::atomic<uint64_t> staged_core_mask[EARLY_DISPATCH_CORE_MASK_WORDS]{};
     // Candidate detection is the event-driven dual of fanin_refcount. Wiring
     // seeds producers already complete, and flagged producers increment the
     // count only after all logical blocks are launch-visible. Equality with
@@ -312,7 +312,7 @@ struct TaskPayload {
     std::atomic<uint8_t> early_dispatch_state{0};
     // COMPLETE is published only after every owned doorbell is visible, keeping
     // fanout private until all gated blocks have launched.
-    std::atomic<uint8_t> early_dispatch_launch_state{PTO2_EARLY_DISPATCH_LAUNCH_NONE};
+    std::atomic<uint8_t> early_dispatch_launch_state{EARLY_DISPATCH_LAUNCH_NONE};
     // Number of this sync_start task's gated cores occupying RUNNING slots.
     // Counting cores is shape-agnostic for MIX, whose cluster cores promote
     // independently. Doorbells launch only after this count matches the staged
@@ -321,7 +321,7 @@ struct TaskPayload {
     // OWNER persists through ARMED and COMPLETE for one task lifetime. READY
     // records that producer release observed the owner; only cancellation clears
     // ownership before payload reinitialization.
-    std::atomic<uint8_t> early_sync_drain_state{PTO2_EARLY_SYNC_DRAIN_NONE};
+    std::atomic<uint8_t> early_sync_drain_state{EARLY_SYNC_DRAIN_NONE};
     // === Cache line 9 (byte 576) — dispatch predicate (AICPU-only) ===
     // Offset is a fixed 576, independent of MAX_TENSOR_ARGS / MAX_SCALAR_ARGS.
     // AICore never reads it — args are materialized from the tensor_count / tensors
@@ -401,14 +401,14 @@ struct TaskPayload {
         // are consumer-side state and must be initialized on every submit even
         // when the consumer itself does not allow early resolve, because one of
         // its flagged producers may still update them.
-        early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
+        early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_core_mask[w].store(0, std::memory_order_relaxed);
         dispatch_fanin.store(0, std::memory_order_relaxed);
         published_block_count.store(0, std::memory_order_relaxed);
-        early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+        early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
         running_slot_count.store(0, std::memory_order_relaxed);
-        early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+        early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
     }
 };
 

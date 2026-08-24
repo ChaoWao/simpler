@@ -687,7 +687,7 @@ struct SchedulerState {
         uint64_t addr{0};
         uint32_t token{0};
     };
-    EarlyDispatchDoorbell early_dispatch_doorbell_table[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
+    EarlyDispatchDoorbell early_dispatch_doorbell_table[EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
 
     // Cross-thread early-dispatch work queues, one ChipReadyQueue MPMC instance per
     // resource shape (AIC/AIV/MIX) — arena-backed, reserved/wired in pto_runtime2_init
@@ -747,7 +747,7 @@ struct SchedulerState {
     }
 
     static inline bool should_gate_early_dispatch(bool force_gate, uint8_t early_dispatch_state) {
-        return force_gate || early_dispatch_state == PTO2_EARLY_DISPATCH_STAGING;
+        return force_gate || early_dispatch_state == EARLY_DISPATCH_STAGING;
     }
 
     static inline bool
@@ -758,9 +758,9 @@ struct SchedulerState {
     }
 
     static inline bool try_claim_early_dispatch_launch(TaskPayload &payload) {
-        uint8_t expected = PTO2_EARLY_DISPATCH_LAUNCH_NONE;
+        uint8_t expected = EARLY_DISPATCH_LAUNCH_NONE;
         return payload.early_dispatch_launch_state.compare_exchange_strong(
-            expected, PTO2_EARLY_DISPATCH_LAUNCH_RINGING, std::memory_order_seq_cst, std::memory_order_seq_cst
+            expected, EARLY_DISPATCH_LAUNCH_RINGING, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
     }
 
@@ -773,7 +773,7 @@ struct SchedulerState {
     // the NONE->RINGING launch latch and invokes this exactly once after local or
     // global staging completes, while the corresponding per-core table entries are live.
     inline void ring_all_staged_doorbells(ChipTaskSlotState &slot_state) {
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             uint64_t bits = slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst);
             while (bits != 0) {
                 int core_id = w * 64 + __builtin_ctzll(bits);
@@ -786,43 +786,42 @@ struct SchedulerState {
     }
 
     static inline bool try_claim_early_sync_drain(TaskPayload &payload) {
-        uint8_t expected = PTO2_EARLY_SYNC_DRAIN_NONE;
+        uint8_t expected = EARLY_SYNC_DRAIN_NONE;
         return payload.early_sync_drain_state.compare_exchange_strong(
-            expected, PTO2_EARLY_SYNC_DRAIN_OWNER, std::memory_order_seq_cst, std::memory_order_seq_cst
+            expected, EARLY_SYNC_DRAIN_OWNER, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
     }
 
     static inline bool owns_early_sync_drain(const TaskPayload &payload) {
-        return (payload.early_sync_drain_state.load(std::memory_order_acquire) & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
+        return (payload.early_sync_drain_state.load(std::memory_order_acquire) & EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
     static inline void mark_early_sync_drain_armed(TaskPayload &payload) {
-        payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_ARMED, std::memory_order_seq_cst);
+        payload.early_sync_drain_state.fetch_or(EARLY_SYNC_DRAIN_ARMED, std::memory_order_seq_cst);
     }
 
     static inline bool publish_ready_to_early_sync_drain(TaskPayload &payload) {
-        uint8_t previous =
-            payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_READY, std::memory_order_seq_cst);
-        return (previous & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
+        uint8_t previous = payload.early_sync_drain_state.fetch_or(EARLY_SYNC_DRAIN_READY, std::memory_order_seq_cst);
+        return (previous & EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
     inline void cancel_early_sync_drain(ChipTaskSlotState &slot_state) {
         uint8_t previous =
-            slot_state.payload->early_sync_drain_state.exchange(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
-        if ((previous & PTO2_EARLY_SYNC_DRAIN_OWNER) == 0) return;
-        if ((previous & PTO2_EARLY_SYNC_DRAIN_READY) != 0) {
+            slot_state.payload->early_sync_drain_state.exchange(EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
+        if ((previous & EARLY_SYNC_DRAIN_OWNER) == 0) return;
+        if ((previous & EARLY_SYNC_DRAIN_READY) != 0) {
             push_ready_routed(&slot_state);
             return;
         }
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) == PTO2_EARLY_DISPATCH_STAGING) {
+        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_STAGING) {
             early_sync_start_queue.push_tagged(&slot_state, static_cast<uint64_t>(slot_state.task->task_id.raw));
         }
     }
 
     static inline void finish_early_sync_drain(TaskPayload &payload) {
         uint8_t state = payload.early_sync_drain_state.load(std::memory_order_seq_cst);
-        while ((state & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0 && (state & PTO2_EARLY_SYNC_DRAIN_COMPLETE) == 0) {
-            uint8_t desired = state | PTO2_EARLY_SYNC_DRAIN_COMPLETE;
+        while ((state & EARLY_SYNC_DRAIN_OWNER) != 0 && (state & EARLY_SYNC_DRAIN_COMPLETE) == 0) {
+            uint8_t desired = state | EARLY_SYNC_DRAIN_COMPLETE;
             if (payload.early_sync_drain_state.compare_exchange_weak(
                     state, desired, std::memory_order_seq_cst, std::memory_order_seq_cst
                 )) {
@@ -846,18 +845,18 @@ struct SchedulerState {
         // mask when producer release races staging.
         int32_t running_cores = slot_state.payload->running_slot_count.load(std::memory_order_seq_cst);
         int32_t staged_cores = 0;
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_cores +=
                 __builtin_popcountll(slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst));
         if (staged_cores == 0) return false;
         if (running_cores != staged_cores) return false;
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_DISPATCHED)
+        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_DISPATCHED)
             return false;
         if (!try_claim_early_dispatch_launch(*slot_state.payload)) return false;
         ring_all_staged_doorbells(slot_state);
         wmb();
         slot_state.payload->early_dispatch_launch_state.store(
-            PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_release
+            EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_release
         );
         return true;
     }
