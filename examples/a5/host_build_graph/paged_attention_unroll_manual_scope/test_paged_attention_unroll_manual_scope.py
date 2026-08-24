@@ -97,6 +97,7 @@ class TestPagedAttentionUnrollManualScopeHostBuildGraph(SceneTestCase):
     ]
 
     def generate_args(self, params):
+        params = {**params, "variant": "paged_attention_unroll"}
         inputs = _pa_generate_inputs(params)
         specs = []
         for name, val in inputs:

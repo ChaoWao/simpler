@@ -111,6 +111,7 @@ class TestPagedAttentionUnroll4dims(SceneTestCase):
     ]
 
     def generate_args(self, params):
+        params = {**params, "variant": "paged_attention_unroll"}
         inputs = _pa_generate_inputs(params)
         batch = params["batch"]
         num_heads = params["num_heads"]

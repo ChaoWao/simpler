@@ -27,6 +27,46 @@ import ctypes
 import torch
 
 
+def assert_supported_shape(params: dict, variant: str) -> None:
+    """Reject (q_tile, head_dim, block_size) tuples the kernels silently miscompute.
+
+    The QK/PV/online-update kernels dispatch on runtime tensor shapes but their
+    fallback arm hardcodes (64, 128, 64): an unsupported tuple computes a wrong
+    answer with no diagnostic (issue #1832's months-late ``max_diff ~= 1.0``),
+    so the shape contract is enforced here, before any hardware submission.
+
+    q_tile derives from num_heads exactly as the orchestrations do
+    (``min(num_heads, 128)``); variants differ only in which tuples their
+    kernel copies instantiate.
+    """
+    num_heads = params["num_heads"]
+    head_dim = params["head_dim"]
+    block_size = params["block_size"]
+    q_tile = min(num_heads, 128)
+    shape = (q_tile, head_dim, block_size)
+    if variant == "paged_attention":
+        supported = (q_tile == 16 and head_dim <= 16 and block_size <= 16) or shape == (16, 128, 128)
+    elif variant == "paged_attention_unroll":
+        supported = shape == (16, 128, 128)
+    else:
+        raise ValueError(f"unknown paged-attention variant: {variant}")
+    supported = supported or shape in {
+        (64, 128, 64),
+        (64, 256, 64),
+    }
+    supported = supported or (q_tile, head_dim, block_size) in {
+        (64, 128, 64),
+        (64, 256, 64),
+    }
+    if not supported:
+        raise ValueError(
+            f"unsupported paged-attention shape (q_tile={q_tile}, head_dim={head_dim}, "
+            f"block_size={block_size}) for variant '{variant}': the kernels have no "
+            "matching dispatch arm and would silently compute a wrong result; extend "
+            "the kernel dispatch (and this table) first"
+        )
+
+
 def generate_inputs(params: dict) -> list:
     """Generate input tensors and zeroed output tensor.
 
@@ -35,6 +75,7 @@ def generate_inputs(params: dict) -> list:
                 block_size, context_len, max_model_len, dtype.
                 Optional: context_lens_list (for variable sequence lengths).
     """
+    assert_supported_shape(params, params.get("variant", "paged_attention"))
     batch = params["batch"]
     num_heads = params["num_heads"]
     kv_head_num = params["kv_head_num"]
