@@ -290,3 +290,22 @@ TEST_F(HbgTaskAllocatorTest, InitRejectsAHeapOverlappingTheRecordingVirtualRange
     auto *just_below = reinterpret_cast<void *>(GRAPH_RECORD_VIRTUAL_BASE - 64);
     EXPECT_THROW(straddling.init(WINDOW_SIZE, &current_index, just_below, HEAP_SIZE, &error_code), AssertionError);
 }
+
+// What the production path passes: the graph heap is allocated out of the virtual
+// window, because its device region is committed only once this allocator has
+// revealed how many bytes the graph needs. The window ends exactly where Graph
+// recording's begins, so the disjointness check above holds at equality — which is
+// what makes the two windows provably non-overlapping rather than merely far apart.
+TEST_F(HbgTaskAllocatorTest, AcceptsTheVirtualHeapWindow) {
+    EXPECT_EQ(HEAP_VIRTUAL_BASE + HEAP_VIRTUAL_CAPACITY, GRAPH_RECORD_VIRTUAL_BASE);
+
+    PTO2TaskAllocator virtual_heap{};
+    auto *base = reinterpret_cast<void *>(HEAP_VIRTUAL_BASE);
+    virtual_heap.init(WINDOW_SIZE, &current_index, base, HEAP_VIRTUAL_CAPACITY, &error_code);
+    EXPECT_EQ(virtual_heap.heap_capacity(), HEAP_VIRTUAL_CAPACITY);
+
+    auto r = virtual_heap.alloc(64);
+    ASSERT_FALSE(r.failed());
+    EXPECT_EQ(reinterpret_cast<uint64_t>(r.packed_base), HEAP_VIRTUAL_BASE);
+    EXPECT_EQ(virtual_heap.heap_used_bytes(), 64u);
+}

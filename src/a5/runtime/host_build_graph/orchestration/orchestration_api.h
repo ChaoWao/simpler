@@ -44,14 +44,15 @@
 #include <vector>
 
 // Type headers needed by orchestration
-#include "common.h"            // framework_bind_runtime / framework_current_runtime
-#include "graph_cache.h"       // Graph Execution key and result helpers
-#include "graph_host_state.h"  // GRAPH_MAX_DEFINITIONS
-#include "runtime_types.h"     // SIMPLER_ERROR_*
-#include "submit_types.h"      // MixedKernels, INVALID_KERNEL_ID, subtask slots
-#include "types.h"             // Arg, TaskOutputTensors, TensorArgType
-#include "task_args.h"         // ChipStorageTaskArgs, ChipTensor
-#include "tensor.h"            // ChipTensor, TensorCreateInfo
+#include "common.h"                  // framework_bind_runtime / framework_current_runtime
+#include "common/host_phase_kind.h"  // HostPhaseKind, for the phase records below
+#include "graph_cache.h"             // Graph Execution key and result helpers
+#include "graph_host_state.h"        // GRAPH_MAX_DEFINITIONS
+#include "runtime_types.h"           // SIMPLER_ERROR_*
+#include "submit_types.h"            // MixedKernels, INVALID_KERNEL_ID, subtask slots
+#include "types.h"                   // Arg, TaskOutputTensors, TensorArgType
+#include "task_args.h"               // ChipStorageTaskArgs, ChipTensor
+#include "tensor.h"                  // ChipTensor, TensorCreateInfo
 
 // =============================================================================
 // ChipTensor Factory Helpers
@@ -597,16 +598,9 @@ static inline bool rt_is_fatal() {
 // orchestration code does between submissions, and no existing marker separates them.
 // These accumulators do, in the .so where that code actually runs.
 // ============================================================================
-// The three submission segments the runtime cannot see, spelled as plain integers for
-// the same reason the orchestrator core does it: this .so cannot include the platform's
-// profiling header. Pinned against HostPhaseKind by static_asserts in host_phase_trace.
-enum class RtOrchPhase : uint32_t {
-    SubmitAdmit = 20,
-    RecordHandoff = 21,
-    GeneratedArgs = 22,
-};
-
-inline void rt_record_orch_phase(RtOrchPhase phase, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
+// The three submission segments the runtime cannot see, filed under the
+// OrchSubmitAdmit / OrchRecordHandoff / OrchGeneratedArgs kinds.
+inline void rt_record_orch_phase(HostPhaseKind phase, uint64_t start_ns, uint64_t end_ns, uint64_t detail) {
     const RuntimeOps *ops = current_runtime()->ops;
     if (ops->record_orch_phase != nullptr) {
         ops->record_orch_phase(static_cast<uint32_t>(phase), start_ns, end_ns, detail);
@@ -754,7 +748,7 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
     constexpr uint64_t kBindBoundaryNs = 1000000;
     const uint64_t _between = _phase.prev_exit_ns == 0 ? 0 : _entry_ns - _phase.prev_exit_ns;
     if (_between != 0 && _between < kBindBoundaryNs) {
-        rt_record_orch_phase(RtOrchPhase::GeneratedArgs, _phase.prev_exit_ns, _entry_ns, _phase.count);
+        rt_record_orch_phase(HostPhaseKind::OrchGeneratedArgs, _phase.prev_exit_ns, _entry_ns, _phase.count);
     }
     if (!rt_graph_args_cacheable(args)) {
         invoke(args);
@@ -762,7 +756,7 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
         return GraphSubmitResult{};
     }
     const uint64_t _admitted_ns = rt_orch_phase_now_ns();
-    rt_record_orch_phase(RtOrchPhase::SubmitAdmit, _entry_ns, _admitted_ns, graph_key);
+    rt_record_orch_phase(HostPhaseKind::OrchSubmitAdmit, _entry_ns, _admitted_ns, graph_key);
     GraphScopeResult result = rt_graph_begin(graph_key, args);
     const uint64_t _begun_ns = rt_orch_phase_now_ns();
     if (result.recording) {
@@ -805,7 +799,7 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
         // by no other record: it runs after rt_graph_begin returns, so a swimlane shows
         // it as a gap with no recorder active — which is what it is, the recorder has
         // not reached its first node yet.
-        rt_record_orch_phase(RtOrchPhase::RecordHandoff, _begun_ns, _exit_ns, graph_key);
+        rt_record_orch_phase(HostPhaseKind::OrchRecordHandoff, _begun_ns, _exit_ns, graph_key);
     }
     _phase.count++;
     _phase.prev_exit_ns = _exit_ns;

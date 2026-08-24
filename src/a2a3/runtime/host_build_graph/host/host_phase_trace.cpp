@@ -164,21 +164,6 @@ void drain_in_flight_records(TraceState &s) {
 
 bool is_bind_kind(uint32_t kind) { return kind < static_cast<uint32_t>(HostPhaseKind::OrchSubmitTask); }
 
-// The orchestrator core spells its own kinds as plain integers, because it is also
-// compiled for the AICPU where this header is absent (see HostOrchPhase in
-// orchestrator_core/orchestrator.cpp). Nothing there can check them against
-// the enum, so the check lives here: inserting or removing a bind kind shifts
-// every orchestrator kind, and a silent shift would file each record under its
-// neighbour's name.
-static_assert(
-    static_cast<uint32_t>(HostPhaseKind::OrchSubmitTask) == 12,
-    "HostOrchPhase in the orchestrator core hardcodes 12..22; update both together"
-);
-static_assert(static_cast<uint32_t>(HostPhaseKind::OrchGraphCommit) == 19, "same");
-// The orchestration .so spells these three as plain integers too — it cannot include
-// this header either (see RtOrchPhase in orchestration_api.h).
-static_assert(static_cast<uint32_t>(HostPhaseKind::OrchGeneratedArgs) == 22, "same");
-
 // Opt-in spelling shared by this runtime's switches, matching the runtime's
 // other default-off switch, SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE, so that
 // `=false` / `=off` / `=no` read as off rather than as a non-zero string.

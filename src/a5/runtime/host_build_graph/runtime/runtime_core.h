@@ -149,10 +149,9 @@ struct RuntimeArenaLayout {
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
 
-    // Cached parameters (re-used by init_data + wire stages). hbg is single-ring,
-    // so these are the one ring's.
+    // Cached parameter (re-used by init_data + wire stages). hbg is single-ring,
+    // so this is the one ring's.
     uint64_t task_window_size{0};
-    uint64_t heap_size{0};
 
     // Total arena byte size post-commit. Used by host to size the prebuilt
     // image buffer and as the rtMemcpy length, and requested of the device as
@@ -182,11 +181,6 @@ struct RuntimeContext {
     // addressed through the arena rather than carried inside this header.
     PTO2SchedulerState *scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
-
-    // GM Heap for output buffers
-    void *gm_heap;
-    uint64_t gm_heap_size;
-    bool gm_heap_owned;  // True if we allocated it
 
     // Mode
     RuntimeMode mode;
@@ -238,7 +232,7 @@ static_assert(
  * device memory and may run on host. Returns the layout descriptor; caller
  * commits/attaches the arena before Phase 2/3.
  */
-RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size = 0);
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size);
 
 /**
  * Phase 2 — write the data half of the runtime arena: standalone fields,
@@ -246,9 +240,9 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
  * pointers. The arena must already be committed (or attached); writes go
  * into arena.base() + sub-region offsets.
  *
- * `sm_dev_base` / `gm_heap_dev_base` are device addresses; we only store
- * them (never dereference). Safe to run on a host arena that owns a host
- * mirror of the runtime image — the resulting buffer is rtMemcpy-ready.
+ * `sm_dev_base` is a device address; we only store it (never dereference).
+ * Safe to run on a host arena that owns a host mirror of the runtime image —
+ * the resulting buffer is rtMemcpy-ready.
  *
  * Returns the RuntimeContext* that sits at layout.off_runtime within the arena.
  * Caller must follow up with runtime_wire_arena_pointers; rt->ops and the
@@ -258,8 +252,7 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
  * points rt->orchestrator at, and it is never uploaded to the device.
  */
 RuntimeContext *runtime_init_data_from_layout(
-    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
-    void *gm_heap_dev_base, uint64_t heap_size
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t sm_size
 );
 
 /**

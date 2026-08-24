@@ -84,9 +84,37 @@
 // bind_callable_to_runtime_impl).
 
 // Memory pools (total = value, single ring)
-#define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB
-#define PTO2_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
-#define PTO2_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
+#define PTO2_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
+#define PTO2_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
+
+// Three address classes coexist during orchestration, in windows the two constants
+// below keep disjoint: real device addresses stay below HEAP_VIRTUAL_BASE, since
+// Ascend VA is 48-bit and the asserts named further down hold caller-owned ones
+// there; the graph heap spans HEAP_VIRTUAL_BASE up to GRAPH_RECORD_VIRTUAL_BASE;
+// Graph recording takes everything above.
+//
+// Base of the window the graph heap is allocated out of during orchestration.
+// The heap's device region is committed only once orchestration has run and its
+// exact size is known, so the addresses handed out while the graph is being
+// built cannot be the device ones; compact_live_image rewrites them to the real
+// base before the image travels. Nothing dereferences an address in this window.
+inline constexpr uint64_t HEAP_VIRTUAL_BASE = 1ULL << 62;
+
+// Base of the address range Graph recording hands to an internal node's packed
+// outputs. Recorded addresses are never dereferenced: they exist so
+// graph_classify_tensor can tell an internal producer's output from a boundary
+// tensor by address-range containment alone, and the Definition stores them as
+// offsets. That classification is only sound while the range is disjoint from
+// every graph-heap address, which PTO2TaskAllocator::init() asserts, and from
+// every real device address, which the two asserts in the host's bind path
+// (the acquired heap base, and each caller tensor as it enters device_args)
+// keep below HEAP_VIRTUAL_BASE.
+inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
+
+// Span of the graph-heap window: everything between the two virtual bases. This
+// is the bound orchestration allocates against, so a graph is limited by what
+// the device can commit afterwards rather than by a configured heap size.
+inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HEAP_VIRTUAL_BASE;
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
@@ -432,6 +460,13 @@ struct PTO2TaskPayload {
         // zero additional cost.
         memcpy(scalar_data(), args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
+        // The ring's payload storage is reused raw memory that no constructor runs
+        // over, so an unset predicate reads back as whatever the slot last held —
+        // and compact_live_image translates predicate.addr as a graph-heap address
+        // for every submitted slot. An ordinary ring task overwrites this right
+        // after init(); a hidden-alloc task has nothing following it, so this is
+        // the only value its predicate ever gets.
+        predicate = DispatchPredicate{};
         dump_metadata = {};
 #if SIMPLER_DFX
         dump_metadata.dump_arg_mask = args.dump_arg_mask();

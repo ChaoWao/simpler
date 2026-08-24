@@ -205,7 +205,7 @@ image.
 
 ### 4.1 Allocation Failure
 
-The graph must fit the configured task window, heap, fanin capacity, and
+The graph must fit the configured task window, the fanin capacity, and the
 TensorMap pool. Because nothing is reclaimed, a request that does not fit can
 never become satisfiable — the allocator names the exhausted resource and fails
 on the spot. There is no wait and no timeout.
@@ -213,8 +213,8 @@ on the spot. There is no wait and no timeout.
 Representative allocator output is:
 
 ```text
-FATAL: Graph Heap Exhausted!
-The whole graph must fit the configured ring; nothing is reclaimed mid-run.
+FATAL: Task Window Exhausted!
+The whole graph must fit at once; nothing is reclaimed mid-run.
   Task window: used=.../...
   Graph heap:  used=.../..., available=...
   Requested:   ... bytes + 1 task slot
@@ -222,6 +222,11 @@ The whole graph must fit the configured ring; nothing is reclaimed mid-run.
 
 This is host-orchestration logging. The allocator records the corresponding
 runtime error and unwinds; it does not terminate the process directly.
+
+The graph heap is not one of those capacities. Orchestration allocates it out of
+a virtual window, and its device region is committed afterwards at the size the
+graph turned out to need, so a graph too large for the device fails at that
+commit — which names the byte count it asked for — rather than in the allocator.
 
 ## 5. Submission and Dependencies
 

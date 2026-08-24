@@ -30,14 +30,6 @@
 #include "shared_memory.h"
 #include "common/unified_log.h"
 
-// Base of the address range Graph recording hands to an internal node's packed
-// outputs. Recorded addresses are never dereferenced: they exist so
-// graph_classify_tensor can tell an internal producer's output from a boundary
-// tensor by address-range containment alone, and the Definition stores them as
-// offsets. That classification is only sound while the range is disjoint from
-// every real heap address, which PTO2TaskAllocator::init() asserts.
-inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
-
 // =============================================================================
 // Task Allocator (unified task slot + heap buffer allocation)
 // =============================================================================
@@ -217,9 +209,15 @@ private:
     /**
      * Report the exhausted resource and latch its error code.
      *
-     * The graph does not fit the configured ring. Nothing is reclaimed during a
-     * run, so this is a sizing problem with an immediate verdict, not a wait
+     * Nothing is reclaimed during a run, so this is a sizing verdict with no wait
      * that could still succeed.
+     *
+     * The task window is a configured capacity, so its branch is the one a real
+     * bind reaches. The heap is not configured: a bind hands this allocator the
+     * whole HEAP_VIRTUAL_CAPACITY span and commits the device region afterwards, so
+     * a graph that does not fit the device fails at that commit and not here. The
+     * heap branch stays because the allocator is also constructed directly, against
+     * a small heap, by the unit tests that cover this report.
      */
     void report_capacity_exhausted(bool heap_blocked, uint64_t requested_bytes) {
         LOG_ERROR("========================================");
@@ -229,7 +227,7 @@ private:
             LOG_ERROR("FATAL: Task Window Exhausted!");
         }
         LOG_ERROR("========================================");
-        LOG_ERROR("The whole graph must fit the configured ring; nothing is reclaimed mid-run.");
+        LOG_ERROR("The whole graph must fit at once; nothing is reclaimed mid-run.");
         LOG_ERROR("  Task window: used=%d/%d", local_task_id_, window_size_);
         LOG_ERROR(
             "  Graph heap:  used=%" PRIu64 "/%" PRIu64 ", available=%" PRIu64, heap_top_, heap_size_, heap_available()
@@ -237,10 +235,7 @@ private:
         LOG_ERROR("  Requested:   %" PRIu64 " bytes + 1 task slot", requested_bytes);
         LOG_ERROR("Solution:");
         if (heap_blocked) {
-            LOG_ERROR(
-                "  Increase heap (current: %" PRIu64 "); env PTO2_RING_HEAP=<pow2> (e.g. %" PRIu64 ")", heap_size_,
-                heap_size_ * 2
-            );
+            LOG_ERROR("  Shrink the graph's intermediate tensors; this heap has no configuration knob");
         } else {
             LOG_ERROR(
                 "  Increase task window (current: %d); env PTO2_RING_TASK_WINDOW=<pow2> (e.g. %d)", window_size_,

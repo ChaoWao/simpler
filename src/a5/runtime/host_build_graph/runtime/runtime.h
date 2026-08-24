@@ -184,7 +184,6 @@ private:
     // Kernel binary tracking for cleanup
 
     void *gm_sm_ptr_;                        // GM pointer to PTO2 shared memory (device)
-    void *gm_heap_ptr_;                      // GM heap for orchestrator output buffers (device)
     void *slot_states_ptr_;                  // Pointer to ChipTaskSlotState array (scheduler-private, for profiling)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
 
@@ -243,10 +242,8 @@ public:
     // =========================================================================
 
     void *get_gm_sm_ptr() const;
-    void *get_gm_heap_ptr() const;
     const ChipStorageTaskArgs &get_orch_args() const;
     void set_gm_sm_ptr(void *p);
-    void set_gm_heap(void *p);
     void set_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
 

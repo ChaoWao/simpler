@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -749,4 +750,151 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
         reinterpret_cast<uintptr_t>(shell->packed_buffer_base),
         reinterpret_cast<uintptr_t>(gm_heap.data()) + heap_after_ordinary
     ) << "the two reservations must be disjoint";
+}
+
+// A Graph's boundary tensor can be an upstream task's output, which lives in the
+// graph heap and therefore carries an address out of HEAP_VIRTUAL_BASE's window
+// while recording — three address classes are in play at once, the third being
+// GRAPH_RECORD_VIRTUAL_BASE for the recorded nodes' own outputs. Recording must
+// still classify such a tensor as a boundary: graph_tensor_from_boundary matches
+// on equality, not on range containment, and the windows do not overlap. If it
+// fell through to the recorded-output ranges instead, the node would be marked
+// unsupported and the whole Graph would silently drop to the ordinary path.
+//
+// The Definition describes a boundary by its shape, strides, buffer size and type
+// and never by its address, so the same body over a heap-resident boundary must
+// describe it exactly as one over a caller-owned boundary of the same shape. That
+// is checked on the boundary signatures rather than on content_hash: full_key is
+// written into the image before the hash covers it, so two recordings under
+// different graph_keys never hash alike no matter what their boundaries are.
+struct BoundaryRecording {
+    uint64_t full_key;
+    GraphBoundarySignature signature;
+};
+
+TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    // Never dereferenced: recording is bookkeeping over the tensor's descriptor.
+    auto *heap_resident = reinterpret_cast<void *>(HEAP_VIRTUAL_BASE + 0x2000);
+    const uint64_t nbytes = storage.size() * sizeof(uint32_t);
+
+    auto record_with = [&](void *boundary_addr, uint64_t graph_key) -> std::optional<BoundaryRecording> {
+        const size_t definitions_before = graph_host_definitions(*graph_state).entries.size();
+        const size_t uploads_before = graph_host_upload_count(*graph_state);
+        ChipTensor boundary = make_tensor_external(boundary_addr, shape, 1);
+        GraphTaskArgs boundary_args;
+        boundary_args.add_input(boundary);
+
+        const GraphScopeResult graph = orch.graph_begin(graph_key, boundary_args, 0x1736);
+        EXPECT_TRUE(graph.recording);
+        EXPECT_TRUE(graph.task_id.is_valid());
+        EXPECT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
+
+        CoreTaskArgs node_args;
+        node_args.add_input(boundary);
+        TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+        node_args.add_output(recorded_output);
+        EXPECT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+        EXPECT_TRUE(orch.graph_end());
+        orch.graph_commit();
+        EXPECT_FALSE(orch.fatal);
+
+        // Each call uses its own graph_key, so it publishes exactly one Definition
+        // and appends exactly one upload. That upload names this call's full_key
+        // (graph_key combined with the callable hash), which is how the Definition
+        // is selected: graph_host_definitions walks an unordered_map, so the order
+        // of `entries` says nothing about which call published which.
+        const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
+        if (definitions.entries.size() != definitions_before + 1) {
+            ADD_FAILURE() << "graph_key " << graph_key << " published "
+                          << (definitions.entries.size() - definitions_before) << " Definitions, expected 1";
+            return std::nullopt;
+        }
+        if (graph_host_upload_count(*graph_state) != uploads_before + 1) {
+            ADD_FAILURE() << "graph_key " << graph_key << " appended "
+                          << (graph_host_upload_count(*graph_state) - uploads_before) << " uploads, expected 1";
+            return std::nullopt;
+        }
+        const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, uploads_before);
+        if (!upload.has_value()) {
+            ADD_FAILURE() << "graph_key " << graph_key << " has no upload at index " << uploads_before;
+            return std::nullopt;
+        }
+        const GraphHostDefinition *published = nullptr;
+        for (const GraphHostDefinition &entry : definitions.entries) {
+            if (entry.full_key == upload->full_key) {
+                published = &entry;
+                break;
+            }
+        }
+        if (published == nullptr) {
+            ADD_FAILURE() << "graph_key " << graph_key << " published no Definition under its own full_key";
+            return std::nullopt;
+        }
+        const GraphDefinition *def = definition_image(*published);
+        if (def->boundary_count != 1u) {
+            ADD_FAILURE() << "graph_key " << graph_key << " recorded " << def->boundary_count
+                          << " boundaries, expected 1";
+            return std::nullopt;
+        }
+        // off_boundary_signatures is an offset into the Definition image, whose base
+        // is what definition_image resolves to.
+        const auto *signatures = reinterpret_cast<const GraphBoundarySignature *>(
+            reinterpret_cast<const std::byte *>(def) + def->off_boundary_signatures
+        );
+        return BoundaryRecording{def->full_key, signatures[0]};
+    };
+
+    orch.begin_scope();
+    const std::optional<BoundaryRecording> heap_recording = record_with(heap_resident, 0x1801);
+    const std::optional<BoundaryRecording> caller_recording = record_with(storage.data(), 0x1802);
+    ASSERT_TRUE(heap_recording.has_value());
+    ASSERT_TRUE(caller_recording.has_value());
+
+    // Two distinct Definitions, so the comparison below is between two recordings
+    // rather than one Definition against itself.
+    EXPECT_NE(heap_recording->full_key, caller_recording->full_key);
+    EXPECT_EQ(std::memcmp(&heap_recording->signature, &caller_recording->signature, sizeof(GraphBoundarySignature)), 0)
+        << "a boundary's Definition signature must not depend on where its buffer lives";
+    // The address the recording saw stayed in the heap window, i.e. the test really
+    // exercised the three-class case rather than a coincidentally-real address.
+    EXPECT_GE(reinterpret_cast<uint64_t>(heap_resident), HEAP_VIRTUAL_BASE);
+    EXPECT_LT(reinterpret_cast<uint64_t>(heap_resident) + nbytes, GRAPH_RECORD_VIRTUAL_BASE);
+}
+
+// A hidden-alloc task's payload passes through PTO2TaskPayload::init() and nothing
+// else — unlike an ordinary ring task, no dispatch-predicate assignment follows it,
+// and unlike an outer GRAPH task, no graph_reset_outer_payload precedes it. So
+// init() is where its predicate has to acquire a defined value: the ring's payload
+// storage is reused raw memory that no constructor runs over, and compact_live_image
+// translates every submitted slot's predicate.addr as a graph-heap address.
+TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefined) {
+    PTO2TaskPayload *payloads = sm_handle->header->ring.task_payloads;
+    ASSERT_NE(payloads, nullptr);
+    // 0x4A repeated has 01 as its top two bits, so read as an address it lands
+    // inside [HEAP_VIRTUAL_BASE, GRAPH_RECORD_VIRTUAL_BASE) — the quarter of the
+    // 64-bit range that the rebase would mistake for a graph-heap allocation. The
+    // mirror arrives zeroed here, so an undefined field is only observable once the
+    // slot is poisoned the way a reused one would be.
+    constexpr int kPoisonedSlots = 8;
+    for (int i = 0; i < kPoisonedSlots; ++i) {
+        std::memset(&payloads[i].predicate, 0x4A, sizeof(payloads[i].predicate));
+    }
+    ASSERT_GE(payloads[0].predicate.addr, HEAP_VIRTUAL_BASE);
+    ASSERT_LT(payloads[0].predicate.addr, GRAPH_RECORD_VIRTUAL_BASE);
+
+    orch.begin_scope();
+    uint32_t shape[] = {16};
+    TensorCreateInfo output(shape, 1, DataType::UINT32);
+    CoreTaskArgs args;
+    args.add_output(output);
+    const TaskOutputTensors outputs = orch.alloc_tensors(args);
+    ASSERT_TRUE(outputs.task_id().is_valid());
+    ASSERT_FALSE(orch.fatal);
+
+    const uint64_t slot = outputs.task_id().local() & (PTO2_TASK_WINDOW_SIZE - 1);
+    ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
+    EXPECT_EQ(payloads[slot].predicate.op, PredicateOp::NONE);
+    EXPECT_EQ(payloads[slot].predicate.addr, 0u);
 }
