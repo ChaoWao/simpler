@@ -767,7 +767,9 @@ Dedicated DFX steps are the exception: they use `--manual include` in normal
 Per-PR and Daily jobs, so marking a case under their target path removes only
 its duplicate main-sweep execution. A caller selecting `--manual only` keeps
 that mode in the DFX steps. The A2/A3 `network1` cases run in the same Daily
-workflow through their existing two-machine job.
+workflow through their existing two-machine job, and the DeepSeek smokes run
+Per-PR in their own parallel job (`st-deepseek-onboard-a2a3`, `--manual only`
+over the two `deepseek_v4_flash_decode` directories).
 
 To move only selected platforms, pass the platform list to the same marker:
 use `@pytest.mark.manual(["a2a3sim", "a5sim"])` (or the equivalent
