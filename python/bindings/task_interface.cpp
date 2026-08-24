@@ -3034,6 +3034,8 @@ NB_MODULE(_task_interface, m) {
         )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))
+        .def("alloc_pinned_host", &ChipWorker::alloc_pinned_host, nb::arg("size"))
+        .def("free_pinned_host", &ChipWorker::free_pinned_host, nb::arg("ptr"))
         .def("copy_to", &ChipWorker::copy_to, nb::arg("dst"), nb::arg("src"), nb::arg("size"))
         .def("copy_from", &ChipWorker::copy_from, nb::arg("dst"), nb::arg("src"), nb::arg("size"))
         .def(

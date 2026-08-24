@@ -65,6 +65,24 @@ def test_default_case_computes_and_compares():
     assert inst.compare_calls == [_OUTPUT_NAMES]
 
 
+def test_l2_arg_generation_can_allocate_from_worker():
+    class _WorkerAware(_Recorder):
+        def __init__(self):
+            super().__init__()
+            self.arg_worker = None
+
+        def generate_args(self, params):
+            raise AssertionError("ordinary arg generation must not run")
+
+        def generate_args_for_worker(self, worker, params):
+            self.arg_worker = worker
+            return TaskArgsBuilder(TensorArg("y", torch.zeros(4, dtype=torch.float32)))
+
+    inst = _WorkerAware()
+    _drive(inst, {"name": "c"})
+    assert inst.arg_worker is not None
+
+
 def test_per_case_skip_golden_bypasses_both_hooks():
     inst = _Recorder()
     _drive(inst, {"name": "c", "skip_golden": True})

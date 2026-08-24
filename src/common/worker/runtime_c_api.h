@@ -242,6 +242,12 @@ void *device_malloc_ctx(DeviceContextHandle ctx, size_t size);
 /** Free device memory previously allocated in the given device context. */
 void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr);
 
+/** Allocate page-locked host memory owned by the given device context. */
+int alloc_pinned_host_ctx(DeviceContextHandle ctx, size_t size, void **host_ptr);
+
+/** Release host memory returned by alloc_pinned_host_ctx. */
+int free_pinned_host_ctx(DeviceContextHandle ctx, void *host_ptr);
+
 /**
  * Total device HBM (bytes) currently committed by this device context's
  * MemoryAllocator (user tensors + pooled arenas + Graph execution blocks +

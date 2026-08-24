@@ -4305,6 +4305,53 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
 # ---------------------------------------------------------------------------
 
 
+class _PinnedHostAllocation:
+    """Lifetime token for one ChipWorker-owned page-locked host allocation."""
+
+    __slots__ = ("base", "nbytes", "_worker")
+
+    def __init__(self, worker: ChipWorker, nbytes: int) -> None:
+        self._worker = worker
+        self.nbytes = int(nbytes)
+        self.base = worker.alloc_pinned_host(self.nbytes)
+
+    def __del__(self) -> None:
+        base = self.base
+        if base == 0:
+            return
+        self.base = 0
+        try:
+            self._worker.free_pinned_host(base)
+        except Exception as exc:  # noqa: BLE001 -- ChipWorker.finalize already reclaims every still-live allocation
+            sys.stderr.write(f"PinnedHostBuffer cleanup: free_pinned_host failed (continuing best-effort): {exc}\n")
+            sys.stderr.flush()
+
+
+class PinnedHostBuffer:
+    """A page-locked host byte span whose exported views keep its allocation alive.
+
+    Use ``buffer`` with consumers of Python's buffer protocol, for example
+    ``torch.frombuffer(handle.buffer, dtype=...)``. The tensor retains the
+    ctypes exporter, which retains the allocation token, so dropping this
+    handle cannot release storage while a tensor view still exists.
+    """
+
+    __slots__ = ("base", "nbytes", "_buffer")
+
+    def __init__(self, worker: ChipWorker, nbytes: int) -> None:
+        allocation = _PinnedHostAllocation(worker, nbytes)
+        raw = (ctypes.c_ubyte * allocation.nbytes).from_address(allocation.base)
+        raw._simpler_pinned_owner = allocation
+        self.base = allocation.base
+        self.nbytes = allocation.nbytes
+        self._buffer = raw
+
+    @property
+    def buffer(self):
+        """Writable object implementing Python's contiguous buffer protocol."""
+        return self._buffer
+
+
 class Worker:
     """Unified worker for all hierarchy levels.
 
@@ -10258,6 +10305,23 @@ class Worker:
     # ------------------------------------------------------------------
     # Post-fork zero-copy host buffers
     # ------------------------------------------------------------------
+
+    def alloc_pinned_host(self, nbytes: int) -> PinnedHostBuffer:
+        """Allocate page-locked host storage for direct L2 host/device copies.
+
+        The returned byte span is local to this process and therefore only
+        valid on an L2 Worker. Build producer tensors directly over its
+        ``buffer``; copying an existing pageable tensor into it would be a
+        bounce buffer and defeats this API's purpose.
+        """
+        if self.level != 2:
+            raise TypeError("alloc_pinned_host requires a level-2 Worker")
+        nbytes = int(nbytes)
+        if nbytes <= 0:
+            raise ValueError("alloc_pinned_host: nbytes must be positive")
+        with self._operation_lease("alloc_pinned_host"):
+            assert self._chip_worker is not None
+            return PinnedHostBuffer(self._chip_worker, nbytes)
 
     def create_buffer(self, nbytes: int) -> Buffer:
         """Allocate a shared ``Buffer`` owned by this Worker (P1-B).

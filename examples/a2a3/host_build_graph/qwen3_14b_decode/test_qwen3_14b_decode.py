@@ -14,7 +14,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from simpler_setup import SceneTestCase, scene_test
+from simpler_setup import PinnedTorchAllocator, SceneTestCase, scene_test
 from simpler_setup.goldens.qwen3_14b_decode import compute_golden as _decode_golden
 from simpler_setup.goldens.qwen3_14b_decode import generate_inputs as _decode_generate_inputs
 
@@ -62,6 +62,14 @@ class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
             seed=params.get("seed", 1234),
             seq_len=params.get("seq_len", 3500),
             n_layers=N_LAYERS,
+        )
+
+    def generate_args_for_worker(self, worker, params):
+        return _decode_generate_inputs(
+            seed=params.get("seed", 1234),
+            seq_len=params.get("seq_len", 3500),
+            n_layers=N_LAYERS,
+            allocator=PinnedTorchAllocator(worker),
         )
 
     def compute_golden(self, args, params):

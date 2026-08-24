@@ -206,6 +206,8 @@ void ChipWorker::init(
         destroy_device_context_fn_ = load_symbol<DestroyDeviceContextFn>(handle, "destroy_device_context");
         device_malloc_ctx_fn_ = load_symbol<DeviceMallocCtxFn>(handle, "device_malloc_ctx");
         device_free_ctx_fn_ = load_symbol<DeviceFreeCtxFn>(handle, "device_free_ctx");
+        alloc_pinned_host_ctx_fn_ = load_symbol<AllocPinnedHostCtxFn>(handle, "alloc_pinned_host_ctx");
+        free_pinned_host_ctx_fn_ = load_symbol<FreePinnedHostCtxFn>(handle, "free_pinned_host_ctx");
         device_committed_memory_fn_ = load_symbol<GetCommittedDeviceMemoryFn>(handle, "committed_device_memory_ctx");
         copy_to_device_ctx_fn_ = load_symbol<CopyToDeviceCtxFn>(handle, "copy_to_device_ctx");
         copy_from_device_ctx_fn_ = load_symbol<CopyFromDeviceCtxFn>(handle, "copy_from_device_ctx");
@@ -332,6 +334,8 @@ void ChipWorker::init(
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
         device_free_ctx_fn_ = nullptr;
+        alloc_pinned_host_ctx_fn_ = nullptr;
+        free_pinned_host_ctx_fn_ = nullptr;
         device_committed_memory_fn_ = nullptr;
         copy_to_device_ctx_fn_ = nullptr;
         copy_from_device_ctx_fn_ = nullptr;
@@ -383,6 +387,8 @@ void ChipWorker::init(
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
         device_free_ctx_fn_ = nullptr;
+        alloc_pinned_host_ctx_fn_ = nullptr;
+        free_pinned_host_ctx_fn_ = nullptr;
         device_committed_memory_fn_ = nullptr;
         copy_to_device_ctx_fn_ = nullptr;
         copy_from_device_ctx_fn_ = nullptr;
@@ -492,6 +498,19 @@ void ChipWorker::finalize() {
     // communicator handles and streams before tearing down the device context.
     clear_comm_sessions();
 
+    if (device_ctx_ != nullptr && free_pinned_host_ctx_fn_ != nullptr) {
+        for (void *ptr : pinned_host_allocations_) {
+            int rc = free_pinned_host_ctx_fn_(device_ctx_, ptr);
+            if (rc != 0) {
+                HostLogger::get_instance().log(
+                    simpler::log::LogLevel::ERROR, __func__,
+                    "free_pinned_host_ctx failed during finalization for %p: %d", ptr, rc
+                );
+            }
+        }
+    }
+    pinned_host_allocations_.clear();
+
     if (device_ctx_ != nullptr && finalize_device_fn_ != nullptr && initialized_) {
         finalize_device_fn_(device_ctx_);
     }
@@ -507,6 +526,8 @@ void ChipWorker::finalize() {
     destroy_device_context_fn_ = nullptr;
     device_malloc_ctx_fn_ = nullptr;
     device_free_ctx_fn_ = nullptr;
+    alloc_pinned_host_ctx_fn_ = nullptr;
+    free_pinned_host_ctx_fn_ = nullptr;
     device_committed_memory_fn_ = nullptr;
     copy_to_device_ctx_fn_ = nullptr;
     copy_from_device_ctx_fn_ = nullptr;
@@ -1080,6 +1101,43 @@ void ChipWorker::free(uint64_t ptr) {
         throw std::runtime_error("ChipWorker not initialized; call init() first");
     }
     device_free_ctx_fn_(device_ctx_, reinterpret_cast<void *>(ptr));
+}
+
+uint64_t ChipWorker::alloc_pinned_host(size_t size) {
+    if (!initialized_) {
+        throw std::runtime_error("ChipWorker not initialized; call init() first");
+    }
+    if (size == 0) {
+        throw std::invalid_argument("alloc_pinned_host: size must be positive");
+    }
+    void *ptr = nullptr;
+    int rc = alloc_pinned_host_ctx_fn_(device_ctx_, size, &ptr);
+    if (rc != 0 || ptr == nullptr) {
+        throw std::runtime_error(
+            "alloc_pinned_host(" + std::to_string(size) + ") failed with code " + std::to_string(rc)
+        );
+    }
+    try {
+        pinned_host_allocations_.insert(ptr);
+    } catch (...) {
+        (void)free_pinned_host_ctx_fn_(device_ctx_, ptr);
+        throw;
+    }
+    return reinterpret_cast<uint64_t>(ptr);
+}
+
+void ChipWorker::free_pinned_host(uint64_t ptr) {
+    void *host_ptr = reinterpret_cast<void *>(ptr);
+    auto it = pinned_host_allocations_.find(host_ptr);
+    if (it == pinned_host_allocations_.end()) return;
+    if (!initialized_) {
+        throw std::runtime_error("ChipWorker not initialized; call init() first");
+    }
+    int rc = free_pinned_host_ctx_fn_(device_ctx_, host_ptr);
+    if (rc != 0) {
+        throw std::runtime_error("free_pinned_host failed with code " + std::to_string(rc));
+    }
+    pinned_host_allocations_.erase(it);
 }
 
 void ChipWorker::copy_to(uint64_t dst, uint64_t src, size_t size) {

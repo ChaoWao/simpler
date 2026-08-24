@@ -314,6 +314,18 @@ void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr) {
     } catch (...) {}
 }
 
+int alloc_pinned_host_ctx(DeviceContextHandle ctx, size_t size, void **host_ptr) {
+    if (ctx == NULL || size == 0 || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    *host_ptr = std::malloc(size);
+    return *host_ptr == NULL ? PTO_RUNTIME_ERR_INTERNAL : 0;
+}
+
+int free_pinned_host_ctx(DeviceContextHandle ctx, void *host_ptr) {
+    if (ctx == NULL || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    std::free(host_ptr);
+    return 0;
+}
+
 int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_ptr, size_t size) {
     if (ctx == NULL || dev_ptr == NULL || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
