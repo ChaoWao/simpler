@@ -246,9 +246,7 @@ struct alignas(64) ChipTensor {
     // in the runtime tensor_create_info.h as init_tensor_from_create_info(), which
     // operates on a ChipTensor& through its public members. Kept out of the
     // wire/host-facing ChipTensor so this header has no dependency on the
-    // runtime-only create-info. tensormap_and_ringbuffer additionally has
-    // fill_tensor_initial_value(); host_build_graph does not, because that store
-    // goes to a device address its host orchestrator cannot reach.
+    // runtime-only create-info.
 
     // ========================================================================
     // Address / offset computation

@@ -49,22 +49,25 @@ One extra step versus get_tensor_data: wait for all consumers to finish (`fanout
 - Threshold: `PTO2_TENSOR_DATA_TIMEOUT_CYCLES` (~10 s at 1.5 GHz)
 - On timeout: sets `orch.fatal = true`, preventing further task submission
 
-## 4. add_output with Initial Value
+## 4. Seeding a Runtime-Created Output
+
+`TensorCreateInfo` carries no initial-value fill; a fresh allocation starts
+with whatever the heap block last held. Two ways to give it defined content:
 
 ```cpp
+// Orchestration-side write: alloc returns before any producer or consumer
+// exists, so set_tensor_data finds nothing to wait for and writes at once.
+// Suited to scalars and a handful of elements; each call writes one element.
 TensorCreateInfo ci(shapes, ndims, dtype);
-ci.set_initial_value(initial_value);
-args.add_output(ci);
+TaskOutputTensors outs = alloc_tensors(ci);
+const ChipTensor &t = outs.get_ref(0);
+set_tensor_data(t, 1, idx, 42.0f);
+
+// Device-side fill: a task (a dedicated seed kernel, or a prefix of the
+// first consumer) writes the buffer. Suited to whole-buffer initialization
+// such as zeroing a large accumulator; task dependencies order every reader
+// and writer after the seed.
 ```
-
-**Mechanism**:
-
-1. `ci.set_initial_value(value)` marks the create-info with an initial value before submission
-2. `add_output(ci)` stores a pointer to `ci` in `CoreTaskArgs` (the original must remain valid until submit)
-3. During payload init, the output tensor is materialized via `init_from_create_info()` which triggers the fill
-4. Fill strategy:
-   - Small buffer (< 64 B): element-by-element memcpy directly into dst
-   - Large buffer (≥ 64 B): fill the first 64 bytes as a template block, then bulk-memcpy in 64 B chunks; partial tail copy for remainder
 
 **Constraint**: existing tensors are write targets only through `add_inout()`.
 
@@ -76,15 +79,13 @@ Traditional scalars (`CoreTaskArgs::add_scalar`) are one-way inputs with no Tens
 uint32_t shapes[1] = {1};
 TensorCreateInfo scalar_ci(shapes, 1, DataType::FLOAT32);
 
-// Submit with initial value and keep the returned tensor
-scalar_ci.set_initial_value(float_to_u64(77.0f));
-CoreTaskArgs args;
-args.add_output(scalar_ci);
-TaskOutputTensors outs = rt_submit_aiv_task(FUNC_NOOP, args);
+// Allocate, seed from orchestration, and keep the returned tensor
+TaskOutputTensors outs = alloc_tensors(scalar_ci);
 const Tensor& scalar_tensor = outs.get_ref(0);
+uint32_t idx[1] = {0};
+set_tensor_data(scalar_tensor, 1, idx, 77.0f);
 
 // Orchestration-side blocking read (waits for kernel completion)
-uint32_t idx[1] = {0};
 float val = get_tensor_data<float>(scalar_tensor, 1, idx);
 ```
 
