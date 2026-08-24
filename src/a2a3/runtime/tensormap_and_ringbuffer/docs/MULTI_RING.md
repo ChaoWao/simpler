@@ -8,7 +8,7 @@ The single-ring design uses one `last_task_alive` watermark shared by HeapRing, 
 
 ## 2. Solution
 
-Split HeapRing, TaskRing, and DepPool into arrays of `PTO2_MAX_RING_DEPTH` (4) independent instances. Each scope depth maps to its own ring, with an independent `last_task_alive` watermark.
+Split HeapRing, TaskRing, and DepPool into arrays of `CHIP_MAX_RING_DEPTH` (4) independent instances. Each scope depth maps to its own ring, with an independent `last_task_alive` watermark.
 
 ```text
 Scope depth 0  ──►  rings[0] = { HeapRing, TaskRing, DepPool }
@@ -67,10 +67,10 @@ PTO2TaskRing task_ring;
 PTO2DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
-PTO2RingSet rings[PTO2_MAX_RING_DEPTH];
+PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
 ```
 
-Ring selection: `current_ring_id() = min(scope_stack_top, PTO2_MAX_RING_DEPTH - 1)`.
+Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 1)`.
 
 ### 4.3 PTO2SharedMemoryHeader (modified)
 
@@ -108,7 +108,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 };
 
 // In header:
-PTO2SharedMemoryRingHeader rings[PTO2_MAX_RING_DEPTH];
+PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 ```
 
 Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `PTO2SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
@@ -139,7 +139,7 @@ struct RingSchedState {
     alignas(64) PTO2DepListPool dep_pool;
 };
 
-RingSchedState ring_sched_states[PTO2_MAX_RING_DEPTH];
+RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
 ```
 
 `slot_states`, `task_window_size`, and `task_window_mask` are no longer duplicated — callers access them via `ring->get_slot_state_by_*()` and other ring header accessors. The ring pointer shares cache line 0 with `last_task_alive` and `advance_lock`.
@@ -147,8 +147,8 @@ RingSchedState ring_sched_states[PTO2_MAX_RING_DEPTH];
 ### 4.6 PTO2TensorMap (modified)
 
 ```cpp
-PTO2TensorMapEntry** task_entry_heads[PTO2_MAX_RING_DEPTH];
-int64_t last_task_alives[PTO2_MAX_RING_DEPTH];
+PTO2TensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
+int64_t last_task_alives[CHIP_MAX_RING_DEPTH];
 ```
 
 Entry validity checks and `cleanup_retired` operate per-ring:

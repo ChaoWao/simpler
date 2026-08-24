@@ -222,7 +222,7 @@ void PTO2OrchestratorState::report_fatal(int32_t error_code, const char *func, c
 static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             memset(
                 orch->fanin_seen_epoch[r], 0,
                 static_cast<size_t>(orch->sm_header->rings[r].task_window_size) * sizeof(uint32_t)
@@ -256,7 +256,7 @@ struct PTO2FaninBuilder {
     }
 
     bool mark_seen(uint8_t prod_ring, int32_t prod_slot) {
-        if (prod_ring >= PTO2_MAX_RING_DEPTH || prod_slot < 0) {
+        if (prod_ring >= CHIP_MAX_RING_DEPTH || prod_slot < 0) {
             return false;
         }
         uint32_t *seen = orch->fanin_seen_epoch[prod_ring];
@@ -795,9 +795,9 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
         return true;
     }
 
-    int32_t alive[PTO2_MAX_RING_DEPTH];
+    int32_t alive[CHIP_MAX_RING_DEPTH];
     auto read_alive = [&]() {
-        for (int32_t r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int32_t r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             // Relaxed: a self-correcting poll re-read every reclaim tick, so a stale
             // watermark only defers reclaim one tick and never over-frees.
             alive[r] = orch->sm_header->rings[r].fc.last_task_alive.load(std::memory_order_relaxed);
@@ -1367,7 +1367,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
 
 void PTO2OrchestratorState::mark_done() {
     auto *orch = this;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         int32_t total_tasks = orch->rings[r].task_allocator.active_count();
         if (total_tasks > 0) {
             LOG_DEBUG("=== [Orchestrator] ring %d: total_tasks=%d ===", r, total_tasks);

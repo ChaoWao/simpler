@@ -246,9 +246,9 @@ ChipStorageTaskArgs make_args(std::vector<uint8_t> &input, std::vector<uint8_t> 
 int bind_runtime(
     Runtime &runtime, const HostApi &api, const ChipStorageTaskArgs &args, const ArgDirection *signature, int sig_count
 ) {
-    uint64_t ring_task_window[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
-    uint64_t ring_heap[PTO2_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
-    uint64_t ring_dep_pool[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
+    uint64_t ring_task_window[CHIP_MAX_RING_DEPTH] = {4, 4, 4, 4};
+    uint64_t ring_heap[CHIP_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
+    uint64_t ring_dep_pool[CHIP_MAX_RING_DEPTH] = {4, 4, 4, 4};
     return bind_callable_to_runtime_impl(
         &runtime, &api, &args, nullptr, signature, sig_count, ring_task_window, ring_heap, ring_dep_pool
     );
@@ -469,9 +469,9 @@ TEST_F(TrbRuntimeTempBufferTest, FailedCopyOnTemporaryPathDoesNotFreeRetainedBuf
 TEST_F(TrbRuntimeTempBufferTest, PreparedRuntimeEnvRequiresTheActiveArenaKey) {
     fake_.reset();
     HostApi compatibility_api = make_host_api();
-    uint64_t task_window[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
-    uint64_t heap[PTO2_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
-    uint64_t dep_pool[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
+    uint64_t task_window[CHIP_MAX_RING_DEPTH] = {4, 4, 4, 4};
+    uint64_t heap[CHIP_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
+    uint64_t dep_pool[CHIP_MAX_RING_DEPTH] = {4, 4, 4, 4};
 
     EXPECT_EQ(concurrent_native_prepare_supported_impl(), 1);
     EXPECT_EQ(prepared_run_config_compatible_impl(&compatibility_api, task_window, heap, dep_pool), 0);

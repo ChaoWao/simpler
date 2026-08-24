@@ -54,7 +54,7 @@ The primary production runtime. Uses ring buffers for task slots and output memo
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
 - **Thread model**: `aicpu_thread_num - 1` scheduler threads + 1 orchestrator
   thread on AICPU; the default five-thread configuration uses 4 schedulers
-- **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `PTO2_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
+- **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `CHIP_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
 - **Use case**: production workloads; supports streaming, flow control, and large batch sizes
 
 ---
@@ -431,7 +431,7 @@ The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the
 
 Key members:
 
-- `rings[PTO2_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
+- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
 - `tensor_map`, `tensor_pool`: dependency tracking
 - `scope_tasks[]`, `scope_begins[]`, `scope_stack_top`: scope nesting stack (flat buffer partitioned by level)
 - `scheduler`: pointer to scheduler state (for Orch-side wiring helpers and ready queue access)

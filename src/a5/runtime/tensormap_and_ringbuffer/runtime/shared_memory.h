@@ -13,7 +13,7 @@
  *
  * Defines the shared memory structure for Orchestrator-Scheduler communication.
  *
- * Memory Layout (per-ring sections repeat for each ring 0..PTO2_MAX_RING_DEPTH-1):
+ * Memory Layout (per-ring sections repeat for each ring 0..CHIP_MAX_RING_DEPTH-1):
  *   +---------------------------+
  *   | SharedMemoryHeader        |  (per-ring flow control + sync)
  *   +---------------------------+
@@ -129,7 +129,7 @@ static_assert(
  */
 struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
     // === PER-RING FLOW CONTROL + LAYOUT INFO (set once at init) ===
-    PTO2SharedMemoryRingHeader rings[PTO2_MAX_RING_DEPTH];
+    PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 
     // === GLOBAL FIELDS ===
     std::atomic<int32_t> orchestrator_done;  // Flag: orchestration complete
@@ -195,7 +195,7 @@ struct PTO2SharedMemoryHandle {
     // === Static helpers ===
 
     static uint64_t calculate_size(uint64_t task_window_size);
-    static uint64_t calculate_size_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]);
+    static uint64_t calculate_size_per_ring(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]);
 
     // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init
     // using default PTO2_TASK_WINDOW_SIZE / PTO2_HEAP_SIZE. Only valid when the
@@ -211,8 +211,8 @@ struct PTO2SharedMemoryHandle {
     // `task_window_size`.
     bool init(void *sm_base, uint64_t sm_size, uint64_t task_window_size, uint64_t heap_size);
     bool init_per_ring(
-        void *sm_base, uint64_t sm_size, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-        const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+        void *sm_base, uint64_t sm_size, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH],
+        const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]
     );
 
     void destroy();
@@ -222,10 +222,10 @@ struct PTO2SharedMemoryHandle {
 private:
     void init_header(uint64_t task_window_size, uint64_t heap_size);
     void init_header_per_ring(
-        const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+        const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]
     );
     void setup_pointers(uint64_t task_window_size);
-    void setup_pointers_per_ring(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]);
+    void setup_pointers_per_ring(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]);
 };
 
 // =============================================================================
@@ -288,8 +288,8 @@ struct PTO2RingSegmentOffsets {
 // segment is a one-line edit here; every consumer follows automatically, so the
 // layout walk can never silently disagree across call sites.
 inline PTO2RingSegmentOffsets
-ring_segment_offsets(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int ring_id) noexcept {
-    assert(ring_id >= 0 && ring_id < PTO2_MAX_RING_DEPTH && "pto2_sm_layout: ring_id out of range");
+ring_segment_offsets(const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id) noexcept {
+    assert(ring_id >= 0 && ring_id < CHIP_MAX_RING_DEPTH && "pto2_sm_layout: ring_id out of range");
     uint64_t off = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
     for (int r = 0; r < ring_id; r++) {
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
@@ -309,7 +309,7 @@ ring_segment_offsets(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int 
 
 // Device address of ring `ring_id`'s task_descriptors array.
 inline PTO2TaskDescriptor *ring_task_descriptors_addr(
-    void *sm_dev_base, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int ring_id
+    void *sm_dev_base, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id
 ) noexcept {
     return reinterpret_cast<PTO2TaskDescriptor *>(
         static_cast<char *>(sm_dev_base) + ring_segment_offsets(task_window_sizes, ring_id).descriptors
@@ -319,7 +319,7 @@ inline PTO2TaskDescriptor *ring_task_descriptors_addr(
 // Device address of ring `ring_id`'s slot_states array (used by the allocator's
 // deadlock detector to identify the head task's slot).
 inline ChipTaskSlotState *
-ring_slot_states_addr(void *sm_dev_base, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int ring_id) noexcept {
+ring_slot_states_addr(void *sm_dev_base, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH], int ring_id) noexcept {
     return reinterpret_cast<ChipTaskSlotState *>(
         static_cast<char *>(sm_dev_base) + ring_segment_offsets(task_window_sizes, ring_id).slot_states
     );

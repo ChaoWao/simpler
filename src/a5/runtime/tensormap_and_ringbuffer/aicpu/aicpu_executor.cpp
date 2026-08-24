@@ -664,7 +664,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level();
                 {
                     auto &orch = rt->orchestrator;
-                    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+                    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
                         auto &alloc = orch.rings[r].task_allocator;
                         scope_stats_set_ring_capacity(
                             r, alloc.window_size(), alloc.heap_capacity(),
@@ -813,7 +813,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // submit_task().
             int32_t total_tasks = 0;
             if (rt->orchestrator.sm_header) {
-                for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+                for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
                     total_tasks +=
                         rt->orchestrator.sm_header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
                 }

@@ -67,7 +67,7 @@ extern "C" {
 //
 // Each boundary writes one record into host-visible (uncached) device memory,
 // so record width is directly on the orchestrator hot path. A scope only ever
-// touches its own ring (ring_id = min(scope_depth, PTO2_MAX_RING_DEPTH-1)), so
+// touches its own ring (ring_id = min(scope_depth, CHIP_MAX_RING_DEPTH-1)), so
 // a single ring's start/end is stored rather than a per-ring array.
 //
 // For the ring resources, end-start is the live span: task_end-task_start is

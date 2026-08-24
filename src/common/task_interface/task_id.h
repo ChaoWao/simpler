@@ -25,7 +25,7 @@
  *
  * raw encoding: (ring_id << 32) | local_id
  *
- * ring_id:  which ring layer (0..PTO2_MAX_RING_DEPTH-1)
+ * ring_id:  which ring layer (0..CHIP_MAX_RING_DEPTH-1)
  * local_id: per-ring monotonic counter
  *
  * Invalid sentinel: raw == UINT64_MAX (no valid task has this encoding).

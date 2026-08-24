@@ -49,7 +49,7 @@ uint64_t g_insert_count = 0;
 
 PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
     DeviceArena &arena, int32_t new_num_buckets, int32_t new_pool_size,
-    const int32_t new_task_window_sizes[PTO2_MAX_RING_DEPTH]
+    const int32_t new_task_window_sizes[CHIP_MAX_RING_DEPTH]
 ) {
     // num_buckets must be a power of two for the hash truncation to work.
     always_assert((new_num_buckets & (new_num_buckets - 1)) == 0);
@@ -57,7 +57,7 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
     PTO2TensorMapLayout layout{};
     layout.num_buckets = new_num_buckets;
     layout.pool_size = new_pool_size;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         layout.task_window_sizes[r] = new_task_window_sizes[r];
     }
 
@@ -70,7 +70,7 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
         arena.reserve(static_cast<size_t>(new_pool_size) * sizeof(PTO2TensorMapEntry), alignof(PTO2TensorMapEntry));
     layout.off_free_entry_list =
         arena.reserve(static_cast<size_t>(new_pool_size) * sizeof(PTO2TensorMapEntry *), alignof(PTO2TensorMapEntry *));
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         layout.off_task_entry_heads[r] = arena.reserve(
             static_cast<size_t>(new_task_window_sizes[r]) * sizeof(PTO2TensorMapEntry *), alignof(PTO2TensorMapEntry *)
         );
@@ -81,7 +81,7 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
 }
 
 PTO2TensorMapLayout
-PTO2TensorMap::reserve_layout_default(DeviceArena &arena, const int32_t new_task_window_sizes[PTO2_MAX_RING_DEPTH]) {
+PTO2TensorMap::reserve_layout_default(DeviceArena &arena, const int32_t new_task_window_sizes[CHIP_MAX_RING_DEPTH]) {
     return reserve_layout(arena, PTO2_TENSORMAP_NUM_BUCKETS, PTO2_TENSORMAP_POOL_SIZE, new_task_window_sizes);
 }
 
@@ -122,7 +122,7 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
     next_entry_idx = 0;
     free_num = 0;
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto *heads_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_task_entry_heads[r]));
         auto *head_epochs_arena = static_cast<uint32_t *>(arena.region_ptr(layout.off_task_entry_head_epochs[r]));
         for (int32_t i = 0; i < layout.task_window_sizes[r]; i++) {
@@ -146,12 +146,12 @@ void PTO2TensorMap::reset_for_reuse(const PTO2TensorMapLayout &layout) {
     if (current_epoch == 0) {
         current_epoch = 1;
         memset(bucket_epochs, 0, static_cast<size_t>(layout.num_buckets) * sizeof(uint32_t));
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             memset(task_entry_head_epochs[r], 0, static_cast<size_t>(layout.task_window_sizes[r]) * sizeof(uint32_t));
         }
     }
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         task_window_sizes[r] = layout.task_window_sizes[r];
         last_task_alives[r] = 0;
         last_cleanup[r] = 0;
@@ -163,7 +163,7 @@ void PTO2TensorMap::wire_arena_pointers(const PTO2TensorMapLayout &layout, Devic
     bucket_epochs = static_cast<uint32_t *>(arena.region_ptr(layout.off_bucket_epochs));
     entry_pool = static_cast<PTO2TensorMapEntry *>(arena.region_ptr(layout.off_entry_pool));
     free_entry_list = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_free_entry_list));
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         task_entry_heads[r] = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_task_entry_heads[r]));
         task_entry_head_epochs[r] = static_cast<uint32_t *>(arena.region_ptr(layout.off_task_entry_head_epochs[r]));
     }
@@ -177,7 +177,7 @@ void PTO2TensorMap::destroy() {
     bucket_epochs = nullptr;
     entry_pool = nullptr;
     free_entry_list = nullptr;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         task_entry_heads[r] = nullptr;
         task_entry_head_epochs[r] = nullptr;
     }
@@ -237,7 +237,7 @@ void PTO2TensorMap::print_stats() {
     LOG_DEBUG("Empty buckets:       %d", empty_buckets);
     LOG_DEBUG("Max chain len:       %d", max_chain);
     LOG_DEBUG("Avg chain len:       %.2f", non_empty_buckets > 0 ? (float)total_chain / non_empty_buckets : 0);
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         LOG_DEBUG("Last task alive[%d]: %d", r, last_task_alives[r]);
     }
     LOG_DEBUG("============================");

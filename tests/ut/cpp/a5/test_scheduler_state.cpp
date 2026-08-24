@@ -196,7 +196,7 @@ TEST_F(SchedulerStateTest, ConsumedTransition) {
 }
 
 TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
-    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     constexpr int32_t head_task_id = 0;
     setup_ring_for_reclaim_race(ring_id, /*current_task_index=*/1, head_task_id);
 
@@ -242,7 +242,7 @@ TEST_F(SchedulerStateTest, ConsumedIdempotent) {
 }
 
 TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances) {
-    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     constexpr int32_t head_task_id = 17;
     setup_contended_head_case(ring_id, head_task_id);
 
@@ -270,7 +270,7 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances)
 }
 
 TEST_F(SchedulerStateTest, DeferredAdvanceDoesNotAcknowledgePublication) {
-    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     constexpr int32_t head_task_id = 17;
     setup_contended_head_case(ring_id, head_task_id);
 
@@ -290,7 +290,7 @@ TEST_F(SchedulerStateTest, DeferredAdvanceDoesNotAcknowledgePublication) {
 }
 
 TEST_F(SchedulerStateTest, PublicationRequestDoesNotConsumeDeferredAdvance) {
-    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     setup_ring_for_reclaim_race(ring_id, /*current_task_index=*/1, /*blocked_task_id=*/1);
 
     uint32_t pending_bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
@@ -309,7 +309,7 @@ TEST_F(SchedulerStateTest, PublicationRequestDoesNotConsumeDeferredAdvance) {
 TEST_F(SchedulerStateTest, ContendedConsumedHeadIdleDrainStress) {
     const int32_t head_task_ids[] = {0, 1, 127, PTO2_TASK_WINDOW_SIZE - 2, PTO2_TASK_WINDOW_SIZE + 3};
 
-    for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+    for (int32_t ring_id = 0; ring_id < CHIP_MAX_RING_DEPTH; ring_id++) {
         for (int32_t head_task_id : head_task_ids) {
             SCOPED_TRACE(::testing::Message() << "ring_id=" << ring_id << " head_task_id=" << head_task_id);
             setup_contended_head_case(ring_id, head_task_id);

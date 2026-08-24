@@ -807,7 +807,7 @@ struct PTO2DepListPool {
 
 /**
  * Groups a TaskAllocator and DepPool into one per-depth unit.
- * PTO2_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
+ * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
 struct PTO2RingSet {
     PTO2TaskAllocator task_allocator;

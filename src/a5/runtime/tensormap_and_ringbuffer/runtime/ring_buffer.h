@@ -63,7 +63,7 @@
 #define PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
 
 constexpr uint32_t ring_mask_bit(int32_t ring_id) {
-    static_assert(PTO2_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
+    static_assert(CHIP_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
     return 1u << static_cast<uint32_t>(ring_id);
 }
 
@@ -921,7 +921,7 @@ struct PTO2DepListPool {
 
 /**
  * Groups a TaskAllocator and DepPool into one per-depth unit.
- * PTO2_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
+ * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
 struct PTO2RingSet {
     PTO2TaskAllocator task_allocator;

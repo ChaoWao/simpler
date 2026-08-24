@@ -33,10 +33,10 @@ protected:
     void SetUp() override {
         sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        gm_heap.resize(4096 * PTO2_MAX_RING_DEPTH);
+        gm_heap.resize(4096 * CHIP_MAX_RING_DEPTH);
 
-        int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             task_window_sizes[r] = static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE);
         }
 
@@ -277,10 +277,10 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     std::vector<TensorCreateInfo> create_infos;
     create_infos.reserve(2);
 
-    for (int32_t depth = 0; depth < PTO2_MAX_RING_DEPTH; ++depth) {
+    for (int32_t depth = 0; depth < CHIP_MAX_RING_DEPTH; ++depth) {
         orch.begin_scope();
     }
-    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
 
     CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 1024);
@@ -288,7 +288,7 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     ASSERT_TRUE(parent.task_id().is_valid());
 
     orch.begin_scope();
-    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
 
     CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 1);
@@ -306,11 +306,11 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     std::vector<TensorCreateInfo> create_infos;
     create_infos.reserve(3);
 
-    for (int32_t depth = 0; depth < PTO2_MAX_RING_DEPTH; ++depth) {
+    for (int32_t depth = 0; depth < CHIP_MAX_RING_DEPTH; ++depth) {
         orch.begin_scope();
     }
     orch.begin_scope();
-    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
 
     CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 768);
@@ -318,7 +318,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     ASSERT_TRUE(child.task_id().is_valid());
 
     orch.end_scope();
-    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
 
     CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 256);
@@ -342,31 +342,31 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
 // (sum of the runtime per-ring windows), not the compile-time PTO2_SCOPE_TASKS_CAP.
 // reserve_layout only computes offsets, so no commit()/backing is needed here.
 TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
-    auto cap_for = [](const int32_t windows[PTO2_MAX_RING_DEPTH]) {
+    auto cap_for = [](const int32_t windows[CHIP_MAX_RING_DEPTH]) {
         DeviceArena arena;
         int32_t cap = PTO2OrchestratorState::reserve_layout(arena, windows).scope_tasks_cap;
         arena.release();
         return cap;
     };
 
-    int32_t windows[PTO2_MAX_RING_DEPTH];
+    int32_t windows[CHIP_MAX_RING_DEPTH];
 
     // Default window: cap == the old compile-time value (no behavior change).
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++)
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = PTO2_TASK_WINDOW_SIZE;
-    EXPECT_EQ(cap_for(windows), PTO2_TASK_WINDOW_SIZE * PTO2_MAX_RING_DEPTH);
+    EXPECT_EQ(cap_for(windows), PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
     EXPECT_EQ(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
 
     // Shrunk window: cap shrinks to the real budget (no over-allocation).
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++)
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = 4;
-    EXPECT_EQ(cap_for(windows), 4 * PTO2_MAX_RING_DEPTH);
+    EXPECT_EQ(cap_for(windows), 4 * CHIP_MAX_RING_DEPTH);
 
     // Enlarged window past the compile default: cap grows to match the rings, so a
     // large scope no longer hits a premature SCOPE_TASKS_OVERFLOW (the bug fixed).
     const int32_t big = PTO2_TASK_WINDOW_SIZE * 2;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++)
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = big;
-    EXPECT_EQ(cap_for(windows), big * PTO2_MAX_RING_DEPTH);
+    EXPECT_EQ(cap_for(windows), big * CHIP_MAX_RING_DEPTH);
     EXPECT_GT(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
 }

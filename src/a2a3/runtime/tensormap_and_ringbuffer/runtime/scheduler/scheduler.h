@@ -429,9 +429,9 @@ struct PTO2SchedulerLayout {
     size_t off_dummy_ready_queue_slots;
     size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
-    size_t off_dep_pool_entries[PTO2_MAX_RING_DEPTH];
+    size_t off_dep_pool_entries[CHIP_MAX_RING_DEPTH];
     uint64_t ready_queue_capacity;
-    int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
+    int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
 };
 
 /**
@@ -507,7 +507,7 @@ struct PTO2SchedulerState {
 
             sync_to_sm();
         }
-    } ring_sched_states[PTO2_MAX_RING_DEPTH];
+    } ring_sched_states[CHIP_MAX_RING_DEPTH];
 
     alignas(64) std::atomic<uint32_t> advance_pending_mask;
 
@@ -554,7 +554,7 @@ struct PTO2SchedulerState {
     }
 
     static uint32_t ring_advance_pending_bit(int32_t ring_id) {
-        static_assert(PTO2_MAX_RING_DEPTH <= 32, "advance_pending_mask uses one uint32_t bit per ring");
+        static_assert(CHIP_MAX_RING_DEPTH <= 32, "advance_pending_mask uses one uint32_t bit per ring");
         return 1u << static_cast<uint32_t>(ring_id);
     }
 
@@ -571,7 +571,7 @@ struct PTO2SchedulerState {
         if (pending == 0) return false;
 
         bool advanced = false;
-        for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+        for (int32_t ring_id = 0; ring_id < CHIP_MAX_RING_DEPTH; ring_id++) {
             uint32_t bit = ring_advance_pending_bit(ring_id);
             if ((pending & bit) == 0) continue;
 
@@ -1382,7 +1382,7 @@ struct PTO2SchedulerState {
     // the same values.
     static PTO2SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
     static PTO2SchedulerLayout
-    reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]);
+    reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never

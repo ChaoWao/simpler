@@ -585,7 +585,7 @@ is reclaimed individually when it reaches CONSUMED. The deque is reset only
 when the worker has no registered runs or live slots.
 
 The HeapRing is **partitioned into `MAX_RING_DEPTH = 4` independent
-rings** (Strict-1; matches L2's `PTO2_MAX_RING_DEPTH`). Each ring is its
+rings** (Strict-1; matches L2's `CHIP_MAX_RING_DEPTH`). Each ring is its
 own `mmap(MAP_SHARED | MAP_ANONYMOUS)` taken before fork, so children
 inherit all four at the same virtual addresses. The `heap_ring_size`
 knob on `Worker(...)` is the **per-ring** size (default 1 GiB → 4 GiB

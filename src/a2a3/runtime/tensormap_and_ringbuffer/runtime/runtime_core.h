@@ -107,9 +107,9 @@ struct RuntimeOps {
  * config); re-read at AICPU boot to reconstruct ring/heap/dep-pool capacities.
  */
 struct ArenaSizingKey {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]{};
-    int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]{};
+    uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]{};
+    uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]{};
+    int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]{};
 };
 
 /**
@@ -198,8 +198,8 @@ RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
 );
 RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]
+    DeviceArena &arena, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH],
+    const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]
 );
 
 /**
@@ -223,7 +223,7 @@ RuntimeContext *runtime_init_data_from_layout(
 );
 RuntimeContext *runtime_init_data_from_layout(
     DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
-    void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+    void *gm_heap_dev_base, const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]
 );
 
 /**

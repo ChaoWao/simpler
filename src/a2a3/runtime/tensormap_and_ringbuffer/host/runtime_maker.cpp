@@ -94,7 +94,7 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
 
 extern "C" int concurrent_native_prepare_supported_impl(void) { return 1; }
 
-static_assert(RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match the runtime ring depth");
+static_assert(RUNTIME_ENV_RING_COUNT == CHIP_MAX_RING_DEPTH, "RuntimeEnv ring count must match the runtime ring depth");
 
 // Helper: return current time in milliseconds
 static int64_t _now_ms() {
@@ -106,9 +106,9 @@ static int64_t _now_ms() {
 static bool is_power_of_2_u64(uint64_t value) { return value != 0 && (value & (value - 1)) == 0; }
 
 template <typename T>
-static std::string format_ring_array(const T (&values)[PTO2_MAX_RING_DEPTH]) {
+static std::string format_ring_array(const T (&values)[CHIP_MAX_RING_DEPTH]) {
     std::string out = "[";
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; ++r) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; ++r) {
         if (r != 0) {
             out += ", ";
         }
@@ -167,7 +167,7 @@ static bool parse_uint_token(
 }
 
 static void apply_env_ring_values(
-    const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t out[PTO2_MAX_RING_DEPTH]
+    const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t out[CHIP_MAX_RING_DEPTH]
 ) {
     const char *env = std::getenv(name);
     if (!env) return;
@@ -178,25 +178,25 @@ static void apply_env_ring_values(
         if (!parse_uint_token(name, text, min_val, max_val, require_power_of_2, &value)) {
             return;
         }
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             out[r] = value;
         }
         return;
     }
 
-    uint64_t parsed[PTO2_MAX_RING_DEPTH]{};
+    uint64_t parsed[CHIP_MAX_RING_DEPTH]{};
     size_t pos = 0;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         size_t comma = text.find(',', pos);
         std::string token = text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
         if (!parse_uint_token(name, token, min_val, max_val, require_power_of_2, &parsed[r])) {
             return;
         }
         if (comma == std::string::npos) {
-            if (r != PTO2_MAX_RING_DEPTH - 1) {
+            if (r != CHIP_MAX_RING_DEPTH - 1) {
                 LOG_WARN(
                     "%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env,
-                    PTO2_MAX_RING_DEPTH
+                    CHIP_MAX_RING_DEPTH
                 );
                 return;
             }
@@ -206,10 +206,10 @@ static void apply_env_ring_values(
         }
     }
     if (pos < text.size() || (!text.empty() && text.back() == ',')) {
-        LOG_WARN("%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env, PTO2_MAX_RING_DEPTH);
+        LOG_WARN("%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env, CHIP_MAX_RING_DEPTH);
         return;
     }
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         out[r] = parsed[r];
     }
 }
@@ -230,16 +230,16 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // Each of ring_task_window / ring_heap / ring_dep_pool is a per-ring array of
-// PTO2_MAX_RING_DEPTH entries (0 = unset). Precedence per ring: per-task entry >
+// CHIP_MAX_RING_DEPTH entries (0 = unset). Precedence per ring: per-task entry >
 // PTO2_RING_* env value > compile-time default. A "size all rings the same"
 // request arrives already broadcast to every entry by the caller.
 static bool resolve_ring_config(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
-    uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH], uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH],
-    int32_t eff_dep_pool_capacities[PTO2_MAX_RING_DEPTH]
+    uint64_t eff_task_window_sizes[CHIP_MAX_RING_DEPTH], uint64_t eff_heap_sizes[CHIP_MAX_RING_DEPTH],
+    int32_t eff_dep_pool_capacities[CHIP_MAX_RING_DEPTH]
 ) {
-    uint64_t dep_pool_values[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    uint64_t dep_pool_values[CHIP_MAX_RING_DEPTH];
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         eff_task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
         eff_heap_sizes[r] = PTO2_HEAP_SIZE;
         dep_pool_values[r] = PTO2_DEP_LIST_POOL_SIZE;
@@ -249,7 +249,7 @@ static bool resolve_ring_config(
     apply_env_ring_values("PTO2_RING_HEAP", 1024, std::numeric_limits<uint64_t>::max(), false, eff_heap_sizes);
     apply_env_ring_values("PTO2_RING_DEP_POOL", 4, static_cast<uint64_t>(INT32_MAX), false, dep_pool_values);
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         const uint64_t task_window_override = read_ring_override(ring_task_window, r);
         const uint64_t heap_override = read_ring_override(ring_heap, r);
         const uint64_t dep_pool_override = read_ring_override(ring_dep_pool, r);
@@ -458,9 +458,9 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 // arena description. Resolved once per config from per-task overrides + env +
 // compile-time defaults; depends on nothing that varies per run.
 struct ArenaSizingConfig {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
-    int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
+    uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH];
+    uint64_t heap_sizes[CHIP_MAX_RING_DEPTH];
+    int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
 };
 
 struct ArenaStaticSizes {
@@ -498,8 +498,8 @@ static void append_cache_key_u64(std::vector<uint8_t> *out, uint64_t value) {
 static PrebuiltRuntimeArenaCacheProbe make_prebuilt_runtime_arena_cache_probe(const ArenaSizingConfig &sizing) {
     PrebuiltRuntimeArenaCacheProbe probe;
     uint64_t hash = 1469598103934665603ULL;
-    probe.serialized_key.reserve(PTO2_MAX_RING_DEPTH * 3 * sizeof(uint64_t));
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    probe.serialized_key.reserve(CHIP_MAX_RING_DEPTH * 3 * sizeof(uint64_t));
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         hash_mix_u64(&hash, sizing.task_window_sizes[r]);
         append_cache_key_u64(&probe.serialized_key, sizing.task_window_sizes[r]);
         hash_mix_u64(&hash, sizing.heap_sizes[r]);
@@ -563,7 +563,7 @@ static bool resolve_arena_sizing(
 
 static bool derive_arena_static_sizes(const ArenaSizingConfig &sizing, ArenaStaticSizes *out) {
     out->total_heap = 0;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         if (sizing.heap_sizes[r] > std::numeric_limits<uint64_t>::max() - out->total_heap) {
             LOG_ERROR("Total ring heap size overflows uint64_t");
             return false;
