@@ -13,6 +13,7 @@
 
 #include <array>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_execution.h"
 #include "graph_host_state.h"
 #include "orchestrator.h"
 #include "shared_memory.h"
@@ -36,6 +38,11 @@ protected:
     PTO2SchedulerLayout sched_layout{};
     GraphHostStatePtr graph_state;
     std::vector<char> gm_heap;
+    // The Definition objects are built in here, as a bind's retained staging.
+    // vector<std::byte>::data() is aligned for any fundamental type, which is what
+    // an object base has to carry.
+    std::vector<std::byte> definition_staging;
+    GraphDefinitionArena arena{};
 
     // A Graph task's heap allocation covers its nodes' packed outputs *and* the
     // execution storage the device materializes into, so the pool has to hold a
@@ -43,6 +50,15 @@ protected:
     // outputs. 4 KB used to be enough when the storage came from a separate
     // device allocation.
     static constexpr size_t HEAP_BYTES = 64 * 1024;
+    static constexpr size_t STAGING_BYTES = 256 * 1024;
+
+    // Where an entry's image is: in the arena at the offset it claimed, or in the
+    // buffer it spilled to.
+    const GraphDefinition *definition_image(const GraphHostDefinition &entry) const {
+        const std::byte *image =
+            entry.spill != nullptr ? entry.spill : arena.base + entry.object_offset + arena.object_prefix_bytes;
+        return reinterpret_cast<const GraphDefinition *>(image);
+    }
 
     void SetUp() override {
         sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
@@ -56,7 +72,12 @@ protected:
         sched.wire_arena_pointers(sched_layout, runtime_arena);
         ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE, &sched));
 
-        graph_state = make_graph_host_state();
+        definition_staging.assign(STAGING_BYTES, std::byte{0});
+        arena.base = definition_staging.data();
+        arena.capacity = definition_staging.size();
+        arena.object_prefix_bytes = sizeof(GraphDefinitionHeader);
+        arena.object_align = GRAPH_DEFINITION_OBJECT_ALIGN;
+        graph_state = make_graph_host_state(arena);
         ASSERT_NE(graph_state, nullptr);
         orch.graph_host_state = graph_state.get();
     }
@@ -117,7 +138,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 1u);
     ASSERT_EQ(definitions.entries[0].full_key, first_upload->full_key);
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
         PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
     EXPECT_EQ(static_cast<uint64_t>(first_end - first_base), expected_extent);
@@ -226,7 +247,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 1u);
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
         PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
 

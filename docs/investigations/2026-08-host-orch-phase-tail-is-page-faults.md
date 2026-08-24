@@ -231,6 +231,39 @@ Any of these must be measured by fault *count* first, and only then by duration,
 same rank and with `args` carried alongside as a load proxy — see
 `.claude/rules/discipline.md` §4 and the entries on this file's dead ends.
 
+## Amendment 2026-08-23 — the Definition image is not part of this tail
+
+Recording a Definition image no longer allocates: the images go straight into the
+retained upload staging. That removes a per-orchestration allocation the list above
+does not name — the `std::vector` each recording built its image into, 8 of them per
+dsv4 bind at ~126 KB each, acquired and returned every bind. Interleaved A/B on dsv4
+(`base, measure, base, measure`, six rounds each, 8 Definitions / 86 Graph
+submissions / 129 host tasks per bind on both arms), both arms taken at
+`3069f1aff`'s recording storage, i.e. **before** the per-recorder ownership of #1981:
+
+| per warm bind | base | measure |
+| ------------- | ---- | ------- |
+| `host_orch` minflt, min / median | 1100 / 1248, 1047 / 1138 | 1062 / 1107, 1082 / 1124 |
+| `graph_upload` minflt, min / median / max | 2 / 38 / 47, 34 / 43 / 133 | 0 / 1 / 3, 0 / 1 / 5 |
+| `graph_upload` dur min (ms) | 0.225, 0.282 | 0.141, 0.106 |
+| control plane, min of sums (ms) | 1.194, 1.365 | 1.549, 1.199 |
+
+**`host_orch`'s fault count did not move** — the two repetitions disagree in sign
+on both the min and the median, which is this file's own criterion for "not
+resolvable". Only `graph_upload` moved, consistently: the ~40 faults per bind it
+took allocating one staging vector per Definition are gone, and so is the copy.
+
+The reason is worth keeping: **a freed 126 KB block is reused from the heap without
+re-faulting**, so an allocation this size that is acquired and returned in the same
+orchestration was never a fault source, while the 2.17 MB hazard-map arena — far
+above glibc's mmap and trim thresholds — is. **Size against those thresholds, not
+byte count, decides what shows up in this tail**, which is why the entry's evidence
+points at the recording's own storage and not at the largest thing a bind allocates.
+
+The control-plane duration is **not** resolvable from this A/B either (+0.355 ms
+then −0.166 ms), which is the expected outcome of a change worth ~0.1 ms on a box
+whose load average sat between 40 and 66 throughout.
+
 ## References
 
 - Probe commits on the local `probe-on-main` branch (measurement only, unpushed):

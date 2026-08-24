@@ -395,58 +395,94 @@ struct HostOrchEntryPoints {
     OrchestrationBindFunc bind{nullptr};
 };
 
-// What the Definition pass copied to the device: the distinct objects, and their
-// bytes. Both are smaller than the run's Graph task count, which exceeds the object
-// count by the replay factor — one Definition serves every task with its key.
+// What the Definition pass copied to the device: the distinct objects, the bytes
+// of the one block holding them (inter-object alignment padding included), and how
+// many of them the recorders could not build in the block, so that this pass had to
+// copy them in. The object count is smaller than the run's Graph task count, which exceeds it
+// by the replay factor — one Definition serves every task with its key.
 struct DefinitionUploads {
     size_t count;
     uint64_t bytes;
+    size_t spilled;
 };
 
-// Upload each distinct Definition once, validate every outer Graph task against
-// it, and bind the task's existing graph_context to the device Definition. The
-// device initial classify replaces that pointer with an execution constructed in
-// the outer task's own heap.
+// Ship the run's Definition objects and bind every outer Graph task to the one
+// with its key. The recorders built most or all of them in place in the block's
+// host staging, each as [GraphDefinitionHeader][Definition image] at the offset it
+// claimed, so this pass writes the headers, copies in whatever did not fit, and
+// issues a single H2D of the used prefix. The device initial classify then replaces
+// each task's graph_context with an execution constructed in its own heap.
 bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, DefinitionUploads *uploads) {
     *uploads = DefinitionUploads{};
     const size_t count = graph_host_upload_count(graph_state);
     GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
-    struct UploadedDefinition {
-        void *device_object;               // GM address; host must not dereference
-        const GraphDefinition *host_view;  // the host-side image the object was built from
+    const auto align_up = [](size_t value) {
+        return (value + GRAPH_DEFINITION_OBJECT_ALIGN - 1) & ~(GRAPH_DEFINITION_OBJECT_ALIGN - 1);
     };
-    std::unordered_map<uint64_t, UploadedDefinition> definition_objects;
+    struct PackedDefinition {
+        size_t object_offset;   // of the object's header, from the block base
+        size_t image_bytes;     // the Definition image alone
+        const std::byte *copy;  // the image to copy in, or nullptr when built in place
+    };
+    std::unordered_map<uint64_t, PackedDefinition> packed;
+    // Objects the recorders built already occupy the arena's used prefix at the
+    // offsets they claimed, so the block starts out that long and the rest are
+    // appended past them.
+    size_t block_bytes = graph_host_arena_used(graph_state);
     for (const GraphHostDefinition &entry : definitions.entries) {
-        if (entry.data == nullptr || entry.bytes < sizeof(GraphDefinition)) continue;
-        const auto *definition = reinterpret_cast<const GraphDefinition *>(entry.data);
-        if (definition->total_bytes != entry.bytes || definition->full_key != entry.full_key) continue;
-        const size_t object_bytes = sizeof(GraphDefinitionHeader) + entry.bytes;
-        void *object =
-            api->acquire_graph_definition_buffer(entry.full_key, object_bytes, alignof(GraphDefinitionHeader));
-        if (object == nullptr) {
+        if (entry.bytes < sizeof(GraphDefinition)) continue;
+        if (entry.spill == nullptr) {
+            packed.emplace(entry.full_key, PackedDefinition{entry.object_offset, entry.bytes, nullptr});
+            continue;
+        }
+        const size_t object_offset = block_bytes;
+        block_bytes += align_up(sizeof(GraphDefinitionHeader) + entry.bytes);
+        packed.emplace(entry.full_key, PackedDefinition{object_offset, entry.bytes, entry.spill});
+        uploads->spilled++;
+    }
+
+    void *block = nullptr;
+    std::byte *staging = nullptr;
+    if (block_bytes != 0) {
+        void *staging_addr = nullptr;
+        // Growing the staging preserves what the recorders wrote into it, and the
+        // offsets above name positions rather than addresses, so a block that moves
+        // here costs nothing. Nothing is recording by now, which is what makes the
+        // move safe at all.
+        if (api->acquire_graph_definition_block(block_bytes, GRAPH_DEFINITION_OBJECT_ALIGN, &block, &staging_addr) !=
+            0) {
             LOG_ERROR(
-                "host-orch: failed to retain %zu bytes for Graph Definition key=%#llx", object_bytes,
-                static_cast<unsigned long long>(entry.full_key)
+                "host-orch: failed to retain %zu bytes for %zu Graph Definition object(s)", block_bytes, packed.size()
             );
             return false;
         }
-        std::vector<std::byte> staging(object_bytes, std::byte{0});
-        auto *header = reinterpret_cast<GraphDefinitionHeader *>(staging.data());
-        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-        header->verify_state.store(
-            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
-        );
-        header->definition_bytes = static_cast<uint32_t>(entry.bytes);
-        header->content_hash = definition->content_hash;
-        header->full_key = definition->full_key;
-        std::memcpy(staging.data() + sizeof(GraphDefinitionHeader), entry.data, entry.bytes);
-        if (api->copy_to_device(object, staging.data(), object_bytes) != 0) {
-            LOG_ERROR("host-orch: failed to upload Graph Definition object");
+        staging = static_cast<std::byte *>(staging_addr);
+        for (const auto &[key, object] : packed) {
+            std::byte *base = staging + object.object_offset;
+            std::byte *image = base + sizeof(GraphDefinitionHeader);
+            if (object.copy != nullptr) std::memcpy(image, object.copy, object.image_bytes);
+            // The five header fields cover its every byte, so the object's framing
+            // is fully defined by these writes rather than by what the retained
+            // staging held before them.
+            const auto *definition = reinterpret_cast<const GraphDefinition *>(image);
+            auto *header = reinterpret_cast<GraphDefinitionHeader *>(base);
+            header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+            header->verify_state.store(
+                static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
+            );
+            header->definition_bytes = definition->total_bytes;
+            header->content_hash = definition->content_hash;
+            header->full_key = definition->full_key;
+            const size_t object_bytes = sizeof(GraphDefinitionHeader) + object.image_bytes;
+            const size_t padded = align_up(object_bytes);
+            std::memset(base + object_bytes, 0, padded - object_bytes);
+        }
+        if (api->copy_to_device(block, staging, block_bytes) != 0) {
+            LOG_ERROR("host-orch: failed to upload the Graph Definition block");
             return false;
         }
-        definition_objects.emplace(definition->full_key, UploadedDefinition{object, definition});
-        uploads->count++;
-        uploads->bytes += object_bytes;
+        uploads->count = packed.size();
+        uploads->bytes = block_bytes;
     }
 
     for (size_t index = 0; index < count; ++index) {
@@ -456,14 +492,21 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
             LOG_ERROR("host-orch: invalid pending Graph task");
             return false;
         }
-        auto object_it = definition_objects.find(upload->full_key);
-        if (object_it == definition_objects.end() || object_it->second.device_object == nullptr ||
-            object_it->second.host_view == nullptr ||
-            object_it->second.host_view->content_hash != upload->definition_hash) {
+        auto object_it = packed.find(upload->full_key);
+        if (object_it == packed.end() || block == nullptr || staging == nullptr) {
             LOG_ERROR("host-orch: Graph task has no matching uploaded Definition object");
             return false;
         }
-        const GraphDefinition *definition = object_it->second.host_view;
+        // The object as it was shipped, so what this validates is the bytes the
+        // device will read rather than a host copy of them.
+        const auto *definition = reinterpret_cast<const GraphDefinition *>(
+            staging + object_it->second.object_offset + sizeof(GraphDefinitionHeader)
+        );
+        if (definition->total_bytes != object_it->second.image_bytes ||
+            definition->content_hash != upload->definition_hash) {
+            LOG_ERROR("host-orch: Graph task has no matching uploaded Definition object");
+            return false;
+        }
         GraphExecutionStorageLayout storage_layout{};
         if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
             definition->full_key != upload->full_key ||
@@ -491,7 +534,7 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
             return false;
         }
         upload->outer_slot->graph_context = reinterpret_cast<GraphDefinition *>(
-            reinterpret_cast<uintptr_t>(object_it->second.device_object) + sizeof(GraphDefinitionHeader)
+            reinterpret_cast<uintptr_t>(block) + object_it->second.object_offset + sizeof(GraphDefinitionHeader)
         );
     }
     return true;
@@ -548,7 +591,26 @@ int32_t run_host_orchestration(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
-    GraphHostStatePtr graph_state = make_graph_host_state();
+    // The recorders build their Definition objects straight into the retained
+    // staging block, so it is claimed before orchestration starts and at whatever
+    // capacity the previous bind left behind — the run's real total is not known
+    // until every recording has ended. What does not fit is built in its own
+    // buffer and copied by the upload, which then grows the block, so the arena
+    // reaches a run's high-water mark within one bind of needing it.
+    GraphDefinitionArena definition_arena{};
+    definition_arena.object_prefix_bytes = sizeof(GraphDefinitionHeader);
+    definition_arena.object_align = GRAPH_DEFINITION_OBJECT_ALIGN;
+    {
+        void *staging = nullptr;
+        size_t staging_bytes = 0;
+        api->get_graph_definition_staging(&staging, &staging_bytes);
+        if (staging != nullptr && reinterpret_cast<uintptr_t>(staging) % definition_arena.object_align == 0) {
+            definition_arena.base = static_cast<std::byte *>(staging);
+            definition_arena.capacity = staging_bytes;
+        }
+    }
+
+    GraphHostStatePtr graph_state = make_graph_host_state(definition_arena);
     if (!graph_state) {
         LOG_ERROR("host-orch: failed to allocate Graph host state");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -648,11 +710,14 @@ int32_t run_host_orchestration(
     {
         // `bytes` is what this segment copied: the Definition objects, which are all
         // it copies. `defs` and `submissions` differ by the replay count — one
-        // Definition serves every Graph task with its key.
-        char attrs[96];
+        // Definition serves every Graph task with its key. `spilled` is how many
+        // objects the recorders could not build in the block, and so is 0 for a bind
+        // the retained staging was big enough for. It is deliberately not spelled
+        // `copied=`, which on arena_h2d means a zone rather than a count.
+        char attrs[128];
         snprintf(
-            attrs, sizeof(attrs), "defs=%zu bytes=%" PRIu64 " submissions=%zu", definition_uploads.count,
-            definition_uploads.bytes, graph_host_upload_count(*graph_state)
+            attrs, sizeof(attrs), "defs=%zu bytes=%" PRIu64 " submissions=%zu spilled=%zu", definition_uploads.count,
+            definition_uploads.bytes, graph_host_upload_count(*graph_state), definition_uploads.spilled
         );
         record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, definition_uploads.bytes);
     }

@@ -20,16 +20,24 @@ The follow-up Graph execution layout now removes the per-occurrence
 compact payload pools, while `GraphExecution` and node storage are initialized
 in the outer Graph task's heap tail on device. The outer slot's existing
 `graph_context` points first to the shared Definition and then to the localized
-execution. The measurements below describe the earlier shared-Definition step
-and remain its historical baseline.
+execution. The upload itself has since been packed further: the objects share one
+retained device block and one retained host staging block per pipeline slot, so a
+bind issues a single `rtMemcpy` for all of them
+(`HostApi::acquire_graph_definition_block`), and the recorders build their images
+directly into that staging at offsets they claim from it, so in steady state the
+upload copies no image at all — it writes the headers and ships the block. A run
+whose Definitions outgrow the retained capacity still builds them in buffers of its
+own and has them copied in, which `graph_upload`'s `spilled=` counts. The
+measurements below describe the earlier shared-Definition step and remain its
+historical baseline.
 
 ## Change
 
 `254f924e` (measured by `4d434174`/`b8095e39`, enabled by `f868ac52`):
 
 - each distinct Definition uploads **once** as a
-  `[GraphDefinitionHeader][Definition image]` object retained by
-  `acquire_graph_definition_buffer`, keyed by content identity;
+  `[GraphDefinitionHeader][Definition image]` object retained by the runner's
+  per-key Graph Definition buffer cache, keyed by content identity;
 - `GraphSubmission` carries `definition_addr` + `definition_hash` instead of
   the inline image; a submission is now 2,568 bytes;
 - device localize validates the shared object through a one-time verify gate
