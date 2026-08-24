@@ -13,8 +13,8 @@
  *
  * Empty kernel used to trigger runtime allocation for tensors passed
  * as OUTPUT/INOUT via add_inout(). The runtime allocates HeapRing memory
- * and writes initial values before dispatching this task; the kernel
- * itself does not read or modify any data.
+ * before dispatching this task; the kernel itself does not read or
+ * modify any data.
  */
 
 #include <cstdint>
