@@ -108,32 +108,49 @@ get_aicore_reg_info(std::vector<int64_t> &aic, std::vector<int64_t> &aiv, const 
     in_map_para.devid = phys_device_id;
     in_map_para.addr_type = addr_type;
 
-    // Retry rc=13 (EACCES): concurrent chip_process bring-up across paired dies
-    // can lose a narrow driver-side serialization window for halMemCtl. The
-    // failure consistently lands on dev=11 (last die of last chip in the
-    // 8-11 range); a short backoff lets the prior holder release before the
-    // next attempt. Other return codes are not retried — they indicate a
-    // permanent failure mode (missing capability, invalid devid, etc.).
+    // Retry rc=13 (EACCES): immediate cross-process reuse of two logical
+    // devices on the same A3 card can hit a transient driver-side window in
+    // halMemCtl. Keep the normal path zero-wait, but give that transient window
+    // a bounded chance to settle. Other return codes are not retried; they
+    // indicate a permanent failure mode (missing capability, invalid devid, etc.).
     constexpr int kHalMemCtlEacces = 13;
-    constexpr int kHalMemCtlMaxRetries = 3;
-    constexpr int kHalMemCtlRetryDelayMs = 50;
+    constexpr int64_t kHalMemCtlRetryDeadlineMs = 2000;
+    constexpr int64_t kHalMemCtlInitialRetryDelayMs = 20;
+    constexpr int64_t kHalMemCtlMaxRetryDelayMs = 200;
+    const auto retry_start = std::chrono::steady_clock::now();
     int ret = 0;
-    for (int attempt = 0; attempt <= kHalMemCtlMaxRetries; ++attempt) {
+    int attempt = 0;
+    int64_t retry_delay_ms = kHalMemCtlInitialRetryDelayMs;
+    while (true) {
+        ++attempt;
         ret = halFunc(
             0, reinterpret_cast<void *>(&in_map_para), sizeof(struct AddrMapInPara),
             reinterpret_cast<void *>(&out_map_para), nullptr
         );
         if (ret != kHalMemCtlEacces) break;
-        if (attempt == kHalMemCtlMaxRetries) break;
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - retry_start).count();
+        if (elapsed_ms >= kHalMemCtlRetryDeadlineMs) break;
+        const int64_t sleep_ms = std::min(retry_delay_ms, kHalMemCtlRetryDeadlineMs - elapsed_ms);
         LOG_WARN(
-            "halMemCtl rc=13 (EACCES) on devid=%lld (acl=%lld) attempt %d/%d, retrying after %d ms",
-            (long long)phys_device_id, (long long)device_id, attempt + 1, kHalMemCtlMaxRetries, kHalMemCtlRetryDelayMs
+            "halMemCtl rc=13 (EACCES) on devid=%lld (acl=%lld) attempt=%d elapsed_ms=%lld, "
+            "retrying after %lld ms (deadline_ms=%lld)",
+            (long long)phys_device_id, (long long)device_id, attempt, (long long)elapsed_ms, (long long)sleep_ms,
+            (long long)kHalMemCtlRetryDeadlineMs
         );
-        std::this_thread::sleep_for(std::chrono::milliseconds(kHalMemCtlRetryDelayMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        const auto after_sleep = std::chrono::steady_clock::now();
+        const auto after_sleep_elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(after_sleep - retry_start).count();
+        if (after_sleep_elapsed_ms >= kHalMemCtlRetryDeadlineMs) break;
+        retry_delay_ms = std::min(retry_delay_ms * 2, kHalMemCtlMaxRetryDelayMs);
     }
 
     if (ret != 0) {
-        LOG_ERROR("halMemCtl failed with rc=%d", ret);
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - retry_start)
+                .count();
+        LOG_ERROR("halMemCtl failed with rc=%d after attempts=%d elapsed_ms=%lld", ret, attempt, (long long)elapsed_ms);
         return ret;
     }
 
