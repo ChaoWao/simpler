@@ -51,8 +51,8 @@ void make_queue(PTO2ReadyQueue *queue, SlotsRegion &region) {
 }
 
 // Distinct non-null slot_state values; the queue only moves the pointer around.
-PTO2TaskSlotState *fake_slot_state(size_t i) {
-    static PTO2TaskSlotState states[CAPACITY * 2];
+ChipTaskSlotState *fake_slot_state(size_t i) {
+    static ChipTaskSlotState states[CAPACITY * 2];
     return &states[i];
 }
 

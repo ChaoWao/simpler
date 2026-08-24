@@ -78,7 +78,7 @@ TEST(A5AICoreCompletionMailbox, PushNormalDoneCreatesEntryReadyToComplete) {
     AsyncWaitList wait_list{};
 
     TaskId token = make_token(99);
-    PTO2TaskSlotState dummy_slot{};
+    ChipTaskSlotState dummy_slot{};
     uint64_t slot_addr = reinterpret_cast<uint64_t>(&dummy_slot);
     ASSERT_TRUE(mb->try_push_normal_done(token, slot_addr));
 
@@ -109,7 +109,7 @@ TEST(A5AICoreCompletionMailbox, NormalDoneAttachesToExistingEntry) {
     wait_list.entries[0].normal_done = false;
     wait_list.count = 1;
 
-    PTO2TaskSlotState dummy_slot{};
+    ChipTaskSlotState dummy_slot{};
     uint64_t slot_addr = reinterpret_cast<uint64_t>(&dummy_slot);
     ASSERT_TRUE(mb->try_push_normal_done(token, slot_addr));
 

@@ -95,7 +95,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Per-ring data pointers (host-side, set by setup_pointers)
     PTO2TaskDescriptor *task_descriptors;
     PTO2TaskPayload *task_payloads;
-    PTO2TaskSlotState *slot_states;
+    ChipTaskSlotState *slot_states;
 
     int32_t get_slot_by_task_id(int32_t local_task_id) { return local_task_id & task_window_mask; }
 
@@ -109,9 +109,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
     PTO2TaskPayload &get_payload_by_task_id(int32_t local_id) { return task_payloads[get_slot_by_task_id(local_id)]; }
 
-    PTO2TaskSlotState &get_slot_state_by_slot(int32_t slot) { return slot_states[slot]; }
+    ChipTaskSlotState &get_slot_state_by_slot(int32_t slot) { return slot_states[slot]; }
 
-    PTO2TaskSlotState &get_slot_state_by_task_id(int32_t local_id) {
+    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id) {
         return slot_states[get_slot_by_task_id(local_id)];
     }
 };
@@ -294,7 +294,7 @@ ring_segment_offsets(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int 
     for (int r = 0; r < ring_id; r++) {
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
         off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
-        off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+        off += PTO2_ALIGN_UP(task_window_sizes[r] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
     }
     PTO2RingSegmentOffsets o{};
     o.descriptors = off;
@@ -302,7 +302,7 @@ ring_segment_offsets(const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int 
     o.payloads = off;
     off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(task_window_sizes[ring_id] * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
     o.end = off;
     return o;
 }
@@ -318,9 +318,9 @@ inline PTO2TaskDescriptor *ring_task_descriptors_addr(
 
 // Device address of ring `ring_id`'s slot_states array (used by the allocator's
 // deadlock detector to identify the head task's slot).
-inline PTO2TaskSlotState *
+inline ChipTaskSlotState *
 ring_slot_states_addr(void *sm_dev_base, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int ring_id) noexcept {
-    return reinterpret_cast<PTO2TaskSlotState *>(
+    return reinterpret_cast<ChipTaskSlotState *>(
         static_cast<char *>(sm_dev_base) + ring_segment_offsets(task_window_sizes, ring_id).slot_states
     );
 }

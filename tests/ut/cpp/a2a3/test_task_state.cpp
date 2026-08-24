@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2TaskSlotState lifecycle through PTO2SchedulerState API.
+ * Unit tests for ChipTaskSlotState lifecycle through PTO2SchedulerState API.
  *
  * These tests drive state transitions via src methods (release_fanin,
  * on_subtask_complete, check_and_handle_consumed) rather than manually
@@ -60,7 +60,7 @@ protected:
         sm_arena.release();
     }
 
-    void init_slot(PTO2TaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count) {
+    void init_slot(ChipTaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count) {
         memset(&slot, 0, sizeof(slot));
         slot.task_state.store(state);
         slot.fanin_count = fanin_count;
@@ -85,7 +85,7 @@ protected:
 // -> (subtask) -> COMPLETED -> (fanout) -> CONSUMED
 // =============================================================================
 TEST_F(TaskStateTest, FullLifecycleThroughAPI) {
-    alignas(64) PTO2TaskSlotState slot;
+    alignas(64) ChipTaskSlotState slot;
     init_slot(slot, PTO2_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 1;
     slot.completed_subtasks.store(0);
@@ -114,7 +114,7 @@ TEST_F(TaskStateTest, FullLifecycleThroughAPI) {
 // "dispatched to a worker" until the worker stores COMPLETED.
 // =============================================================================
 TEST_F(TaskStateTest, ReadyPathStaysPending) {
-    alignas(64) PTO2TaskSlotState slot;
+    alignas(64) ChipTaskSlotState slot;
     init_slot(slot, PTO2_TASK_PENDING, 1, 1);
 
     bool ready = sched.release_fanin_and_check_ready(slot);
@@ -128,7 +128,7 @@ TEST_F(TaskStateTest, ReadyPathStaysPending) {
 // Multi-fanin: partial release does not trigger ready
 // =============================================================================
 TEST_F(TaskStateTest, MultiFaninPartialNotReady) {
-    alignas(64) PTO2TaskSlotState slot;
+    alignas(64) ChipTaskSlotState slot;
     init_slot(slot, PTO2_TASK_PENDING, 3, 1);
 
     EXPECT_FALSE(sched.release_fanin_and_check_ready(slot));
@@ -143,7 +143,7 @@ TEST_F(TaskStateTest, ConcurrentFaninExactlyOneReady) {
     constexpr int ROUNDS = 500;
 
     for (int round = 0; round < ROUNDS; round++) {
-        alignas(64) PTO2TaskSlotState slot;
+        alignas(64) ChipTaskSlotState slot;
         init_slot(slot, PTO2_TASK_PENDING, 3, 1);
         std::atomic<int> ready_count{0};
 
@@ -169,7 +169,7 @@ TEST_F(TaskStateTest, ConcurrentSubtaskCompletion) {
     constexpr int ROUNDS = 500;
 
     for (int round = 0; round < ROUNDS; round++) {
-        alignas(64) PTO2TaskSlotState slot;
+        alignas(64) ChipTaskSlotState slot;
         init_slot(slot, PTO2_TASK_PENDING, 1, 1);
         slot.total_required_subtasks = 3;
         slot.completed_subtasks.store(0);
@@ -198,7 +198,7 @@ TEST_F(TaskStateTest, ConcurrentSubtaskCompletion) {
 // Unlike the old bitmask model, the counter cannot detect duplicates.
 // =============================================================================
 TEST_F(TaskStateTest, DoubleSubtaskCompletionCounterWeakness) {
-    alignas(64) PTO2TaskSlotState slot;
+    alignas(64) ChipTaskSlotState slot;
     init_slot(slot, PTO2_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 2;
     slot.completed_subtasks.store(0);

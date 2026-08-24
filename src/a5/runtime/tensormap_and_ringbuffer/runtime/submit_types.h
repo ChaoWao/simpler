@@ -167,7 +167,7 @@ private:
 static_assert(sizeof(ActiveMask) == 1, "ActiveMask must be exactly 1 byte");
 
 /**
- * Per-task scheduling attributes, packed into one byte on PTO2TaskSlotState.
+ * Per-task scheduling attributes, packed into one byte on ChipTaskSlotState.
  *
  * Single home for the independent per-task flags: an early-dispatch hint, the
  * two dispatch-time predicates (sync_start / has_predicate), and the selective

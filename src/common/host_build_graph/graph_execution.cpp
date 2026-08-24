@@ -298,7 +298,7 @@ bool graph_predicate_resolve(
 
 }  // namespace
 
-GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
+GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.task == nullptr || outer_slot.payload == nullptr ||
         outer_slot.task->packed_buffer_base == nullptr || outer_slot.task->packed_buffer_end == nullptr ||
         outer_slot.graph_context == nullptr) {
@@ -352,7 +352,7 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
 }
 
 GraphMaterializeResult graph_execution_materialize_slice(
-    PTO2TaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized
+    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized
 ) {
     if (nodes_materialized != nullptr) *nodes_materialized = 0;
     if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.task == nullptr ||
@@ -436,7 +436,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         }
         PTO2TaskDescriptor &task = storage->task;
         PTO2TaskPayload &payload = storage->payload;
-        PTO2TaskSlotState &slot = storage->slot;
+        ChipTaskSlotState &slot = storage->slot;
 
         const uint32_t synthetic_local =
             (static_cast<uint32_t>(outer_slot.task->task_id.local()) << 10) | static_cast<uint32_t>(i);

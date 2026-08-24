@@ -41,7 +41,7 @@ constexpr int32_t FANIN_PER_TASK = 4;
 constexpr int32_t FANIN_STRIDE = static_cast<int32_t>(ARG_POOL_ALIGN / sizeof(int32_t));
 
 // A buffer aligned the way both the arena mirror and the device SM base are;
-// PTO2TaskSlotState is alignas(64) and every segment offset is a multiple of
+// ChipTaskSlotState is alignas(64) and every segment offset is a multiple of
 // PTO2_ALIGN_SIZE.
 class AlignedImage {
 public:
@@ -132,8 +132,8 @@ public:
     int32_t *fanin_pool() {
         return reinterpret_cast<int32_t *>(image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).fanin_pool);
     }
-    PTO2TaskSlotState *slot_states() {
-        return reinterpret_cast<PTO2TaskSlotState *>(
+    ChipTaskSlotState *slot_states() {
+        return reinterpret_cast<ChipTaskSlotState *>(
             image_.base() + pto2_sm_layout::ring_segment_offsets(WINDOW).slot_states
         );
     }
@@ -181,7 +181,7 @@ struct Compacted {
         return reinterpret_cast<PTO2TaskDescriptor *>(image.base() + off().descriptors);
     }
     PTO2TaskPayload *payloads() { return payload_at(0); }
-    PTO2TaskSlotState *slot_states() { return reinterpret_cast<PTO2TaskSlotState *>(image.base() + off().slot_states); }
+    ChipTaskSlotState *slot_states() { return reinterpret_cast<ChipTaskSlotState *>(image.base() + off().slot_states); }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(image.base() + off().completion_flags);
     }
@@ -244,7 +244,7 @@ TEST(HbgSmCompaction, BindingsSurviveTheCopyToTheDevice) {
     // to agree between the two, but reading them off the mirror overload here would
     // stop being true the moment a pool moved ahead of them.
     const auto off = compacted.off();
-    auto *slots = reinterpret_cast<PTO2TaskSlotState *>(landed.base() + off.slot_states);
+    auto *slots = reinterpret_cast<ChipTaskSlotState *>(landed.base() + off.slot_states);
     auto *payloads = reinterpret_cast<PTO2TaskPayload *>(landed.base() + off.payloads);
     auto *descriptors = reinterpret_cast<PTO2TaskDescriptor *>(landed.base() + off.descriptors);
 

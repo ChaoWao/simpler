@@ -180,14 +180,14 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
     // idempotent (task_state is monotonic) and only adds one atomic load on
     // the second encounter.
     constexpr int kSegmentCap = 64;
-    const PTO2TaskSlotState *seg[kSegmentCap];
+    const ChipTaskSlotState *seg[kSegmentCap];
     int seg_count = 0;
     bool failed = false;
 
     // Returns nullptr for every rejected producer, having latched the fatal.
     // Callers branch on the returned pointer, not on `failed`: the slot is
     // dereferenced immediately and a null return is the only safe signal.
-    auto resolve_producer = [&](TaskId producer) -> const PTO2TaskSlotState * {
+    auto resolve_producer = [&](TaskId producer) -> const ChipTaskSlotState * {
         if (!producer.is_valid() || producer.ring() != 0) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
@@ -214,7 +214,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         return &slot;
     };
 
-    auto wait_one_producer = [&](const PTO2TaskSlotState &slot) {
+    auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = 0;
         int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -241,7 +241,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         }
     };
 
-    auto wait_one_consumers = [&](const PTO2TaskSlotState &slot) {
+    auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = 0;
         int32_t local_id = slot.task->task_id.local();
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -284,7 +284,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         seg_count = 0;
     };
 
-    auto try_push = [&](const PTO2TaskSlotState &s) {
+    auto try_push = [&](const ChipTaskSlotState &s) {
         for (int j = 0; j < seg_count; j++) {
             if (seg[j] == &s) return;  // per-segment dedup
         }

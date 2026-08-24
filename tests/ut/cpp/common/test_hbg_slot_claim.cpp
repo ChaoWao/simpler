@@ -69,7 +69,7 @@ protected:
     // pass left is what the claim has to overwrite. Every value here is one a
     // completed task really leaves behind.
     void poison_slot(int32_t slot) {
-        PTO2TaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
+        ChipTaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
         state.wake_list_head.store(WAKE_LIST_SENTINEL, std::memory_order_relaxed);
         state.next_in_wake_list = &sm_handle->header->ring.get_slot_state_by_slot(slot + 1);
         state.any_subtask_deferred.store(true, std::memory_order_relaxed);
@@ -80,7 +80,7 @@ protected:
     }
 
     void expect_slot_pristine(int32_t slot) {
-        PTO2TaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
+        ChipTaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
         EXPECT_EQ(state.wake_list_head.load(std::memory_order_relaxed), nullptr)
             << "a stale SENTINEL closes the wake list, so no consumer can register on this producer";
         EXPECT_EQ(state.next_in_wake_list, nullptr);
@@ -137,7 +137,7 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
-    PTO2TaskSlotState &outer = sm_handle->header->ring.get_slot_state_by_slot(0);
+    ChipTaskSlotState &outer = sm_handle->header->ring.get_slot_state_by_slot(0);
     ASSERT_EQ(outer.task_kind, TaskKind::GRAPH);
     expect_slot_pristine(0);
 }

@@ -23,7 +23,7 @@ constexpr int32_t WINDOW_SIZE = 16;
 constexpr int32_t POOL_CAPACITY = 8;
 
 void make_head_match_old_structural_predicate(
-    PTO2TaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
+    ChipTaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
 ) {
     descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
@@ -43,7 +43,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
-    alignas(64) PTO2TaskSlotState slot_states[WINDOW_SIZE]{};
+    alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
     PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
@@ -54,7 +54,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     ring.fc.last_task_alive.store(0, std::memory_order_release);
 
     make_head_match_old_structural_predicate(slot_states[0], task_descriptors[0], 0, 0);
-    PTO2TaskSlotState *oldest_open_task = &slot_states[1];
+    ChipTaskSlotState *oldest_open_task = &slot_states[1];
 
     testing::internal::CaptureStderr();
     bool available = pool.ensure_space(ring, 1, oldest_open_task);
@@ -75,7 +75,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
-    alignas(64) PTO2TaskSlotState slot_states[WINDOW_SIZE]{};
+    alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
     PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
@@ -83,7 +83,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     ring.task_window_mask = WINDOW_SIZE - 1;
     ring.slot_states = slot_states;
     ring.fc.current_task_index.store(1, std::memory_order_release);
-    PTO2TaskSlotState *oldest_open_task = &slot_states[0];
+    ChipTaskSlotState *oldest_open_task = &slot_states[0];
     make_head_match_old_structural_predicate(slot_states[0], task_descriptors[0], 0, 0);
 
     testing::internal::CaptureStderr();

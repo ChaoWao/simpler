@@ -150,7 +150,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 │  Per-ring regions ×4:       │
 │    PTO2TaskDescriptor[N]    │  N = task_window_size per ring
 │    PTO2TaskPayload[N]       │
-│    PTO2TaskSlotState[N]     │
+│    ChipTaskSlotState[N]     │
 └─────────────────────────────┘
 ```
 
@@ -702,7 +702,7 @@ publication and early-candidate readiness.
 
 The producer's slot-local dispatch-propagated bit in `lifecycle_flags` and fanout snapshot are
 serialized under `fanout_lock` with consumer wiring. Wiring already locks and reads the
-producer's 64-byte `PTO2TaskSlotState`, so testing this bit does not read a producer payload
+producer's 64-byte `ChipTaskSlotState`, so testing this bit does not read a producer payload
 cache line. An edge already in the snapshot is counted by scheduler propagation; wiring seeds
 an edge added after the claim and enqueues the consumer if that seed completes
 `dispatch_fanin`. This gives each eligible producer-consumer edge exactly one early-candidate

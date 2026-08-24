@@ -38,7 +38,7 @@ struct PTO2Runtime;
 
 // SPSC ring carrying completed-but-unresolved task slots from one scheduler (S)
 // thread to the dedicated resolution (P) thread. Whole-graph-resident hbg never
-// reclaims a slot, so the queued PTO2TaskSlotState* stays valid until P reads it.
+// reclaims a slot, so the queued ChipTaskSlotState* stays valid until P reads it.
 // Single producer (the owning S thread) / single consumer (P): plain
 // acquire/release on head/tail, no CAS. Capacity is a power of two sized to the
 // in-flight bound (min of total tasks and the ring window), so a producer does
@@ -47,7 +47,7 @@ struct PTO2Runtime;
 // make this type non-copyable / non-movable, so `buf` cannot be double-freed
 // through an accidental copy.
 struct CompletedTaskQueue {
-    PTO2TaskSlotState **buf{nullptr};
+    ChipTaskSlotState **buf{nullptr};
     uint64_t cap{0};
     uint64_t mask{0};
     alignas(64) std::atomic<uint64_t> head{0};  // consumer (P) cursor
@@ -57,7 +57,7 @@ struct CompletedTaskQueue {
         debug_assert(capacity_pow2 != 0 && (capacity_pow2 & (capacity_pow2 - 1)) == 0);
         cap = capacity_pow2;
         mask = capacity_pow2 - 1;
-        buf = new PTO2TaskSlotState *[capacity_pow2];
+        buf = new ChipTaskSlotState *[capacity_pow2];
         head.store(0, std::memory_order_relaxed);
         tail.store(0, std::memory_order_relaxed);
     }
@@ -66,7 +66,7 @@ struct CompletedTaskQueue {
         buf = nullptr;
     }
     // Producer (S). Spins only if the ring is full — sized so this never fires.
-    void push(PTO2TaskSlotState *s) {
+    void push(ChipTaskSlotState *s) {
         uint64_t t = tail.load(std::memory_order_relaxed);
         while (t - head.load(std::memory_order_acquire) >= cap) {
             SPIN_WAIT_HINT();
@@ -75,12 +75,12 @@ struct CompletedTaskQueue {
         tail.store(t + 1, std::memory_order_release);
     }
     // Consumer (P). Returns nullptr when empty.
-    PTO2TaskSlotState *pop() {
+    ChipTaskSlotState *pop() {
         uint64_t h = head.load(std::memory_order_relaxed);
         if (h == tail.load(std::memory_order_acquire)) {
             return nullptr;
         }
-        PTO2TaskSlotState *s = buf[h & mask];
+        ChipTaskSlotState *s = buf[h & mask];
         head.store(h + 1, std::memory_order_release);
         return s;
     }
@@ -299,11 +299,11 @@ private:
     }
 
     int pop_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, PTO2TaskSlotState **out, int max_count
+        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
     );
 
     void build_payload(
-        PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
+        PTO2DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
         int32_t block_idx, bool force_gate
     );
 
@@ -325,7 +325,7 @@ private:
     };
 
     PublishHandle prepare_subtask_to_core(
-        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
         bool to_pending, int32_t block_idx, bool force_gate
     );
 
@@ -380,7 +380,7 @@ private:
     // Fan out one block's subtasks (1 for AIC/AIV, 1-3 for MIX) into the
     // caller-supplied handles buffer. Returns the number of handles written.
     int prepare_block_for_dispatch(
-        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2ResourceShape shape,
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2ResourceShape shape,
         bool to_pending, int32_t block_idx, PublishHandle *out_handles, bool force_gate = false
     );
 
@@ -407,7 +407,7 @@ private:
     // concurrently with peers (mirrors the normal SPMD dispatch path). Returns the
     // number of blocks staged.
     int32_t stage_consumer_blocks(
-        int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+        int32_t thread_idx, ChipTaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
         CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
     );
 
@@ -484,7 +484,7 @@ private:
     );
 
     void complete_slot_task(
-        PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
+        ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
         int32_t core_id, Handshake *hank, int32_t &completed_this_turn
 #if SIMPLER_DFX
         ,
@@ -500,7 +500,7 @@ private:
         bool &made_progress
     );
 
-    bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);
+    bool enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num);
     int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
     struct SyncStartStageResult {
         int32_t staged_blocks{0};
@@ -511,7 +511,7 @@ private:
     // the local fast path invokes it once after proving this tracker has enough
     // capacity. record_drain_phases keeps local work attributed to EarlyDispatch.
     SyncStartStageResult stage_sync_start_cores(
-        PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
+        ChipTaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
     );
     // out_stage_wall_cycles (profiling only): cycles this thread spent in stage_sync_start_cores
     // (prepare + publish), set ONLY on threads that actually staged. Lets the caller isolate

@@ -42,7 +42,7 @@ Type changes:
 | ----- | ------ | ----- |
 | `PTO2TaskDescriptor.task_id` | `int32_t` | `TaskId` |
 | `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
-| `PTO2TaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
+| `ChipTaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures
 
@@ -96,15 +96,15 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Per-ring data pointers (host-side, set by setup_pointers)
     PTO2TaskDescriptor *task_descriptors;
     PTO2TaskPayload *task_payloads;
-    PTO2TaskSlotState *slot_states;
+    ChipTaskSlotState *slot_states;
 
     // Accessors (slot = local_id & task_window_mask)
     PTO2TaskDescriptor &get_task_by_slot(int32_t slot);
     PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id);
     PTO2TaskPayload &get_payload_by_slot(int32_t slot);
     PTO2TaskPayload &get_payload_by_task_id(int32_t local_id);
-    PTO2TaskSlotState &get_slot_state_by_slot(int32_t slot);
-    PTO2TaskSlotState &get_slot_state_by_task_id(int32_t local_id);
+    ChipTaskSlotState &get_slot_state_by_slot(int32_t slot);
+    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id);
 };
 
 // In header:
@@ -165,7 +165,7 @@ bool entry_valid(const PTO2TensorMapEntry& e) {
 
 | Structure | Reason |
 | --------- | ------ |
-| `PTO2DepListEntry` | Stores `PTO2TaskSlotState*` pointer — naturally crosses ring boundaries |
+| `PTO2DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
 | `PTO2TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
 | `PTO2ReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
 | `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
@@ -193,9 +193,9 @@ For ring-heap stall triage, a `CONSUMED` head whose ring bit remains set means t
 
 ### 5.2 Cross-Ring Dependencies
 
-Dependency edges use `PTO2TaskSlotState*` pointers, which naturally span rings:
+Dependency edges use `ChipTaskSlotState*` pointers, which naturally span rings:
 
-- Ring 1 task depends on ring 0 producer → ring 0's `fanout_head` linked list contains a ring 1 `PTO2TaskSlotState*`
+- Ring 1 task depends on ring 0 producer → ring 0's `fanout_head` linked list contains a ring 1 `ChipTaskSlotState*`
 - When ring 0 task completes, it walks its fanout list and decrements ring 1 consumers' `fanin_refcount`
 - No special cross-ring logic needed — pointer-based design is ring-agnostic
 

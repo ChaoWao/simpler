@@ -426,7 +426,7 @@ struct GraphRecording {
 };
 
 struct GraphPendingUpload {
-    PTO2TaskSlotState *outer_slot{nullptr};
+    ChipTaskSlotState *outer_slot{nullptr};
     uint64_t full_key{0};
     uint64_t definition_hash{0};
     bool deferred_heap{false};
@@ -984,7 +984,7 @@ struct PTO2FaninBuilder {
 };
 
 static bool append_fanin_or_fail(
-    PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, PTO2TaskSlotState *prod_state,
+    PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
     TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
@@ -1027,7 +1027,7 @@ struct PTO2PreparedTask {
     PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
     PTO2TaskDescriptor *task = nullptr;
     PTO2TaskPayload *payload = nullptr;
-    PTO2TaskSlotState *slot_state = nullptr;
+    ChipTaskSlotState *slot_state = nullptr;
 };
 
 static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
@@ -1350,7 +1350,7 @@ static TaskOutputTensors submit_task_common(
         PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
         int32_t dep_slot = dep_ring.get_slot_by_task_id(dep_local_task_id);
-        PTO2TaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
+        ChipTaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
         if (!append_fanin_or_fail(orch, dep_ring_id, dep_slot, producer_slot_state, dep_task_id, &fanin_builder)) {
             return result;
         }
@@ -1366,7 +1366,7 @@ static TaskOutputTensors submit_task_common(
         uint8_t prod_ring = producer_task_id.ring();
         PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
-        PTO2TaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
+        ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
         return append_fanin_or_fail(orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder);
     };
 
@@ -1639,7 +1639,7 @@ bool graph_submit_outer(
     PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
     PTO2TaskDescriptor &task = ring.task_descriptors[allocation.slot];
     PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
-    PTO2TaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
+    ChipTaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
 
     // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
     // completion flag are established here, at the claim, because nothing else
@@ -1689,7 +1689,7 @@ bool graph_submit_outer(
     auto emit = [&](TaskId producer_id) -> bool {
         const int32_t producer_local = static_cast<int32_t>(producer_id.local());
         const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);
-        PTO2TaskSlotState *producer = &ring.get_slot_state_by_slot(producer_slot);
+        ChipTaskSlotState *producer = &ring.get_slot_state_by_slot(producer_slot);
         return append_fanin_or_fail(orch, producer_id.ring(), producer_slot, producer, producer_id, &fanin_builder);
     };
     // An outer GRAPH task is a ring task like any other, so the dependency graph

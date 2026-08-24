@@ -186,7 +186,7 @@ private:
 
     void *gm_sm_ptr_;                        // GM pointer to PTO2 shared memory (device)
     void *gm_heap_ptr_;                      // GM heap for orchestrator output buffers (device)
-    void *slot_states_ptr_;                  // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
+    void *slot_states_ptr_;                  // Pointer to ChipTaskSlotState array (scheduler-private, for profiling)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
 
     // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing

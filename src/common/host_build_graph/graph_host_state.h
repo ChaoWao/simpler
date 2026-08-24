@@ -17,7 +17,7 @@
 #include <optional>
 #include <vector>
 
-struct PTO2TaskSlotState;
+struct ChipTaskSlotState;
 struct GraphHostState;
 
 inline constexpr size_t GRAPH_MAX_DEFINITIONS = 16;
@@ -29,7 +29,7 @@ struct GraphHostStateDeleter {
 using GraphHostStatePtr = std::unique_ptr<GraphHostState, GraphHostStateDeleter>;
 
 struct GraphHostUpload {
-    PTO2TaskSlotState *outer_slot;
+    ChipTaskSlotState *outer_slot;
     uint64_t full_key;
     uint64_t definition_hash;
 };

@@ -78,7 +78,7 @@ struct PTO2OrchestratorState {
     // Single contiguous buffer of task IDs, partitioned by scope level.
     // scope_begins[i] is the index into scope_tasks where scope i starts.
     // Tasks for the top scope occupy [scope_begins[top], scope_tasks_size).
-    PTO2TaskSlotState **scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
+    ChipTaskSlotState **scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
     int32_t scope_tasks_size;         // Number of task IDs currently in the buffer
     int32_t scope_tasks_capacity;     // Allocated capacity of scope_tasks
     int32_t *scope_begins;            // scope_begins[i] = start index of scope i in scope_tasks
@@ -174,8 +174,8 @@ struct PTO2OrchestratorState {
     // Forget pointers; arena owns the backing buffers.
     void destroy();
     void set_scheduler(PTO2SchedulerState *scheduler);
-    void mark_dep_pool_position(PTO2TaskSlotState &slot_state);
-    void wire_fanin_task(PTO2TaskSlotState &slot_state, int32_t wfanin);
+    void mark_dep_pool_position(ChipTaskSlotState &slot_state);
+    void wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
     void end_scope();

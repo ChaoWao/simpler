@@ -185,7 +185,7 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   switch. An untagged task's only added hot-path cost is one cache-hot sentinel
   compare; it never reads `get_sys_cnt_aicpu()`.
 * **Transport reuses this same buffer.** The id rides the scheduler's hot
-  `PTO2TaskSlotState` in the `TaskAttrs` byte (bit 3 `is_timed` + bits 4-7 the
+  `ChipTaskSlotState` in the `TaskAttrs` byte (bit 3 `is_timed` + bits 4-7 the
   0..15 tag), co-located with the other per-task scheduling flags. The 16 slots
   are a fixed `TaskTimingRecord[16]` **tail** appended after the `AicpuPhaseRecord`
   region in the same device buffer — same base pointer and per-run H2D reset.

@@ -95,7 +95,7 @@ TEST_F(DepListPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
 
 // Prepend builds LIFO linked list: verify each slot_state pointer.
 TEST_F(DepListPoolTest, PrependChainCorrectness) {
-    PTO2TaskSlotState slots[5]{};
+    ChipTaskSlotState slots[5]{};
     PTO2DepListEntry *head = nullptr;
 
     for (int i = 0; i < 5; i++) {
@@ -157,7 +157,7 @@ TEST_F(DepListPoolTest, HighWaterAccuracy) {
 
 // Prepend chain integrity under pool exhaustion: chain must be walkable.
 TEST_F(DepListPoolTest, PrependUnderExhaustion) {
-    PTO2TaskSlotState slots[POOL_CAP]{};
+    ChipTaskSlotState slots[POOL_CAP]{};
     PTO2DepListEntry *head = nullptr;
 
     int count = 0;

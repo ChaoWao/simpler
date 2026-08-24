@@ -151,7 +151,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 │  Per-ring regions ×4:       │
 │    PTO2TaskDescriptor[N]    │  N = task_window_size per ring
 │    PTO2TaskPayload[N]       │
-│    PTO2TaskSlotState[N]     │
+│    ChipTaskSlotState[N]     │
 └─────────────────────────────┘
 ```
 

@@ -75,7 +75,7 @@ TEST(HbgSelfRelativePtr, SetNullRebindsToUnbound) {
 // a host address the device would dereference verbatim, while a delta names the
 // same *relative* position in whichever copy is being read.
 TEST(HbgSelfRelativePtr, SurvivesABlockCopyToAnotherAddress) {
-    // Two real objects rather than raw byte buffers: PTO2TaskSlotState is
+    // Two real objects rather than raw byte buffers: ChipTaskSlotState is
     // alignas(64), which std::vector<std::byte>::data() does not promise, and a
     // memcpy into untyped storage would not begin the object's lifetime.
     Block source{};
@@ -100,7 +100,7 @@ TEST(HbgSelfRelativePtr, SlotStateBindingSurvivesTheImageCopy) {
     struct Image {
         PTO2TaskDescriptor descriptor;
         PTO2TaskPayload payload;
-        PTO2TaskSlotState slot;
+        ChipTaskSlotState slot;
     };
 
     // Real objects, not byte buffers: the slot state is alignas(64), which
@@ -124,7 +124,7 @@ TEST(HbgSelfRelativePtr, SlotStateBindingSurvivesTheImageCopy) {
 // unchanged by the representation: the eight bytes the two deltas save become
 // tail padding inside the same 64.
 TEST(HbgSelfRelativePtr, KeepsTheSharedMemoryAbiSizes) {
-    EXPECT_EQ(sizeof(PTO2TaskSlotState), 64u);
+    EXPECT_EQ(sizeof(ChipTaskSlotState), 64u);
     EXPECT_EQ(sizeof(PTO2TaskDescriptor), 40u);
     EXPECT_EQ(sizeof(SelfRelativePtr<PTO2TaskPayload>), 4u);
     EXPECT_EQ(offsetof(PTO2TaskDescriptor, packed_buffer_base), 24u);

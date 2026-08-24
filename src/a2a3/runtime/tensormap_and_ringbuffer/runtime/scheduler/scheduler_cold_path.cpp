@@ -238,7 +238,7 @@ void SchedulerContext::log_stall_diagnostics(
             // slot once per earlier task_id and inflates the scan_* counts.
             int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
             for (int32_t si = ring_task_start; si < ring_task_count; si++) {
-                PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+                ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
                 PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
                 int32_t rc = slot_state.fanin_refcount.load(std::memory_order_relaxed);
                 int32_t fi = slot_state.fanin_count;
@@ -374,7 +374,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
         // Start at the tail so each live slot is visited exactly once (O(window)).
         int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
         for (int32_t si = ring_task_start; si < ring_task_count; si++) {
-            PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+            ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
             PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             if (st >= PTO2_TASK_COMPLETED) continue;
             // Same ground truth as log_stall_diagnostics: task_state stays PENDING

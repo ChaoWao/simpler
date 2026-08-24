@@ -59,7 +59,7 @@
  */
 struct PTO2ReadyQueueSlot {
     std::atomic<int64_t> sequence;
-    PTO2TaskSlotState *slot_state;
+    ChipTaskSlotState *slot_state;
     uint64_t task_id_snapshot;
 };
 
@@ -93,9 +93,9 @@ struct alignas(64) PTO2ReadyQueue {
 
     void reset_for_reuse() {}
 
-    bool push(PTO2TaskSlotState *slot_state) { return push_tagged(slot_state, 0); }
+    bool push(ChipTaskSlotState *slot_state) { return push_tagged(slot_state, 0); }
 
-    bool push_tagged(PTO2TaskSlotState *slot_state, uint64_t task_id_snapshot) {
+    bool push_tagged(ChipTaskSlotState *slot_state, uint64_t task_id_snapshot) {
         uint64_t pos;
         PTO2ReadyQueueSlot *slot;
         while (true) {
@@ -126,9 +126,9 @@ struct alignas(64) PTO2ReadyQueue {
     // `count` items. A target slot holding an older generation means full and
     // ends the call; a slot a peer has reserved but not yet published is
     // transient and retries, so this only spins while a peer is mid-publish.
-    bool push_batch(PTO2TaskSlotState **items, int count) { return push_batch_tagged(items, nullptr, count); }
+    bool push_batch(ChipTaskSlotState **items, int count) { return push_batch_tagged(items, nullptr, count); }
 
-    bool push_batch_tagged(PTO2TaskSlotState **items, const uint64_t *task_id_snapshots, int count) {
+    bool push_batch_tagged(ChipTaskSlotState **items, const uint64_t *task_id_snapshots, int count) {
         if (count == 0) return true;
         if (static_cast<uint64_t>(count) > capacity) return false;
 
@@ -168,7 +168,7 @@ struct alignas(64) PTO2ReadyQueue {
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    bool push(PTO2TaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    bool push(ChipTaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
         uint64_t pos;
         PTO2ReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -207,9 +207,9 @@ struct alignas(64) PTO2ReadyQueue {
     }
 #endif
 
-    PTO2TaskSlotState *pop() { return pop_tagged(nullptr); }
+    ChipTaskSlotState *pop() { return pop_tagged(nullptr); }
 
-    PTO2TaskSlotState *pop_tagged(uint64_t *task_id_snapshot) {
+    ChipTaskSlotState *pop_tagged(uint64_t *task_id_snapshot) {
         // Fast-path: skip slot load when queue is clearly empty
         uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
@@ -234,14 +234,14 @@ struct alignas(64) PTO2ReadyQueue {
             }
         }
 
-        PTO2TaskSlotState *result = slot->slot_state;
+        ChipTaskSlotState *result = slot->slot_state;
         if (task_id_snapshot != nullptr) *task_id_snapshot = slot->task_id_snapshot;
         slot->sequence.store(static_cast<int64_t>(pos + mask + 1), std::memory_order_release);
         return result;
     }
 
 #if SIMPLER_SCHED_PROFILING
-    PTO2TaskSlotState *pop(uint64_t &atomic_count, uint64_t &wait_cycle) {
+    ChipTaskSlotState *pop(uint64_t &atomic_count, uint64_t &wait_cycle) {
         // Fast-path: skip slot load when queue is clearly empty
         uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
@@ -283,7 +283,7 @@ struct alignas(64) PTO2ReadyQueue {
             wait_cycle += (get_sys_cnt_aicpu() - t0);
         }
 
-        PTO2TaskSlotState *result = slot->slot_state;
+        ChipTaskSlotState *result = slot->slot_state;
         slot->sequence.store(static_cast<int64_t>(pos + mask + 1), std::memory_order_release);
         return result;
     }
@@ -291,9 +291,9 @@ struct alignas(64) PTO2ReadyQueue {
 
     // Batch pop: reserve a contiguous run of ready slots with a single CAS.
     // Returns actual number of items popped (may be less than max_count).
-    int pop_batch(PTO2TaskSlotState **out, int max_count) { return pop_batch_tagged(out, nullptr, max_count); }
+    int pop_batch(ChipTaskSlotState **out, int max_count) { return pop_batch_tagged(out, nullptr, max_count); }
 
-    int pop_batch_tagged(PTO2TaskSlotState **out, uint64_t *task_id_snapshots, int max_count) {
+    int pop_batch_tagged(ChipTaskSlotState **out, uint64_t *task_id_snapshots, int max_count) {
         uint64_t pos;
         int count;
         while (true) {
@@ -332,7 +332,7 @@ struct alignas(64) PTO2ReadyQueue {
     }
 
 #if SIMPLER_SCHED_PROFILING
-    int pop_batch(PTO2TaskSlotState **out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    int pop_batch(ChipTaskSlotState **out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle) {
         uint64_t pos;
         int count;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -489,7 +489,7 @@ struct PTO2SchedulerState {
             int32_t old_last_task_alive = last_task_alive;
 
             while (last_task_alive < current_task_index) {
-                PTO2TaskSlotState &slot_state = ring->get_slot_state_by_task_id(last_task_alive);
+                ChipTaskSlotState &slot_state = ring->get_slot_state_by_task_id(last_task_alive);
                 if (slot_state.task_state.load(std::memory_order_acquire) != PTO2_TASK_CONSUMED) {
                     break;
                 }
@@ -541,7 +541,7 @@ struct PTO2SchedulerState {
     // dummy_ready_queue and are retired inline; a ready sync_start cohort goes to
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
-    void push_ready_routed(PTO2TaskSlotState *slot_state) {
+    void push_ready_routed(ChipTaskSlotState *slot_state) {
         PTO2ResourceShape shape = slot_state->active_mask.to_shape();
         if (shape == PTO2ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
@@ -592,7 +592,7 @@ struct PTO2SchedulerState {
         return advanced;
     }
 
-    bool try_claim_ready_once(PTO2TaskSlotState &slot_state) {
+    bool try_claim_ready_once(ChipTaskSlotState &slot_state) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         for (;;) {
             if ((flags & PTO2_READY_CLAIMED) != 0) return false;
@@ -605,7 +605,7 @@ struct PTO2SchedulerState {
         }
     }
 
-    void check_and_handle_consumed(PTO2TaskSlotState &slot_state) {
+    void check_and_handle_consumed(ChipTaskSlotState &slot_state) {
         // Read fanout_refcount/fanout_count and flip COMPLETED->CONSUMED under
         // fanout_lock. The orchestrator claims producers (fanout_count++) under the
         // same lock, so the consume decision is serialized against a concurrent
@@ -643,7 +643,7 @@ struct PTO2SchedulerState {
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void check_and_handle_consumed(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void check_and_handle_consumed(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
         // See the non-profiling overload for why the read + COMPLETED->CONSUMED
         // flip is serialized against the orchestrator's claim under fanout_lock.
         bool became_consumed = false;
@@ -683,26 +683,26 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    void release_producer(PTO2TaskSlotState &slot_state) {
+    void release_producer(ChipTaskSlotState &slot_state) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
         check_and_handle_consumed(slot_state);
     }
 
     // Scope-end release: sets bit31 (PTO2_FANOUT_SCOPE_BIT) instead of bumping a
     // consumer ref. Called exactly once per task from on_scope_end.
-    void release_producer_scope(PTO2TaskSlotState &slot_state) {
+    void release_producer_scope(ChipTaskSlotState &slot_state) {
         slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         check_and_handle_consumed(slot_state);
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void release_producer(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void release_producer(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
         check_and_handle_consumed(slot_state, atomic_count);
     }
 
-    void release_producer_scope(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void release_producer_scope(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
         slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
         check_and_handle_consumed(slot_state, atomic_count);
@@ -814,7 +814,7 @@ struct PTO2SchedulerState {
         );
     }
 
-    inline void record_published_blocks(PTO2TaskSlotState &slot_state, int32_t count) {
+    inline void record_published_blocks(ChipTaskSlotState &slot_state, int32_t count) {
         if (count <= 0 || !slot_state.task_attrs.allow_early_resolve()) return;
         slot_state.payload->published_block_count.fetch_add(static_cast<int16_t>(count), std::memory_order_seq_cst);
     }
@@ -822,7 +822,7 @@ struct PTO2SchedulerState {
     // Ring one sync_start cohort from its stable staged_core_mask. The caller owns
     // the NONE->RINGING launch latch and invokes this exactly once after local or
     // global staging completes, while the corresponding per-core table entries are live.
-    inline void ring_all_staged_doorbells(PTO2TaskSlotState &slot_state) {
+    inline void ring_all_staged_doorbells(ChipTaskSlotState &slot_state) {
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             uint64_t bits = slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst);
             while (bits != 0) {
@@ -856,7 +856,7 @@ struct PTO2SchedulerState {
         return (previous & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
-    inline void cancel_early_sync_drain(PTO2TaskSlotState &slot_state) {
+    inline void cancel_early_sync_drain(ChipTaskSlotState &slot_state) {
         uint8_t previous =
             slot_state.payload->early_sync_drain_state.exchange(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
         if ((previous & PTO2_EARLY_SYNC_DRAIN_OWNER) == 0) return;
@@ -889,7 +889,7 @@ struct PTO2SchedulerState {
     // release and each pending->running promotion); whichever observes the second half
     // wins the launch latch and rings exactly once. Returns true only to that winner,
     // which may then expose the cohort to its fanout.
-    inline bool maybe_rendezvous_ring(PTO2TaskSlotState &slot_state) {
+    inline bool maybe_rendezvous_ring(ChipTaskSlotState &slot_state) {
         // running_slot_count is the publication seed: every staged_core_mask OR
         // happens-before its final store. Read the seed first, then the mask, so
         // observing the final count cannot be paired with a partially published
@@ -912,7 +912,7 @@ struct PTO2SchedulerState {
         return true;
     }
 
-    inline bool retry_sync_start_rendezvous_after_staging(PTO2TaskSlotState &slot_state) {
+    inline bool retry_sync_start_rendezvous_after_staging(ChipTaskSlotState &slot_state) {
         if (!maybe_rendezvous_ring(slot_state)) return false;
         propagate_dispatch_fanin(slot_state);
         return true;
@@ -920,7 +920,7 @@ struct PTO2SchedulerState {
 
     // Attempt to claim and enqueue a consumer after every direct producer becomes
     // launch-visible. Both propagation and wiring can complete dispatch_fanin.
-    inline void try_enqueue_early_dispatch_candidate(PTO2TaskSlotState &consumer) {
+    inline void try_enqueue_early_dispatch_candidate(ChipTaskSlotState &consumer) {
         // Predicated tasks resolve at the ready point, never early-dispatch. The
         // wiring caller has no separate predicate filter, so the gate lives here.
         if (consumer.task_attrs.has_predicate()) return;
@@ -969,7 +969,7 @@ struct PTO2SchedulerState {
     // every placement path publishes its claimed range. Once-guarded per producer.
     // Only codegen-flagged producers propagate: a task's successors early-dispatch off its
     // DIRECT producers' marks, never an inherited chain.
-    void propagate_dispatch_fanin(PTO2TaskSlotState &p) {
+    void propagate_dispatch_fanin(ChipTaskSlotState &p) {
         if (!p.task_attrs.allow_early_resolve()) return;  // only codegen-flagged (direct) producers propagate
         if (p.payload->published_block_count.load(std::memory_order_seq_cst) < p.logical_block_num) return;
         if (p.payload->early_dispatch_state.load(std::memory_order_acquire) == PTO2_EARLY_DISPATCH_STAGING) return;
@@ -996,7 +996,7 @@ struct PTO2SchedulerState {
         PTO2DepListEntry *edge = p.fanout_head;
         p.unlock_fanout();
         for (; edge != nullptr; edge = edge->next) {
-            PTO2TaskSlotState *c = edge->slot_state;
+            ChipTaskSlotState *c = edge->slot_state;
             if (c->task_attrs.has_predicate()) continue;  // predicated consumers never early-dispatch
             // Compare to fanin_actual_count (the real producer-edge count), NOT
             // fanin_count: fanin_count = fanin_actual_count + 1 (a self/wiring +1 that
@@ -1016,16 +1016,16 @@ struct PTO2SchedulerState {
     // propagation runs AFTER the walk — never between two siblings' doorbells.
     struct EarlyDispatchReleaseSink {
         static constexpr int CAP = 32;
-        PTO2TaskSlotState *items[CAP];
+        ChipTaskSlotState *items[CAP];
         int n = 0;
-        inline bool push(PTO2TaskSlotState *s) {
+        inline bool push(ChipTaskSlotState *s) {
             if (n >= CAP) return false;
             items[n++] = s;
             return true;
         }
     };
 
-    inline bool try_early_dispatch_release(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    inline bool try_early_dispatch_release(ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
         // A predicated task is evaluated at the ready point, never early-dispatched.
         if (slot_state.task_attrs.has_predicate()) return false;
         // Never staged => CAS NONE->DISPATCHED wins => dispatch normally.
@@ -1085,7 +1085,7 @@ struct PTO2SchedulerState {
         return slot_state.next_block_idx.load(std::memory_order_seq_cst) >= slot_state.logical_block_num;
     }
 
-    bool route_ready_once(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool route_ready_once(ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
         if (!try_claim_ready_once(slot_state)) return false;
 
         // Early-dispatch: pre-staged tasks are released by doorbell
@@ -1112,7 +1112,7 @@ struct PTO2SchedulerState {
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool route_ready_once(
-        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
+        ChipTaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
@@ -1152,7 +1152,7 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    bool release_fanin_and_check_ready(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool release_fanin_and_check_ready(ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
         // Atomically increment fanin_refcount and check if all producers are done
         // ACQ_REL on fanin_refcount already synchronizes with the orchestrator's
         // init release, making fanin_count visible — plain load suffices.
@@ -1166,7 +1166,7 @@ struct PTO2SchedulerState {
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool release_fanin_and_check_ready(
-        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
+        ChipTaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1179,20 +1179,20 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    int get_ready_tasks_batch(PTO2ReadyQueue *queues, PTO2ResourceShape shape, PTO2TaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, PTO2TaskSlotState **out, int max_count, uint64_t &atomic_count,
+        PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);
     }
 #endif
 
-    void on_scope_end(PTO2TaskSlotState **task_slot_states, int32_t count) {
+    void on_scope_end(ChipTaskSlotState **task_slot_states, int32_t count) {
 #if SIMPLER_ORCH_PROFILING
         extern uint64_t g_orch_scope_end_atomic_count;
         if (count > 0) __builtin_prefetch(task_slot_states[0], 1, 0);
@@ -1217,7 +1217,7 @@ struct PTO2SchedulerState {
      *
      * @return true if this was the last subtask, completing the entire task.
      */
-    bool on_subtask_complete(PTO2TaskSlotState &slot_state) {
+    bool on_subtask_complete(ChipTaskSlotState &slot_state) {
         int16_t prev = slot_state.completed_subtasks.fetch_add(1, std::memory_order_acq_rel);
         return (prev + 1) == slot_state.total_required_subtasks;
     }
@@ -1240,7 +1240,7 @@ struct PTO2SchedulerState {
     uint32_t
 #endif
     on_task_complete(
-        PTO2TaskSlotState &slot_state
+        ChipTaskSlotState &slot_state
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx
@@ -1296,7 +1296,7 @@ struct PTO2SchedulerState {
         // after the walk, so no consumer's doorbell waits on a sibling's propagate.
         EarlyDispatchReleaseSink rel_sink;
         while (current != nullptr) {
-            PTO2TaskSlotState &consumer_slot = *current->slot_state;
+            ChipTaskSlotState &consumer_slot = *current->slot_state;
 #if SIMPLER_SCHED_PROFILING
             stats.fanout_edges++;
             if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink)) {
@@ -1329,7 +1329,7 @@ struct PTO2SchedulerState {
      */
 
 #if SIMPLER_SCHED_PROFILING
-    int32_t on_task_release(PTO2TaskSlotState &slot_state, int32_t thread_idx) {
+    int32_t on_task_release(ChipTaskSlotState &slot_state, int32_t thread_idx) {
         PTO2_SCHED_CYCLE_START();
         extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
         extern uint64_t g_sched_self_atomic_count[];
@@ -1337,7 +1337,7 @@ struct PTO2SchedulerState {
         extern uint64_t g_sched_complete_count[];
         uint64_t fanin_atomics = 0;
 #else
-    int32_t on_task_release(PTO2TaskSlotState &slot_state) {
+    int32_t on_task_release(ChipTaskSlotState &slot_state) {
 #endif
         PTO2TaskPayload *payload = slot_state.payload;
         int32_t released = 0;
@@ -1345,7 +1345,7 @@ struct PTO2SchedulerState {
         // ordering-only edge released its submit->wire pin at wiring, so releasing
         // it again here would over-count fanout_refcount against fanout_count and
         // break the rc == fc consume invariant.
-        for_each_fanin_slot_state(*payload, [&](PTO2TaskSlotState *producer_slot_state, DepFlags flags) {
+        for_each_fanin_slot_state(*payload, [&](ChipTaskSlotState *producer_slot_state, DepFlags flags) {
             if (!dep_has_retain(flags)) {
                 return;
             }
@@ -1418,7 +1418,7 @@ struct PTO2SchedulerState {
 // that scheduler_completion.cpp's inline NotDeferred path uses, so high task
 // rates don't surface as ASYNC_WAIT_OVERFLOW errors.
 inline bool
-AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, PTO2TaskSlotState &slot_state) {
+AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, ChipTaskSlotState &slot_state) {
     // Return value (CompletionStats / consumer-walk count) discarded:
     // async-wait drain path has no Resolve swimlane bar attached.
 #if SIMPLER_SCHED_PROFILING
@@ -1445,7 +1445,7 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
     AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
+    ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
