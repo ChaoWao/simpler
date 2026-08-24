@@ -81,7 +81,7 @@ struct DepGraphAnnotate {
         dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
     }
     void tensormap(
-        int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+        int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry, OverlapStatus overlap
     ) const {
         dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
     }
@@ -90,7 +90,7 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit
 __attribute__((weak, visibility("hidden"))) void
 dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
+    uint64_t, int32_t, const ChipTensor &, const ChipTensorMapEntry &, OverlapStatus
 ) {}
 
 // AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
@@ -442,7 +442,7 @@ struct GraphRecording {
     // (the shape every generated orchestration uses) would therefore record a
     // node with no edge to its actual producer, and the Definition would replay
     // a DAG the same body never had when submitted task by task.
-    PTO2TensorMap tensor_map{};
+    ChipTensorMap tensor_map{};
     bool tensor_map_ready{false};
     // Scope depth as the body sees it. begin_scope/end_scope leave the real
     // orchestrator stack untouched while recording (a Graph replays flat), but
@@ -649,7 +649,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // Entry capacity for one recorded body's hazard map. A Definition is capped at
 // GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
 // args, so this bounds the worst realistic body while staying a small fraction of
-// the ring path's whole-orchestration pool (PTO2_TENSORMAP_POOL_SIZE). Exhausting
+// the ring path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
 // it marks the recording unsupported, which graph_commit reports as
 // SIMPLER_ERROR_INVALID_ARGS -- the outer shell is already submitted by then, so there
 // is no ordinary-path fallback left to take.
@@ -659,7 +659,7 @@ constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 // reported to the caller, which abandons the recording rather than producing a
 // Definition with inferred edges missing.
 bool graph_recording_init_tensor_map(GraphRecording &recording) {
-    if (!recording.tensor_map.init(PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
+    if (!recording.tensor_map.init(CHIP_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
         return false;
     }
     recording.tensor_map_ready = true;
@@ -1421,7 +1421,7 @@ void OrchestratorState::end_scope() {
 // assert fire mid-registration. Returns false when the pool is exhausted or a
 // fatal is already latched by another party.
 static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
-    PTO2TensorMap &tm = orch->tensor_map;
+    ChipTensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
     }
@@ -1437,7 +1437,7 @@ static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
     LOG_ERROR("  - Free:        %d entries", tm.free_entries());
     LOG_ERROR("  - Needed:      %d entries", needed);
     LOG_ERROR("Solution:");
-    LOG_ERROR("  Increase PTO2_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
+    LOG_ERROR("  Increase CHIP_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
     LOG_ERROR("========================================");
     orch_mark_fatal(orch, SIMPLER_ERROR_TENSORMAP_OVERFLOW);
     return false;

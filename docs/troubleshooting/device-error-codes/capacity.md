@@ -44,7 +44,7 @@ that trips the code.
 | ------- | ------------------- | ---- | --- |
 | HBG | task window | 3 | raise `ring_task_window` (`PTO2_RING_TASK_WINDOW`), or shrink the graph |
 | HBG | inline fanin | 4 | reduce distinct producers to `PTO2_MAX_FANIN` (currently 128) or less; HBG has no `PTO2_RING_DEP_POOL` |
-| HBG | TensorMap entries | 11 | increase `PTO2_TENSORMAP_POOL_SIZE`, or reduce registered outputs |
+| HBG | TensorMap entries | 11 | increase `CHIP_TENSORMAP_POOL_SIZE`, or reduce registered outputs |
 | TRB | open-scope task window | 1 or 3 | raise `PTO2_RING_TASK_WINDOW`, split the scope, or diagnose stalled reclaim |
 | TRB | heap | 2 | raise `PTO2_RING_HEAP`, shrink allocations, or diagnose stalled reclaim |
 | TRB | dependency pool | 4 | raise `PTO2_RING_DEP_POOL`, cut fanin, or diagnose stalled reclaim |

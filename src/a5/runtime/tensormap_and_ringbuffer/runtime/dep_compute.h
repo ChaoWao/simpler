@@ -82,7 +82,7 @@ struct DepInputs {
  */
 template <typename Emit>
 [[nodiscard]] inline bool
-compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, Emit emit) {
+compute_task_fanin(const DepInputs &inputs, ChipTensorMap &tensor_map, bool in_manual_scope, Emit emit) {
     if (in_manual_scope) {
         return true;
     }
@@ -115,7 +115,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
         }
 
         bool fatal = false;
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
+        tensor_map.lookup(*tensor, [&](ChipTensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
             // Ordering-only (DEP_WAIT): a modifier only rewrote a buffer someone
             // else allocated, so its lifetime rides that allocator's creator edge,
             // not this modifier edge. Retention-safety invariant that makes this
@@ -151,7 +151,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, TaskId task_id, ChipTensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }

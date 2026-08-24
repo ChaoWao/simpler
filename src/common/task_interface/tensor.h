@@ -121,7 +121,7 @@ struct alignas(64) ChipTensor {
 
     // --- Copy / move / destroy ---
     // Kept trivially copyable (default copy = byte-for-byte) so other modules
-    // (PTO2TensorMapEntry::copy_from_tensor, TensorCreateInfo memcpy path)
+    // (ChipTensorMapEntry::copy_from_tensor, TensorCreateInfo memcpy path)
     // can rely on memcpy semantics. The contiguous fast-path optimization
     // lives in `init(const ChipTensor&)`; call sites that care should use
     // `result.init(*this)` instead of the default copy ctor.

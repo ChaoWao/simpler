@@ -41,7 +41,7 @@ Type changes:
 | Field | Before | After |
 | ----- | ------ | ----- |
 | `TaskDescriptor.task_id` | `int32_t` | `TaskId` |
-| `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
+| `ChipTensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
 | `ChipTaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures
@@ -144,17 +144,17 @@ RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
 
 `slot_states`, `task_window_size`, and `task_window_mask` are no longer duplicated — callers access them via `ring->get_slot_state_by_*()` and other ring header accessors. The ring pointer shares cache line 0 with `last_task_alive` and `advance_lock`.
 
-### 4.6 PTO2TensorMap (modified)
+### 4.6 ChipTensorMap (modified)
 
 ```cpp
-PTO2TensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
+ChipTensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
 int64_t last_task_alives[CHIP_MAX_RING_DEPTH];
 ```
 
 Entry validity checks and `cleanup_retired` operate per-ring:
 
 ```cpp
-bool entry_valid(const PTO2TensorMapEntry& e) {
+bool entry_valid(const ChipTensorMapEntry& e) {
     int32_t ring = e.producer_task_id.ring();
     int32_t local = e.producer_task_id.local();
     return local >= last_task_alives[ring];

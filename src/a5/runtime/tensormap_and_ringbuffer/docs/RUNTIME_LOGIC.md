@@ -326,7 +326,7 @@ Unlike the Task Ring and Heap Ring, TensorMap entries are **not** managed by a r
 2. **Bump allocation**: if free list is empty, `entry_pool[next_entry_idx++]` allocates from the end of the pool.
 3. **Blocking reclaim**: if the pool is short of the inserts a task needs, the orchestrator's `ensure_tensormap_capacity` reads the latest `last_task_alive` for every ring and calls `reclaim_retired_all` (`cleanup_retired` per ring) to batch-free entries belonging to retired tasks, returning them to the free list, before the inserts proceed.
 
-This design avoids the complexity of ring-based wrapping while still being bounded by `PTO2_TENSORMAP_POOL_SIZE` (default 65536 entries).
+This design avoids the complexity of ring-based wrapping while still being bounded by `CHIP_TENSORMAP_POOL_SIZE` (default 65536 entries).
 
 ### 5.4 Stale Entry Cleanup: Three-Layer Defense
 
@@ -339,13 +339,13 @@ Three complementary mechanisms achieve this:
 
 **Layer 1 — Chain Truncation during Lookup** (lazy, per-bucket):
 
-Since `insert` always prepends to the bucket head, entries in each bucket chain are in **descending task_id order**. When `PTO2TensorMap::lookup` encounters the first stale entry (`producer_task_id < last_task_alive`), all subsequent entries in the chain are guaranteed stale too. The entire tail is truncated in one operation using `prev_in_bucket` pointers for O(1) unlinking.
+Since `insert` always prepends to the bucket head, entries in each bucket chain are in **descending task_id order**. When `ChipTensorMap::lookup` encounters the first stale entry (`producer_task_id < last_task_alive`), all subsequent entries in the chain are guaranteed stale too. The entire tail is truncated in one operation using `prev_in_bucket` pointers for O(1) unlinking.
 
 This guarantees lookup only traverses valid entries — O(valid_entries_in_bucket), not O(total_entries).
 
 **Layer 2 — Periodic Batch Cleanup** (`cleanup_retired`, per-task):
 
-Every time the orchestrator submits a task (Step 0 of `OrchestratorState::submit_task`), it calls `PTO2TensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `PTO2_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `PTO2TensorMap::cleanup_retired` runs:
+Every time the orchestrator submits a task (Step 0 of `OrchestratorState::submit_task`), it calls `ChipTensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `CHIP_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `ChipTensorMap::cleanup_retired` runs:
 
 This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each task's entries are doubly-linked together at insert time via `next_in_task`/`prev_in_task`. A slot's chain can hold more than one task's entries: a task at `local_id + N * window` reuses the slot and prepends to the chain already there, and cleanup can lag that reuse. Cleanup therefore walks the chain and frees only the entries whose `producer_task_id` matches the retiring task, unlinking each and leaving the rest linked — O(entries_in_slot), with no scan of the entire pool or all buckets. Freed entries are returned to `free_entry_list` for immediate reuse.
 
@@ -369,9 +369,9 @@ In steady state, the number of valid TensorMap entries ≈ `active_tasks × avg_
 
 When `OrchestratorState::submit_task` processes parameters:
 
-1. **INPUT/INOUT**: `PTO2TensorMap::lookup` searches for overlapping producers (with chain truncation)
+1. **INPUT/INOUT**: `ChipTensorMap::lookup` searches for overlapping producers (with chain truncation)
 2. For each producer found: `append_fanin_or_fail` adds the dependency
-3. **OUTPUT/INOUT**: `PTO2TensorMap::insert` registers the current task as the new producer at bucket head
+3. **OUTPUT/INOUT**: `ChipTensorMap::insert` registers the current task as the new producer at bucket head
 4. Stale entries are pruned lazily during lookup (Layer 1) and periodically by cleanup (Layer 2)
 
 ---
@@ -441,7 +441,7 @@ Key members:
 
 | Step | Operation |
 | ---- | --------- |
-| 0 | `PTO2TensorMap::sync_tensormap` — prune stale TensorMap entries |
+| 0 | `ChipTensorMap::sync_tensormap` — prune stale TensorMap entries |
 | 1 | `PTO2TaskAllocator::alloc` — allocate task slot (may block on flow control) |
 | 2 | Initialize task descriptor + slot state, copy parameters |
 | 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `PTO2FaninBuilder` |

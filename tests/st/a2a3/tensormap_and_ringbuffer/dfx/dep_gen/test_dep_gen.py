@@ -13,7 +13,7 @@ Re-runs the ``vector_example`` orchestration with ``--enable-dep-gen``.
 Verifies the end-to-end dep_gen pipeline on a2a3sim:
 
   ``<output_prefix>/deps.json`` is produced by the host replay
-  (PTO2TensorMap replay → JSON edge list), and contains exactly the
+  (ChipTensorMap replay → JSON edge list), and contains exactly the
   6 edges documented in example_orchestration.cpp. The capture path
   (host collector drains the device ring buffer into memory and feeds
   the replay directly — no submit_trace.bin on disk) is exercised

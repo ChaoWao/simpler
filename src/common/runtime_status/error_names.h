@@ -162,7 +162,7 @@ static inline const char *error_hint(int32_t code) {
         return "not expected in normal operation -- keep the device log and report it to the runtime "
                "maintainers; tuning the ring capacities will not help";
     case SIMPLER_ERROR_TENSORMAP_OVERFLOW:
-        return "follow the preceding resource diagnostic: in HBG increase PTO2_TENSORMAP_POOL_SIZE "
+        return "follow the preceding resource diagnostic: in HBG increase CHIP_TENSORMAP_POOL_SIZE "
                "or shrink the graph; in a reclaiming runtime also inspect entry-reclaim progress";
     case SIMPLER_ERROR_SCHEDULER_TIMEOUT:
         return "read the sub_class= line below first, then follow the S1-S5 table in the doc; raise "

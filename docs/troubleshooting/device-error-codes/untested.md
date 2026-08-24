@@ -22,7 +22,7 @@ they cannot be provoked. Recording why, so the next person does not re-derive it
   end; hbg is whole-graph-resident and reclaims nothing, so overrunning the ring latches
   **2 HEAP_RING_DEADLOCK** or the ring's own exhaustion code instead. Reserved in hbg's
   table, raised only by `tensormap_and_ringbuffer`.
-- **11 TENSORMAP_OVERFLOW** needs the 65536-entry pool (`PTO2_TENSORMAP_POOL_SIZE`,
+- **11 TENSORMAP_OVERFLOW** needs the 65536-entry pool (`CHIP_TENSORMAP_POOL_SIZE`,
   compile-time, not tunable via `runtime_env`) flooded *and* a stalled producer
   holding entries.
 - **S4 / S5 / unknown**: not expressible through the public API. `set_dependencies()`

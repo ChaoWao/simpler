@@ -355,7 +355,7 @@ OrchestratorLayout OrchestratorState::reserve_layout(
         arena.reserve(static_cast<size_t>(layout.scope_tasks_cap) * sizeof(uintptr_t), alignof(ChipTaskSlotState *));
     layout.off_scope_begins =
         arena.reserve(static_cast<size_t>(layout.scope_stack_capacity) * sizeof(int32_t), alignof(int32_t));
-    layout.tensor_map = PTO2TensorMap::reserve_layout_default(arena, task_window_sizes);
+    layout.tensor_map = ChipTensorMap::reserve_layout_default(arena, task_window_sizes);
     return layout;
 }
 

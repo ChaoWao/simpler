@@ -85,7 +85,7 @@ where the fault landed. Over the 447 faulting calls above 10 µs (867 faults, 19
 leaves the per-node vector as the allocation: it is the single largest source.
 
 **But the structure that makes the others expensive is the hazard map.**
-`PTO2TensorMap::init` takes four `new[]` allocations per recording — 4096×8 buckets,
+`ChipTensorMap::init` takes four `new[]` allocations per recording — 4096×8 buckets,
 16384×128 entries, 16384×8 free list, 1024×8 task heads = **2.17 MB**, of which the 2 MB
 entry pool is one block — and they are freed when the recording is destroyed at the end
 of the orchestration. Only ~115 KB is ever touched (the buckets and task heads `init`

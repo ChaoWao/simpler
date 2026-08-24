@@ -67,7 +67,7 @@ struct OrchestratorState {
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
-    PTO2TensorMap tensor_map;  // Producer lookup
+    ChipTensorMap tensor_map;  // Producer lookup
 
     // === SCOPE STACK (Private) ===
     // Depth only. A scope decides whether a submit takes its fanin from TensorMap

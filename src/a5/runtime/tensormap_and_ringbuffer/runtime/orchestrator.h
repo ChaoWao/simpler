@@ -40,14 +40,14 @@
 /**
  * Layout descriptor produced by OrchestratorState::reserve_layout(). Holds
  * arena offsets for every sub-region the orchestrator owns (per-ring fanin
- * pools, scope arrays, plus the nested PTO2TensorMap layout).
+ * pools, scope arrays, plus the nested ChipTensorMap layout).
  */
 struct OrchestratorLayout {
     size_t off_fanin_pool[CHIP_MAX_RING_DEPTH];
     size_t off_fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     size_t off_scope_tasks;
     size_t off_scope_begins;
-    PTO2TensorMapLayout tensor_map;
+    ChipTensorMapLayout tensor_map;
     int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
     int32_t scope_tasks_cap;
     uint64_t scope_stack_capacity;
@@ -72,7 +72,7 @@ struct OrchestratorState {
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
-    PTO2TensorMap tensor_map;  // Producer lookup
+    ChipTensorMap tensor_map;  // Producer lookup
 
     // === SCOPE STACK (Private) ===
     // Single contiguous buffer of task IDs, partitioned by scope level.

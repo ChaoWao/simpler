@@ -12,10 +12,10 @@
 /**
  * @file dep_gen_replay.cpp
  * @brief Replay in-memory DepGenRecord stream → deps.json (strided tensor
- *        representation, tensor-annotated) via a host-resident PTO2TensorMap,
+ *        representation, tensor-annotated) via a host-resident ChipTensorMap,
  *        with a differential check against the runtime template `compute_task_fanin`.
  *
- * Two passes run per record against two parallel PTO2TensorMap instances that
+ * Two passes run per record against two parallel ChipTensorMap instances that
  * evolve in lockstep:
  *
  *   ORACLE pass (read-only contract):
@@ -29,7 +29,7 @@
  *   ANNOT pass (this file's feature):
  *     Inlines the same STEP A (creator retention) + STEP B (tensormap lookup)
  *     against `tm_annot`, but the callback fires with the full
- *     `PTO2TensorMapEntry&` + the consumer ChipTensor* + the arg index, so the
+ *     `ChipTensorMapEntry&` + the consumer ChipTensor* + the arg index, so the
  *     replay can record per-edge tensor metadata (producer/consumer
  *     shape/offset, dtype, version).
  *
@@ -295,9 +295,9 @@ void fill_consumer(EdgeAnnot &e, const ChipTensor &t) {
     }
 }
 
-// Copy a PTO2TensorMapEntry's slice description into an EdgeAnnot's producer_*
+// Copy a ChipTensorMapEntry's slice description into an EdgeAnnot's producer_*
 // fields. Only called from the TENSORMAP emit path.
-void fill_producer(EdgeAnnot &e, const PTO2TensorMapEntry &entry) {
+void fill_producer(EdgeAnnot &e, const ChipTensorMapEntry &entry) {
     e.producer_ndims = entry.ndims;
     e.producer_start_offset = entry.start_offset;
     for (uint32_t i = 0; i < entry.ndims && i < MAX_TENSOR_DIMS; i++) {
@@ -425,7 +425,7 @@ bool write_deps_json(
 
 template <typename EmitTM, typename EmitCreator>
 void annot_pass(
-    const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
+    const DepInputs &inputs, ChipTensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
     EmitTM emit_tensormap
 ) {
     if (in_manual_scope) {
@@ -452,7 +452,7 @@ void annot_pass(
             continue;
         }
 
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
+        tensor_map.lookup(*tensor, [&](ChipTensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
             emit_tensormap(entry.producer_task_id, i, *tensor, entry, overlap_status);
             if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
                 tensor_map.remove_entry(entry);
@@ -498,12 +498,12 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
 
     int32_t output_count = count_outputs(records, num_records);
     int32_t pool_size = output_count + (output_count / 10) + 64;
-    if (pool_size < PTO2_TENSORMAP_POOL_SIZE) {
-        pool_size = PTO2_TENSORMAP_POOL_SIZE;
+    if (pool_size < CHIP_TENSORMAP_POOL_SIZE) {
+        pool_size = CHIP_TENSORMAP_POOL_SIZE;
     }
 
-    PTO2TensorMap tm_oracle;
-    PTO2TensorMap tm_annot;
+    ChipTensorMap tm_oracle;
+    ChipTensorMap tm_annot;
     std::memset(&tm_oracle, 0, sizeof(tm_oracle));
     std::memset(&tm_annot, 0, sizeof(tm_annot));
 
@@ -512,12 +512,12 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     DeviceArena replay_arena;
 
     auto oracle_layout =
-        PTO2TensorMap::reserve_layout(replay_arena, PTO2_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
+        ChipTensorMap::reserve_layout(replay_arena, CHIP_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
     auto annot_layout =
-        PTO2TensorMap::reserve_layout(replay_arena, PTO2_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
+        ChipTensorMap::reserve_layout(replay_arena, CHIP_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
     if (replay_arena.commit() == nullptr || !tm_oracle.init_data_from_layout(oracle_layout, replay_arena) ||
         !tm_annot.init_data_from_layout(annot_layout, replay_arena)) {
-        LOG_ERROR("dep_gen replay: tensormap.init failed (buckets=%d, pool=%d)", PTO2_TENSORMAP_NUM_BUCKETS, pool_size);
+        LOG_ERROR("dep_gen replay: tensormap.init failed (buckets=%d, pool=%d)", CHIP_TENSORMAP_NUM_BUCKETS, pool_size);
         return -3;
     }
     // Replay tensormaps live entirely on host; only arena-internal pointer
@@ -658,7 +658,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         // Register tasks[] entry (with per-arg slot info) and any unseen
         // tensors[] entries up-front. ChipTensors are registered from the
         // consumer-side blob so raw_shapes / dtype are populated (the
-        // producer-side PTO2TensorMapEntry drops raw_shapes to fit in two
+        // producer-side ChipTensorMapEntry drops raw_shapes to fit in two
         // cache lines).
         TaskTableEntry task_entry;
         task_entry.task_id = rec.task_id;
@@ -753,7 +753,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 annot_edges.push_back(e);
             },
             // emit_tensormap(producer, arg_idx, consumer_tensor, entry, status)
-            [&](TaskId producer, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
+            [&](TaskId producer, int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry,
                 OverlapStatus status) {
                 // Per-(succ, arg_idx, producer_buffer_addr, producer_version)
                 // dedup gives us "the same producer slice fired twice for the

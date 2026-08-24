@@ -790,7 +790,7 @@ void OrchestratorState::end_scope() {
 // and bail. Returns false on deadlock or on a fatal already latched by another
 // party. Cold path — the fast path returns immediately when the pool has room.
 static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
-    PTO2TensorMap &tm = orch->tensor_map;
+    ChipTensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
     }
@@ -865,7 +865,7 @@ static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
                 LOG_ERROR("  still move on rings with no registered outputs). Check TaskRing");
                 LOG_ERROR("  diagnostics for the stalled producer.");
                 LOG_ERROR("Solution:");
-                LOG_ERROR("  Increase PTO2_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
+                LOG_ERROR("  Increase CHIP_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
                 LOG_ERROR("========================================");
                 orch_mark_fatal(orch, SIMPLER_ERROR_TENSORMAP_OVERFLOW);
                 return false;

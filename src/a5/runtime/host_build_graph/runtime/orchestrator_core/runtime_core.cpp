@@ -301,7 +301,7 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
-        orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
+        orch.tensor_map.lookup(tensor, [&](ChipTensorMapEntry &entry, OverlapStatus) -> bool {
             TaskId pid = entry.producer_task_id;
             const auto *slot = resolve_producer(pid);
             if (slot == nullptr) return false;

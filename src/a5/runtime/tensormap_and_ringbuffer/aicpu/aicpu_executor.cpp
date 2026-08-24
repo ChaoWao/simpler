@@ -783,7 +783,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             );
 
 #if SIMPLER_TENSORMAP_PROFILING
-            PTO2TensorMapProfilingData tp = pto2_tensormap_get_profiling();
+            ChipTensorMapProfilingData tp = chip_tensormap_get_profiling();
             LOG_INFO("Thread %d: === TensorMap Lookup Stats ===", thread_idx);
             LOG_INFO(
                 "Thread %d:   lookups        : %" PRIu64 ", inserts: %" PRIu64 "", thread_idx,

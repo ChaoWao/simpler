@@ -20,7 +20,7 @@
  *
  * `TensorFootprint` is what tells them apart. Each key holds every producer whose written view is
  * still the last word on some byte of the backing, so `x[0]` and `x[1]` coexist under one key and
- * neither resolves as the other's producer. This mirrors the L2 PTO2TensorMap, which hashes by
+ * neither resolves as the other's producer. This mirrors the L2 ChipTensorMap, which hashes by
  * base address only and walks the chain running the same overlap cascade — a bounding-range
  * reject, then a per-dimension hyper-rectangle test that separates two column blocks whose
  * bounding boxes interleave.
@@ -29,7 +29,7 @@
  * overlapping, and a producer a later write only partly covers stays live. So an extra edge is
  * possible where the truth is subtler, and a real dependency is never dropped.
  *
- * Unlike the L2 PTO2TensorMap, this implementation:
+ * Unlike the L2 ChipTensorMap, this implementation:
  *   - Uses std::unordered_map (no ring buffer entry pool)
  *   - Cleans up a task's entries when it is CONSUMED, skipping the views a
  *     newer same-run producer has taken over

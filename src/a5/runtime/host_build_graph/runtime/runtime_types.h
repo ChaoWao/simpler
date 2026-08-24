@@ -85,8 +85,8 @@
 // bind_callable_to_runtime_impl).
 
 // Memory pools (total = value, single ring)
-#define PTO2_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
-#define PTO2_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
+#define CHIP_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
+#define CHIP_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
 // Three address classes coexist during orchestration, in windows the two constants
 // below keep disjoint: real device addresses stay below HEAP_VIRTUAL_BASE, since

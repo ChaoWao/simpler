@@ -61,17 +61,17 @@ uint64_t g_insert_count = 0;
  * exists to avoid, and nothrow keeps the failure reportable to a caller that
  * still has an alternative path.
  */
-bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size) {
+bool ChipTensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size) {
     // num_buckets must be a power of two for the hash truncation to work, and
     // task_window_size for the task-chain slot mask.
     always_assert(new_num_buckets > 0 && (new_num_buckets & (new_num_buckets - 1)) == 0);
     always_assert(new_task_window_size > 0 && (new_task_window_size & (new_task_window_size - 1)) == 0);
     always_assert(new_pool_size > 0);
 
-    buckets.reset(new (std::nothrow) PTO2TensorMapEntry *[new_num_buckets]);
-    entry_pool.reset(new (std::nothrow) PTO2TensorMapEntry[new_pool_size]);
-    free_entry_list.reset(new (std::nothrow) PTO2TensorMapEntry *[new_pool_size]);
-    task_entry_heads.reset(new (std::nothrow) PTO2TensorMapEntry *[new_task_window_size]);
+    buckets.reset(new (std::nothrow) ChipTensorMapEntry *[new_num_buckets]);
+    entry_pool.reset(new (std::nothrow) ChipTensorMapEntry[new_pool_size]);
+    free_entry_list.reset(new (std::nothrow) ChipTensorMapEntry *[new_pool_size]);
+    task_entry_heads.reset(new (std::nothrow) ChipTensorMapEntry *[new_task_window_size]);
     if (buckets == nullptr || entry_pool == nullptr || free_entry_list == nullptr || task_entry_heads == nullptr) {
         LOG_ERROR(
             "TensorMap init failed (buckets=%d, pool=%d, window=%d)", new_num_buckets, new_pool_size,
@@ -105,7 +105,7 @@ bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t
     return true;
 }
 
-void PTO2TensorMap::reset() {
+void ChipTensorMap::reset() {
     always_assert(buckets != nullptr && entry_pool != nullptr && task_entry_heads != nullptr);
 
     for (int32_t i = 0; i < num_buckets; i++) {
@@ -121,15 +121,15 @@ void PTO2TensorMap::reset() {
     free_num = 0;
 }
 
-bool PTO2TensorMap::init_default(int32_t new_task_window_size) {
-    return init(PTO2_TENSORMAP_NUM_BUCKETS, PTO2_TENSORMAP_POOL_SIZE, new_task_window_size);
+bool ChipTensorMap::init_default(int32_t new_task_window_size) {
+    return init(CHIP_TENSORMAP_NUM_BUCKETS, CHIP_TENSORMAP_POOL_SIZE, new_task_window_size);
 }
 
 // =============================================================================
 // Debug Utilities
 // =============================================================================
 
-void PTO2TensorMap::print_stats() {
+void ChipTensorMap::print_stats() {
     int32_t valid = 0;
     int32_t empty_buckets = 0;
     int32_t max_chain = 0;
@@ -178,7 +178,7 @@ void PTO2TensorMap::print_stats() {
     LOG_DEBUG("============================");
 }
 
-int32_t PTO2TensorMap::valid_count() {
+int32_t ChipTensorMap::valid_count() {
     int32_t count = 0;
 
     // Init-on-write: only [0, next_entry_idx) slots have ever been allocated and
@@ -196,8 +196,8 @@ int32_t PTO2TensorMap::valid_count() {
 // TensorMap Lookup Profiling
 // =============================================================================
 #if SIMPLER_TENSORMAP_PROFILING
-PTO2TensorMapProfilingData pto2_tensormap_get_profiling() {
-    PTO2TensorMapProfilingData d;
+ChipTensorMapProfilingData chip_tensormap_get_profiling() {
+    ChipTensorMapProfilingData d;
     d.lookup_chain_total = g_lookup_chain_total;
     d.lookup_count = g_lookup_count;
     d.lookup_chain_max = g_lookup_chain_max;
