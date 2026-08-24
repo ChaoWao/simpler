@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import re
 import sys
 from collections import defaultdict
@@ -95,6 +96,28 @@ _CLOCK_ANCHOR_RE = re.compile(
 # The emitter percent-encodes any byte that would otherwise be record grammar —
 # see `encode_host_span_field` in src/common/log/host_log.cpp.
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+# One file per process, written under a run's `output_prefix` when the host logger
+# writes to files rather than stderr. It holds everything that logger emits, so a
+# process's spans and its `[CLOCK_ANCHOR]` are in the same file. See
+# docs/dfx/host-trace.md.
+_LOG_FILE_GLOB = "host.*.log"
+
+
+def _expand_log_source(source):
+    """Resolve one CLI input to the files to read.
+
+    A directory expands to its per-process log files, so a run's
+    ``output_prefix`` can be passed as-is instead of being globbed by the caller.
+    Sorted, because a reader comparing two runs should not have to care that the
+    shell and the filesystem disagree about order.
+    """
+    path = pathlib.Path(source)
+    if not path.is_dir():
+        return [path]
+    log_files = sorted(path.glob(_LOG_FILE_GLOB))
+    if not log_files:
+        raise SystemExit(f"{source} is a directory but holds no {_LOG_FILE_GLOB} files")
+    return log_files
 
 
 def decode_field(text):
@@ -1359,7 +1382,13 @@ def write_host_swimlane(args, spans, lines, anchors):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("log", help="path to a host/CANN log containing [STRACE] lines (or '-' for stdin)")
+    ap.add_argument(
+        "log",
+        nargs="+",
+        help="one or more host/CANN logs containing [STRACE] lines, '-' for stdin, or a directory holding "
+        f"{_LOG_FILE_GLOB} files (a run's output_prefix). Several inputs are concatenated: records carry their "
+        "own pid, so a whole run's per-process logs, or logs from several runs, can be passed together.",
+    )
     ap.add_argument(
         "--trace-out", help="write a Chrome-trace/Perfetto JSON here (load in chrome://tracing or perfetto)"
     )
@@ -1401,11 +1430,14 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
 
-    if args.log == "-":
-        lines = sys.stdin.readlines()
-    else:
-        with open(args.log, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+    lines = []
+    for source in args.log:
+        if source == "-":
+            lines.extend(sys.stdin.readlines())
+            continue
+        for path in _expand_log_source(source):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines.extend(f.readlines())
 
     spans = list(parse_spans(lines))
     anchors = list(parse_clock_anchors(lines))
@@ -1418,6 +1450,18 @@ def main(argv=None):
                 f"warning: multiple [CLOCK_ANCHOR] records found for pid {pid} ({count} records); using the last one",
                 file=sys.stderr,
             )
+    # Without an anchor a pid's records stay monotonic-only, and every renderer
+    # degrades to relative time without saying so. A process writes its anchor
+    # ahead of its first record, into whichever stream it is logging to, so a pid
+    # with spans and no anchor means that stream reached us incomplete.
+    unanchored = sorted({span.pid for span in spans} - set(anchor_counts))
+    if unanchored:
+        print(
+            f"warning: no [CLOCK_ANCHOR] record for pid(s) {', '.join(str(pid) for pid in unanchored)} that emitted "
+            "spans; their timestamps stay monotonic-only. Each process writes its anchor before its first record, so "
+            "check that every input is complete and that no process's stream is missing.",
+            file=sys.stderr,
+        )
     heads = count_record_heads(lines)
     if heads > len(spans):
         print(

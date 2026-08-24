@@ -1708,6 +1708,18 @@ NB_MODULE(_task_interface, m) {
         nb::arg("level"), "Seed the process-owned host-log state before workers fork or load runtime modules."
     );
     m.def(
+        "_set_host_log_directory",
+        [](const std::string &path) {
+            HostLogger::get_instance().set_log_directory(path.c_str());
+            const char *bound = HostLogger::get_instance().log_directory();
+            return bound == nullptr ? std::string() : std::string(bound);
+        },
+        nb::arg("path"),
+        "Write this process's host log to <path>/host.<pid>.log instead of stderr, and return the directory "
+        "actually in effect. Applies to every record this logger writes, including the host spans Python emits. "
+        "The first non-empty path in a process wins; an empty path leaves the logger on stderr."
+    );
+    m.def(
         "_set_host_span_level_prefix",
         [](const std::string &word) {
             simpler::host_trace::set_level_prefix(word.c_str());

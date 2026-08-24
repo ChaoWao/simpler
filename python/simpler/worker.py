@@ -108,6 +108,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 from _task_interface import (
     _host_spans_active as _native_host_spans_active,
 )
+from _task_interface import (
+    _set_host_log_directory as _native_set_host_log_directory,
+)
 
 from . import _log as _simpler_log
 from .buffer import (
@@ -3335,6 +3338,9 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     cfg.runtime_env.ring_dep_pool = ring_dep_pool
     # NUL-terminated C string in a 1024-byte field.
     cfg.output_prefix = prefix_bytes.split(b"\x00", 1)[0].decode("utf-8")
+    # A forked chip child owns its own log file under the same directory.
+    if cfg.output_prefix:
+        _native_set_host_log_directory(cfg.output_prefix)
     return cfg
 
 
@@ -10801,6 +10807,13 @@ class Worker:
     def _submit_l3_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
         assert self._orch is not None
         assert self._worker is not None
+        # This process's log belongs beside the run's other diagnostic artifacts,
+        # so the directory comes from the config that already names it. First one
+        # in a process wins; with no prefix the logger stays on stderr. Read
+        # defensively: wiring an output must never be what fails a submit.
+        log_directory = getattr(cfg, "output_prefix", "")
+        if log_directory:
+            _native_set_host_log_directory(log_directory)
         run_id = self._orch._begin_run()
         resources = _RunResources()
         handle = RunHandle(self, run_id, (callable, args, cfg), resources)

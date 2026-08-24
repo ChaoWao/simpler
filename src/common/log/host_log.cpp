@@ -153,6 +153,87 @@ long host_trace_tid() {
 #endif
 }
 
+struct HostLogFileSink {
+    HostLogFileSink();
+
+    std::mutex mutex;
+    FILE *stream = nullptr;
+    pid_t pid = -1;
+    std::string directory;
+};
+
+HostLogFileSink &host_log_file_sink() {
+    static HostLogFileSink sink;
+    return sink;
+}
+
+void host_log_sink_before_fork() { host_log_file_sink().mutex.lock(); }
+
+void host_log_sink_after_fork() { host_log_file_sink().mutex.unlock(); }
+
+HostLogFileSink::HostLogFileSink() {
+    // A child inherits only the thread that called fork(). Locking here makes
+    // that thread the mutex owner at the fork boundary, so both the parent and
+    // child handlers can release it without inheriting an owner that vanished.
+    (void)pthread_atfork(host_log_sink_before_fork, host_log_sink_after_fork, host_log_sink_after_fork);
+}
+
+// Append one already-formatted record. The <=`PIPE_BUF` single-write rule that
+// makes a stderr record indivisible neither applies nor is needed here: this file
+// has exactly one writer process and the sink mutex serializes the writers inside
+// it, so a flush of up to the buffer's size cannot interleave with anything.
+//
+// Two properties a system tracer would have and this deliberately does not, so
+// the difference is not mistaken for an oversight. The flush runs on the thread
+// that emitted the record, where ftrace and Perfetto hand the bytes to a consumer
+// and never let a producer touch the output; and a full buffer here blocks that
+// thread rather than dropping and counting, where every comparable tracer bounds
+// the buffer and exports a loss counter. What this buys is one write per root
+// span instead of one per record — an order of magnitude, not the elimination of
+// the observer effect.
+bool write_log_file(const char *directory, const char *record, size_t size, bool flush) {
+    HostLogFileSink &sink = host_log_file_sink();
+    std::scoped_lock lock(sink.mutex);
+    const pid_t pid = getpid();
+    const bool inherited = sink.stream != nullptr && sink.pid != pid;
+    const bool changed_directory = sink.stream != nullptr && sink.directory != directory;
+    if (inherited) {
+        // Do not fclose(): its copied stdio buffer contains records already
+        // owned by the parent and must never be flushed again by the child.
+        // Dropping the FILE leaks it and its buffer in the child, one per
+        // process, which is the price of not duplicating the parent's records —
+        // C offers no portable way to discard a stream's buffer.
+        const int inherited_fd = fileno(sink.stream);
+        if (inherited_fd >= 0) (void)::close(inherited_fd);
+        sink.stream = nullptr;
+        sink.pid = -1;
+        sink.directory.clear();
+    } else if (changed_directory) {
+        std::fclose(sink.stream);
+        sink.stream = nullptr;
+        sink.pid = -1;
+        sink.directory.clear();
+    }
+    if (sink.stream == nullptr) {
+        char path[PATH_MAX];
+        const int length = std::snprintf(path, sizeof(path), "%s/host.%d.log", directory, pid);
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(path)) return false;
+        sink.stream = std::fopen(path, "a");
+        if (sink.stream == nullptr) return false;
+        std::setvbuf(sink.stream, nullptr, _IOFBF, 1U << 20U);
+        sink.pid = pid;
+        sink.directory = directory;
+    }
+    if (std::fwrite(record, 1, size, sink.stream) != size) return false;
+    return !flush || std::fflush(sink.stream) == 0;
+}
+
+bool flush_log_file() {
+    HostLogFileSink &sink = host_log_file_sink();
+    std::scoped_lock lock(sink.mutex);
+    return sink.stream == nullptr || std::fflush(sink.stream) == 0;
+}
+
 }  // namespace
 
 namespace {
@@ -236,7 +317,7 @@ const char *HostLogger::level_name(LogLevel level) const {
     return "?";
 }
 
-bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args) {
+bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args, bool flush) {
     const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
@@ -252,22 +333,32 @@ bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
         stack_buffer, sizeof(stack_buffer), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
     );
     if (length < sizeof(stack_buffer)) {
-        std::scoped_lock lock(mutex_);
-        return write_stderr(stack_buffer, length);
+        return write_record(stack_buffer, length, flush);
     }
 
     std::vector<char> heap_buffer(length + 1);
     const size_t heap_length = format_record(
         heap_buffer.data(), heap_buffer.size(), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
     );
+    return write_record(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length, flush);
+}
+
+// The one place a destination is chosen. It is a property of this logger, so it
+// holds for every record from every caller: nothing about a record's kind, its
+// producer, or its level selects a sink here.
+bool HostLogger::write_record(const char *record, size_t size, bool flush) {
+    const char *directory = log_directory();
+    if (directory != nullptr && write_log_file(directory, record, size, flush)) return true;
     std::scoped_lock lock(mutex_);
-    return write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
+    return write_stderr(record, size);
 }
 
 bool HostLogger::emit_ungated(const char *level_tag, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    const bool written = emit(level_tag, func, fmt, args);
+    // Its one caller writes the clock anchor, which every reader of this stream
+    // needs before it can place anything else in wall time.
+    const bool written = emit(level_tag, func, fmt, args, /*flush=*/true);
     va_end(args);
     return written;
 }
@@ -301,7 +392,9 @@ void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list
         return;
     }
     emit_clock_anchor_if_needed();
-    emit(level_name(level), func, fmt, args);
+    // A warning or an error is rare and is worth having on disk if the process
+    // dies; everything below that rides the buffer.
+    emit(level_name(level), func, fmt, args, /*flush=*/level >= LogLevel::WARN);
 }
 
 void HostLogger::log(LogLevel level, const char *func, const char *fmt, ...) {
@@ -309,6 +402,27 @@ void HostLogger::log(LogLevel level, const char *func, const char *fmt, ...) {
     va_start(args, fmt);
     vlog(level, func, fmt, args);
     va_end(args);
+}
+
+void HostLogger::set_log_directory(const char *path) {
+    if (path == nullptr || path[0] == '\0') return;
+    SimplerHostLogState *shared = state();
+    if (shared == nullptr) return;
+    // Claim 0 -> -1, fill, publish -1 -> 1, mirroring the anchor claim above. A
+    // reader accepts only 1, so it never observes a half-written path; and a
+    // later caller with a different path is refused rather than moving a file
+    // some thread may already hold open.
+    int32_t unclaimed = 0;
+    if (!atomic_compare_exchange_i32(&shared->log_directory_bound, &unclaimed, -1)) return;
+    (void)std::snprintf(shared->log_directory, sizeof(shared->log_directory), "%s", path);
+    int32_t claim = -1;
+    (void)atomic_compare_exchange_i32(&shared->log_directory_bound, &claim, 1);
+}
+
+const char *HostLogger::log_directory() const {
+    SimplerHostLogState *shared = state();
+    if (shared == nullptr || atomic_load_i32(&shared->log_directory_bound) != 1) return nullptr;
+    return shared->log_directory;
 }
 
 void HostLogger::log_host_span(const SimplerHostSpan *span) {
@@ -320,11 +434,23 @@ void HostLogger::log_host_span(const SimplerHostSpan *span) {
     const std::string name = encode_host_span_field(span->name, kHostSpanNameCapacity, false);
     const std::string attributes =
         encode_host_span_field(span->attributes == nullptr ? "" : span->attributes, kHostSpanAttributesCapacity, true);
-    log(LogLevel::TIMING, "emit_host_span",
+
+    // One record grammar, in one place. Where it lands is the logger's business,
+    // not this emitter's.
+    char record[kRecordStackCapacity];
+    (void)std::snprintf(
+        record, sizeof(record),
         "[STRACE] v=1 pid=%d tid=%ld inv=%" PRIu64 " hid=%" PRIx64 " depth=%d name=%s ts=%" PRId64 " dur=%" PRId64
         " %s",
         static_cast<int>(getpid()), host_trace_tid(), span->invocation_id, span->callable_hash, span->depth,
-        name.c_str(), span->timestamp_ns, span->duration_ns, attributes.c_str());
+        name.c_str(), span->timestamp_ns, span->duration_ns, attributes.c_str()
+    );
+
+    log(LogLevel::TIMING, "emit_host_span", "%s", record);
+    // A closed root span is where the records so far describe a whole
+    // invocation, which is what makes an in-progress run readable. It is the one
+    // thing this emitter knows that the writer does not.
+    if (span->depth == 0) (void)flush_log_file();
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_host_log_bind_state(SimplerHostLogState *state) {
