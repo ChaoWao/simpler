@@ -467,16 +467,16 @@ private:
             LOG_ERROR("  2. Size the ring for the peak live-set retained behind the oldest open-scope task.");
         } else if (heap_blocked) {
             LOG_ERROR(
-                "  Increase heap (current: %" PRIu64 "); env PTO2_RING_HEAP=<bytes> (e.g. %" PRIu64 ")", heap_size_,
-                heap_size_ * 2
+                "  Increase heap (current: %" PRIu64 "); CallConfig.runtime_env.ring_heap=<bytes> (e.g. %" PRIu64 ")",
+                heap_size_, heap_size_ * 2
             );
             LOG_ERROR(
                 "  If one increase completes, it was under-provisioned; otherwise debug the stuck head consumer."
             );
         } else {
             LOG_ERROR(
-                "  Increase task window (current: %d); env PTO2_RING_TASK_WINDOW=<pow2> (e.g. %d)", window_size_,
-                active_tasks * 2
+                "  Increase task window (current: %d); CallConfig.runtime_env.ring_task_window=<pow2> (e.g. %d)",
+                window_size_, active_tasks * 2
             );
             LOG_ERROR(
                 "  If one increase completes, it was under-provisioned; otherwise debug the stuck head consumer."
@@ -550,7 +550,7 @@ struct FaninPool {
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase fanin spill pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
             LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
-            LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
+            LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
                 error_code_ptr->store(SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED, std::memory_order_release);
@@ -755,7 +755,7 @@ struct DepListPool {
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
             LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
-            LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
+            LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
                 error_code_ptr->store(SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED, std::memory_order_release);

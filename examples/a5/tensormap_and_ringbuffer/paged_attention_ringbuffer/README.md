@@ -30,7 +30,7 @@ referenced, the golden check fails or the orchestrator wedges.
 Two things this example is the reference for:
 
 - **Per-case ring sizing through `config.runtime_env`**, not the process-global
-  `PTO2_RING_*` environment variables. The rings are sized per task, so one
+  now-retired `PTO2_RING_*` environment variables. The rings are sized per task, so one
   suite can mix a stress case with normally-sized ones.
 - **Non-power-of-2 sizes are accepted.** 4 MiB is chosen to keep the stress
   intent compact, not because the runtime requires a round number.

@@ -127,13 +127,16 @@
     "PTO Runtime2", and a bare "Runtime2" are not names of anything** — the
     `2` never denoted a version any reader can identify.
 
-    **Tiers A and B are done** (snapshot 2026-08-24: 129 occurrences, down
-    from ~6.6k across 367 files on 2026-07-26). What remains is Tier C and
-    nothing else: `PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` /
-    `PTO2_RING_DEP_POOL`, plus `PTO2_MANUAL_MAX_SEQ`, which pypto-lib owns
-    and this repo only documents. **So a `PTO2` match now means either a
-    Tier-C knob or a defect** — there is no longer a backlog to work
-    through. Find the current surface with:
+    **The retirement is complete** (snapshot 2026-08-24: 6.6k occurrences across
+    367 files on 2026-07-26 → 0 that this repo reads). Nothing here reads a
+    `PTO2` name any more: the last of them were the `PTO2_RING_*` ring-sizing
+    environment variables, retired in favour of per-task
+    `CallConfig.runtime_env`. What is left in the tree is this rule's own
+    examples, the warning that fires if a caller still exports a retired ring
+    variable, prose recording that these names are gone, and
+    `PTO2_MANUAL_MAX_SEQ` — a pypto-lib knob two example READMEs document and
+    this repo never reads. **So a new `PTO2` match is a defect** — there is no
+    backlog to work through. Find the surface with:
 
     ```bash
     grep -rIn -E "PTO Runtime2?|PTO2|pto2_|pto_runtime2" --include=* . | grep -v '^\./\.git/'
@@ -145,15 +148,21 @@
     | ---- | ---- | ------ |
     | **A — prose** | Brand mentions in docs, headings, skill descriptions, issue templates, and code comments (`# PTO Runtime2 Profiling Levels`, "the PTO Runtime consists of…") | **Fix on sight, unconditionally.** No compile risk, no contract. Say `simpler`, or name the actual component ("the AICPU orchestrator", "the `tensormap_and_ringbuffer` runtime") when that is what the sentence means. |
     | **B — internal identifiers** | `PTO2Foo` types, `pto2_*` functions, internal `PTO2_*` macros and enumerators, `pto_*.h` / `pto_runtime2*.cpp` file names | Rename **only when you are already modifying that code**, per rule 9, and finish the identifier you started (below). |
-    | **C — external contracts** | `PTO2_RING_*` and other `runtime_env` knobs (documented in `MULTI_RING.md`, set by pypto-lib / pypto-serving), `extern "C"` symbols in `runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
+    | **C — external contracts** | `runtime_env` knobs, `extern "C"` symbols in `runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
 
     An environment variable is the worst case in Tier C and the reason it
     exists: an unrecognised name is *ignored*, so the rename fails silently
-    in production instead of at compile time. Two knobs that had already
-    drifted this way were found dead during the Tier-B work — a benchmark
-    setting `PTO2_SERIAL_ORCH_SCHED` against a runtime reading
-    `SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE`, and an error hint naming
-    `PTO2_SCHEDULER_TIMEOUT_MS` instead of `SIMPLER_SCHEDULER_TIMEOUT_MS`.
+    in production instead of at compile time. Three knobs proved the point.
+    Two were found already dead — a benchmark setting `PTO2_SERIAL_ORCH_SCHED`
+    against a runtime reading `SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE`, and an
+    error hint naming `PTO2_SCHEDULER_TIMEOUT_MS` instead of
+    `SIMPLER_SCHEDULER_TIMEOUT_MS`. The third case, `PTO2_RING_*`, is the one
+    to copy: the knob was not renamed but **removed**, because
+    `CallConfig.runtime_env` already carried the same sizing per task and was
+    strictly more expressive. Retiring an env knob outright beats renaming it —
+    and when you do, the runtime should say so on sight rather than silently
+    fall back, which is what `warn_on_retired_ring_env()` in each
+    `host/runtime_maker.cpp` is for.
 
     Three constraints make the difference between progress and churn:
 

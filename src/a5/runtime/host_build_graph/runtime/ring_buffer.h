@@ -238,8 +238,8 @@ private:
             LOG_ERROR("  Shrink the graph's intermediate tensors; this heap has no configuration knob");
         } else {
             LOG_ERROR(
-                "  Increase task window (current: %d); env PTO2_RING_TASK_WINDOW=<pow2> (e.g. %d)", window_size_,
-                window_size_ * 2
+                "  Increase task window (current: %d); CallConfig.runtime_env.ring_task_window=<pow2> (e.g. %d)",
+                window_size_, window_size_ * 2
             );
         }
         LOG_ERROR("========================================");

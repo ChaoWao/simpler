@@ -8,7 +8,7 @@ each need a different ring footprint.
 ## What it shows
 
 Before this knob, every L2 dispatched from one L3 shared the process-wide
-`PTO2_RING_*` env and could not be sized independently. Now each
+process-wide `PTO2_RING_*` env, since retired, and could not be sized independently. Now each
 `submit_next_level` gets its own `CallConfig`:
 
 Each spec sets `ring_task_window` / `ring_heap` / `ring_dep_pool` to a scalar

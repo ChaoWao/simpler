@@ -161,10 +161,15 @@ log to tell them apart**:
 1. **Heap-exhausted deadlock** (default 256 MB ring): the open prefill scope's
    live-set exceeds one ring → device log prints
    `FATAL: Task Allocator Deadlock - Heap Exhausted! ... Provable head-of-line`.
-   Fix: raise the ring. batch-1 needs just over 256 MB; batch-16 needs the
-   prefill config `PTO2_RING_HEAP=4294967296 PTO2_RING_TASK_WINDOW=131072
-   PTO2_RING_DEP_POOL=131072` (heap, task-window, and dep-pool all scale with
-   batch; default `task_window=16384` also overflows at batch-16).
+   Fix: raise the ring. batch-1 needs just over 256 MB; batch-16 needs
+   `ring_heap=4294967296`, `ring_task_window=131072`, `ring_dep_pool=131072`
+   (heap, task-window, and dep-pool all scale with batch; the default
+   `task_window=16384` also overflows at batch-16). These are per-task values on
+   `CallConfig.runtime_env` — the runner has to pass them with the prefill call.
+   The `PTO2_RING_*` environment variables that used to carry them are no longer
+   read by simpler, and a stale export is silently ignored (simpler warns), so a
+   runner still exporting them runs on the 256 MB default and deadlocks exactly
+   as described above.
 2. **Op-execute timeout** (slow/contended prefill): device log prints
    `HandleTaskTimeout ... timeOut:<N>` and kills `aicpu-sd`. The compiled
    defaults (`PLATFORM_OP_EXECUTE_TIMEOUT_US`=45 s,

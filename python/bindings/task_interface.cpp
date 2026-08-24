@@ -2538,7 +2538,7 @@ NB_MODULE(_task_interface, m) {
             return os.str();
         });
 
-    // --- RuntimeEnv (per-task PTO2_RING_* overrides; nested under CallConfig.runtime_env) ---
+    // --- RuntimeEnv (per-task ring sizing; nested under CallConfig.runtime_env) ---
     // Each ring resource is exposed as ONE property that accepts either an int
     // (broadcast to every ring) or a list of RUNTIME_ENV_RING_COUNT ints
     // (per-ring). The value always reads back as a list — the wire layout is the

@@ -576,7 +576,7 @@ static bool check_scope_can_accept_task(OrchestratorState *orch, TaskAllocator &
     LOG_ERROR("  1. Reduce tasks per scope (use batching/unroll)");
     LOG_ERROR("  2. Increase task window (current: %d)", allocator.window_size());
     LOG_ERROR("     Compile-time: CHIP_TASK_WINDOW_SIZE in runtime_types.h");
-    LOG_ERROR("     Runtime env:  PTO2_RING_TASK_WINDOW=<power-of-2>");
+    LOG_ERROR("     Per task:     CallConfig.runtime_env.ring_task_window=<power-of-2>");
     LOG_ERROR("  3. Split work across multiple scopes");
     LOG_ERROR("========================================");
     orch_mark_fatal(orch, SIMPLER_ERROR_SCOPE_DEADLOCK);

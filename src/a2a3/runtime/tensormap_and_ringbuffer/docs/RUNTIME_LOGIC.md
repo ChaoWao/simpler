@@ -210,7 +210,7 @@ else:
 
 **Reclamation**: Scheduler threads advance `last_task_alive` via lock-free CAS when the oldest task reaches state CONSUMED (4). This frees slots for reuse.
 
-**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With `PTO2_RING_TASK_WINDOW=16` and 208 tasks, slots are recycled ~13 times each.
+**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With a 16-slot `runtime_env.ring_task_window` and 208 tasks, slots are recycled ~13 times each.
 
 ### 4.2 Heap Ring
 
@@ -250,7 +250,7 @@ The ring buffer mechanism provides **flow control** between the orchestrator (pr
 
 **TensorMap pool back-pressure**: Before STEP 4 registers a task's outputs, the orchestrator's `ensure_tensormap_capacity` reserves pool space for the inserts. When the shared entry pool is exhausted, it reclaims retired entries across all rings and spin-waits until reclaim actually frees entries, with a 500 ms wall-clock deadlock backstop (see Section 5.4).
 
-This back-pressure is essential for correctness with small ring sizes — for example, with `PTO2_RING_TASK_WINDOW=16` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
+This back-pressure is essential for correctness with small ring sizes — for example, with a 16-slot `runtime_env.ring_task_window` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
 
 ### 4.5 Deadlock Detection
 

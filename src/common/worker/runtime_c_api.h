@@ -359,7 +359,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
  * enables + output_prefix, and the per-task ring sizing overrides
  * (`runtime_env.ring_task_window` / `.ring_heap` / `.ring_dep_pool`, each a
  * per-scope-depth-ring array of RUNTIME_ENV_RING_COUNT entries; 0 = unset,
- * precedence per ring: per-ring entry > PTO2_RING_* env var > compile-time
+ * precedence per ring: per-ring entry > compile-time
  * default). Ring overrides are consumed by tensormap_and_ringbuffer only; other
  * runtime variants accept and ignore them. Wire-compatible POD; prepare copies
  * it into the native-run context before returning.

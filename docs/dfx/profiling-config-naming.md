@@ -72,11 +72,10 @@ translation unit (`CHIP_HEAP_SIZE`, `CHIP_ALIGN_UP`). Configuration surface expo
 to users / CI / external consumers is unified under `SIMPLER_`, and status codes
 under `SIMPLER_ERROR_*`.
 
-The exception is `PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` /
-`PTO2_RING_DEP_POOL`. Those three are read from the environment by name, and other
-repositories and shell scripts set them, so renaming them would be ignored
-silently rather than failing to compile. They keep the legacy spelling until a
-cross-repo migration retires them.
+There is no `PTO2_` configuration surface left. `PTO2_RING_TASK_WINDOW` /
+`PTO2_RING_HEAP` / `PTO2_RING_DEP_POOL` were the last of it; ring sizing is per
+task now, on `CallConfig.runtime_env`, and the runtime warns if one of those names
+is still exported so a stale export cannot quietly become the compile-time default.
 
 ## Compile-time gates vs runtime emission
 

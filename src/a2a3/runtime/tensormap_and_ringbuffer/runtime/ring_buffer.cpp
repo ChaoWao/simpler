@@ -110,7 +110,7 @@ bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
                     "  Increase fanin spill pool capacity (current: %d, recommended: %d)", capacity, high_water * 2
                 );
                 LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
-                LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+                LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", high_water * 2);
                 LOG_ERROR("========================================");
                 latch_pool_error(error_code_ptr, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
                 return false;
@@ -170,7 +170,7 @@ void DepListPool::report_deadlock(SharedMemoryRingHeader &ring, int32_t needed, 
     LOG_ERROR("Solution:");
     LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d)", capacity, high_water * 2);
     LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
-    LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+    LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", high_water * 2);
     LOG_ERROR("========================================");
 }
 

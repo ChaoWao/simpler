@@ -13,7 +13,7 @@ Runs the same vector_add kernel several times on one L2 Worker, each time with
 a different ``CallConfig.runtime_env`` (ring buffer sizing) — covering both the
 scalar form (one value broadcast to every ring) and the per-ring form (each
 scope-depth ring sized independently). Ring sizing is a per-run knob carried on
-``CallConfig`` — no process-wide ``PTO2_RING_*`` env export needed, and each
+``CallConfig`` — the only place ring sizing lives, and each
 ``worker.run`` binds its ring buffers from the config it was handed.
 
     Each runtime_env field takes EITHER a scalar (broadcast to every ring) OR a
@@ -68,7 +68,7 @@ NBYTES = N_ELEMS * 4  # float32
 RING_FIELDS = ("ring_task_window", "ring_heap", "ring_dep_pool")
 
 # (label, runtime_env dict or None). None => no override; falls back to the
-# PTO2_RING_* env var / compile-time default. Same kernel + same inputs run
+# compile-time default. Same kernel + same inputs run
 # under every sizing, so all of them produce identical (correct) output.
 RING_CONFIGS = [
     # Scalar form: one value broadcast to every ring.

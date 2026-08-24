@@ -183,73 +183,18 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
     host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload);
 }
 
-static std::string trim_copy(const std::string &input) {
-    size_t begin = 0;
-    while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
+// The ring sizes were once settable process-wide through PTO2_RING_TASK_WINDOW /
+// PTO2_RING_HEAP. They are per task now, through CallConfig.runtime_env, and
+// nothing reads those names. Exporting one is therefore a silent
+// misconfiguration -- the run takes the compile-time default and the requested
+// sizing appears nowhere -- so it is reported once per bind.
+static void warn_on_retired_ring_env() {
+    static constexpr const char *kRetired[] = {"PTO2_RING_TASK_WINDOW", "PTO2_RING_HEAP"};
+    for (const char *name : kRetired) {
+        if (std::getenv(name) != nullptr) {
+            LOG_WARN("%s is no longer read; size the rings per task via CallConfig.runtime_env", name);
+        }
     }
-    size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
-}
-
-static bool parse_uint_token(
-    const char *name, const std::string &raw, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out
-) {
-    std::string token = trim_copy(raw);
-    if (token.empty()) {
-        LOG_WARN("%s has an empty value in '%s', ignored", name, raw.c_str());
-        return false;
-    }
-
-    if (token[0] == '-') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long parsed = std::strtoull(token.c_str(), &endptr, 10);
-    if (errno == ERANGE || endptr == token.c_str() || *endptr != '\0') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    uint64_t val = static_cast<uint64_t>(parsed);
-
-    if (val < min_val || val > max_val) {
-        LOG_WARN(
-            "%s=%s invalid (must be in [%" PRIu64 ", %" PRIu64 "]), ignored", name, token.c_str(), min_val, max_val
-        );
-        return false;
-    }
-    if (require_power_of_2 && !is_power_of_2_u64(val)) {
-        LOG_WARN("%s=%s invalid (must be a power of 2), ignored", name, token.c_str());
-        return false;
-    }
-    *out = val;
-    return true;
-}
-
-// The PTO2_RING_* knobs are shared with tensormap_and_ringbuffer, where a value
-// may be a comma-separated list, one entry per ring. hbg has one ring, so it
-// accepts the single-value spelling and rejects a list — which is what the
-// multi-ring parser did here too, since it required exactly one entry.
-static void
-apply_env_ring_value(const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out) {
-    const char *env = std::getenv(name);
-    if (!env) return;
-
-    std::string text(env);
-    if (text.find(',') != std::string::npos) {
-        LOG_WARN("%s=%s invalid (this runtime has one ring; expected a single value), ignored", name, env);
-        return;
-    }
-    uint64_t value = 0;
-    if (!parse_uint_token(name, text, min_val, max_val, require_power_of_2, &value)) {
-        return;
-    }
-    *out = value;
 }
 
 // ring_task_window points into the #pragma pack(1) RuntimeEnv wire struct
@@ -268,18 +213,18 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // ring_task_window points at the first slot of a per-ring array in the RuntimeEnv
-// wire struct (0 = unset); hbg has one ring and reads slot 0. Precedence:
-// per-task entry > PTO2_RING_TASK_WINDOW env value > compile-time default.
+// wire struct (0 = unset); hbg has one ring and reads slot 0. A per-task entry
+// wins over the compile-time default, and there is nothing between them.
 //
 // The heap takes no configuration: its device region is committed after
 // orchestration, sized to what the graph turned out to need, so there is nothing
-// to resolve up front. RuntimeEnv::ring_heap and PTO2_RING_HEAP remain the
-// reclaiming runtime's knobs; this function does not resolve them, and the caller
-// reads them only to warn that they reach nothing here.
+// to resolve up front. RuntimeEnv::ring_heap stays the reclaiming runtime's knob;
+// this function does not resolve it, and the caller reads it only to warn that it
+// reaches nothing here.
 static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t *eff_task_window_size) {
     *eff_task_window_size = CHIP_TASK_WINDOW_SIZE;
 
-    apply_env_ring_value("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_size);
+    warn_on_retired_ring_env();
 
     const uint64_t task_window_override = read_ring_override(ring_task_window, 0);
     if (task_window_override != 0) {
@@ -1064,13 +1009,13 @@ extern "C" int bind_callable_to_runtime_impl(
     if (!resolve_task_window_size(ring_task_window, &eff_task_window_size)) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    // The heap takes no configuration, so a set ring_heap / PTO2_RING_HEAP reaches
-    // nothing in this runtime — most often it is a config written for the reclaiming
-    // one, whose knob it still is.
-    if (read_ring_override(ring_heap, 0) != 0 || std::getenv("PTO2_RING_HEAP") != nullptr) {
+    // The heap takes no configuration, so a set ring_heap reaches nothing in this
+    // runtime — most often it is a config written for the reclaiming one, whose knob
+    // it still is.
+    if (read_ring_override(ring_heap, 0) != 0) {
         LOG_WARN(
-            "%s", "host_build_graph ignores ring_heap / PTO2_RING_HEAP: its graph heap is committed after "
-                  "orchestration at the size the graph turned out to need"
+            "%s", "host_build_graph ignores ring_heap: its graph heap is committed after orchestration at the "
+                  "size the graph turned out to need"
         );
     }
     LOG_INFO("Ring task window: %" PRIu64, eff_task_window_size);

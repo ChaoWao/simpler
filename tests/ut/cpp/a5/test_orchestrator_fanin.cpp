@@ -283,7 +283,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     EXPECT_NE(log.find("Heap ring 1:"), std::string::npos);
     EXPECT_NE(log.find("used=3072"), std::string::npos);
     EXPECT_NE(log.find("available=1024"), std::string::npos);
-    EXPECT_EQ(log.find("PTO2_RING_HEAP=<pow2>"), std::string::npos);
+    EXPECT_EQ(log.find("runtime_env.ring_heap=<bytes>"), std::string::npos);
 }
 
 TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopesShareRing) {

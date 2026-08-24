@@ -10,7 +10,7 @@
 """Paged attention with small ring buffer sizes — stress test for ring rotation/reclamation.
 
 Drives per-case ring sizing through ``config.runtime_env`` (ring_task_window /
-ring_heap / ring_dep_pool) rather than the process-global PTO2_RING_* env, plus
+ring_heap / ring_dep_pool) rather than the process-global PTO2_RING_* env it replaced, plus
 INOUT tensors, bfloat16, and AIC+AIV mixed execution.
 """
 

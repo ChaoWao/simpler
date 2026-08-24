@@ -34,7 +34,6 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -118,99 +117,17 @@ static std::string format_ring_array(const T (&values)[CHIP_MAX_RING_DEPTH]) {
     return out;
 }
 
-static std::string trim_copy(const std::string &input) {
-    size_t begin = 0;
-    while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
-    }
-    size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
-}
-
-static bool parse_uint_token(
-    const char *name, const std::string &raw, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out
-) {
-    std::string token = trim_copy(raw);
-    if (token.empty()) {
-        LOG_WARN("%s has an empty value in '%s', ignored", name, raw.c_str());
-        return false;
-    }
-
-    if (token[0] == '-') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long parsed = std::strtoull(token.c_str(), &endptr, 10);
-    if (errno == ERANGE || endptr == token.c_str() || *endptr != '\0') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    uint64_t val = static_cast<uint64_t>(parsed);
-
-    if (val < min_val || val > max_val) {
-        LOG_WARN(
-            "%s=%s invalid (must be in [%" PRIu64 ", %" PRIu64 "]), ignored", name, token.c_str(), min_val, max_val
-        );
-        return false;
-    }
-    if (require_power_of_2 && !is_power_of_2_u64(val)) {
-        LOG_WARN("%s=%s invalid (must be a power of 2), ignored", name, token.c_str());
-        return false;
-    }
-    *out = val;
-    return true;
-}
-
-static void apply_env_ring_values(
-    const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t out[CHIP_MAX_RING_DEPTH]
-) {
-    const char *env = std::getenv(name);
-    if (!env) return;
-
-    std::string text(env);
-    if (text.find(',') == std::string::npos) {
-        uint64_t value = 0;
-        if (!parse_uint_token(name, text, min_val, max_val, require_power_of_2, &value)) {
-            return;
+// The ring sizes were once settable process-wide through PTO2_RING_TASK_WINDOW /
+// PTO2_RING_HEAP / PTO2_RING_DEP_POOL. They are per task now, through
+// CallConfig.runtime_env, and nothing reads those names. Exporting one is
+// therefore a silent misconfiguration -- the run takes the compile-time default
+// and the requested sizing appears nowhere -- so it is reported once per bind.
+static void warn_on_retired_ring_env() {
+    static constexpr const char *kRetired[] = {"PTO2_RING_TASK_WINDOW", "PTO2_RING_HEAP", "PTO2_RING_DEP_POOL"};
+    for (const char *name : kRetired) {
+        if (std::getenv(name) != nullptr) {
+            LOG_WARN("%s is no longer read; size the rings per task via CallConfig.runtime_env", name);
         }
-        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-            out[r] = value;
-        }
-        return;
-    }
-
-    uint64_t parsed[CHIP_MAX_RING_DEPTH]{};
-    size_t pos = 0;
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        size_t comma = text.find(',', pos);
-        std::string token = text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        if (!parse_uint_token(name, token, min_val, max_val, require_power_of_2, &parsed[r])) {
-            return;
-        }
-        if (comma == std::string::npos) {
-            if (r != CHIP_MAX_RING_DEPTH - 1) {
-                LOG_WARN(
-                    "%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env,
-                    CHIP_MAX_RING_DEPTH
-                );
-                return;
-            }
-            pos = text.size();
-        } else {
-            pos = comma + 1;
-        }
-    }
-    if (pos < text.size() || (!text.empty() && text.back() == ',')) {
-        LOG_WARN("%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env, CHIP_MAX_RING_DEPTH);
-        return;
-    }
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        out[r] = parsed[r];
     }
 }
 
@@ -230,9 +147,10 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // Each of ring_task_window / ring_heap / ring_dep_pool is a per-ring array of
-// CHIP_MAX_RING_DEPTH entries (0 = unset). Precedence per ring: per-task entry >
-// PTO2_RING_* env value > compile-time default. A "size all rings the same"
-// request arrives already broadcast to every entry by the caller.
+// CHIP_MAX_RING_DEPTH entries (0 = unset). A per-ring entry wins over the
+// compile-time default, and there is nothing between them: sizing is per task.
+// A "size all rings the same" request arrives already broadcast to every entry
+// by the caller.
 static bool resolve_ring_config(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
     uint64_t eff_task_window_sizes[CHIP_MAX_RING_DEPTH], uint64_t eff_heap_sizes[CHIP_MAX_RING_DEPTH],
@@ -245,9 +163,7 @@ static bool resolve_ring_config(
         dep_pool_values[r] = CHIP_DEP_LIST_POOL_SIZE;
     }
 
-    apply_env_ring_values("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_sizes);
-    apply_env_ring_values("PTO2_RING_HEAP", 1024, std::numeric_limits<uint64_t>::max(), false, eff_heap_sizes);
-    apply_env_ring_values("PTO2_RING_DEP_POOL", 4, static_cast<uint64_t>(INT32_MAX), false, dep_pool_values);
+    warn_on_retired_ring_env();
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         const uint64_t task_window_override = read_ring_override(ring_task_window, r);
@@ -539,7 +455,7 @@ extern "C" int prepared_run_config_compatible_impl(
 }
 
 // per-(cid,config): resolve the cache-key sizing knobs. Pure host parsing over
-// per-task overrides, PTO2_RING_* env, and compile-time defaults. Derived
+// per-task overrides and compile-time defaults. Derived
 // allocation sizes are computed only on cache miss.
 static bool resolve_arena_sizing(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool, ArenaSizingConfig *out

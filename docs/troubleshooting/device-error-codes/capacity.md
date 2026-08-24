@@ -42,12 +42,12 @@ that trips the code.
 
 | Runtime | Bottleneck resource | Code | Fix |
 | ------- | ------------------- | ---- | --- |
-| HBG | task window | 3 | raise `ring_task_window` (`PTO2_RING_TASK_WINDOW`), or shrink the graph |
-| HBG | inline fanin | 4 | reduce distinct producers to `CHIP_MAX_FANIN` (currently 128) or less; HBG has no `PTO2_RING_DEP_POOL` |
+| HBG | task window | 3 | raise `runtime_env.ring_task_window`, or shrink the graph |
+| HBG | inline fanin | 4 | reduce distinct producers to `CHIP_MAX_FANIN` (currently 128) or less; HBG has no dependency spill pool |
 | HBG | TensorMap entries | 11 | increase `CHIP_TENSORMAP_POOL_SIZE`, or reduce registered outputs |
-| TRB | open-scope task window | 1 or 3 | raise `PTO2_RING_TASK_WINDOW`, split the scope, or diagnose stalled reclaim |
-| TRB | heap | 2 | raise `PTO2_RING_HEAP`, shrink allocations, or diagnose stalled reclaim |
-| TRB | dependency pool | 4 | raise `PTO2_RING_DEP_POOL`, cut fanin, or diagnose stalled reclaim |
+| TRB | open-scope task window | 1 or 3 | raise `runtime_env.ring_task_window`, split the scope, or diagnose stalled reclaim |
+| TRB | heap | 2 | raise `runtime_env.ring_heap`, shrink allocations, or diagnose stalled reclaim |
+| TRB | dependency pool | 4 | raise `runtime_env.ring_dep_pool`, cut fanin, or diagnose stalled reclaim |
 
 HBG's graph heap is absent from the table because it has no knob and cannot latch
 code 2: orchestration allocates it out of a virtual window, and the device region

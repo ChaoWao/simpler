@@ -1201,7 +1201,7 @@ static bool append_fanin_or_fail(
         LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
         LOG_ERROR("Solution:");
         LOG_ERROR("  Reduce the task fanin to at most CHIP_MAX_FANIN=%d.", CHIP_MAX_FANIN);
-        LOG_ERROR("  HBG has no dependency spill pool; PTO2_RING_DEP_POOL does not apply.");
+        LOG_ERROR("  HBG has no dependency spill pool; runtime_env.ring_dep_pool does not apply.");
         LOG_ERROR("========================================");
         orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;

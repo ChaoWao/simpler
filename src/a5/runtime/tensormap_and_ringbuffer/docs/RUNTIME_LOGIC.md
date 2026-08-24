@@ -211,7 +211,7 @@ else:
 
 **Reclamation**: Scheduler threads advance `last_task_alive` via lock-free CAS when the oldest task reaches state CONSUMED (4). This frees slots for reuse.
 
-**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With `PTO2_RING_TASK_WINDOW=16` and 208 tasks, slots are recycled ~13 times each.
+**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With a 16-slot `runtime_env.ring_task_window` and 208 tasks, slots are recycled ~13 times each.
 
 ### 4.2 Heap Ring
 
@@ -260,7 +260,7 @@ share one entry pool. K=16 batching is enabled only after every reclaim
 consumer is wired to the current request/ack masks; incomplete wiring keeps
 per-advance publication.
 
-This back-pressure is essential for correctness with small ring sizes — for example, with `PTO2_RING_TASK_WINDOW=16` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
+This back-pressure is essential for correctness with small ring sizes — for example, with a 16-slot `runtime_env.ring_task_window` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
 
 ### 4.5 Deadlock Detection
 

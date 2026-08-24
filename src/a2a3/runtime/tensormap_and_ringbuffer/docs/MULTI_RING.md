@@ -245,8 +245,6 @@ independently for each resource and ring:
 
 ```text
 per-ring CallConfig entry (a scalar is broadcast to every entry)
-  > per-ring PTO2_RING_* env value
-  > scalar PTO2_RING_* env value
   > compile-time default
 ```
 
@@ -302,21 +300,13 @@ per-case `config` dict — each value is a scalar or a four-entry list:
 }
 ```
 
-Process-wide env fallback accepts either one scalar value or exactly four
-comma-separated per-ring values. Invalid env values are logged and ignored, then
-fall through to defaults. `PTO2_RING_HEAP` values are integer bytes:
-
-```bash
-# Uniform, old behavior:
-PTO2_RING_TASK_WINDOW=1024
-PTO2_RING_HEAP=1048576
-PTO2_RING_DEP_POOL=1024
-
-# Per-ring, indexed by ring_id 0..3:
-PTO2_RING_TASK_WINDOW=8192,16384,131072,524288
-PTO2_RING_HEAP=134217728,268435456,402653184,536870912
-PTO2_RING_DEP_POOL=4096,8192,16384,32768
-```
+There is no process-wide fallback. `PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` /
+`PTO2_RING_DEP_POOL` used to size every ring in the process; they are not read any
+more, and the runtime logs a warning if one is still exported, because otherwise
+the requested sizing would vanish into the compile-time default. Size the rings
+per task instead — that is what the `CallConfig` block above does, and it is
+strictly more expressive: two tasks in one process can hold different ring sizes,
+which the env never allowed.
 
 Use `--enable-scope-stats` to confirm the effective values for a real run. The
 first line of `scope_stats/scope_stats.jsonl` includes `task_window_max`,
