@@ -860,7 +860,7 @@ Tasks are queued by resource shape, which is derived from the `active_mask` in t
 Each orchestration `.so` must export:
 
 ```cpp
-extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
+extern "C" OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
 extern "C" void aicpu_orchestration_entry(uint64_t* args, int arg_count);
 ```
 

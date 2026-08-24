@@ -14,7 +14,7 @@ In tensormap_and_ringbuffer, the orchestration function runs on AICPU and builds
 Your orchestration shared object must export:
 
 ```cpp
-extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args);
+extern "C" OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args);
 extern "C" void aicpu_orchestration_entry(const ChipTaskArgs &orch_args);
 ```
 

@@ -51,10 +51,9 @@ static constexpr int32_t ROUNDS = 6;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{.expected_arg_count = 1};
+    return OrchestrationConfig{.expected_arg_count = 1};
 }
 
 static void submit_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {

@@ -22,14 +22,13 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
+__attribute__((visibility("default"))) OrchestrationConfig
 prefetch_async_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{.expected_arg_count = 2};
+    return OrchestrationConfig{.expected_arg_count = 2};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return prefetch_async_orchestration_config(orch_args);
 }
 

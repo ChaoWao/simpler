@@ -312,7 +312,7 @@ void set_tensor_data(
  */
 #ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
 #define PTO2_ORCHESTRATION_CONFIG_DEFINED
-struct PTO2OrchestrationConfig {
+struct OrchestrationConfig {
     int expected_arg_count;
 };
 #endif

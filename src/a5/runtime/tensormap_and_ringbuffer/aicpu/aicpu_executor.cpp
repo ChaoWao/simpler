@@ -70,7 +70,7 @@ typedef void (*DeviceOrchestrationFunc)(const ChipTaskArgs &orch_args);
 typedef void (*DeviceOrchestrationBindRuntimeFunc)(PTO2Runtime *rt);
 
 // Config function exported by orchestration .so
-typedef PTO2OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const ChipTaskArgs &orch_args);
+typedef OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const ChipTaskArgs &orch_args);
 
 // From orchestration/common.cpp linked into this DSO — updates g_current_runtime here (distinct from
 // framework_bind_runtime in the dlopen'd libdevice_orch_*.so).
@@ -570,7 +570,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 // Validate arg count on every run against the registered SO.
                 if (*p_config_func != nullptr) {
-                    PTO2OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
+                    OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
                     LOG_DEBUG("Thread %d: Config: expected_args=%d", thread_idx, cfg.expected_arg_count);
                     if (cfg.expected_arg_count > 0) {
                         const ChipStorageTaskArgs &args_validate = runtime->get_orch_args();
