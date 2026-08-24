@@ -30,12 +30,37 @@ Requires torch >= 2.3 (for ``torch.uint16`` / ``torch.uint32``).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from simpler.task_interface import ChipTensor, DataType
 
 _TORCH_DTYPE_MAP = None
+
+
+class PinnedTorchAllocator:
+    """Allocate CPU tensors directly on a Worker's page-locked host storage."""
+
+    def __init__(self, worker) -> None:
+        if int(worker.level) != 2:
+            raise TypeError("PinnedTorchAllocator requires a level-2 Worker")
+        self._worker = worker
+
+    def empty(self, shape, *, dtype=None):
+        """Return a contiguous tensor whose storage comes from ``aclrtMallocHost``."""
+        import torch  # pyright: ignore[reportMissingImports]
+
+        shape = tuple(int(dim) for dim in shape)
+        dtype = torch.get_default_dtype() if dtype is None else dtype
+        if any(dim < 0 for dim in shape):
+            raise ValueError(f"PinnedTorchAllocator.empty: shape dimensions must be non-negative, got {shape}")
+        numel = math.prod(shape)
+        if numel == 0:
+            return torch.empty(shape, dtype=dtype)
+        element_size = torch.empty((), dtype=dtype).element_size()
+        backing = self._worker.alloc_pinned_host(numel * element_size)
+        return torch.frombuffer(backing.buffer, dtype=dtype, count=numel).reshape(shape)
 
 
 def _ensure_torch_map():

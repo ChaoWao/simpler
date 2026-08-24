@@ -23,11 +23,12 @@ from .scene_test import (
     scene_level,
     scene_test,
 )
-from .torch_interop import make_chip_tensor_arg, torch_dtype_to_datatype
+from .torch_interop import PinnedTorchAllocator, make_chip_tensor_arg, torch_dtype_to_datatype
 
 __all__ = [
     "CallableNamespace",
     "KernelCompiler",
+    "PinnedTorchAllocator",
     "RuntimeBuilder",
     "Scalar",
     "SceneTestCase",

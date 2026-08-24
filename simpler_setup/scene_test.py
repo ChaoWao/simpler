@@ -1445,6 +1445,15 @@ class SceneTestCase:
         """Return TaskArgsBuilder with ordered TensorArg/Scalar specs."""
         raise NotImplementedError
 
+    def generate_args_for_worker(self, worker, params) -> TaskArgsBuilder:
+        """Build L2 args with access to worker-owned allocation APIs.
+
+        Most cases use ordinary CPU tensors and inherit this forwarding
+        implementation. Cases whose producer writes directly into specialized
+        storage, such as pinned HBG args, override this hook.
+        """
+        return self.generate_args(params)
+
     def compute_golden(self, args: TaskArgsBuilder, params) -> None:
         """Compute expected outputs in-place on a cloned TaskArgsBuilder."""
         raise NotImplementedError
@@ -1650,7 +1659,7 @@ class SceneTestCase:
             type(self)._st_l2_handle = handle
 
         # Build args
-        test_args = self.generate_args(params)
+        test_args = self.generate_args_for_worker(worker, params)
         chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker)
 
         # Compute golden (unless skip_golden)

@@ -15,6 +15,7 @@ import itertools
 import struct
 import weakref
 from multiprocessing.shared_memory import SharedMemory
+from typing import Any, cast
 
 import pytest
 import simpler.task_interface as task_interface_module
@@ -200,6 +201,84 @@ class TestGetDtypeName:
 
 
 class TestTorchInterop:
+    def test_pinned_torch_allocator_builds_tensor_over_worker_storage(self):
+        import torch  # pyright: ignore[reportMissingImports]
+        from simpler.worker import PinnedHostBuffer
+
+        from simpler_setup.torch_interop import PinnedTorchAllocator
+
+        class FakeChipWorker:
+            def __init__(self):
+                self.blocks = {}
+                self.alloc_sizes = []
+                self.freed = []
+
+            def alloc_pinned_host(self, size):
+                block = (ctypes.c_ubyte * size)()
+                ptr = ctypes.addressof(block)
+                self.blocks[ptr] = block
+                self.alloc_sizes.append(size)
+                return ptr
+
+            def free_pinned_host(self, ptr):
+                self.freed.append(ptr)
+                self.blocks.pop(ptr)
+
+        class FakeWorker:
+            level = 2
+
+            def __init__(self):
+                self.chip_worker = FakeChipWorker()
+
+            def alloc_pinned_host(self, size):
+                return PinnedHostBuffer(cast(Any, self.chip_worker), size)
+
+        worker = FakeWorker()
+        tensor = PinnedTorchAllocator(worker).empty((2, 3), dtype=torch.float32)
+        ptr = tensor.data_ptr()
+
+        assert worker.chip_worker.alloc_sizes == [2 * 3 * 4]
+        assert ptr in worker.chip_worker.blocks
+        tensor.fill_(1.25)
+        assert tensor.tolist() == [[1.25, 1.25, 1.25], [1.25, 1.25, 1.25]]
+
+        # torch keeps the ctypes exporter (and therefore its allocation token)
+        # alive after PinnedTorchAllocator.empty() drops its local handle.
+        gc.collect()
+        assert worker.chip_worker.freed == []
+        del tensor
+        gc.collect()
+        assert worker.chip_worker.freed == [ptr]
+
+    def test_pinned_torch_allocator_rejects_non_l2_worker(self):
+        from simpler_setup.torch_interop import PinnedTorchAllocator
+
+        with pytest.raises(TypeError, match="level-2"):
+            PinnedTorchAllocator(type("Worker", (), {"level": 3})())
+
+    def test_pinned_host_cleanup_reports_free_failure(self, capsys):
+        from simpler.worker import PinnedHostBuffer
+
+        class FailingChipWorker:
+            def __init__(self):
+                self.block = (ctypes.c_ubyte * 16)()
+
+            def alloc_pinned_host(self, size):
+                assert size == len(self.block)
+                return ctypes.addressof(self.block)
+
+            def free_pinned_host(self, ptr):
+                raise RuntimeError(f"injected failure for {ptr}")
+
+        buffer = PinnedHostBuffer(cast(Any, FailingChipWorker()), 16)
+        ptr = buffer.base
+        del buffer
+        gc.collect()
+
+        assert capsys.readouterr().err == (
+            f"PinnedHostBuffer cleanup: free_pinned_host failed (continuing best-effort): injected failure for {ptr}\n"
+        )
+
     def test_torch_dtype_to_datatype(self):
         import torch  # pyright: ignore[reportMissingImports]
 

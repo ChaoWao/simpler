@@ -103,10 +103,11 @@ def _rope_half(vec: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch
     return torch.cat([lo * cos_lo - hi * sin_lo, hi * cos_hi + lo * sin_hi], dim=-1)
 
 
-def _paged_block_table_slot_mapping(seq_lens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _paged_block_table_slot_mapping(seq_lens: torch.Tensor, empty=torch.empty) -> tuple[torch.Tensor, torch.Tensor]:
     """Identity paging within a layer pool (same for every layer)."""
-    block_table = torch.arange(BATCH * MAX_BLOCKS_PER_SEQ, dtype=torch.int32)
-    slot_mapping = torch.empty(BATCH, dtype=torch.int32)
+    block_table = empty((BATCH * MAX_BLOCKS_PER_SEQ,), dtype=torch.int32)
+    torch.arange(BATCH * MAX_BLOCKS_PER_SEQ, dtype=torch.int32, out=block_table)
+    slot_mapping = empty((BATCH,), dtype=torch.int32)
     for b in range(BATCH):
         pos = int(seq_lens[b].item()) - 1
         logical_block = pos // BLOCK_SIZE
@@ -119,6 +120,7 @@ def generate_inputs(
     seed: int = 1234,
     seq_len: int = DEFAULT_SEQ_LEN,
     n_layers: int = N_LAYERS,
+    allocator=None,
 ) -> TaskArgsBuilder:
     """Deterministic fixture for decode_fwd_layers, stacked along dim 0.
 
@@ -135,6 +137,9 @@ def generate_inputs(
     if n_layers <= 0:
         raise ValueError(f"n_layers must be positive, got {n_layers}")
     g = torch.Generator().manual_seed(seed)
+
+    if allocator is not None:
+        return _generate_direct_inputs(allocator, g, seq_len, n_layers)
 
     def rn(shape, std=1.0, bias=0.0):
         return torch.empty(shape).normal_(0.0, std, generator=g) + bias
@@ -174,6 +179,70 @@ def generate_inputs(
     }
     specs = [TensorArg(name, tensors[name]) for name in INPUT_NAMES]
     specs.append(TensorArg("out", torch.zeros([BATCH, HIDDEN], dtype=torch.bfloat16)))
+    return TaskArgsBuilder(*specs)
+
+
+def _generate_direct_inputs(allocator, generator, seq_len: int, n_layers: int) -> TaskArgsBuilder:
+    """Generate every final Qwen arg directly in allocator-owned storage."""
+
+    def empty(shape, *, dtype=torch.float32):
+        return allocator.empty(shape, dtype=dtype)
+
+    def normal(shape, std=1.0, bias=0.0, *, dtype=torch.float32):
+        result = empty(shape, dtype=dtype)
+        result.normal_(0.0, std, generator=generator)
+        if bias:
+            result.add_(bias)
+        return result
+
+    def stacked(shape, std=1.0, bias=0.0, *, dtype=torch.float32):
+        rows = int(shape[0])
+        result = empty((n_layers * rows, *shape[1:]), dtype=dtype)
+        first = result[:rows]
+        first.normal_(0.0, std, generator=generator)
+        if bias:
+            first.add_(bias)
+        for layer in range(1, n_layers):
+            result[layer * rows : (layer + 1) * rows].copy_(first)
+        return result
+
+    seq_lens = empty((BATCH,), dtype=torch.int32).fill_(seq_len)
+    block_table, slot_mapping = _paged_block_table_slot_mapping(seq_lens, empty)
+
+    posv = torch.arange(MAX_SEQ).float().unsqueeze(1)
+    inv_freq = 1.0 / (ROPE_THETA ** (torch.arange(0, HALF_DIM).float() / HALF_DIM))
+    ang = posv * inv_freq.unsqueeze(0)
+    rope_cos = empty((MAX_SEQ, HEAD_DIM))
+    rope_sin = empty((MAX_SEQ, HEAD_DIM))
+    torch.cos(ang, out=rope_cos[:, :HALF_DIM])
+    torch.sin(ang, out=rope_sin[:, :HALF_DIM])
+    rope_cos[:, HALF_DIM:].copy_(rope_cos[:, :HALF_DIM])
+    rope_sin[:, HALF_DIM:].copy_(rope_sin[:, :HALF_DIM])
+
+    tensors = {
+        "hidden_states": normal((BATCH, HIDDEN), dtype=torch.bfloat16),
+        "input_rms_weight": stacked((1, HIDDEN), 0.1, 1.0),
+        "wq": stacked((HIDDEN, HIDDEN), 0.02, dtype=torch.bfloat16),
+        "wk": stacked((HIDDEN, KV_HIDDEN), 0.02, dtype=torch.bfloat16),
+        "wv": stacked((HIDDEN, KV_HIDDEN), 0.02, dtype=torch.bfloat16),
+        "q_norm_weight": stacked((1, HEAD_DIM), 0.1, 1.0),
+        "k_norm_weight": stacked((1, HEAD_DIM), 0.1, 1.0),
+        "seq_lens": seq_lens,
+        "block_table": block_table,
+        "slot_mapping": slot_mapping,
+        "rope_cos": rope_cos,
+        "rope_sin": rope_sin,
+        "k_cache": stacked((CACHE_ROWS, HEAD_DIM), 0.01, dtype=torch.bfloat16),
+        "v_cache": stacked((CACHE_ROWS, HEAD_DIM), 0.02, 0.3, dtype=torch.bfloat16),
+        "wo": stacked((HIDDEN, HIDDEN), 0.0006, dtype=torch.bfloat16),
+        "w_gate": stacked((HIDDEN, INTERMEDIATE), 0.02, dtype=torch.bfloat16),
+        "w_up": stacked((HIDDEN, INTERMEDIATE), 0.02, dtype=torch.bfloat16),
+        "w_down": stacked((INTERMEDIATE, HIDDEN), 0.0004, dtype=torch.bfloat16),
+        "post_rms_weight": stacked((1, HIDDEN), 0.1, 1.0),
+    }
+    specs = [TensorArg(name, tensors[name]) for name in INPUT_NAMES]
+    output = empty((BATCH, HIDDEN), dtype=torch.bfloat16).zero_()
+    specs.append(TensorArg("out", output))
     return TaskArgsBuilder(*specs)
 
 

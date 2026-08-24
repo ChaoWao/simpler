@@ -1603,6 +1603,14 @@ class ChipWorker:
         """Free memory allocated by ``malloc()``."""
         self._impl.free(int(ptr))
 
+    def alloc_pinned_host(self, size):
+        """Allocate page-locked host memory. Returns a pointer (uint64)."""
+        return int(self._impl.alloc_pinned_host(int(size)))
+
+    def free_pinned_host(self, ptr):
+        """Release memory allocated by ``alloc_pinned_host()``."""
+        self._impl.free_pinned_host(int(ptr))
+
     def copy_to(self, dst, src, size):
         """Copy *size* bytes from host *src* to worker *dst*."""
         self._impl.copy_to(int(dst), int(src), int(size))

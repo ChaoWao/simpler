@@ -172,6 +172,8 @@ public:
 
     uint64_t malloc(size_t size);
     void free(uint64_t ptr);
+    uint64_t alloc_pinned_host(size_t size);
+    void free_pinned_host(uint64_t ptr);
     void copy_to(uint64_t dst, uint64_t src, size_t size);
     void copy_from(uint64_t dst, uint64_t src, size_t size);
 
@@ -248,6 +250,8 @@ private:
     using DestroyDeviceContextFn = void (*)(void *);
     using DeviceMallocCtxFn = void *(*)(void *, size_t);
     using DeviceFreeCtxFn = void (*)(void *, void *);
+    using AllocPinnedHostCtxFn = int (*)(void *, size_t, void **);
+    using FreePinnedHostCtxFn = int (*)(void *, void *);
     using CopyToDeviceCtxFn = int (*)(void *, void *, const void *, size_t);
     using CopyFromDeviceCtxFn = int (*)(void *, void *, const void *, size_t);
     using GetRuntimeSizeFn = size_t (*)();
@@ -309,11 +313,14 @@ private:
     DestroyDeviceContextFn destroy_device_context_fn_ = nullptr;
     DeviceMallocCtxFn device_malloc_ctx_fn_ = nullptr;
     DeviceFreeCtxFn device_free_ctx_fn_ = nullptr;
+    AllocPinnedHostCtxFn alloc_pinned_host_ctx_fn_ = nullptr;
+    FreePinnedHostCtxFn free_pinned_host_ctx_fn_ = nullptr;
     CopyToDeviceCtxFn copy_to_device_ctx_fn_ = nullptr;
     CopyFromDeviceCtxFn copy_from_device_ctx_fn_ = nullptr;
     GetRuntimeSizeFn get_runtime_size_fn_ = nullptr;
     GetRuntimeAlignmentFn get_runtime_alignment_fn_ = nullptr;
     GetCommittedDeviceMemoryFn device_committed_memory_fn_ = nullptr;
+    std::unordered_set<void *> pinned_host_allocations_;
     SimplerInitFn simpler_init_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;

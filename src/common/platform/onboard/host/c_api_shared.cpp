@@ -32,6 +32,7 @@
 #include "task_args.h"
 #include "native_run_context.h"
 
+#include <acl/acl_rt.h>
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstdio>
@@ -329,6 +330,17 @@ void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr) {
     try {
         static_cast<DeviceRunnerBase *>(ctx)->free_tensor(dev_ptr);
     } catch (...) {}
+}
+
+int alloc_pinned_host_ctx(DeviceContextHandle ctx, size_t size, void **host_ptr) {
+    if (ctx == NULL || size == 0 || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    *host_ptr = NULL;
+    return aclrtMallocHost(host_ptr, size);
+}
+
+int free_pinned_host_ctx(DeviceContextHandle ctx, void *host_ptr) {
+    if (ctx == NULL || host_ptr == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    return aclrtFreeHost(host_ptr);
 }
 
 int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_ptr, size_t size) {
