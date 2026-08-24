@@ -83,8 +83,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
         LOG_INFO(
-            "Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed),
-            task_count
+            "Thread %d: completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count
         );
         return LoopAction::BREAK_LOOP;
     }
@@ -905,7 +904,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     }
 #endif
 
-    // Initialize task counters. Task count comes from PTO2 shared memory.
+    // Initialize task counters. Task count comes from shared memory.
     if (runtime->get_gm_sm_ptr()) {
         auto *header = static_cast<SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
         // Read at one-time boot init, before the SM is reset for the run, so a ring
@@ -914,10 +913,10 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         // CHIP_TASK_WINDOW_SIZE], since the ring cannot hold more than its task
         // window — so any garbage pattern, negative or positive, leaves the count
         // at 0, which is the correct value at boot.
-        int32_t pto2_count = 0;
+        int32_t window_tasks = 0;
         int32_t ring_tasks = header->ring.fc.current_task_index.load(std::memory_order_acquire);
-        if (ring_tasks > 0 && ring_tasks <= CHIP_TASK_WINDOW_SIZE) pto2_count = ring_tasks;
-        total_tasks_ = pto2_count;
+        if (ring_tasks > 0 && ring_tasks <= CHIP_TASK_WINDOW_SIZE) window_tasks = ring_tasks;
+        total_tasks_ = window_tasks;
     } else {
         total_tasks_ = 0;
     }

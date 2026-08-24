@@ -317,7 +317,7 @@ void dep_gen_aicpu_record_submit(
     }
 
     // Per-subslot kernel ids (AIC, AIV0, AIV1). The orchestrator owns the
-    // identity-side of the swimlane join: with task_id (PTO2 raw) + kernel_id
+    // identity-side of the swimlane join: with task_id (TaskId raw) + kernel_id
     // captured here, the host post-processor can name every AICore record.
     // Inactive subslots stay at INVALID_KERNEL_ID (-1); the caller is expected
     // to pass that sentinel rather than 0.

@@ -154,7 +154,7 @@ public:
 
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
-    //  - latches submitted task count from PTO2 shared memory
+    //  - latches submitted task count from shared memory
     //  - folds inline_completed_tasks into completed_tasks_
     //    (skipped on fatal error — emergency_shutdown runs instead)
     // Callers must invoke rt_orchestration_done(rt) before this — that

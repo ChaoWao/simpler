@@ -186,7 +186,7 @@ void SharedMemoryHandle::print_layout() {
 
     SharedMemoryHeader *h = header;
 
-    LOG_DEBUG("=== PTO2 Shared Memory Layout ===");
+    LOG_DEBUG("=== Shared Memory Layout ===");
     LOG_DEBUG("Base address:       %p", sm_base);
     LOG_DEBUG("Total size:         %" PRIu64 " bytes", h->total_size);
     LOG_DEBUG("Ring depth:         %d", CHIP_MAX_RING_DEPTH);

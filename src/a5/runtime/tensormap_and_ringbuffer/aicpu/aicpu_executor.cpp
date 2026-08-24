@@ -803,7 +803,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 #endif
 #endif  // SIMPLER_ORCH_PROFILING
 
-            // Latch task count from PTO2 shared memory to hand off to the
+            // Latch task count from shared memory to hand off to the
             // scheduler. The orchestrator's run window (start_time / end_time /
             // submit_count) is no longer published to shared memory — the
             // device LOG_INFO "orch_start=… orch_end=… orch_cost=…" line
@@ -842,7 +842,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         );
         if (submitted_tasks >= 0) {
             LOG_INFO(
-                "PTO2 total submitted tasks = %d, already executed %d tasks", submitted_tasks,
+                "total submitted tasks = %d, already executed %d tasks", submitted_tasks,
                 sched_ctx_.completed_tasks_count()
             );
         }

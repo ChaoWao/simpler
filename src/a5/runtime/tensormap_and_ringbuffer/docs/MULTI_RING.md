@@ -1,6 +1,6 @@
 # Multi-Ring Buffer Architecture
 
-> Extension to the PTO2 runtime. For the base architecture, see [RUNTIME_LOGIC.md](RUNTIME_LOGIC.md).
+> Extension to `tensormap_and_ringbuffer`. For the base architecture, see [RUNTIME_LOGIC.md](RUNTIME_LOGIC.md).
 
 ## 1. Problem
 

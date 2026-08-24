@@ -133,7 +133,7 @@ remote sidecars; the remote framed path encodes the sidecar as a
 | **① User submit** | `TaskArgs` object (builder) | Python/C++ parent heap | user orch fn | Orchestrator |
 | **② Slot storage** | `TaskArgs` object (inside `slot.task_args`) | parent heap | Orchestrator.submit moves it here | WorkerThread at dispatch |
 | **③ Dispatch wire (PROCESS only)** | length-prefixed blob | shm mailbox (MAP_SHARED) | parent WorkerThread encodes | forked child decodes |
-| **④ L2 ABI edge** | `ChipStorageTaskArgs` POD | child stack | `ChipWorker::run` assembles | `pto2_run_runtime` consumes |
+| **④ L2 ABI edge** | `ChipStorageTaskArgs` POD | child stack | `ChipWorker::run` assembles | `simpler_run` consumes |
 
 ### Tags stripped at submit
 
@@ -201,7 +201,7 @@ View does **not** own memory. Valid for the duration of a single
 ④ ChipStorageTaskArgs POD — child stack
      │ memcpy view.tensors, view.scalars into struct
      ▼
-    pto2_run_runtime(local_slot, &chip_storage, &config)
+    simpler_run(local_slot, &chip_storage, &config)
 ```
 
 ---
@@ -232,7 +232,7 @@ Propagated by value throughout:
 5. Child reads `CallConfig` from mailbox by value, or the remote session
    runner reconstructs it from `CallConfigWire`
 6. `ChipWorker::run` receives `const CallConfig&`; passed on to
-   `pto2_run_runtime` at the L2 edge
+   `simpler_run` at the L2 edge
 
 Same type at every level. Used directly at the L2 runtime ABI.
 
@@ -248,7 +248,7 @@ concrete leaves, each consumed by its own Python child loop.
 Wraps a dlsym'd `runtime.so`. `_chip_process_loop` instantiates one
 `ChipWorker` per chip child and calls its `run` on every dispatch.
 `run()` assembles a `ChipStorageTaskArgs` POD from the decoded view and
-calls `pto2_run_runtime`:
+calls `simpler_run`:
 
 ```cpp
 void ChipWorker::run(int32_t local_slot, TaskArgsView view, const CallConfig &config) {
@@ -257,7 +257,7 @@ void ChipWorker::run(int32_t local_slot, TaskArgsView view, const CallConfig &co
     chip_storage.scalar_count_ = view.scalar_count;
     memcpy(chip_storage.tensors_, view.tensors, view.tensor_count * sizeof(ChipTensor));
     memcpy(chip_storage.scalars_, view.scalars, view.scalar_count * sizeof(uint64_t));
-    pto2_run_runtime(local_slot, &chip_storage, &config);
+    simpler_run(local_slot, &chip_storage, &config);
 }
 ```
 

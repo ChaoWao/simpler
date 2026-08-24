@@ -312,14 +312,14 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
         return 0;
     }
 
-    void *pto2_sm = runtime->get_gm_sm_ptr();
-    if (pto2_sm == nullptr) {
+    void *device_sm = runtime->get_gm_sm_ptr();
+    if (device_sm == nullptr) {
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, device_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
-        LOG_WARN("Failed to copy PTO2 header from device");
+        LOG_WARN("Failed to copy the shared-memory header from device");
         return 0;
     }
 
@@ -373,7 +373,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
     return true;
 }
 
-// The orchestration .so exports these (PTO2 submit_task form).
+// The orchestration .so exports these (submit_task form).
 typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(RuntimeContext *);
 typedef void (*OrchestrationPrewarmFunc)();
@@ -997,7 +997,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 
 /**
  * Per-run binding: build device-side argument storage (tensor copy-out, GM
- * heap, PTO2 shared memory) and publish it to the runtime. Assumes the
+ * heap, shared memory) and publish it to the runtime. Assumes the
  * callable-side state (kernel binaries, orch SO bytes, func/config names)
  * is already populated by register_callable_impl.
  *

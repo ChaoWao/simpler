@@ -178,7 +178,7 @@ public:
     // Non-blocking: `scope_end` walks the scope's tasks and releases one
     // ref per task, returning immediately. Actual CONSUMED transitions
     // happen asynchronously as each task's consumer count reaches
-    // threshold (mirrors L2's `pto2_scope_end`). The owning run fence
+    // threshold (mirrors the chip runtime's `rt_scope_end`). The owning run fence
     // provides the synchronous completion boundary.
     void scope_begin();
     void scope_end();

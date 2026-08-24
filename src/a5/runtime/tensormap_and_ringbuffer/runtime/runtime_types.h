@@ -61,7 +61,7 @@
 // Task management
 // NOTE: CHIP_TASK_WINDOW_SIZE is now a per-ring default value.
 // Actual window size is passed at runtime to runtime_reserve_layout().
-// Use pto2_task_slot(sched, task_id) for slot calculation.
+// The slot is local_id masked by the window size, which is why the window is a power of two.
 #define CHIP_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
 // Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)

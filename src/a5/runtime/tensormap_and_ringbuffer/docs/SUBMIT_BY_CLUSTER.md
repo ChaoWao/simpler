@@ -2,7 +2,7 @@
 
 ## 1. Goal
 
-Define a single, main-branch-aligned specification for PTO2 cluster submission that combines:
+Define a single, main-branch-aligned specification for cluster submission that combines:
 
 1. Product requirements (what must be true).
 2. Runtime design (how it is implemented on current main baseline).
@@ -82,7 +82,7 @@ Rules:
 4. `aiv0_kernel_id` and `aiv1_kernel_id` are semantically equivalent.
 5. Wrappers are orchestration sugar only (inline in orchestration API); no dedicated runtime ops entries.
 6. Submit-contract types are defined once in a shared header-only submit-types surface consumed by orchestration and runtime headers.
-7. Invalid submits follow existing PTO2 behavior (`always_assert`), not a new recoverable return-code API.
+7. Invalid submits follow existing behavior (`always_assert`), not a new recoverable return-code API.
 
 ## 7. Data Model (Requirements + Design)
 

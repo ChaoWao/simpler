@@ -354,7 +354,7 @@ protected:
     };
     std::array<RetainedGraphBlock, PTO_PIPELINE_MAX_DEPTH> graph_definition_blocks_{};
 
-    // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2
+    // Each arena bank backs the three pooled regions (GM heap / shared
     // shared memory / trb prebuilt runtime arena) for one pipeline slot. They
     // are separate allocations because the combined size can exceed the device
     // allocator's largest contiguous block. Released explicitly in finalize()

@@ -14,7 +14,7 @@
  *
  * This module owns the host-side state and methods that are identical
  * between the two onboard arches today:
- *   - The `MemoryAllocator` and the three `DeviceArena`s (gm heap, PTO2
+ *   - The `MemoryAllocator` and the three `DeviceArena`s (gm heap, shared memory
  *     SM, runtime arena) backing the per-Worker pooled regions.
  *   - The trivial tensor-memory wrappers (`allocate_tensor`,
  *     `free_tensor`, `copy_*_device`).
@@ -167,7 +167,7 @@ public:
     virtual void unregister_device_memory_from_host(void *dev_ptr) { (void)dev_ptr; }
 
     /**
-     * Commit the three per-Worker pooled regions (PTO2 GM heap, PTO2
+     * Commit the three per-Worker pooled regions (GM heap, shared
      * shared memory, trb prebuilt runtime arena) as three independent
      * device allocations. Must be called before any `acquire_pooled_*`.
      * Idempotent on identical (or smaller) sizes; an equal-or-smaller
@@ -188,7 +188,7 @@ public:
     int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
     /**
-     * Return the pooled GM heap / PTO2 SM / runtime arena base pointer of the
+     * Return the pooled GM heap / shared memory / runtime arena base pointer of the
      * selected arena bank. `setup_static_arena` (arch subclass) must have
      * already committed the relevant region on that bank; otherwise returns
      * nullptr. The runtime arena accessor is trb-only — hbg's

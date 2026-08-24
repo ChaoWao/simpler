@@ -522,7 +522,7 @@ state machine).
 counter, then returns. A task whose `fanout_released` now meets the
 threshold transitions to CONSUMED inline; others stay COMPLETED or PENDING
 until the scheduler and consumers finish their own releases. This mirrors
-L2's `pto2_scope_end`.
+the chip runtime's `rt_scope_end`.
 
 The internal run fence, not `scope_end`, provides synchronous completion.
 `Worker.run` closes its outer scope, closes submission, and waits for that

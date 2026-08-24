@@ -289,14 +289,14 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
         return 0;
     }
 
-    void *pto2_sm = runtime->get_gm_sm_ptr();
-    if (pto2_sm == nullptr) {
+    void *device_sm = runtime->get_gm_sm_ptr();
+    if (device_sm == nullptr) {
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, device_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
-        LOG_WARN("Failed to copy PTO2 header from device");
+        LOG_WARN("Failed to copy the shared-memory header from device");
         return 0;
     }
 
@@ -673,7 +673,7 @@ static void apply_orch_sched_env_flags(Runtime *runtime) {
     );
 }
 
-// per-(cid,config): reserve and acquire the static device pools. GM heap, PTO2
+// per-(cid,config): reserve and acquire the static device pools. GM heap, shared memory
 // shared memory, and the prebuilt runtime arena all live in one backing
 // allocation; setup_static_arena reserves the three regions and commits in one
 // shot. The runtime-arena size is recovered by replaying the (pure, cheap)
@@ -705,7 +705,7 @@ static bool ensure_static_arenas(
     out->gm_sm = api->acquire_pooled_gm_sm();
     int64_t t_sm_end = _now_ms();
     if (out->gm_sm == nullptr) {
-        LOG_ERROR("Failed to acquire pooled PTO2 shared memory");
+        LOG_ERROR("Failed to acquire pooled shared memory");
         return false;
     }
 
@@ -844,7 +844,7 @@ static bool build_and_cache_prebuilt_arena(
 
 /**
  * Per-run binding: build device-side argument storage (tensor copy-out, GM
- * heap, PTO2 shared memory) and publish it to the runtime. Assumes the
+ * heap, shared memory) and publish it to the runtime. Assumes the
  * callable-side state (kernel binaries, orch SO bytes, func/config names)
  * is already populated by register_callable_impl.
  *
@@ -1033,7 +1033,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         if (sched_error_code == SIMPLER_ERROR_SCHEDULER_TIMEOUT) {
             int32_t detail = host_header.sched_stall_detail.load(std::memory_order_acquire);
             LOG_ERROR(
-                "PTO2 scheduler timeout sub_class=%s (detail=%d) completed=%d/%d running=%d ready=%d waiting=%d "
+                "scheduler timeout sub_class=%s (detail=%d) completed=%d/%d running=%d ready=%d waiting=%d "
                 "orch_done=%d stuck_task_id=%" PRId64 " stuck_core=%d",
                 stall_detail_name(detail), detail, host_header.sched_stall_completed.load(std::memory_order_relaxed),
                 host_header.sched_stall_total.load(std::memory_order_relaxed),

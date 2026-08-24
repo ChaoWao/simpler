@@ -17,7 +17,7 @@ See [host_build_graph/docs/RUNTIME_LOGIC.md](../runtime/host_build_graph/docs/RU
 Graph recording and replay are documented in
 [GRAPH_EXECUTION.md](../runtime/host_build_graph/docs/GRAPH_EXECUTION.md).
 
-## tensormap_and_ringbuffer (PTO2)
+## tensormap_and_ringbuffer
 
 See [tensormap_and_ringbuffer/docs/](../runtime/tensormap_and_ringbuffer/docs/):
 

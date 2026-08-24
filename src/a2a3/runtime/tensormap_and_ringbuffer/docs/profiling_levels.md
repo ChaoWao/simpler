@@ -47,7 +47,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 **What's compiled:**
 
 - Debug/diagnostic logs (always present)
-- Progress tracking (`PTO2 progress: completed=...`)
+- Progress tracking (`progress: completed=...`)
 - Stall detection and dump (triggered after the `SCHEDULER_TIMEOUT_MS` wall-clock no-progress budget)
 - Deadlock/livelock detection (`diagnose_stuck_state`, called on stall)
 
@@ -62,8 +62,8 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 - No `sched_start/sched_end/sched_cost` timestamps
 - No `orch_start/orch_end/orch_cost` timestamps
 - No `Scheduler summary: total_time=...`
-- No `PTO2 total submitted tasks` log
-- `PTO2 progress: completed=... total=...` may appear (thread 0 only, at task completion milestones)
+- No `total submitted tasks` log
+- `progress: completed=... total=...` may appear (thread 0 only, at task completion milestones)
 
 ---
 
@@ -161,7 +161,7 @@ captured at chip_swimlane_level >= 3) and `deps.json`; consume them via
 
 **Log output (per orchestrator thread, normal run):** the orchestrator phase
 breakdown, followed by the `orch_start/orch_end/orch_cost` line and the
-`PTO2 total submitted tasks` line — all gated by `SIMPLER_ORCH_PROFILING`. This
+`total submitted tasks` line — all gated by `SIMPLER_ORCH_PROFILING`. This
 level adds orchestrator-side logs only; the scheduler side is unchanged from
 Level 1 (add `SIMPLER_SCHED_PROFILING` / Level 2 for scheduler detail).
 
@@ -180,7 +180,7 @@ Thread X:   finalize+SM    : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:   scope_end      : XXXus  atomics=XXX
 Thread X:   avg/task       : XXXus
 Thread X: orch_start=XXX orch_end=XXX orch_cost=XXXus
-PTO2 total submitted tasks = XXX, already executed XXX tasks
+total submitted tasks = XXX, already executed XXX tasks
 ```
 
 **Note:** Orchestrator logs always print when `SIMPLER_ORCH_PROFILING=1`, regardless of `enable_chip_swimlane` flag.
@@ -240,7 +240,7 @@ header just like on onboard.
 | 3 | + Scheduler phases (`SCHED_*`) |
 | 4 | + Orchestrator phases (full) |
 
-At level 1 the AICore record carries the full PTO2 `task_token_raw`
+At level 1 the AICore record carries the full `task_token_raw`
 (`(ring_id << 32) | local_id`), read straight from
 `LocalContext.async_ctx.task_token.raw` inside the AICore helper —
 already in cache from the dispatch payload, so no extra GM load.
@@ -405,7 +405,7 @@ definitions to runtime headers.
 | 0 | `SIMPLER_DFX=0` | 0 | No timing output |
 | 1 | `SIMPLER_DFX=1` | 0 | Host-side `Orch`/`Sched` `[STRACE]` windows only; no device logs |
 | 2 | `+SIMPLER_SCHED_PROFILING=1` | per sched thread | `sched_start` + phase breakdown + `Scheduler summary` |
-| 3 | `+SIMPLER_ORCH_PROFILING=1` | per orch thread | Orchestrator phase breakdown + `orch_start` + `PTO2 total` |
+| 3 | `+SIMPLER_ORCH_PROFILING=1` | per orch thread | Orchestrator phase breakdown + `orch_start` + `total submitted tasks` |
 | 4 | `+SIMPLER_TENSORMAP_PROFILING=1` | per orch thread | + TensorMap lookup stats (4 lines) |
 
 ---

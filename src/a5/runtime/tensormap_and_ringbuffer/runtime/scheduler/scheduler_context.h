@@ -109,7 +109,7 @@ public:
 
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
-    //  - latches submitted task count from PTO2 shared memory
+    //  - latches submitted task count from shared memory
     //  - folds inline_completed_tasks into completed_tasks_
     //  - flips orchestrator_done_ and triggers core transition
     //    (skipped on fatal error — emergency_shutdown runs instead)

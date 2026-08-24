@@ -203,7 +203,7 @@ bool OrchestratorState::init(
     auto *orch = this;
     *orch = OrchestratorState{};
 
-    // A power-of-two window lets pto2_task_slot() mask instead of dividing.
+    // A power-of-two window lets the slot index mask instead of dividing.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
 
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);

@@ -71,7 +71,7 @@
 
 // Task management
 // Actual window size is passed at runtime to runtime_create_from_sm().
-// Use pto2_task_slot(sched, task_id) for slot calculation.
+// The slot is local_id masked by the window size, which is why the window is a power of two.
 #define CHIP_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
 
 // host_build_graph has one ring, and carries no per-ring dimension anywhere:

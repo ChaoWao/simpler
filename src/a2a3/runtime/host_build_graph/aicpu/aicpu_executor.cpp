@@ -60,7 +60,7 @@
 // here (cleared on teardown before runtime_destroy).
 extern "C" void framework_bind_runtime(RuntimeContext *rt);
 
-static int32_t read_pto2_runtime_status(Runtime *runtime) {
+static int32_t read_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
         return 0;
     }
@@ -480,7 +480,7 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
         LOG_ERROR("aicpu_execute: Thread execution failed with rc=%d", rc);
     }
 
-    int32_t runtime_rc = read_pto2_runtime_status(runtime);
+    int32_t runtime_rc = read_runtime_status(runtime);
 
     // The finalizer publishes cleanup eligibility only after runtime destruction.
     if (g_aicpu_executor.completion_gate_.claim_cleanup()) {

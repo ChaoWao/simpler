@@ -86,8 +86,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
         LOG_INFO(
-            "Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed),
-            task_count
+            "Thread %d: completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count
         );
         return LoopAction::BREAK_LOOP;
     }

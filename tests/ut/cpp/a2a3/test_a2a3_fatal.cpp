@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2 A2A3 fatal error handling.
+ * Unit tests for a2a3 fatal error handling.
  *
  * Tests API short-circuit after fatal state, explicit fatal routing,
  * and allocation with invalid arguments.

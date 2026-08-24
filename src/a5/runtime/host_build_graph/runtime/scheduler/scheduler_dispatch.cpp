@@ -892,7 +892,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     always_assert(sched_ != nullptr);
     SharedMemoryHeader *header = sched_->sm_header;
     if (!header) {
-        LOG_ERROR("PTO2 resolution: header is null");
+        LOG_ERROR("resolution: header is null");
         return -1;
     }
     LOG_INFO("Thread %d: resolution (P) thread starting, serving %d schedulers", thread_idx, active_sched_threads_);
@@ -1064,13 +1064,13 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 
     SharedMemoryHeader *header = sched_->sm_header;
     if (!header) {
-        LOG_ERROR("PTO2 dispatch: header is null");
+        LOG_ERROR("dispatch: header is null");
         return -1;
     }
 
     Handshake *hank = static_cast<Handshake *>(runtime->workers);
 
-    LOG_INFO("Thread %d: PTO2 dispatch starting with %d cores", thread_idx, core_trackers_[thread_idx].core_num());
+    LOG_INFO("Thread %d: dispatch starting with %d cores", thread_idx, core_trackers_[thread_idx].core_num());
     int32_t cur_thread_completed = 0;
     // Non-zero once a scheduler-hang timeout latches; returned in place of the
     // completed count so the caller still sees the negative error rc while the
@@ -1224,7 +1224,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 if (new_total <= PROGRESS_VERBOSE_THRESHOLD ||
                     new_total / PROGRESS_LOG_INTERVAL != prev / PROGRESS_LOG_INTERVAL || new_total >= task_count) {
                     LOG_INFO(
-                        "PTO2 progress: completed=%d total=%d (%.1f%%)", new_total, task_count,
+                        "progress: completed=%d total=%d (%.1f%%)", new_total, task_count,
                         100.0 * new_total / task_count
                     );
                 }

@@ -84,8 +84,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
         LOG_INFO(
-            "Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed),
-            task_count
+            "Thread %d: completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count
         );
         return LoopAction::BREAK_LOOP;
     }
@@ -1180,12 +1179,12 @@ int32_t SchedulerContext::pre_handshake_init(
     // (on the leader, before any thread is released) rather than post-handshake.
     if (runtime->get_gm_sm_ptr()) {
         auto *header = static_cast<SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
-        int64_t pto2_count = 0;
+        int64_t window_tasks = 0;
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             int32_t ring_tasks = header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
-            if (ring_tasks > 0 && ring_tasks <= CHIP_SCOPE_TASKS_CAP) pto2_count += ring_tasks;
+            if (ring_tasks > 0 && ring_tasks <= CHIP_SCOPE_TASKS_CAP) window_tasks += ring_tasks;
         }
-        total_tasks_ = static_cast<int32_t>(pto2_count);
+        total_tasks_ = static_cast<int32_t>(window_tasks);
     } else {
         total_tasks_ = 0;
     }

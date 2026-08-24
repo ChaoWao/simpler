@@ -26,7 +26,7 @@ The simplest runtime. The host CPU builds the complete task dependency graph bef
 
 See [host_build_graph/docs/RUNTIME_LOGIC.md](../runtime/host_build_graph/docs/RUNTIME_LOGIC.md) for details.
 
-## tensormap_and_ringbuffer (PTO2)
+## tensormap_and_ringbuffer
 
 The primary production runtime. Uses ring buffers for task slots and output memory, with a TensorMap for automatic dependency tracking.
 

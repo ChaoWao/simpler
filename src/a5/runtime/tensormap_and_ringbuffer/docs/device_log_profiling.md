@@ -1,4 +1,4 @@
-# PTO2 Device Log Profiling Guide
+# Device Log Profiling Guide
 
 ## How to Find Device Logs
 
@@ -21,7 +21,7 @@ A single run produces two profiling blocks in the device log:
 | Block | Emitted by | Function | Content |
 | ----- | ---------- | -------- | ------- |
 | **Orchestrator Profiling** | Thread 3 (orchestrator) | `aicpu_orchestration_entry` | Time breakdown of graph construction on device |
-| **PTO2 Scheduler Summary** | Threads 0/1/2 (schedulers) | `SchedulerContext::resolve_and_dispatch` | Per-thread scheduling statistics, phase timing, and lock contention |
+| **Scheduler Summary** | Threads 0/1/2 (schedulers) | `SchedulerContext::resolve_and_dispatch` | Per-thread scheduling statistics, phase timing, and lock contention |
 
 All timing values are in microseconds (us), converted from AICPU cycle counters.
 
@@ -47,7 +47,7 @@ Thread 3:   fanin+ready    : 1207.400us (8.3%)
 Thread 3:   finalize+SM    : 697.500us (4.8%)
 Thread 3:   scope_end      : 364.080us
 Thread 3:   avg/task       : 0.874us
-Thread 3: PTO2 total submitted tasks = 16704
+Thread 3: total submitted tasks = 16704
 ```
 
 ### Field Reference
@@ -75,7 +75,7 @@ Thread 3: PTO2 total submitted tasks = 16704
 
 ---
 
-## Block 2: PTO2 Scheduler Summary
+## Block 2: Scheduler Summary
 
 Each of the 3 scheduler threads (Thread 0, 1, 2) prints its own summary after completing all tasks. The output has two sub-sections: **summary** and **phase breakdown**.
 

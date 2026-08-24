@@ -239,7 +239,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             }
 
             // Performance profiling: record task execution. task_token_raw is
-            // the PTO2 identity (already in AICore cache from the dispatch
+            // the task identity (already in AICore cache from the dispatch
             // payload); reg_task_id is the per-core dispatch token AICore just
             // read. Host uses reg_task_id as join key vs the AICPU stream.
             if (chip_swimlane_enabled) {

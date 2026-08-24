@@ -842,7 +842,7 @@ add_a2a3_test(test_a2a3_fatal a2a3/test_a2a3_fatal.cpp)
 add_a2a3_test(test_task_timing_slots a2a3/test_task_timing_slots.cpp)
 add_a2a3_test(test_acl_hal_device common/test_acl_hal_device.cpp)
 
-# PTO2 runtime-linked tests
+# runtime-linked tests
 add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_runtime_test(test_scope_deadlock_detection common/test_scope_deadlock_detection.cpp)
 set(HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime)

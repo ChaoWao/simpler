@@ -251,7 +251,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             }
 
             // Two identity fields go into the record (different roles):
-            //   - task_token_raw (PTO2 ring/local) is pulled from the dispatch
+            //   - task_token_raw (ring/local) is pulled from the dispatch
             //     payload's LocalContext.async_ctx — already in AICore cache
             //     from the just-completed task, no extra GM load. Host uses
             //     it as the canonical task identity for JSON output / ring

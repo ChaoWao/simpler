@@ -179,7 +179,7 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     int32_t aicpu_allowed_cpu_count;
     int32_t aicpu_launch_count;
 
-    // PTO2 integration: kernel_id -> GM function_bin_addr mapping
+    // kernel binary resolution: kernel_id -> GM function_bin_addr mapping
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
 
     // Serial orchestrator -> scheduler start control.
@@ -188,7 +188,7 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Controlled via SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE environment variable.
     bool serial_orch_sched;
 
-    void *gm_sm_ptr_;                        // GM pointer to PTO2 shared memory (device)
+    void *gm_sm_ptr_;                        // GM pointer to shared memory (device)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
 
     // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
@@ -306,7 +306,7 @@ public:
     // Task graph is now managed by RuntimeContext, not Runtime
     // =========================================================================
 
-    /** @deprecated Task count is now in PTO2 shared memory */
+    /** @deprecated Task count is now in shared memory */
     int get_task_count() const { return 0; }
 
     /** @deprecated RT2 uses DispatchPayload, not Task. Always returns nullptr. */

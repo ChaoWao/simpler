@@ -94,7 +94,7 @@ constexpr uint8_t ARGS_DUMP_MAX_FUNC_IDS = 3;
  */
 struct alignas(64) ArgsDumpRecord {
     // === Cache line 1 (64B) ===
-    uint64_t task_id;                           // PTO2 encoding or plain task index
+    uint64_t task_id;                           // TaskId encoding or plain task index
     uint8_t role;                               // ArgsDumpRole (formal callable signature)
     uint8_t stage;                              // ArgsDumpStage (before/after execution)
     uint8_t ndims;                              // Number of dimensions

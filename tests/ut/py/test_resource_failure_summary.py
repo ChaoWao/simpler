@@ -45,7 +45,7 @@ def test_emit_resource_failure_summary_prints_nodeid_and_annotation(capsys):
                 "line1\n"
                 "E       RuntimeError: run_prepared failed with code 507018\n"
                 "simpler runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100\n"
-                "PTO2 scheduler timeout sub_class=S1:running-stalled\n"
+                "scheduler timeout sub_class=S1:running-stalled\n"
             ),
             duration_s=12.34,
             nodeid="tests/st/runtime_fatal_codes/test_probe.py::test_bad[param]",
@@ -69,7 +69,7 @@ def test_emit_resource_failure_summary_prints_nodeid_and_annotation(capsys):
     assert "line1" not in out
     assert "RuntimeError: run_prepared failed with code 507018" not in out
     assert "simpler runtime failed: orch_error_code=0 sched_error_code=100 runtime_status=-100" not in out
-    assert "PTO2 scheduler timeout sub_class=S1:running-stalled" not in out
+    assert "scheduler timeout sub_class=S1:running-stalled" not in out
     assert "standalone pass" not in out
 
 

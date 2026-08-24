@@ -318,7 +318,7 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionWithoutDeviceStatusSkipsTensorCo
     ASSERT_EQ(runtime.tensor_leases_.size(), 1u);
     std::memset(runtime.tensor_leases_[0].dev_ptr, 0x2a, output.size());
 
-    // A stream/bind failure may happen before the device publishes a PTO2
+    // A stream/bind failure may happen before the device publishes a
     // status. The one D2H is the diagnostic header; tensor data stays untouched.
     EXPECT_EQ(validate_runtime_impl(&runtime, &api_, -1), 0);
     EXPECT_EQ(fake_.copy_from_count, 1);

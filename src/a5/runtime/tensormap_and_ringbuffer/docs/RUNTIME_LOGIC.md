@@ -841,7 +841,7 @@ capacity because no task execution/reclaim happens during graph build.
 
 ---
 
-## 11. PTO2 Orchestration API
+## 11. Orchestration API
 
 The orchestration API is defined in `orchestration_api.h`. Orchestration code depends only on this header.
 
