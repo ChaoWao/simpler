@@ -253,13 +253,13 @@ void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this-
 // Top-level runtime arena
 // =============================================================================
 
-PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
-    PTO2RuntimeArenaLayout layout{};
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
+    RuntimeArenaLayout layout{};
 
     layout.task_window_size = task_window_size;
     layout.heap_size = heap_size;
 
-    // Reservation order is the zone partition (see PTO2RuntimeArenaLayout):
+    // Reservation order is the zone partition (see RuntimeArenaLayout):
     // everything the device initializes itself, then the one copied range. Each
     // zone is contiguous, so bind is a single copy and no consumer has to infer a
     // boundary from what happens to come first.
@@ -274,7 +274,7 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_
     layout.off_copied_begin = arena.total_size();
     // Padded to a PTO2_ALIGN_SIZE boundary: the shared-memory image starts at
     // off_copied_end on the device and its segment offsets are aligned from there.
-    layout.off_runtime = arena.reserve(PTO2_ALIGN_UP(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE), PTO2_ALIGN_SIZE);
+    layout.off_runtime = arena.reserve(PTO2_ALIGN_UP(sizeof(RuntimeContext), PTO2_ALIGN_SIZE), PTO2_ALIGN_SIZE);
     layout.off_copied_end = arena.total_size();
 
     layout.arena_size = arena.total_size();
@@ -284,19 +284,19 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_
 /**
  * Populate the prebuilt runtime-arena image in place (host build path).
  *
- * Zeroes the PTO2Runtime header at layout.off_runtime, records the GM heap,
+ * Zeroes the RuntimeContext header at layout.off_runtime, records the GM heap,
  * and initializes the scheduler (ready / sync / dummy / graph queues) against
  * the device SM. rt->orchestrator is left null: the orchestrator is a host-owned
  * object the host-orch path (run_host_orchestration) stands up against the host
  * SM once that buffer exists, and it is never uploaded to the device. Caller must
  * follow up with runtime_wire_arena_pointers. Returns the arena-resident
- * PTO2Runtime*, or nullptr on failure.
+ * RuntimeContext*, or nullptr on failure.
  */
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
-    uint64_t /*sm_size*/, void *gm_heap_dev_base, uint64_t heap_size
+RuntimeContext *runtime_init_data_from_layout(
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/,
+    void *gm_heap_dev_base, uint64_t heap_size
 ) {
-    PTO2Runtime *rt = static_cast<PTO2Runtime *>(arena.region_ptr(layout.off_runtime));
+    RuntimeContext *rt = static_cast<RuntimeContext *>(arena.region_ptr(layout.off_runtime));
     memset(rt, 0, sizeof(*rt));
 
     // rt->ops is filled by the AICPU at boot.
@@ -322,14 +322,14 @@ PTO2Runtime *runtime_init_data_from_layout(
     return rt;
 }
 
-void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
+void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
     rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
     rt->scheduler = static_cast<PTO2SchedulerState *>(arena.region_ptr(layout.off_scheduler));
     rt->scheduler->wire_arena_pointers(layout.sched, arena);
 }
 
-void runtime_destroy(PTO2Runtime *rt, DeviceArena & /*arena*/) {
+void runtime_destroy(RuntimeContext *rt, DeviceArena & /*arena*/) {
     // Arena buffer is pooled across runs by DeviceRunner — never freed here.
     if (!rt) return;
     rt->scheduler->destroy();

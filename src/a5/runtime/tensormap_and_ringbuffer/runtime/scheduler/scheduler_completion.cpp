@@ -76,9 +76,9 @@ SlotTransition SchedulerContext::decide_slot_transition(
 
 // Complete one slot's task: subtask counting, mixed completion, deferred release, profiling.
 void SchedulerContext::complete_slot_task(
-    PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
+    ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
     [[maybe_unused]] int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-    PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+    ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX
     ,
     uint64_t dispatch_ts, uint64_t finish_ts
@@ -273,7 +273,7 @@ void SchedulerContext::clear_running_slot(CoreExecState &core) {
 
 void SchedulerContext::check_running_cores_for_completion(
     int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
-    bool &made_progress, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+    bool &made_progress, ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 ) {
 #if SIMPLER_SCHED_PROFILING
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -287,7 +287,7 @@ void SchedulerContext::check_running_cores_for_completion(
 
         // Skip gated early-dispatch cores still waiting for their doorbell.
         {
-            PTO2TaskSlotState *rs = core.running_slot_state;
+            ChipTaskSlotState *rs = core.running_slot_state;
             if (rs != nullptr && rs->payload != nullptr &&
                 rs->payload->early_dispatch_state.load(std::memory_order_relaxed) == PTO2_EARLY_DISPATCH_STAGING) {
                 continue;
@@ -397,7 +397,7 @@ void SchedulerContext::check_running_cores_for_completion(
         // 2. Update slot data
         if (t.running_freed) {
             if (core.pending_slot_state != nullptr && !t.pending_done) {
-                PTO2TaskSlotState *promoted = core.pending_slot_state;
+                ChipTaskSlotState *promoted = core.pending_slot_state;
                 bool sync_start_promote = pending_gated && promoted->task_attrs.requires_sync_start();
                 promote_pending_to_running(core);
                 if (sync_start_promote) {
@@ -448,7 +448,7 @@ void SchedulerContext::check_running_cores_for_completion(
 // Two-phase protocol: CAS 0 -> -1 (sentinel) to claim ownership, store task and
 // reset staging state, then release-store block_num. Other threads acquire-load
 // sync_start_pending; seeing block_num > 0 ensures all relaxed stores are visible.
-bool SchedulerContext::enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num) {
+bool SchedulerContext::enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num) {
     int32_t expected = 0;
     if (!drain_state_.sync_start_pending.compare_exchange_strong(
             expected, -1, std::memory_order_acquire, std::memory_order_relaxed
@@ -484,7 +484,7 @@ int32_t SchedulerContext::count_global_available(PTO2ResourceShape shape, uint8_
 // cohort progress, while running_cores seeds the core-count rendezvous (MIX may
 // contribute multiple running cores per logical block).
 SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
-    PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated,
+    ChipTaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated,
     [[maybe_unused]] bool record_drain_phases
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -616,7 +616,7 @@ void SchedulerContext::handle_drain_mode(
     }
     bool coordinator = thread_idx == 0;
 
-    PTO2TaskSlotState *slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
+    ChipTaskSlotState *slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
     bool gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
 
     if (coordinator) {

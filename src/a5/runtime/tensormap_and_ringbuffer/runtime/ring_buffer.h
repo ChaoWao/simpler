@@ -63,12 +63,12 @@
 #define PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
 
 constexpr uint32_t ring_mask_bit(int32_t ring_id) {
-    static_assert(PTO2_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
+    static_assert(CHIP_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
     return 1u << static_cast<uint32_t>(ring_id);
 }
 
 inline bool
-reclaim_head_matches_open_task(int32_t head_task_id, uint8_t ring_id, const PTO2TaskSlotState *oldest_open_task) {
+reclaim_head_matches_open_task(int32_t head_task_id, uint8_t ring_id, const ChipTaskSlotState *oldest_open_task) {
     return oldest_open_task != nullptr && oldest_open_task->task != nullptr &&
            oldest_open_task->task->task_id == TaskId::make(ring_id, static_cast<uint32_t>(head_task_id));
 }
@@ -136,7 +136,7 @@ public:
     void init(
         PTO2TaskDescriptor *descriptors, int32_t window_size, std::atomic<int32_t> *current_index_ptr,
         std::atomic<int32_t> *last_alive_ptr, void *heap_base, uint64_t heap_size, std::atomic<int32_t> *error_code_ptr,
-        PTO2TaskSlotState *slot_states = nullptr, int32_t initial_local_task_id = 0, uint8_t ring_id = 0
+        ChipTaskSlotState *slot_states = nullptr, int32_t initial_local_task_id = 0, uint8_t ring_id = 0
     ) {
         descriptors_ = descriptors;
         slot_states_ = slot_states;
@@ -179,7 +179,7 @@ public:
      * @param oldest_open_task Oldest task owned by any open scope on this ring
      * @return Allocation result; check failed() for errors
      */
-    PTO2TaskAllocResult alloc(int32_t output_size, PTO2TaskSlotState *oldest_open_task = nullptr) {
+    PTO2TaskAllocResult alloc(int32_t output_size, ChipTaskSlotState *oldest_open_task = nullptr) {
         uint64_t aligned_size =
             output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
 
@@ -329,7 +329,7 @@ private:
     PTO2TaskDescriptor *descriptors_ = nullptr;
     // Parallel to descriptors_, indexed by task_id & window_mask_. Read-only here,
     // used by the deadlock detector to identify the head task's slot.
-    PTO2TaskSlotState *slot_states_ = nullptr;
+    ChipTaskSlotState *slot_states_ = nullptr;
     uint8_t ring_id_ = 0;
     int32_t window_size_ = 0;
     int32_t window_mask_ = 0;
@@ -480,7 +480,7 @@ private:
     }
 #endif
 
-    bool head_is_oldest_open_task(int32_t head_task_id, const PTO2TaskSlotState *oldest_open_task) const {
+    bool head_is_oldest_open_task(int32_t head_task_id, const ChipTaskSlotState *oldest_open_task) const {
         return slot_states_ != nullptr && reclaim_head_matches_open_task(head_task_id, ring_id_, oldest_open_task);
     }
 
@@ -524,7 +524,7 @@ private:
         }
         // Head-task state dump: what the reclaim watermark is actually waiting on.
         if (slot_states_ != nullptr) {
-            PTO2TaskSlotState &h = slot_states_[last_alive & window_mask_];
+            ChipTaskSlotState &h = slot_states_[last_alive & window_mask_];
             uint32_t fc = h.fanout_count;
             uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
             LOG_ERROR(
@@ -669,7 +669,7 @@ struct PTO2FaninPool {
 };
 
 template <typename Fn>
-using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, PTO2TaskSlotState *, DepFlags>;
+using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, ChipTaskSlotState *, DepFlags>;
 
 template <typename Fn>
 using PTO2FaninForEachReturn = std::conditional_t<std::is_same_v<PTO2FaninCallbackResult<Fn>, void>, void, bool>;
@@ -842,7 +842,7 @@ struct PTO2DepListPool {
      * exact publication, then use a structural head-of-line check plus a
      * wall-clock backstop, each emitting report_deadlock.
      */
-    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed, PTO2TaskSlotState *oldest_open_task = nullptr);
+    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
 
     /**
      * Structured dep-pool deadlock report, mirroring PTO2TaskAllocator::report_deadlock.
@@ -902,7 +902,7 @@ struct PTO2DepListPool {
      * @param task_slot     Task slot to prepend
      * @return New head offset
      */
-    PTO2DepListEntry *prepend(PTO2DepListEntry *cur, PTO2TaskSlotState *slot_state) {
+    PTO2DepListEntry *prepend(PTO2DepListEntry *cur, ChipTaskSlotState *slot_state) {
         PTO2DepListEntry *new_entry = alloc();
         if (!new_entry) return nullptr;
         new_entry->slot_state = slot_state;
@@ -921,7 +921,7 @@ struct PTO2DepListPool {
 
 /**
  * Groups a TaskAllocator and DepPool into one per-depth unit.
- * PTO2_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
+ * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
 struct PTO2RingSet {
     PTO2TaskAllocator task_allocator;

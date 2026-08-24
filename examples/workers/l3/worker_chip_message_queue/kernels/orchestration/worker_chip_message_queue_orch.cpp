@@ -232,10 +232,9 @@ bool finish_pending_inputs(QueueEndpoint &queue, ActiveRequest *active) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{.expected_arg_count = kExpectedArgCount};
+    return OrchestrationConfig{.expected_arg_count = kExpectedArgCount};
 }
 
 __attribute__((visibility("default"))) void worker_chip_message_queue_orchestration(const ChipTaskArgs &orch_args) {

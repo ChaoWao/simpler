@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """scope_stats smoke — capture pipeline produces a usable ``scope_stats.jsonl``.
 
-Re-uses ``vector_example`` (outer executor scope + one inner ``PTO2_SCOPE()``).
+Re-uses ``vector_example`` (outer executor scope + one inner ``SIMPLER_SCOPE()``).
 With ``--enable-scope-stats`` the platform collector
 (``scope_stats_collector_aicpu.h``) appends one record per scope boundary
 (begin and end) into a pooled buffer that streams to the host, which writes
@@ -137,7 +137,7 @@ class TestScopeStats(SceneTestCase):
         assert meta.get("dropped", 0) == 0, f"records dropped on device: {meta!r}"
         assert "dep_pool_max" in meta, f"metadata missing dep_pool_max: {meta!r}"
         records = [json.loads(ln) for ln in lines[1:]]
-        # outer (executor) + inner PTO2_SCOPE, each emitting a begin and an end
+        # outer (executor) + inner SIMPLER_SCOPE, each emitting a begin and an end
         # record → ≥4 records.
         assert len(records) >= 4, f"expected ≥4 begin/end records, got {records!r}"
         for rec in records:

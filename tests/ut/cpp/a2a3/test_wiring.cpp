@@ -75,7 +75,7 @@ protected:
 
     // Initialize a slot for testing wiring/completion
     void init_slot(
-        PTO2TaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
+        ChipTaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
     ) {
         memset(&slot, 0, sizeof(slot));
         slot.task_state.store(state);
@@ -99,14 +99,14 @@ protected:
         slot.task = &slot_task;
     }
 
-    void publish_no_fanin(PTO2TaskSlotState &slot) {
+    void publish_no_fanin(ChipTaskSlotState &slot) {
         slot.fanin_count = 1;
         slot.fanin_refcount.store(1, std::memory_order_release);
         orch.mark_dep_pool_position(slot);
         sched.push_ready_routed(&slot);
     }
 
-    void wire_fanin(PTO2TaskSlotState &slot, int32_t wfanin) {
+    void wire_fanin(ChipTaskSlotState &slot, int32_t wfanin) {
         auto &rss = sched.ring_sched_states[slot.ring_id];
         bool ok = rss.dep_pool.ensure_space(*rss.ring, wfanin);
         if (ok) {
@@ -122,7 +122,7 @@ protected:
 
 TEST_F(WiringTest, NoFaninTaskBecomesReady) {
     // A task with 0 actual fanins should immediately be pushed to ready queue
-    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState task_slot;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -150,8 +150,8 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
 // =============================================================================
 
 TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producer_slots[2];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producer_slots[2];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -188,8 +188,8 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
 // =============================================================================
 
 TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producer_slots[2];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producer_slots[2];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -227,7 +227,7 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
 }
 
 TEST_F(WiringTest, DispatchPropagationMarkerPreservesLifecycleFlagsAndResets) {
-    alignas(64) PTO2TaskSlotState producer;
+    alignas(64) ChipTaskSlotState producer;
     init_slot(producer, PTO2_TASK_PENDING, 1, 1);
 
     EXPECT_FALSE(producer.has_dispatch_propagated());
@@ -251,8 +251,8 @@ TEST_F(WiringTest, DispatchPropagationMarkerPreservesLifecycleFlagsAndResets) {
 // =============================================================================
 
 TEST_F(WiringTest, WireTaskMixedProducerStates) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producers[3];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producers[3];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -293,8 +293,8 @@ TEST_F(WiringTest, WireTaskMixedProducerStates) {
 // =============================================================================
 
 TEST_F(WiringTest, WireTaskAllFlaggedPrecompletedSeedsDispatchFanin) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producer_slots[2];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producer_slots[2];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -323,8 +323,8 @@ TEST_F(WiringTest, WireTaskUnflaggedPrecompletedProducerDoesNotSeed) {
     // dispatch_fanin. It never dispatches, so it can never be the flagged-and-
     // dispatched contributor the candidate compare expects; seeding it would let
     // the consumer become an early-dispatch candidate it should stay off.
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producer;
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producer;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -346,8 +346,8 @@ TEST_F(WiringTest, WireTaskUnflaggedPrecompletedProducerDoesNotSeed) {
 }
 
 TEST_F(WiringTest, WireTaskOneUnflaggedProducerDisqualifiesSeed) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producers[2];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producers[2];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -373,8 +373,8 @@ TEST_F(WiringTest, EarlyDispatchWaitsForAllProducerBlocksPublished) {
     // A flagged, still-pending producer seeds nothing at wiring (not
     // pre-completed); only publishing every logical block bumps the consumer
     // to fanin_actual_count and makes it an early-dispatch candidate.
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producer;
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producer;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -407,14 +407,14 @@ TEST_F(WiringTest, EarlyDispatchWaitsForAllProducerBlocksPublished) {
 }
 
 TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
-    alignas(64) PTO2TaskSlotState filler;
+    alignas(64) ChipTaskSlotState filler;
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
     for (uint64_t i = 0; i < queue.capacity; i++) {
         ASSERT_TRUE(queue.push_tagged(&filler, i));
     }
 
-    PTO2TaskSlotState *items[1] = {&filler};
+    ChipTaskSlotState *items[1] = {&filler};
     uint64_t tags[1] = {queue.capacity};
     // A full queue must end the call, not spin waiting for a consumer. Reaching
     // the next line at all is the assertion.
@@ -426,7 +426,7 @@ TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
 }
 
 TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
-    alignas(64) PTO2TaskSlotState filler;
+    alignas(64) ChipTaskSlotState filler;
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
     for (uint64_t i = 0; i < queue.capacity; i++) {
@@ -435,14 +435,14 @@ TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
     ASSERT_NE(queue.pop(), nullptr);
     ASSERT_NE(queue.pop(), nullptr);
 
-    PTO2TaskSlotState *items[2] = {&filler, &filler};
+    ChipTaskSlotState *items[2] = {&filler, &filler};
     uint64_t tags[2] = {7, 8};
     EXPECT_TRUE(queue.push_batch_tagged(items, tags, 2));
     EXPECT_EQ(queue.size(), queue.capacity);
 }
 
 TEST_F(WiringTest, EarlyDispatchQueueOverflowRollsBackStagingClaim) {
-    alignas(64) PTO2TaskSlotState filler, consumer;
+    alignas(64) ChipTaskSlotState filler, consumer;
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     init_slot(consumer, PTO2_TASK_PENDING, 0, 1);
 
@@ -459,7 +459,7 @@ TEST_F(WiringTest, EarlyDispatchQueueOverflowRollsBackStagingClaim) {
 }
 
 TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
-    alignas(64) PTO2TaskSlotState filler, consumer;
+    alignas(64) ChipTaskSlotState filler, consumer;
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
 
@@ -480,7 +480,7 @@ TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
 }
 
 TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue) {
-    alignas(64) PTO2TaskSlotState filler, consumer;
+    alignas(64) ChipTaskSlotState filler, consumer;
     init_slot(filler, PTO2_TASK_PENDING, 0, 1);
     init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
     consumer.task_attrs.set_sync_start();
@@ -503,7 +503,7 @@ TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue)
 }
 
 TEST_F(WiringTest, LateWiredFullyPublishedProducerStillSeedsEarlyDispatch) {
-    alignas(64) PTO2TaskSlotState producer, consumer;
+    alignas(64) ChipTaskSlotState producer, consumer;
     alignas(64) PTO2TaskPayload consumer_payload;
     memset(&consumer_payload, 0, sizeof(consumer_payload));
     PTO2TaskDescriptor consumer_desc{};
@@ -530,7 +530,7 @@ TEST_F(WiringTest, LateWiredFullyPublishedProducerStillSeedsEarlyDispatch) {
 }
 
 TEST_F(WiringTest, WiringSeedEnqueuesAfterConcurrentPropagation) {
-    alignas(64) PTO2TaskSlotState producers[3], consumer;
+    alignas(64) ChipTaskSlotState producers[3], consumer;
     alignas(64) PTO2TaskPayload consumer_payload;
     memset(&consumer_payload, 0, sizeof(consumer_payload));
     PTO2TaskDescriptor consumer_desc{};
@@ -574,7 +574,7 @@ TEST_F(WiringTest, WiringSeedEnqueuesAfterConcurrentPropagation) {
 }
 
 TEST_F(WiringTest, ConcurrentBlockRangeClaimsDoNotOverlap) {
-    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState task_slot;
     init_slot(task_slot, PTO2_TASK_PENDING, 1, 1);
     task_slot.logical_block_num = 8;
 
@@ -609,7 +609,7 @@ TEST_F(WiringTest, ConcurrentBlockRangeClaimsDoNotOverlap) {
 }
 
 TEST_F(WiringTest, PartialStagedReleaseRoutesRemainderToReadyQueue) {
-    alignas(64) PTO2TaskSlotState consumer;
+    alignas(64) ChipTaskSlotState consumer;
     init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
     consumer.logical_block_num = 5;
     consumer.next_block_idx.store(2, std::memory_order_relaxed);
@@ -683,7 +683,7 @@ TEST_F(WiringTest, EarlyDispatchLaunchHasSingleOwner) {
 }
 
 TEST_F(WiringTest, EarlyDispatchFanoutWaitsForDoorbellPass) {
-    alignas(64) PTO2TaskSlotState producer, consumer;
+    alignas(64) ChipTaskSlotState producer, consumer;
     init_slot(producer, PTO2_TASK_PENDING, 1, 1);
     init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
 
@@ -733,7 +733,7 @@ TEST_F(WiringTest, EarlyDispatchReleaseConsumesDoorbellMask) {
     constexpr int core_id = 5;
     constexpr uint64_t reg_addr = 0x98760000;
     constexpr uint32_t token = 11;
-    alignas(64) PTO2TaskSlotState task;
+    alignas(64) ChipTaskSlotState task;
     init_slot(task, PTO2_TASK_PENDING, 1, 1);
     task.task_attrs.set_early_resolve(true);
     task.next_block_idx.store(1, std::memory_order_relaxed);
@@ -798,7 +798,7 @@ TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
 }
 
 TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
-    alignas(64) PTO2TaskSlotState sync_consumer, downstream;
+    alignas(64) ChipTaskSlotState sync_consumer, downstream;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
 
@@ -835,7 +835,7 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
 }
 
 TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
-    alignas(64) PTO2TaskSlotState sync_consumer, downstream;
+    alignas(64) ChipTaskSlotState sync_consumer, downstream;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
 
@@ -866,7 +866,7 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
 }
 
 TEST_F(WiringTest, ArmedEarlySyncDrainOwnsFinalReadyRoute) {
-    alignas(64) PTO2TaskSlotState sync_consumer;
+    alignas(64) ChipTaskSlotState sync_consumer;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
@@ -935,7 +935,7 @@ TEST_F(WiringTest, ArmedEarlySyncDrainKeepsEveryStagerGatedAfterReady) {
 }
 
 TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState) {
-    alignas(64) PTO2TaskSlotState sync_consumer;
+    alignas(64) ChipTaskSlotState sync_consumer;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
@@ -959,7 +959,7 @@ TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState)
 }
 
 TEST_F(WiringTest, CancelledEarlySyncDrainRoutesProducerRelease) {
-    alignas(64) PTO2TaskSlotState sync_consumer;
+    alignas(64) ChipTaskSlotState sync_consumer;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
@@ -977,7 +977,7 @@ TEST_F(WiringTest, CancelledEarlySyncDrainRoutesProducerRelease) {
 }
 
 TEST_F(WiringTest, ProducerReleaseTransfersReadyRouteToCancellingDrain) {
-    alignas(64) PTO2TaskSlotState sync_consumer;
+    alignas(64) ChipTaskSlotState sync_consumer;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
@@ -996,8 +996,8 @@ TEST_F(WiringTest, ProducerReleaseTransfersReadyRouteToCancellingDrain) {
 }
 
 TEST_F(WiringTest, EarlyDispatchBlockedByUnflaggedProducer) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState p_flagged, q_unflagged;
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState p_flagged, q_unflagged;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -1027,7 +1027,7 @@ TEST_F(WiringTest, UnflaggedProducerDoesNotPropagate) {
     // Auto-chain removed: an unflagged producer never propagates, so its
     // consumers' dispatch_fanin stays untouched even after it dispatches, and the
     // once-guard is not even consumed (the gate returns first).
-    alignas(64) PTO2TaskSlotState producer, consumer;
+    alignas(64) ChipTaskSlotState producer, consumer;
     alignas(64) PTO2TaskPayload prod_payload, cons_payload;
     memset(&prod_payload, 0, sizeof(prod_payload));
     memset(&cons_payload, 0, sizeof(cons_payload));
@@ -1057,8 +1057,8 @@ TEST_F(WiringTest, FlaggedPrecompletedCreatorTransparentToEarlyDispatch) {
     // a flagged, still-pending compute producer. The creator must be transparent
     // (seeded), not a disqualifier: once the compute producer dispatches, the
     // consumer reaches fanin_actual_count and becomes an early-dispatch candidate.
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState creator, compute;
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState creator, compute;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -1088,8 +1088,8 @@ TEST_F(WiringTest, FlaggedPrecompletedCreatorTransparentToEarlyDispatch) {
 // =============================================================================
 
 TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
-    alignas(64) PTO2TaskSlotState producer;
-    alignas(64) PTO2TaskSlotState consumer1, consumer2;
+    alignas(64) ChipTaskSlotState producer;
+    alignas(64) ChipTaskSlotState consumer1, consumer2;
     alignas(64) PTO2TaskPayload prod_payload;
     memset(&prod_payload, 0, sizeof(prod_payload));
     PTO2TaskDescriptor desc{};
@@ -1138,8 +1138,8 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
 // =============================================================================
 
 TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState producers[2];
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState producers[2];
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -1181,9 +1181,9 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
 // =============================================================================
 
 TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
-    alignas(64) PTO2TaskSlotState task_slot;
-    alignas(64) PTO2TaskSlotState wait_producer;    // DEP_WAIT only (modifier)
-    alignas(64) PTO2TaskSlotState retain_producer;  // DEP_WAIT|DEP_RETAIN (creator)
+    alignas(64) ChipTaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState wait_producer;    // DEP_WAIT only (modifier)
+    alignas(64) ChipTaskSlotState retain_producer;  // DEP_WAIT|DEP_RETAIN (creator)
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -1223,9 +1223,9 @@ TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
 // on_task_release must honor per-edge flags in the spill region too: a spilled
 // DEP_RETAIN edge is released; inline ordering-only edges are skipped.
 TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
-    alignas(64) PTO2TaskSlotState filler;        // 64 inline DEP_WAIT-only edges
-    alignas(64) PTO2TaskSlotState spill_retain;  // 1 spilled DEP_RETAIN edge
-    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState filler;        // 64 inline DEP_WAIT-only edges
+    alignas(64) ChipTaskSlotState spill_retain;  // 1 spilled DEP_RETAIN edge
+    alignas(64) ChipTaskSlotState task_slot;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};
@@ -1326,7 +1326,7 @@ TEST_F(WiringTest, AdvanceRingPointersResetsSlots) {
 }
 
 TEST_F(WiringTest, NoEdgePublishRecordsDepPoolMark) {
-    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) ChipTaskSlotState task_slot;
     alignas(64) PTO2TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
     PTO2TaskDescriptor desc{};

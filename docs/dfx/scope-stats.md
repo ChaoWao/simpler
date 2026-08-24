@@ -1,7 +1,7 @@
 # Scope Stats — Per-scope Resource Usage Peaks
 
 Scope stats records the peak resource usage — task-window slots, heap
-bytes, dep-pool entries, and tensormap entries — for every `PTO2_SCOPE` region in an
+bytes, dep-pool entries, and tensormap entries — for every `SIMPLER_SCOPE` region in an
 orchestration, so you can see *which scope* drove each resource to its
 high-water mark. When a model runs out of task windows, heap, or
 tensormap / dependency-list entries, the failure tells you *which* resource is exhausted
@@ -140,12 +140,12 @@ only the `real_occupancy` curve.
 ## 2. What gets captured
 
 - **The whole orchestration, automatically.** You do not mark a region
-  to profile — instrumentation lives inside the `PTO2_SCOPE` macro
+  to profile — instrumentation lives inside the `SIMPLER_SCOPE` macro
   itself, so *every* scope in the orchestration is recorded once the
   flag is on. The executor wraps the orchestration entry in a root
-  `PTO2_SCOPE` (`depth` 0), and every user-written `PTO2_SCOPE` nests
+  `SIMPLER_SCOPE` (`depth` 0), and every user-written `SIMPLER_SCOPE` nests
   under it, so the report covers the entire orch scope tree end to end.
-- **One sample per scope boundary.** Each `PTO2_SCOPE` emits a `begin`
+- **One sample per scope boundary.** Each `SIMPLER_SCOPE` emits a `begin`
   record on entry and an `end` record on exit. The plot tool pairs them
   by site to compute the metrics above.
 - **Per-ring.** Each ring's task window, heap, and dep pool are tracked
@@ -189,7 +189,7 @@ Per-sample lines, oldest-first:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `site` | `"basename:line"` | Source location of the `PTO2_SCOPE()` call |
+| `site` | `"basename:line"` | Source location of the `SIMPLER_SCOPE()` call |
 | `phase` | `"begin"`/`"end"` | Scope entry or exit sample |
 | `depth` | int | Nesting depth (0 = root scope inside the executor) |
 | `ring` | int | Ring this scope used; indexes `task_window_max` / `heap_max` / `dep_pool_max` |
@@ -292,7 +292,7 @@ they track the submit path directly. The runtime gates both on the local
 weak `is_scope_stats_enabled()` stub first, so a disabled run pays neither the
 cross-`.so` calls nor the cross-agent `active_count()` read (same idiom as
 `is_dep_gen_enabled`).
-`PTO2_SCOPE()` expansion calls `set_pending_site(__FILE__, __LINE__)`
+`SIMPLER_SCOPE()` expansion calls `set_pending_site(__FILE__, __LINE__)`
 before `begin`; `copy_basename` keeps the JSON readable without forcing
 the host to chase a device pointer into the orchestration `.so`'s string
 table. `on_fatal` sets `header.fatal_latched`, surfacing as
@@ -331,7 +331,7 @@ ScopeStatsCollector                platform scope_stats_collector_aicpu.cpp
   set kernel_args fields             runtime: scope_stats_set_ring_capacity()
   launch kernel                      runtime: scope_stats_set_tensormap_capacity()
       │                                  │
-  collector shard(s):                on PTO2_SCOPE begin/end:
+  collector shard(s):                on SIMPLER_SCOPE begin/end:
    append records to memory  ◀──┐      runtime samples task/heap/dep_pool/tensormap
       │                         │      runtime: scope_stats_begin()/end()
       │                         │         └─ emit record, append to buffer;

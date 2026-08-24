@@ -21,7 +21,7 @@
 #include <vector>
 #endif
 
-struct PTO2Runtime;
+struct RuntimeContext;
 
 // Unified-log error sink. Forward-declared here rather than pulled via
 // common/unified_log.h: that header lives under common/log/include, which is
@@ -36,16 +36,18 @@ namespace {
 // crash (BZ #32412) when the orchestration SO is dlclose'd/re-dlopen'd
 // between execution rounds.  All orchestrator threads bind the same rt
 // value, so per-thread storage is unnecessary.
-PTO2Runtime *g_current_runtime = nullptr;
+RuntimeContext *g_current_runtime = nullptr;
 }  // namespace
 
-extern "C" __attribute__((visibility("default"))) void framework_bind_runtime(PTO2Runtime *rt) {
+extern "C" __attribute__((visibility("default"))) void framework_bind_runtime(RuntimeContext *rt) {
     g_current_runtime = rt;
 }
 
 // Keep current_runtime local to this .so so orchestration helpers do not
 // accidentally bind to the AICPU binary's same-named symbol.
-extern "C" __attribute__((visibility("hidden"))) PTO2Runtime *framework_current_runtime() { return g_current_runtime; }
+extern "C" __attribute__((visibility("hidden"))) RuntimeContext *framework_current_runtime() {
+    return g_current_runtime;
+}
 
 /**
  * Use addr2line to convert an address to file:line information.

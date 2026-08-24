@@ -14,7 +14,7 @@ they cannot be provoked. Recording why, so the next person does not re-derive it
   scope keeps no task list, so nothing can saturate one. In
   `tensormap_and_ringbuffer` it exists but cannot be reached — `scope_tasks_cap` is the
   sum of the per-ring windows, but each ring physically holds only `window - 1` tasks,
-  so all rings together top out at `cap - PTO2_MAX_RING_DEPTH`, strictly below the cap.
+  so all rings together top out at `cap - CHIP_MAX_RING_DEPTH`, strictly below the cap.
   The rings always fill first and latch 1 or 3. Shrinking the window shrinks both, so
   the gap holds. The number stays reserved in both runtimes' code tables.
 - **11 TENSORMAP_OVERFLOW** needs the 65536-entry pool (`PTO2_TENSORMAP_POOL_SIZE`,

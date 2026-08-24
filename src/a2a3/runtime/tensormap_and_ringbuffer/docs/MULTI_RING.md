@@ -8,7 +8,7 @@ The single-ring design uses one `last_task_alive` watermark shared by HeapRing, 
 
 ## 2. Solution
 
-Split HeapRing, TaskRing, and DepPool into arrays of `PTO2_MAX_RING_DEPTH` (4) independent instances. Each scope depth maps to its own ring, with an independent `last_task_alive` watermark.
+Split HeapRing, TaskRing, and DepPool into arrays of `CHIP_MAX_RING_DEPTH` (4) independent instances. Each scope depth maps to its own ring, with an independent `last_task_alive` watermark.
 
 ```text
 Scope depth 0  ──►  rings[0] = { HeapRing, TaskRing, DepPool }
@@ -42,7 +42,7 @@ Type changes:
 | ----- | ------ | ----- |
 | `PTO2TaskDescriptor.task_id` | `int32_t` | `TaskId` |
 | `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
-| `PTO2TaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
+| `ChipTaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures
 
@@ -67,10 +67,10 @@ PTO2TaskRing task_ring;
 PTO2DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
-PTO2RingSet rings[PTO2_MAX_RING_DEPTH];
+PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
 ```
 
-Ring selection: `current_ring_id() = min(scope_stack_top, PTO2_MAX_RING_DEPTH - 1)`.
+Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 1)`.
 
 ### 4.3 PTO2SharedMemoryHeader (modified)
 
@@ -96,19 +96,19 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Per-ring data pointers (host-side, set by setup_pointers)
     PTO2TaskDescriptor *task_descriptors;
     PTO2TaskPayload *task_payloads;
-    PTO2TaskSlotState *slot_states;
+    ChipTaskSlotState *slot_states;
 
     // Accessors (slot = local_id & task_window_mask)
     PTO2TaskDescriptor &get_task_by_slot(int32_t slot);
     PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id);
     PTO2TaskPayload &get_payload_by_slot(int32_t slot);
     PTO2TaskPayload &get_payload_by_task_id(int32_t local_id);
-    PTO2TaskSlotState &get_slot_state_by_slot(int32_t slot);
-    PTO2TaskSlotState &get_slot_state_by_task_id(int32_t local_id);
+    ChipTaskSlotState &get_slot_state_by_slot(int32_t slot);
+    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id);
 };
 
 // In header:
-PTO2SharedMemoryRingHeader rings[PTO2_MAX_RING_DEPTH];
+PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 ```
 
 Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `PTO2SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
@@ -139,7 +139,7 @@ struct RingSchedState {
     alignas(64) PTO2DepListPool dep_pool;
 };
 
-RingSchedState ring_sched_states[PTO2_MAX_RING_DEPTH];
+RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
 ```
 
 `slot_states`, `task_window_size`, and `task_window_mask` are no longer duplicated — callers access them via `ring->get_slot_state_by_*()` and other ring header accessors. The ring pointer shares cache line 0 with `last_task_alive` and `advance_lock`.
@@ -147,8 +147,8 @@ RingSchedState ring_sched_states[PTO2_MAX_RING_DEPTH];
 ### 4.6 PTO2TensorMap (modified)
 
 ```cpp
-PTO2TensorMapEntry** task_entry_heads[PTO2_MAX_RING_DEPTH];
-int64_t last_task_alives[PTO2_MAX_RING_DEPTH];
+PTO2TensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
+int64_t last_task_alives[CHIP_MAX_RING_DEPTH];
 ```
 
 Entry validity checks and `cleanup_retired` operate per-ring:
@@ -165,7 +165,7 @@ bool entry_valid(const PTO2TensorMapEntry& e) {
 
 | Structure | Reason |
 | --------- | ------ |
-| `PTO2DepListEntry` | Stores `PTO2TaskSlotState*` pointer — naturally crosses ring boundaries |
+| `PTO2DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
 | `PTO2TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
 | `PTO2ReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
 | `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
@@ -191,9 +191,9 @@ For ring-heap stall triage, a `CONSUMED` head whose ring bit remains set means t
 
 ### 5.2 Cross-Ring Dependencies
 
-Dependency edges use `PTO2TaskSlotState*` pointers, which naturally span rings:
+Dependency edges use `ChipTaskSlotState*` pointers, which naturally span rings:
 
-- Ring 1 task depends on ring 0 producer → ring 0's `fanout_head` linked list contains a ring 1 `PTO2TaskSlotState*`
+- Ring 1 task depends on ring 0 producer → ring 0's `fanout_head` linked list contains a ring 1 `ChipTaskSlotState*`
 - When ring 0 task completes, it walks its fanout list and decrements ring 1 consumers' `fanin_refcount`
 - No special cross-ring logic needed — pointer-based design is ring-agnostic
 
@@ -328,4 +328,4 @@ first line of `scope_stats/scope_stats.jsonl` includes `task_window_max`,
 - `heap` must accommodate peak output buffer allocation across all in-flight tasks on that ring
 - `dep_pool` must be ≥ total dependency entries for all in-flight tasks on that ring
 - On hardware, back-pressure latency is higher than in simulation — size conservatively
-- Adding inner `PTO2_SCOPE` reduces peak per-ring usage, enabling smaller sizes
+- Adding inner `SIMPLER_SCOPE` reduces peak per-ring usage, enabling smaller sizes

@@ -12,7 +12,7 @@
 /**
  * Negative ST orchestration: SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK (code 3).
  *
- * Scope depth maps to ring index via min(scope_depth, PTO2_MAX_RING_DEPTH - 1),
+ * Scope depth maps to ring index via min(scope_depth, CHIP_MAX_RING_DEPTH - 1),
  * so every scope nested at depth >= 3 lands on the SAME ring (ring 3). Nest well
  * past depth 3 and submit a few tasks per level: each level's own scope-task
  * count stays below the window, so the scope-admission check (SCOPE_DEADLOCK, 1)
@@ -28,15 +28,14 @@
 
 #include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
-static constexpr int32_t DEPTH = 8;      // > PTO2_MAX_RING_DEPTH so depths 3..7 share ring 3
+static constexpr int32_t DEPTH = 8;      // > CHIP_MAX_RING_DEPTH so depths 3..7 share ring 3
 static constexpr int32_t PER_LEVEL = 3;  // < window so no single scope trips SCOPE_DEADLOCK
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }

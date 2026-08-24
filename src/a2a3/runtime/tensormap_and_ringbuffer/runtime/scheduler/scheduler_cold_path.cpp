@@ -229,7 +229,7 @@ void SchedulerContext::log_stall_diagnostics(
     // produce identical TASK lines once per scheduler thread.
     if (thread_idx == 0) {
         int32_t cnt_ready = 0, cnt_waiting = 0, cnt_running = 0, submitted_in_ring = 0;
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
             int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
             submitted_in_ring += ring_task_count;
@@ -238,7 +238,7 @@ void SchedulerContext::log_stall_diagnostics(
             // slot once per earlier task_id and inflates the scan_* counts.
             int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
             for (int32_t si = ring_task_start; si < ring_task_count; si++) {
-                PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+                ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
                 PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
                 int32_t rc = slot_state.fanin_refcount.load(std::memory_order_relaxed);
                 int32_t fi = slot_state.fanin_count;
@@ -365,7 +365,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
     cls.stuck_task_id = -1;
     cls.stuck_core = -1;
     int32_t cnt_running = 0, cnt_ready = 0, cnt_waiting = 0;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_states[r].ring;
         int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
         // Active task_ids live in [last_task_alive, current_task_index); slots wrap
@@ -374,7 +374,7 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
         // Start at the tail so each live slot is visited exactly once (O(window)).
         int32_t ring_task_start = ring.fc.last_task_alive.load(std::memory_order_relaxed);
         for (int32_t si = ring_task_start; si < ring_task_count; si++) {
-            PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+            ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
             PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             if (st >= PTO2_TASK_COMPLETED) continue;
             // Same ground truth as log_stall_diagnostics: task_state stays PENDING
@@ -1182,7 +1182,7 @@ int32_t SchedulerContext::pre_handshake_init(
     if (runtime->get_gm_sm_ptr()) {
         auto *header = static_cast<PTO2SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
         int64_t pto2_count = 0;
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             int32_t ring_tasks = header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
             if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) pto2_count += ring_tasks;
         }
@@ -1366,7 +1366,7 @@ void SchedulerContext::deinit() {
     func_id_to_addr_ = nullptr;
 }
 
-void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
+void SchedulerContext::bind_runtime(RuntimeContext *rt) {
     rt_ = rt;
     sched_ = &rt->scheduler;
 }
@@ -1387,7 +1387,7 @@ void SchedulerContext::wait_for_orchestration_done_before_dispatch(Runtime *runt
 // and drives the orchestrator → scheduler core transition (or fatal shutdown).
 // =============================================================================
 void SchedulerContext::on_orchestration_done(
-    Runtime *runtime, PTO2Runtime *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
+    Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
 ) {
 #if SIMPLER_DFX
     if (chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES) {

@@ -401,7 +401,7 @@ enum class GraphMaterializeResult : uint8_t {
 
 struct alignas(64) GraphNodeStorage {
     PTO2TaskDescriptor task;
-    PTO2TaskSlotState slot;
+    ChipTaskSlotState slot;
     // The payload carries its argument regions as deltas into pools past the node
     // array, so its size is the same for every node and the slot names it by a delta
     // from the slot's own address. Field order here therefore constrains nothing, and
@@ -431,7 +431,7 @@ struct GraphExecution {
     int32_t materialized_nodes{0};
     int32_t constructed_nodes{0};
     uint32_t consumed_tensor_args{0};
-    PTO2TaskSlotState *outer_slot{nullptr};
+    ChipTaskSlotState *outer_slot{nullptr};
     GraphNodeStorage *nodes{nullptr};
     GraphNodeStorage *node_storage{nullptr};
     // This execution's node argument pools, in the storage tail past node_storage.
@@ -515,12 +515,12 @@ inline bool graph_execution_storage_bytes(
     return true;
 }
 
-GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot);
+GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot);
 GraphMaterializeResult graph_execution_materialize_slice(
-    PTO2TaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized = nullptr
+    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized = nullptr
 );
 
-inline GraphExecution *graph_execution_from_slot(PTO2TaskSlotState &slot) {
+inline GraphExecution *graph_execution_from_slot(ChipTaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH_NODE ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
 }
 
@@ -531,7 +531,7 @@ inline GraphExecution *graph_execution_from_slot(PTO2TaskSlotState &slot) {
 // all of them barrier before runtime_init_ready_ is published, so no dispatch — and
 // therefore no caller of this function — observes an unlocalized GRAPH slot. A slot
 // whose localization failed carries nullptr.
-inline GraphExecution *graph_execution_from_outer_slot(PTO2TaskSlotState &slot) {
+inline GraphExecution *graph_execution_from_outer_slot(ChipTaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
 }
 

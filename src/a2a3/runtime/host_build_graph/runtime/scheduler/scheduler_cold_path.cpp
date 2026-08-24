@@ -236,7 +236,7 @@ void SchedulerContext::log_stall_diagnostics(
         int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
         submitted_in_ring += ring_task_count;
         for (int32_t si = 0; si < ring_task_count; si++) {
-            PTO2TaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+            ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
             PTO2TaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
             // fanin ids vs the ring completion_flags (rc = satisfied producers,
@@ -396,7 +396,7 @@ int32_t SchedulerContext::handle_timeout_exit(
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);
                 },
-                [](const PTO2TaskSlotState &slot_state) {
+                [](const ChipTaskSlotState &slot_state) {
                     return &slot_state.payload->dump_metadata;
                 }
             );
@@ -1035,7 +1035,7 @@ void SchedulerContext::deinit() {
     func_id_to_addr_ = nullptr;
 }
 
-void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
+void SchedulerContext::bind_runtime(RuntimeContext *rt) {
     rt_ = rt;
     sched_ = rt->scheduler;
 }
@@ -1049,7 +1049,7 @@ void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
 // dispatching.
 // =============================================================================
 void SchedulerContext::on_orchestration_done(
-    Runtime *runtime, PTO2Runtime *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
+    Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
 ) {
     total_tasks_ = total_tasks;
 
@@ -1135,7 +1135,7 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
         if (ring.is_completion_flag_set(id)) {
             continue;  // completed on the host (hidden alloc); nothing to dispatch
         }
-        PTO2TaskSlotState &slot = ring.get_slot_state_by_task_id(id);
+        ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(id);
         if (slot.task_kind == TaskKind::GRAPH) {
             if (graph_execution_localize(slot) == nullptr) slot.graph_context = nullptr;
             if (!sched_->push_graph_prepare(&slot, slot.task->task_id.raw, thread_idx)) return;

@@ -179,7 +179,7 @@ CASES = {
     # * SCOPE_TASKS_OVERFLOW (10): scope_tasks_cap is the in-flight slot budget (sum
     #   of the per-ring windows, since #1188), but each ring physically holds only
     #   window-1 tasks (the ring's full/empty distinction), so all rings together
-    #   hold at most sum(window-1) = cap - PTO2_MAX_RING_DEPTH, strictly below the
+    #   hold at most sum(window-1) = cap - CHIP_MAX_RING_DEPTH, strictly below the
     #   cap. scope_tasks therefore tops out below its own cap: the rings fill first
     #   and latch SCOPE_DEADLOCK (1, single scope) or FLOW_CONTROL_DEADLOCK (3,
     #   same-ring nesting). Verified: no (depth, tasks/level, window) combo reaches

@@ -50,10 +50,10 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
+__attribute__((visibility("default"))) OrchestrationConfig
 ep_dispatch_combine_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 13,  // 11 tensors + 2 scalars
     };
 }

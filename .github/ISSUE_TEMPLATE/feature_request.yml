@@ -34,7 +34,7 @@ body:
       placeholder: |
         ```cpp
         // Example of proposed orchestration API
-        PTO2_SCOPE(rt) {
+        SIMPLER_SCOPE(rt) {
             // dynamic block iteration
         }
         ```

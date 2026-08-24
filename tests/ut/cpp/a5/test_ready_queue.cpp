@@ -73,15 +73,15 @@ protected:
 TEST_F(ReadyQueueTest, EmptyPopReturnsNullptr) { EXPECT_EQ(queue.pop(), nullptr); }
 
 TEST_F(ReadyQueueTest, SinglePushPop) {
-    PTO2TaskSlotState item;
+    ChipTaskSlotState item;
     ASSERT_TRUE(queue.push(&item));
 
-    PTO2TaskSlotState *result = queue.pop();
+    ChipTaskSlotState *result = queue.pop();
     EXPECT_EQ(result, &item);
 }
 
 TEST_F(ReadyQueueTest, FIFOOrdering) {
-    PTO2TaskSlotState a, b, c;
+    ChipTaskSlotState a, b, c;
 
     ASSERT_TRUE(queue.push(&a));
     ASSERT_TRUE(queue.push(&b));
@@ -94,18 +94,18 @@ TEST_F(ReadyQueueTest, FIFOOrdering) {
 }
 
 TEST_F(ReadyQueueTest, QueueFullReturnsFalse) {
-    std::vector<PTO2TaskSlotState> items(CAPACITY);
+    std::vector<ChipTaskSlotState> items(CAPACITY);
 
     for (uint64_t i = 0; i < CAPACITY; i++) {
         ASSERT_TRUE(queue.push(&items[i]));
     }
 
-    PTO2TaskSlotState extra;
+    ChipTaskSlotState extra;
     EXPECT_FALSE(queue.push(&extra));
 }
 
 TEST_F(ReadyQueueTest, SlotReuseAfterFullDrain) {
-    std::vector<PTO2TaskSlotState> items(CAPACITY);
+    std::vector<ChipTaskSlotState> items(CAPACITY);
 
     for (uint64_t i = 0; i < CAPACITY; i++) {
         ASSERT_TRUE(queue.push(&items[i]));
@@ -126,8 +126,8 @@ TEST_F(ReadyQueueTest, SlotReuseAfterFullDrain) {
 
 TEST_F(ReadyQueueTest, PushBatchThenIndividualPop) {
     constexpr int BATCH_SIZE = 5;
-    PTO2TaskSlotState items[BATCH_SIZE];
-    PTO2TaskSlotState *ptrs[BATCH_SIZE];
+    ChipTaskSlotState items[BATCH_SIZE];
+    ChipTaskSlotState *ptrs[BATCH_SIZE];
     for (int i = 0; i < BATCH_SIZE; i++) {
         ptrs[i] = &items[i];
     }
@@ -149,13 +149,13 @@ TEST_F(ReadyQueueTest, PushBatchZeroIsNoop) {
 
 TEST_F(ReadyQueueTest, PopBatchReturnsFive) {
     constexpr int PUSH_COUNT = 10;
-    PTO2TaskSlotState items[PUSH_COUNT];
+    ChipTaskSlotState items[PUSH_COUNT];
 
     for (int i = 0; i < PUSH_COUNT; i++) {
         ASSERT_TRUE(queue.push(&items[i]));
     }
 
-    PTO2TaskSlotState *out[5];
+    ChipTaskSlotState *out[5];
     int popped = queue.pop_batch(out, 5);
     EXPECT_EQ(popped, 5);
 
@@ -166,13 +166,13 @@ TEST_F(ReadyQueueTest, PopBatchReturnsFive) {
 
 TEST_F(ReadyQueueTest, PopBatchPartial) {
     constexpr int PUSH_COUNT = 3;
-    PTO2TaskSlotState items[PUSH_COUNT];
+    ChipTaskSlotState items[PUSH_COUNT];
 
     for (int i = 0; i < PUSH_COUNT; i++) {
         ASSERT_TRUE(queue.push(&items[i]));
     }
 
-    PTO2TaskSlotState *out[5];
+    ChipTaskSlotState *out[5];
     int popped = queue.pop_batch(out, 5);
     EXPECT_EQ(popped, PUSH_COUNT);
 
@@ -182,7 +182,7 @@ TEST_F(ReadyQueueTest, PopBatchPartial) {
 }
 
 TEST_F(ReadyQueueTest, PopBatchEmpty) {
-    PTO2TaskSlotState *out[5];
+    ChipTaskSlotState *out[5];
     int popped = queue.pop_batch(out, 5);
     EXPECT_EQ(popped, 0);
 }
@@ -190,7 +190,7 @@ TEST_F(ReadyQueueTest, PopBatchEmpty) {
 TEST_F(ReadyQueueTest, SizeAccuracy) {
     EXPECT_EQ(queue.size(), 0u);
 
-    PTO2TaskSlotState items[8];
+    ChipTaskSlotState items[8];
 
     queue.push(&items[0]);
     EXPECT_EQ(queue.size(), 1u);
@@ -220,7 +220,7 @@ class ReadyQueueBoundaryTest : public ::testing::Test {
 protected:
     static constexpr uint64_t QUEUE_CAP = 8;  // Small for boundary testing
     PTO2ReadyQueue queue{};
-    PTO2TaskSlotState dummy[8]{};
+    ChipTaskSlotState dummy[8]{};
 
     DeviceArena arena;
 
@@ -296,7 +296,7 @@ TEST_F(ReadyQueueBoundaryTest, RepeatedEmptyPop) {
 TEST_F(ReadyQueueBoundaryTest, ManyPushPopCycles) {
     for (int i = 0; i < 10000; i++) {
         ASSERT_TRUE(queue.push(&dummy[0]));
-        PTO2TaskSlotState *s = queue.pop();
+        ChipTaskSlotState *s = queue.pop();
         ASSERT_NE(s, nullptr);
         EXPECT_EQ(s, &dummy[0]);
     }
@@ -340,13 +340,13 @@ TEST_P(ReadyQueueMPMCTest, NoDuplicateNoLoss) {
     auto cfg = GetParam();
     int total = cfg.producers * cfg.items_per_producer;
 
-    std::vector<PTO2TaskSlotState> items(total);
+    std::vector<ChipTaskSlotState> items(total);
     std::vector<std::atomic<int>> consumed_count(total);
     for (int i = 0; i < total; i++) {
         consumed_count[i].store(0, std::memory_order_relaxed);
     }
 
-    auto item_index = [&](PTO2TaskSlotState *s) -> int {
+    auto item_index = [&](ChipTaskSlotState *s) -> int {
         return static_cast<int>(s - items.data());
     };
 
@@ -363,7 +363,7 @@ TEST_P(ReadyQueueMPMCTest, NoDuplicateNoLoss) {
 
     auto consumer = [&]() {
         while (true) {
-            PTO2TaskSlotState *item = queue.pop();
+            ChipTaskSlotState *item = queue.pop();
             if (item != nullptr) {
                 consumed_count[item_index(item)].fetch_add(1, std::memory_order_relaxed);
                 total_consumed.fetch_add(1, std::memory_order_relaxed);

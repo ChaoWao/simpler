@@ -27,10 +27,9 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
@@ -59,7 +58,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int total_add = 0;
 
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
-        PTO2_SCOPE_GUARD();
+        SIMPLER_SCOPE_GUARD();
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
         uint32_t c_view_offsets[1] = {c_elem_offset};

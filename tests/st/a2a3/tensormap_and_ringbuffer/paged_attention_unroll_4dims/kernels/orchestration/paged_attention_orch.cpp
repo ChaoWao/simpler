@@ -42,10 +42,9 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
@@ -97,7 +96,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             __builtin_prefetch(&host_context_lens[b_idx + 1], 0, 3);
         }
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 // 4D views into query/out, matching (1, 1, q_tile, head_dim).
                 uint32_t view_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)head_dim};
                 uint32_t view_offsets[4] = {(uint32_t)b_idx, 0, (uint32_t)(q_idx * q_tile), 0};

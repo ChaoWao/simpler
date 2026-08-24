@@ -83,7 +83,7 @@ bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, PTO2Re
 }
 
 int SchedulerContext::pop_ready_tasks_batch(
-    PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, PTO2TaskSlotState **out, int max_count
+    PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
 ) {
 #if SIMPLER_DFX
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -112,7 +112,7 @@ int SchedulerContext::pop_ready_tasks_batch(
 }
 
 void SchedulerContext::build_payload(
-    PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot, int32_t block_idx,
+    PTO2DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot, int32_t block_idx,
     bool force_gate
 ) {
     int32_t slot_idx = static_cast<int32_t>(subslot);
@@ -140,7 +140,7 @@ void SchedulerContext::build_payload(
 }
 
 SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
-    int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot, bool to_pending,
+    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot, bool to_pending,
     int32_t block_idx, bool force_gate
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -206,7 +206,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
 }
 
 int SchedulerContext::prepare_block_for_dispatch(
-    int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2ResourceShape shape, bool to_pending,
+    int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2ResourceShape shape, bool to_pending,
     int32_t block_idx, PublishHandle *out_handles, bool force_gate
 ) {
 #if SIMPLER_DFX
@@ -290,7 +290,7 @@ void SchedulerContext::dispatch_shape(
 
     while (cores.has_value() && !entered_drain) {
         int want = cores.count();
-        PTO2TaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
+        ChipTaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
         int got = pop_ready_tasks_batch(disp_queues, shape, thread_idx, batch, want);
         if (got == 0) break;
 
@@ -328,7 +328,7 @@ void SchedulerContext::dispatch_shape(
         // contributes ≤ 3 subtasks for MIX.
         PublishHandle handles[CoreTracker::MAX_CLUSTERS * 3];
         int handle_count = 0;
-        PTO2TaskSlotState *published_list[CoreTracker::MAX_CLUSTERS * 3];
+        ChipTaskSlotState *published_list[CoreTracker::MAX_CLUSTERS * 3];
         int16_t published_counts[CoreTracker::MAX_CLUSTERS * 3];
         int published_n = 0;
         bool dispatched_any = false;
@@ -356,7 +356,7 @@ void SchedulerContext::dispatch_shape(
         };
 
         for (int bi = 0; bi < got; bi++) {
-            PTO2TaskSlotState *slot_state = batch[bi];
+            ChipTaskSlotState *slot_state = batch[bi];
             CoreTracker::BitStates selected_mix_clusters(0ULL);
 
             if (is_mix) {
@@ -577,7 +577,7 @@ void SchedulerContext::dispatch_ready_tasks(
 // those release did not take and rings them from its immutable local handles.
 // The seq_cst order guarantees every gated core has exactly one writer.
 int32_t SchedulerContext::stage_consumer_blocks(
-    int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+    int32_t thread_idx, ChipTaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
     CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -677,7 +677,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     if (!cores.has_value()) return 0;
 
     int32_t total_staged = 0;
-    PTO2TaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
+    ChipTaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
     uint64_t task_id_snapshots[CoreTracker::MAX_CLUSTERS * 3];
     // Batch-pop in one queue op (fewer CAS than one pop per consumer); the pop is
     // bounded by the shape's capacity so the stack buffer always holds it. Then for
@@ -691,7 +691,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     // is pushed back for peers (mirrors normal's push_batch of the unconsumed tail).
     int got = sched_->early_dispatch_queues[s].pop_batch_tagged(batch, task_id_snapshots, cores.count());
     for (int bi = 0; bi < got; bi++) {
-        PTO2TaskSlotState *c = batch[bi];
+        ChipTaskSlotState *c = batch[bi];
         if (static_cast<uint64_t>(c->task->task_id.raw) != task_id_snapshots[bi]) continue;
         if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != PTO2_EARLY_DISPATCH_STAGING)
             continue;  // released
@@ -782,7 +782,7 @@ int32_t SchedulerContext::try_early_dispatch(
     // Case B preserves the global drain fallback for cohorts that need cores
     // owned by multiple schedulers. Neither case permits a partial cohort.
     uint64_t sync_task_id_snapshot = 0;
-    if (PTO2TaskSlotState *c = sched_->early_sync_start_queue.pop_tagged(&sync_task_id_snapshot)) {
+    if (ChipTaskSlotState *c = sched_->early_sync_start_queue.pop_tagged(&sync_task_id_snapshot)) {
         bool current_sync_task =
             static_cast<uint64_t>(c->task->task_id.raw) == sync_task_id_snapshot && c->task_attrs.requires_sync_start();
         if (current_sync_task && PTO2SchedulerState::try_claim_early_sync_drain(*c->payload)) {
@@ -865,7 +865,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     chip_swimlane.chip_swimlane_enabled = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
 #endif
 
-    PTO2TaskSlotState *deferred_release_slot_states[PTO2_DEFERRED_RELEASE_CAP];
+    ChipTaskSlotState *deferred_release_slot_states[PTO2_DEFERRED_RELEASE_CAP];
     int32_t deferred_release_count = 0;
 
     // PMU runs require single-issue dispatch — overlapping in-flight tasks
@@ -1131,7 +1131,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         // the dependency-only resolve work.
         if (thread_idx < PLATFORM_MAX_AICPU_THREADS - 1) {
             constexpr int DUMMY_DRAIN_BATCH = 8;
-            PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
+            ChipTaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
             int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
 #if SIMPLER_DFX
             // Dummy outer phase: covers handling of all dummies popped this
@@ -1140,7 +1140,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 (dummy_got > 0 && chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
 #endif
             for (int di = 0; di < dummy_got; di++) {
-                PTO2TaskSlotState &dummy_slot = *dummy_batch[di];
+                ChipTaskSlotState &dummy_slot = *dummy_batch[di];
 #if SIMPLER_DFX
                 uint64_t dummy_resolve_t0 =
                     (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;

@@ -85,32 +85,32 @@ static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
 // =============================================================================
 
 static TaskOutputTensors
-submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
+submit_task_impl(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     return rt->orchestrator->submit_task(mixed_kernels, args);
 }
 
-static TaskOutputTensors alloc_tensors_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+static TaskOutputTensors alloc_tensors_impl(RuntimeContext *rt, const CoreTaskArgs &args) {
     return rt->orchestrator->alloc_tensors(args);
 }
 
-static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+static TaskOutputTensors submit_dummy_task_impl(RuntimeContext *rt, const CoreTaskArgs &args) {
     return rt->orchestrator->submit_dummy_task(args);
 }
 
-static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args) {
+static GraphScopeResult graph_begin_impl(RuntimeContext *rt, uint64_t graph_key, const GraphTaskArgs &args) {
     if (rt == nullptr) return GraphScopeResult{};
     return rt->orchestrator->graph_begin(graph_key, args, rt->active_callable_hash);
 }
 
-static bool graph_prepare_impl(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args) {
+static bool graph_prepare_impl(RuntimeContext *rt, void *recording_handle, const GraphTaskArgs &args) {
     return rt != nullptr && rt->orchestrator->graph_prepare(recording_handle, args);
 }
 
-static void graph_abort_impl(PTO2Runtime *rt, void *recording_handle) {
+static void graph_abort_impl(RuntimeContext *rt, void *recording_handle) {
     if (rt != nullptr) rt->orchestrator->graph_abort(recording_handle);
 }
 
-static bool graph_end_impl(PTO2Runtime *rt) { return rt != nullptr && rt->orchestrator->graph_end(); }
+static bool graph_end_impl(RuntimeContext *rt) { return rt != nullptr && rt->orchestrator->graph_end(); }
 
 // The orchestration .so's phases arrive already bracketed, so this only forwards them
 // to the same pool the runtime's own records go to. Defined only at SIMPLER_DFX=1, like
@@ -122,19 +122,19 @@ static void record_orch_phase_impl(uint32_t kind, uint64_t start_ns, uint64_t en
 }
 #endif
 
-static void graph_commit_impl(PTO2Runtime *rt) {
+static void graph_commit_impl(RuntimeContext *rt) {
     if (rt != nullptr) rt->orchestrator->graph_commit();
 }
 
-void rt_scope_begin(PTO2Runtime *rt) {
+void rt_scope_begin(RuntimeContext *rt) {
     PTO2ScopeMode mode = rt->pending_scope_mode;
     rt->pending_scope_mode = PTO2ScopeMode::AUTO;
     rt->orchestrator->begin_scope(mode);
 }
 
-void rt_scope_end(PTO2Runtime *rt) { rt->orchestrator->end_scope(); }
+void rt_scope_end(RuntimeContext *rt) { rt->orchestrator->end_scope(); }
 
-void rt_orchestration_done(PTO2Runtime *rt) {
+void rt_orchestration_done(RuntimeContext *rt) {
     // Host orchestration calls this runtime entry directly rather than the
     // orchestration-SO wrapper. Commit here as well so an all-Graph entry has a
     // final synchronization point for its asynchronous recording and deferred
@@ -146,9 +146,9 @@ void rt_orchestration_done(PTO2Runtime *rt) {
     rt->inline_completed_tasks = rt->orchestrator->inline_completed_tasks;
 }
 
-static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator->fatal; }
+static bool is_fatal_impl(RuntimeContext *rt) { return rt->orchestrator->fatal; }
 
-void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...) {
+void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     if (fmt == nullptr || fmt[0] == '\0') {
@@ -169,7 +169,7 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
 // producer while one of its submitted consumers is still live.
 MAYBE_UNINITIALIZED_BEGIN
 static bool
-wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
+wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
     TaskId owner = tensor.owner_task_id;
     PTO2OrchestratorState &orch = *rt->orchestrator;
 
@@ -180,14 +180,14 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
     // idempotent (task_state is monotonic) and only adds one atomic load on
     // the second encounter.
     constexpr int kSegmentCap = 64;
-    const PTO2TaskSlotState *seg[kSegmentCap];
+    const ChipTaskSlotState *seg[kSegmentCap];
     int seg_count = 0;
     bool failed = false;
 
     // Returns nullptr for every rejected producer, having latched the fatal.
     // Callers branch on the returned pointer, not on `failed`: the slot is
     // dereferenced immediately and a null return is the only safe signal.
-    auto resolve_producer = [&](TaskId producer) -> const PTO2TaskSlotState * {
+    auto resolve_producer = [&](TaskId producer) -> const ChipTaskSlotState * {
         if (!producer.is_valid() || producer.ring() != 0) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
@@ -214,7 +214,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         return &slot;
     };
 
-    auto wait_one_producer = [&](const PTO2TaskSlotState &slot) {
+    auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = 0;
         int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -241,7 +241,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         }
     };
 
-    auto wait_one_consumers = [&](const PTO2TaskSlotState &slot) {
+    auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = 0;
         int32_t local_id = slot.task->task_id.local();
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -284,7 +284,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         seg_count = 0;
     };
 
-    auto try_push = [&](const PTO2TaskSlotState &s) {
+    auto try_push = [&](const ChipTaskSlotState &s) {
         for (int j = 0; j < seg_count; j++) {
             if (seg[j] == &s) return;  // per-segment dedup
         }
@@ -320,7 +320,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
 }
 MAYBE_UNINITIALIZED_END
 
-uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
+uint64_t get_tensor_data(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
             __FUNCTION__, "get_tensor_data: buffer not allocated (addr=0). "
@@ -350,7 +350,7 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndi
 }
 
 void set_tensor_data(
-    PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+    RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
 ) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
@@ -378,7 +378,7 @@ void set_tensor_data(
     }
 }
 
-// Ops-table entry that hands the call-site captured by PTO2ScopeGuard to the
+// Ops-table entry that hands the call-site captured by ScopeGuard to the
 // [ScopeStats] collector. The slot is always present in the struct to keep
 // the layout stable; at SIMPLER_DFX=0 we fill nullptr so the orchestration
 // .so's null-check skips it.
@@ -386,10 +386,10 @@ void set_tensor_data(
 static void scope_set_site_impl(const char *file, int line) { scope_stats_set_pending_site(file, line); }
 #endif
 
-static int32_t available_cluster_count_impl(PTO2Runtime *rt) { return rt->orchestrator->total_cluster_count; }
-static int32_t available_aiv_count_impl(PTO2Runtime *rt) { return rt->orchestrator->total_aiv_count; }
+static int32_t available_cluster_count_impl(RuntimeContext *rt) { return rt->orchestrator->total_cluster_count; }
+static int32_t available_aiv_count_impl(RuntimeContext *rt) { return rt->orchestrator->total_aiv_count; }
 
-static const PTO2RuntimeOps s_runtime_ops = {
+static const RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
     .scope_begin = rt_scope_begin,
     .scope_end = rt_scope_end,
@@ -430,9 +430,9 @@ static const PTO2RuntimeOps s_runtime_ops = {
 // prebuilt arena image. The piece below — wiring the ops table — depends on the
 // device-side s_runtime_ops global, so it remains in the AICPU build.
 
-void runtime_bind_ops(PTO2Runtime *rt) { rt->ops = &s_runtime_ops; }
+void runtime_bind_ops(RuntimeContext *rt) { rt->ops = &s_runtime_ops; }
 
-void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode) {
+void runtime_set_mode(RuntimeContext *rt, RuntimeMode mode) {
     if (rt) {
         rt->mode = mode;
     }

@@ -31,7 +31,7 @@ The shared graph image separates stable task identity from scheduling state:
 - `PTO2TaskPayload` contains the argument counts, predicate, and a delta naming
   each of its tensor, scalar and position-independent fanin-id regions. The
   arguments live in the pool segments, not in the payload.
-- `PTO2TaskSlotState` contains the active mask, task attributes, logical block
+- `ChipTaskSlotState` contains the active mask, task attributes, logical block
   count, subtask counters, completion state, and descriptor/payload bindings.
 
 This image is built on the host and copied to the device verbatim. It contains

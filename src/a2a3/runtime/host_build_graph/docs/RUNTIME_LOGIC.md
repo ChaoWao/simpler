@@ -74,7 +74,7 @@ The shared image uses three per-slot structures:
 | --------- | ------- |
 | `PTO2TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
 | `PTO2TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
-| `PTO2TaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
+| `ChipTaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
 
 The host/device boundary is POD and position-independent. Fanins are integer
 producer IDs, not pointers, and a slot state names its payload and descriptor — and
@@ -115,9 +115,9 @@ a boundary from which region happens to be reserved first —
 orchestrator, so nothing on the device reads its state: not the `fanin_seen_epoch`
 table, not the scope arrays, not the TensorMap (~9.3 MB between them). It is
 therefore a plain host object that owns those arrays — `PTO2OrchestratorState::init`
-allocates them — and `PTO2Runtime` reaches it through a pointer that `bind` drops
+allocates them — and `RuntimeContext` reaches it through a pointer that `bind` drops
 before the copied zone is uploaded, so no host address crosses the boundary. A
-`static_assert` keeps `PTO2Runtime` trivially copyable, which is what forbids
+`static_assert` keeps `RuntimeContext` trivially copyable, which is what forbids
 putting an owning member back inside it. The one orchestrator value the device-side
 scheduler reads, the count of tasks completed inline during orchestration, is a
 scalar `rt_orchestration_done` publishes into the runtime header.
@@ -128,7 +128,7 @@ queue capacities are compile-time constants, hbg never advances
 `last_task_alive`, and it has no host-side entry point at all. So the host would
 only be writing an initialization pattern — 203,392 bytes
 of it, dominated by `AsyncWaitList::entries` — for the device to receive and never
-read. `PTO2Runtime` therefore holds a *pointer* to it, wired from
+read. `RuntimeContext` therefore holds a *pointer* to it, wired from
 `off_scheduler` on each side, and the AICPU calls `init_data_from_layout` at boot.
 
 **Why the queue slots are device-written.** `push` claims `slots[pos & mask]` only

@@ -481,17 +481,17 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     // ring's window comfortably covers its observed max local_id (no slot
     // aliasing during INOUT+COVERED remove_from_task). Same sizes feed both
     // maps so they stay in lockstep.
-    int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    uint32_t max_local[PTO2_MAX_RING_DEPTH] = {0};
+    int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];
+    uint32_t max_local[CHIP_MAX_RING_DEPTH] = {0};
     for (size_t i = 0; i < num_records; i++) {
         TaskId tid{records[i].task_id};
         uint8_t ring = tid.ring();
         uint32_t local = tid.local();
-        if (ring < PTO2_MAX_RING_DEPTH && local > max_local[ring]) {
+        if (ring < CHIP_MAX_RING_DEPTH && local > max_local[ring]) {
             max_local[ring] = local;
         }
     }
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         int32_t need = static_cast<int32_t>(max_local[r] + 1);
         task_window_sizes[r] = ceil_pow2(need < 16 ? 16 : need);
     }

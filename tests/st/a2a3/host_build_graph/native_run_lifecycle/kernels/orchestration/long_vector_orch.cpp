@@ -23,9 +23,9 @@ constexpr int kChainLength = 64;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &args) {
     (void)args;
-    return PTO2OrchestrationConfig{.expected_arg_count = 3};
+    return OrchestrationConfig{.expected_arg_count = 3};
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {

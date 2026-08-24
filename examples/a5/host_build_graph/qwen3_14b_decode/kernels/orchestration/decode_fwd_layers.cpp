@@ -60,10 +60,9 @@ private:
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 20,
     };
 }
@@ -95,7 +94,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int64_t BLOCK_TABLE_FLAT_DYN = (int64_t)orch_args.tensor(8).ref().shapes[0];
     int64_t KV_CACHE_ROWS_DYN = (int64_t)orch_args.tensor(12).ref().shapes[0];
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         uint32_t pa_metadata_ci_shapes[1] = {27840};
         TensorCreateInfo pa_metadata_ci(pa_metadata_ci_shapes, 1, DataType::UINT8);
         uint32_t pa_workspace_ci_shapes[1] = {66132544};
@@ -136,7 +135,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskId t = phase_fence_barrier_0_outs.task_id();
         prev_out_tid[0] = t;
         for (int64_t cb0 = 0; cb0 < 16; cb0 += 16) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 // Task 1: copy_hidden
                 CoreTaskArgs params_t1;
                 params_t1.add_output(cur);
@@ -150,7 +149,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskId prev_normed_tid[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
             prev_normed_tid[__init_i] = TaskId::invalid();
-        PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
             TaskId _submit_deps_buf[1];
             for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                 _submit_deps_buf[__init_i] = TaskId::invalid();
@@ -189,7 +188,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             next_hidden_ci, next_normed_ci, next_hidden_ci, next_normed_ci, bf16_scratch_ci, fp32_scratch_ci
         );
         for (uint32_t layer = 0; layer < num_layers; layer += 1) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 const uint32_t storage_base = (layer % 2) * 2;
                 const ChipTensor &next_hidden = layer_storage.get_ref(storage_base);
                 const ChipTensor &next_normed = layer_storage.get_ref(storage_base + 1);
@@ -336,7 +335,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId down_tids_inline156[85];
                     for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
                         down_tids_inline156[__init_i] = TaskId::invalid();
-                    PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+                    SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
                         // Phase-fence barrier 1: dependency-only dummy task
                         CoreTaskArgs params_phase_fence_barrier_1;
                         TaskOutputTensors phase_fence_barrier_1_outs =
@@ -2072,7 +2071,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             }
         }
         for (int64_t ob0 = 0; ob0 < 16; ob0 += 16) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 // Task 35: copy_out
                 CoreTaskArgs params_t35;
                 params_t35.add_output(ext_out);

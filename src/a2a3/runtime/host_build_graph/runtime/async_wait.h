@@ -114,7 +114,7 @@ inline void CompletionCondition::retire() {
 }
 
 struct AsyncWaitEntry {
-    PTO2TaskSlotState *slot_state{nullptr};
+    ChipTaskSlotState *slot_state{nullptr};
     TaskId task_token{TaskId::invalid()};
     CompletionCondition conditions[MAX_COMPLETIONS_PER_TASK];
     int32_t condition_count{0};
@@ -126,7 +126,7 @@ struct AsyncPollResult {
     int32_t completed{0};  // Host-submitted stream tasks completed.
     int32_t resolved{0};   // All task completions, including internal Graph nodes.
     int32_t error_code{SIMPLER_ERROR_NONE};
-    PTO2TaskSlotState *failed_slot_state{nullptr};
+    ChipTaskSlotState *failed_slot_state{nullptr};
 };
 
 inline const char *async_engine_name(AsyncEngine engine) {
@@ -184,7 +184,7 @@ struct AsyncWaitList {
     };
 
     // Inline-complete a NotDeferred task during drain.
-    bool try_inline_complete_locked(DrainCompletionSink &sink, PTO2TaskSlotState &slot_state);
+    bool try_inline_complete_locked(DrainCompletionSink &sink, ChipTaskSlotState &slot_state);
 
     // Single-consumer drain: pop each published message in tail order and
     // translate it into wait-list state. An empty sink (sched == nullptr) just
@@ -227,8 +227,8 @@ struct AsyncWaitList {
                     return drained;
                 }
             } else if (msg.kind == MSG_KIND_TASK_NORMAL_DONE) {
-                PTO2TaskSlotState *slot_state_ptr =
-                    reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(msg.addr));
+                ChipTaskSlotState *slot_state_ptr =
+                    reinterpret_cast<ChipTaskSlotState *>(static_cast<uintptr_t>(msg.addr));
                 AsyncWaitEntry *entry = find_entry_by_token(msg.task_token);
                 if (entry == nullptr) {
                     // Producers strictly order: all CONDITIONs for token T are

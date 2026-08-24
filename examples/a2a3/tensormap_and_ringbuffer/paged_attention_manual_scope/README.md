@@ -15,7 +15,7 @@ diff -r ../paged_attention/kernels ./kernels     # only the orch file differs
 
 ## What changes
 
-`PTO2_SCOPE()` + `PTO2_SCOPE_GUARD()` becomes `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`,
+`SIMPLER_SCOPE()` + `SIMPLER_SCOPE_GUARD()` becomes `SIMPLER_SCOPE(PTO2ScopeMode::MANUAL)`,
 and each submit names its predecessors. See
 [`docs/manual-scope.md`](../../../../docs/manual-scope.md) for the mode itself.
 

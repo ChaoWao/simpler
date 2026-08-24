@@ -12,7 +12,7 @@
  * Runtime Class - Implementation
  *
  * Device execution and handshake control.
- * Task graph construction is handled by PTO2Runtime.
+ * Task graph construction is handled by RuntimeContext.
  */
 
 #include "runtime.h"

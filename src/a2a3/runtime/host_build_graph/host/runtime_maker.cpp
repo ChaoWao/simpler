@@ -382,7 +382,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
 
 // The orchestration .so exports these (PTO2 submit_task form).
 typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
-typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
+typedef void (*OrchestrationBindFunc)(RuntimeContext *);
 typedef void (*OrchestrationPrewarmFunc)();
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
@@ -508,9 +508,9 @@ struct GraphHostStateBinding {
 };
 
 int32_t run_host_orchestration(
-    Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
-    const PTO2RuntimeArenaLayout &layout, uint64_t sm_size, void *device_arena, void *gm_heap, uint64_t eff_heap_size,
-    uint64_t eff_task_window_size, void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
+    Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, RuntimeContext *rt,
+    DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, void *device_arena, void *gm_heap,
+    uint64_t eff_heap_size, uint64_t eff_task_window_size, void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     dep_gen_host_graph_begin_capture();
 
@@ -520,7 +520,7 @@ int32_t run_host_orchestration(
     // orch::prepare_task and shipped bounded to total_tasks below.
     const pto2_sm_layout::PTO2RingSegmentOffsets sm_segs = pto2_sm_layout::ring_segment_offsets(eff_task_window_size);
     // Over-allocated and rounded up: every segment offset is a multiple of
-    // PTO2_ALIGN_SIZE and PTO2TaskSlotState is alignas(64), which a plain
+    // PTO2_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.
     std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + PTO2_ALIGN_SIZE]);
     void *host_sm = reinterpret_cast<void *>(
@@ -719,7 +719,7 @@ int32_t run_host_orchestration(
     // One host source for one copy: the copied zone and shared-memory image at
     // exactly the offsets they occupy on the device.
     // Over-allocated and rounded up because every segment offset is
-    // PTO2_ALIGN_SIZE-aligned and PTO2TaskSlotState is alignas(64), which a byte
+    // PTO2_ALIGN_SIZE-aligned and ChipTaskSlotState is alignas(64), which a byte
     // vector's data() is not.
     const uint64_t copied_bytes = layout.off_copied_end - layout.off_copied_begin;
     const uint64_t upload_bytes = copied_bytes + image_bytes;
@@ -1026,7 +1026,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     const int64_t t_arena_build_ns = bind_now_ns();
     DeviceArena host_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_size, eff_heap_size);
+    RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_size, eff_heap_size);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1089,7 +1089,7 @@ extern "C" int bind_callable_to_runtime_impl(
     const int64_t t_runtime_init_ns = bind_now_ns();
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
-    PTO2Runtime *rt = runtime_init_data_from_layout(
+    RuntimeContext *rt = runtime_init_data_from_layout(
         host_arena, layout, PTO2_MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size, gm_heap, eff_heap_size
     );
     if (rt == nullptr) {
@@ -1097,7 +1097,7 @@ extern "C" int bind_callable_to_runtime_impl(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime_wire_arena_pointers(host_arena, layout, rt);
-    // Stash the layout inside the PTO2Runtime image so the AICPU can recover every
+    // Stash the layout inside the RuntimeContext image so the AICPU can recover every
     // arena-internal offset after the copy. It is written before orchestration
     // because orchestration is what performs that copy, and the runtime header is
     // part of what travels. The runtime arena's device base does NOT travel — it is

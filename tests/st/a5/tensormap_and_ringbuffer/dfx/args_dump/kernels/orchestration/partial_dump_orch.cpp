@@ -15,10 +15,9 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
@@ -39,7 +38,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TaskOutputTensors outs_t0 = rt_submit_aiv_task(0, params_t0);
     const ChipTensor &c = outs_t0.get_ref(0);
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         CoreTaskArgs params_t1;
         params_t1.add_input(c);
         params_t1.add_output(inter_ci);

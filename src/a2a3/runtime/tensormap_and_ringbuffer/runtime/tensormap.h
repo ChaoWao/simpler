@@ -77,11 +77,11 @@ struct PTO2TensorMapLayout {
     size_t off_bucket_epochs;
     size_t off_entry_pool;
     size_t off_free_entry_list;
-    size_t off_task_entry_heads[PTO2_MAX_RING_DEPTH];
-    size_t off_task_entry_head_epochs[PTO2_MAX_RING_DEPTH];
+    size_t off_task_entry_heads[CHIP_MAX_RING_DEPTH];
+    size_t off_task_entry_head_epochs[CHIP_MAX_RING_DEPTH];
     int32_t num_buckets;
     int32_t pool_size;
-    int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
+    int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];
 };
 
 // TensorMap Lookup Profiling (must precede inline lookup/insert methods).
@@ -374,16 +374,16 @@ struct PTO2TensorMap {
 
     // Per-ring per-task entry tracking (for efficient bucket cleanup)
     // Indexed by [ring_id][local_id & (task_window_sizes[ring_id] - 1)]
-    PTO2TensorMapEntry **task_entry_heads[PTO2_MAX_RING_DEPTH];
-    uint32_t *task_entry_head_epochs[PTO2_MAX_RING_DEPTH];
-    int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];  // Per-ring task window size (for slot masking)
+    PTO2TensorMapEntry **task_entry_heads[CHIP_MAX_RING_DEPTH];
+    uint32_t *task_entry_head_epochs[CHIP_MAX_RING_DEPTH];
+    int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];  // Per-ring task window size (for slot masking)
     uint32_t current_epoch{1};
 
     // Per-ring validity threshold (for lazy invalidation)
-    int32_t last_task_alives[PTO2_MAX_RING_DEPTH];  // Cached from shared memory per ring
+    int32_t last_task_alives[CHIP_MAX_RING_DEPTH];  // Cached from shared memory per ring
 
     // Per-ring cleanup progress (for periodic cleanup_retired)
-    int32_t last_cleanup[PTO2_MAX_RING_DEPTH]{};
+    int32_t last_cleanup[CHIP_MAX_RING_DEPTH]{};
 
     uint32_t get_task_local_id_slot(uint8_t ring_id, uint32_t task_local_id) const {
         return task_local_id & (task_window_sizes[ring_id] - 1);
@@ -404,9 +404,9 @@ struct PTO2TensorMap {
     // shortage (some ring still retiring tasks) from a wedged pool (no ring
     // advancing). Idempotent per watermark: a ring whose alive has not passed
     // last_cleanup[r] is skipped, so it never double-frees.
-    int64_t reclaim_retired_all(const int32_t sm_last_task_alive[PTO2_MAX_RING_DEPTH]) {
+    int64_t reclaim_retired_all(const int32_t sm_last_task_alive[CHIP_MAX_RING_DEPTH]) {
         int64_t alive_sum = 0;
-        for (int32_t r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        for (int32_t r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
             int32_t alive = sm_last_task_alive[r];
             sync_validity(r, alive);
             if (alive > last_cleanup[r]) {
@@ -466,7 +466,7 @@ struct PTO2TensorMap {
      * committed.
      */
     static PTO2TensorMapLayout reserve_layout(
-        DeviceArena &arena, int32_t num_buckets, int32_t pool_size, const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH]
+        DeviceArena &arena, int32_t num_buckets, int32_t pool_size, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH]
     );
 
     /**
@@ -474,7 +474,7 @@ struct PTO2TensorMap {
      * PTO2_TENSORMAP_POOL_SIZE).
      */
     static PTO2TensorMapLayout
-    reserve_layout_default(DeviceArena &arena, const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH]);
+    reserve_layout_default(DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH]);
 
     /**
      * Phase 3a: write everything *except* arena-internal pointer fields

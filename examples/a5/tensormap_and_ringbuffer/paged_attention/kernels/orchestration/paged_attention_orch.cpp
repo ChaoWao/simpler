@@ -61,10 +61,9 @@ inline uint64_t get_sys_cnt_aicpu() {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
@@ -149,7 +148,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
         uint64_t cur_seq = static_cast<uint64_t>(get_tensor_data<int32_t>(context_lens, 1, cl_idx));
         uint64_t bn_this_batch = (cur_seq + block_size - 1) / block_size;
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 CYCLE_COUNT_LAP(prof_scope);
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 
@@ -169,7 +168,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                 CYCLE_COUNT_LAP(prof_submit_task);
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn++) {
-                    PTO2_SCOPE_GUARD();
+                    SIMPLER_SCOPE_GUARD();
 
                     uint32_t bt_idx[2] = {static_cast<uint32_t>(b_idx), static_cast<uint32_t>(bn)};
                     uint64_t cur_block_idx = static_cast<uint64_t>(get_tensor_data<int32_t>(block_table, 2, bt_idx));

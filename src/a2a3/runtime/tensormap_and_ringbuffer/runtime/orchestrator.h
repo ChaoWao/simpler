@@ -43,12 +43,12 @@
  * pools, scope arrays, plus the nested PTO2TensorMap layout).
  */
 struct PTO2OrchestratorLayout {
-    size_t off_fanin_pool[PTO2_MAX_RING_DEPTH];
-    size_t off_fanin_seen_epoch[PTO2_MAX_RING_DEPTH];
+    size_t off_fanin_pool[CHIP_MAX_RING_DEPTH];
+    size_t off_fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     size_t off_scope_tasks;
     size_t off_scope_begins;
     PTO2TensorMapLayout tensor_map;
-    int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
+    int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
     int32_t scope_tasks_cap;
     uint64_t scope_stack_capacity;
 };
@@ -67,8 +67,8 @@ struct PTO2OrchestratorState {
     PTO2SharedMemoryHeader *sm_header;
 
     // === PER-RING RESOURCES ===
-    PTO2RingSet rings[PTO2_MAX_RING_DEPTH];
-    uint32_t *fanin_seen_epoch[PTO2_MAX_RING_DEPTH];
+    PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
+    uint32_t *fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
@@ -78,7 +78,7 @@ struct PTO2OrchestratorState {
     // Single contiguous buffer of task IDs, partitioned by scope level.
     // scope_begins[i] is the index into scope_tasks where scope i starts.
     // Tasks for the top scope occupy [scope_begins[top], scope_tasks_size).
-    PTO2TaskSlotState **scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
+    ChipTaskSlotState **scope_tasks;  // Flat buffer of taskSlotState (all scopes concatenated)
     int32_t scope_tasks_size;         // Number of task IDs currently in the buffer
     int32_t scope_tasks_capacity;     // Allocated capacity of scope_tasks
     int32_t *scope_begins;            // scope_begins[i] = start index of scope i in scope_tasks
@@ -123,12 +123,12 @@ struct PTO2OrchestratorState {
 
     /**
      * Get current ring index from scope depth.
-     * Maps scope depth to ring_id: min(scope_depth, PTO2_MAX_RING_DEPTH - 1)
+     * Maps scope depth to ring_id: min(scope_depth, CHIP_MAX_RING_DEPTH - 1)
      */
     uint8_t current_ring_id() const {
         int32_t depth = scope_stack_top;
         if (depth < 0) depth = 0;
-        return depth < PTO2_MAX_RING_DEPTH ? static_cast<uint8_t>(depth) : PTO2_MAX_RING_DEPTH - 1;
+        return depth < CHIP_MAX_RING_DEPTH ? static_cast<uint8_t>(depth) : CHIP_MAX_RING_DEPTH - 1;
     }
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
@@ -140,12 +140,12 @@ struct PTO2OrchestratorState {
     // the nested tensor_map layout. Returned layout is consumed by
     // init_data_from_layout.
     static PTO2OrchestratorLayout reserve_layout(
-        DeviceArena &arena, const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH],
+        DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
         int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
     );
     static PTO2OrchestratorLayout reserve_layout(
-        DeviceArena &arena, const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-        const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]
+        DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
+        const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]
     );
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
@@ -158,11 +158,11 @@ struct PTO2OrchestratorState {
     );
     bool init_data_from_layout(
         const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap,
-        const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]
+        const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
     );
     bool reset_for_reuse(
         const PTO2OrchestratorLayout &layout, void *sm_dev_base, void *gm_heap,
-        const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]
+        const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
     );
 
     // Phase 3b: write the arena-internal pointer fields (scope_tasks,
@@ -174,8 +174,8 @@ struct PTO2OrchestratorState {
     // Forget pointers; arena owns the backing buffers.
     void destroy();
     void set_scheduler(PTO2SchedulerState *scheduler);
-    void mark_dep_pool_position(PTO2TaskSlotState &slot_state);
-    void wire_fanin_task(PTO2TaskSlotState &slot_state, int32_t wfanin);
+    void mark_dep_pool_position(ChipTaskSlotState &slot_state);
+    void wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
     void end_scope();

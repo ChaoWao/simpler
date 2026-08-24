@@ -20,7 +20,7 @@
  *      child workers), so a ring index buys us nothing at L3 (see the plan's
  *      L2 Consistency Audit, allowed exception #6).
  *   2. `MAX_RING_DEPTH` independent shared-memory heap slabs (Strict-1,
- *      matches L2's `PTO2_MAX_RING_DEPTH = 4`). Each slab has its own
+ *      matches L2's `CHIP_MAX_RING_DEPTH = 4`). Each slab has its own
  *      `mmap(MAP_SHARED)` region, bump cursor, FIFO reclamation pointer,
  *      mutex and cv. Slot → ring mapping is driven by scope depth:
  *         ring_idx = min(scope_depth, MAX_RING_DEPTH - 1)

@@ -21,13 +21,13 @@
 
 namespace {
 
-PTO2Runtime *g_bound_runtime = nullptr;
+RuntimeContext *g_bound_runtime = nullptr;
 
-extern "C" PTO2Runtime *framework_current_runtime(void) { return g_bound_runtime; }
-extern "C" void framework_bind_runtime(PTO2Runtime *rt) { g_bound_runtime = rt; }
+extern "C" RuntimeContext *framework_current_runtime(void) { return g_bound_runtime; }
+extern "C" void framework_bind_runtime(RuntimeContext *rt) { g_bound_runtime = rt; }
 
 struct FakeRuntime {
-    const PTO2RuntimeOps *ops;
+    const RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode = PTO2ScopeMode::AUTO;
     bool fatal = false;
     int submit_calls = 0;
@@ -45,26 +45,26 @@ struct FakeRuntime {
 
 static_assert(offsetof(FakeRuntime, ops) == 0);  // Guard: reinterpret_cast below assumes ops is first member.
 static_assert(
-    offsetof(FakeRuntime, pending_scope_mode) == offsetof(PTO2Runtime, pending_scope_mode)
-);  // ...and pending_scope_mode follows ops, matching the PTO2Runtime prefix the inline scope wrappers pun through.
+    offsetof(FakeRuntime, pending_scope_mode) == offsetof(RuntimeContext, pending_scope_mode)
+);  // ...and pending_scope_mode follows ops, matching the RuntimeContext prefix the inline scope wrappers pun through.
 
-FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
+FakeRuntime *as_fake(RuntimeContext *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
 
-TaskOutputTensors fake_submit(PTO2Runtime *rt, const MixedKernels &, const CoreTaskArgs &) {
+TaskOutputTensors fake_submit(RuntimeContext *rt, const MixedKernels &, const CoreTaskArgs &) {
     as_fake(rt)->submit_calls++;
     return TaskOutputTensors{};
 }
 
-void fake_scope_begin(PTO2Runtime *rt) {
+void fake_scope_begin(RuntimeContext *rt) {
     FakeRuntime *fake = as_fake(rt);
     fake->scope_begin_calls++;
     fake->last_scope_mode = fake->pending_scope_mode;
 }
-void fake_scope_end(PTO2Runtime *rt) { as_fake(rt)->scope_end_calls++; }
-void fake_orchestration_done(PTO2Runtime *) {}
-bool fake_is_fatal(PTO2Runtime *rt) { return as_fake(rt)->fatal; }
+void fake_scope_end(RuntimeContext *rt) { as_fake(rt)->scope_end_calls++; }
+void fake_orchestration_done(RuntimeContext *) {}
+bool fake_is_fatal(RuntimeContext *rt) { return as_fake(rt)->fatal; }
 
-void fake_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...) {
+void fake_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     FakeRuntime *fake = as_fake(rt);
     fake->report_fatal_calls++;
     fake->fatal = true;
@@ -83,23 +83,23 @@ void fake_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, co
 
 void fake_log(const char *, const char *, ...) {}
 
-uint64_t fake_get_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[]) {
+uint64_t fake_get_tensor_data(RuntimeContext *rt, const ChipTensor &, uint32_t, const uint32_t[]) {
     as_fake(rt)->get_calls++;
     return 0x1234ULL;
 }
 
-void fake_set_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[], uint64_t) {
+void fake_set_tensor_data(RuntimeContext *rt, const ChipTensor &, uint32_t, const uint32_t[], uint64_t) {
     as_fake(rt)->set_calls++;
 }
 
-TaskOutputTensors fake_alloc_tensors(PTO2Runtime *rt, const CoreTaskArgs &) {
+TaskOutputTensors fake_alloc_tensors(RuntimeContext *rt, const CoreTaskArgs &) {
     as_fake(rt)->alloc_calls++;
     return TaskOutputTensors{};
 }
 
-TaskOutputTensors fake_submit_dummy(PTO2Runtime *, const CoreTaskArgs &) { return TaskOutputTensors{}; }
+TaskOutputTensors fake_submit_dummy(RuntimeContext *, const CoreTaskArgs &) { return TaskOutputTensors{}; }
 
-const PTO2RuntimeOps kFakeOps = {
+const RuntimeOps kFakeOps = {
     .submit_task = fake_submit,
     .scope_begin = fake_scope_begin,
     .scope_end = fake_scope_end,
@@ -120,7 +120,7 @@ const PTO2RuntimeOps kFakeOps = {
 
 class RuntimeBindingGuard {
 public:
-    explicit RuntimeBindingGuard(PTO2Runtime *rt) { framework_bind_runtime(rt); }
+    explicit RuntimeBindingGuard(RuntimeContext *rt) { framework_bind_runtime(rt); }
     ~RuntimeBindingGuard() { framework_bind_runtime(nullptr); }
 };
 
@@ -135,7 +135,7 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
     FakeRuntime runtime{};
     runtime.ops = &kFakeOps;
     runtime.fatal = true;
-    RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+    RuntimeBindingGuard bind(reinterpret_cast<RuntimeContext *>(&runtime));
 
     MixedKernels mixed{};
     CoreTaskArgs args;
@@ -150,7 +150,7 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
     rt_scope_begin();
     rt_scope_end();
     {
-        PTO2ScopeGuard guard;
+        ScopeGuard guard;
         (void)guard;
     }
 
@@ -166,7 +166,7 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
 TEST(A5Fatal, ExplicitFatalRoutesThroughOps) {
     FakeRuntime runtime{};
     runtime.ops = &kFakeOps;
-    RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+    RuntimeBindingGuard bind(reinterpret_cast<RuntimeContext *>(&runtime));
 
     rt_report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "boom %d", 7);
 
@@ -185,12 +185,12 @@ TEST(A5Fatal, ExplicitFatalRoutesThroughOps) {
 TEST(A5Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     FakeRuntime runtime{};
     runtime.ops = &kFakeOps;
-    RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+    RuntimeBindingGuard bind(reinterpret_cast<RuntimeContext *>(&runtime));
 
     runtime.pending_scope_mode = PTO2ScopeMode::MANUAL;
 
     {
-        PTO2_SCOPE_GUARD();
+        SIMPLER_SCOPE_GUARD();
         EXPECT_EQ(runtime.scope_begin_calls, 1);
         EXPECT_EQ(runtime.scope_end_calls, 0);
         EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::AUTO);
@@ -199,7 +199,7 @@ TEST(A5Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     EXPECT_EQ(runtime.scope_end_calls, 1);
 
     {
-        PTO2_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
+        SIMPLER_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
         EXPECT_EQ(runtime.scope_begin_calls, 2);
         EXPECT_EQ(runtime.scope_end_calls, 1);
         EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::MANUAL);
@@ -211,7 +211,7 @@ TEST(A5Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
 TEST(A5Fatal, AllocTensorConvenienceReportsInvalidArgsInsteadOfAsserting) {
     FakeRuntime runtime{};
     runtime.ops = &kFakeOps;
-    RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+    RuntimeBindingGuard bind(reinterpret_cast<RuntimeContext *>(&runtime));
 
     std::array<TensorCreateInfo, MAX_TENSOR_ARGS + 1> create_infos{};
     for (TensorCreateInfo &ci : create_infos) {

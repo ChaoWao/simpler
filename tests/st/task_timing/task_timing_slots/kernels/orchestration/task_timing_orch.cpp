@@ -45,10 +45,10 @@ static inline auto set_spmd_count(Spec &s, int16_t n) -> decltype(s.set_core_num
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
+__attribute__((visibility("default"))) OrchestrationConfig
 task_timing_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 3,  // a, b, out
     };
 }
@@ -159,10 +159,10 @@ __attribute__((visibility("default"))) void task_timing_mix_orchestration(const 
     rt_submit_task(mk, args);
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
+__attribute__((visibility("default"))) OrchestrationConfig
 task_timing_mix_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 9,
     };
 }

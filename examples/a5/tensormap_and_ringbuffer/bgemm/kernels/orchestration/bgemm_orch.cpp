@@ -53,10 +53,9 @@ static constexpr uint32_t TILE_ELEMS = TILE * TILE;  // 4096 elements
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
@@ -74,7 +73,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     for (int batch = 0; batch < BATCH; batch++) {
         for (int m_idx = 0; m_idx < GRID_M; m_idx++) {
             for (int n_idx = 0; n_idx < GRID_N; n_idx++) {
-                PTO2_SCOPE() {
+                SIMPLER_SCOPE() {
                     uint32_t c_elem_offset = (static_cast<uint32_t>(batch) * GRID_M * GRID_N +
                                               static_cast<uint32_t>(m_idx) * GRID_N + static_cast<uint32_t>(n_idx)) *
                                              TILE_ELEMS;

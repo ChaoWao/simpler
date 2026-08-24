@@ -82,7 +82,7 @@ protected:
         const size_t n = static_cast<size_t>(ring.task_window_mask) + 1;
         std::memset(ring.task_descriptors, POISON, n * sizeof(PTO2TaskDescriptor));
         std::memset(ring.task_payloads, POISON, n * sizeof(PTO2TaskPayload));
-        std::memset(ring.slot_states, POISON, n * sizeof(PTO2TaskSlotState));
+        std::memset(ring.slot_states, POISON, n * sizeof(ChipTaskSlotState));
         std::memset(ring.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
     }
 };
@@ -137,7 +137,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         const int32_t slot = ring.get_slot_by_task_id(local);
         const PTO2TaskDescriptor &desc = ring.task_descriptors[slot];
         const PTO2TaskPayload &pl = ring.task_payloads[slot];
-        const PTO2TaskSlotState &st = ring.slot_states[slot];
+        const ChipTaskSlotState &st = ring.slot_states[slot];
 
         // Descriptor: the task id is written to this exact local id.
         EXPECT_EQ(desc.task_id.local(), static_cast<uint32_t>(local));

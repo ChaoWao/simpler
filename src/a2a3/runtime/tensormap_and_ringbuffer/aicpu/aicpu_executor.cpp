@@ -32,7 +32,7 @@
 #include "runtime.h"
 #include "spin_hint.h"
 
-// Runtime headers (full struct definition for create/destroy + PTO2_SCOPE)
+// Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
 #include "runtime_core.h"
 #include "runtime_types.h"
 #include "shared_memory.h"
@@ -64,17 +64,17 @@
 #include "scheduler/scheduler_context.h"
 
 // Device orchestration function signature (loaded via dlopen).
-// The executor binds the current thread's PTO2Runtime into orchestration TLS
+// The executor binds the current thread's RuntimeContext into orchestration TLS
 // before calling the user entry.
 typedef void (*DeviceOrchestrationFunc)(const ChipTaskArgs &orch_args);
-typedef void (*DeviceOrchestrationBindRuntimeFunc)(PTO2Runtime *rt);
+typedef void (*DeviceOrchestrationBindRuntimeFunc)(RuntimeContext *rt);
 
 // Config function exported by orchestration .so
-typedef PTO2OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const ChipTaskArgs &orch_args);
+typedef OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const ChipTaskArgs &orch_args);
 
 // From orchestration/common.cpp linked into this DSO — updates g_current_runtime here (distinct from
 // framework_bind_runtime in the dlopen'd libdevice_orch_*.so).
-extern "C" void framework_bind_runtime(PTO2Runtime *rt);
+extern "C" void framework_bind_runtime(RuntimeContext *rt);
 
 constexpr const char *DEFAULT_ORCH_ENTRY_SYMBOL = "aicpu_orchestration_entry";
 constexpr const char *DEFAULT_ORCH_CONFIG_SYMBOL = "aicpu_orchestration_config";
@@ -95,7 +95,7 @@ static int32_t read_runtime_status(Runtime *runtime) {
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
 }
 
-static PTO2Runtime *rt{nullptr};
+static RuntimeContext *rt{nullptr};
 
 // Per-callable_id orchestration SO table. The executor dispatches
 // `orch_so_table_[active_callable_id_]` (created on first sighting of
@@ -141,7 +141,7 @@ struct AicpuExecutor {
     std::atomic<int32_t> finished_count_{0};
     std::atomic<bool> runtime_init_ready_{false};
 
-    // Per-Worker arena backing the PTO2Runtime + sm_handle + orch/sched/mailbox
+    // Per-Worker arena backing the RuntimeContext + sm_handle + orch/sched/mailbox
     // sub-regions (created in runtime_create_from_sm, released in runtime_destroy).
     // Default-constructed: libc-backed backend, no ctx.
     DeviceArena runtime_arena_;
@@ -566,7 +566,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 // Validate arg count on every run against the registered SO.
                 if (*p_config_func != nullptr) {
-                    PTO2OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
+                    OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
                     LOG_DEBUG("Thread %d: Config: expected_args=%d", thread_idx, cfg.expected_arg_count);
                     if (cfg.expected_arg_count > 0) {
                         const ChipStorageTaskArgs &args_validate = runtime->get_orch_args();
@@ -606,7 +606,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     return -1;
                 }
                 runtime_arena_.attach(prebuilt_arena, DeviceArena::kDefaultBaseAlign);
-                rt = reinterpret_cast<PTO2Runtime *>(static_cast<char *>(prebuilt_arena) + off_runtime);
+                rt = reinterpret_cast<RuntimeContext *>(static_cast<char *>(prebuilt_arena) + off_runtime);
 
                 // Wire every arena-internal pointer field (host wrote host-mirror
                 // addresses; we overwrite them with device addresses).
@@ -659,7 +659,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level();
                 {
                     auto &orch = rt->orchestrator;
-                    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+                    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
                         auto &alloc = orch.rings[r].task_allocator;
                         scope_stats_set_ring_capacity(
                             r, alloc.window_size(), alloc.heap_capacity(),
@@ -670,7 +670,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 }
 #endif
 
-                // Wire scheduler context to the newly created PTO2Runtime before
+                // Wire scheduler context to the newly created RuntimeContext before
                 // releasing scheduler threads from runtime_init_ready_.
                 sched_ctx_.bind_runtime(rt);
             }
@@ -808,7 +808,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // streams that already cover everything inside submit_task().
             int32_t total_tasks = 0;
             if (rt->orchestrator.sm_header) {
-                for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+                for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
                     total_tasks +=
                         rt->orchestrator.sm_header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
                 }
@@ -886,7 +886,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     if (prev_finished + 1 == aicpu_thread_num_) {
         aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         finished_.store(true, std::memory_order_release);
-        // Destroy PTO2 runtime. sm_handle / rt are recreated every run so we
+        // Destroy the runtime context. sm_handle / rt are recreated every run so we
         // always tear them down here, but we keep the per-cid orch SO entries
         // alive — they are loaded once by register_callable and consumed by
         // every subsequent run.
@@ -930,7 +930,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     // are loaded once by register_callable and consumed by every subsequent
     // run. The destructor releases them at process teardown.
 
-    // Clear file-scope PTO2Runtime pointer (freed by orchestrator thread before deinit)
+    // Clear file-scope RuntimeContext pointer (freed by orchestrator thread before deinit)
     rt = nullptr;
 
     // Clear dep_gen file-local bookkeeping. No-op when dep_gen is disabled.

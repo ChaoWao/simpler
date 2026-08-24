@@ -25,7 +25,7 @@
  *   - c flows from outer to inner scope (outer-scope tensors are visible to inner scopes)
  *
  * This file compiles as a standalone .so with zero runtime link dependencies.
- * All runtime calls go through the PTO2RuntimeOps function-pointer table.
+ * All runtime calls go through the RuntimeOps function-pointer table.
  */
 
 #include <stddef.h>
@@ -39,17 +39,16 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
 
 /**
  * Orchestration entry — runtime is bound implicitly by the framework.
- * The executor wraps this call in PTO2_SCOPE, so we are already inside
+ * The executor wraps this call in SIMPLER_SCOPE, so we are already inside
  * the outer scope on entry.
  */
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
@@ -74,7 +73,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // Inner scope: owns t1, t2, t3, t4; intermediates d, e, g release on scope end.
     // c flows in from outer scope (outer-scope tensors are visible to inner scopes).
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         // t1: d = c + 1 (kernel_id=1, kernel_add_scalar)
         CoreTaskArgs params_t1;
         params_t1.add_input(c);

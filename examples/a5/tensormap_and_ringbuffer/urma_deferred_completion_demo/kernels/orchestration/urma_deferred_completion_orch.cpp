@@ -16,14 +16,13 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
+__attribute__((visibility("default"))) OrchestrationConfig
 urma_deferred_completion_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{.expected_arg_count = 4};
+    return OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return urma_deferred_completion_orchestration_config(orch_args);
 }
 

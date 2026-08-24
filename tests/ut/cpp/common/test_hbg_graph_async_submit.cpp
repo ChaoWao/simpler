@@ -28,13 +28,13 @@ namespace {
 // budgeted for a badly loaded host rather than for the expected microseconds.
 constexpr std::chrono::seconds kHandshakeTimeout{5};
 
-PTO2Runtime *g_bound_runtime = nullptr;
+RuntimeContext *g_bound_runtime = nullptr;
 
-extern "C" PTO2Runtime *framework_current_runtime(void) { return g_bound_runtime; }
-extern "C" void framework_bind_runtime(PTO2Runtime *rt) { g_bound_runtime = rt; }
+extern "C" RuntimeContext *framework_current_runtime(void) { return g_bound_runtime; }
+extern "C" void framework_bind_runtime(RuntimeContext *rt) { g_bound_runtime = rt; }
 
 struct FakeRuntime {
-    const PTO2RuntimeOps *ops;
+    const RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode{PTO2ScopeMode::AUTO};
     std::mutex mutex;
     std::condition_variable cv;
@@ -71,13 +71,13 @@ struct FakeRuntime {
 };
 
 static_assert(offsetof(FakeRuntime, ops) == 0);
-static_assert(offsetof(FakeRuntime, pending_scope_mode) == offsetof(PTO2Runtime, pending_scope_mode));
+static_assert(offsetof(FakeRuntime, pending_scope_mode) == offsetof(RuntimeContext, pending_scope_mode));
 
-FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
+FakeRuntime *as_fake(RuntimeContext *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
 
-bool fake_is_fatal(PTO2Runtime *) { return false; }
+bool fake_is_fatal(RuntimeContext *) { return false; }
 
-GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs &) {
+GraphScopeResult fake_graph_begin(RuntimeContext *rt, uint64_t, const GraphTaskArgs &) {
     FakeRuntime &fake = *as_fake(rt);
     std::lock_guard<std::mutex> lock(fake.mutex);
     fake.begin_calls++;
@@ -93,7 +93,7 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs
     return result;
 }
 
-bool fake_graph_prepare(PTO2Runtime *rt, void *recording_handle, const GraphTaskArgs &args) {
+bool fake_graph_prepare(RuntimeContext *rt, void *recording_handle, const GraphTaskArgs &args) {
     FakeRuntime &fake = *as_fake(rt);
     std::unique_lock<std::mutex> lock(fake.mutex);
     fake.prepare_calls++;
@@ -132,9 +132,9 @@ bool fake_graph_prepare(PTO2Runtime *rt, void *recording_handle, const GraphTask
     return true;
 }
 
-void fake_graph_abort(PTO2Runtime *, void *) {}
+void fake_graph_abort(RuntimeContext *, void *) {}
 
-bool fake_graph_end(PTO2Runtime *rt) {
+bool fake_graph_end(RuntimeContext *rt) {
     FakeRuntime &fake = *as_fake(rt);
     std::lock_guard<std::mutex> lock(fake.mutex);
     fake.end_calls++;
@@ -142,13 +142,13 @@ bool fake_graph_end(PTO2Runtime *rt) {
     return true;
 }
 
-void fake_graph_commit(PTO2Runtime *rt) { as_fake(rt)->commit_calls++; }
+void fake_graph_commit(RuntimeContext *rt) { as_fake(rt)->commit_calls++; }
 
-void fake_scope_begin(PTO2Runtime *rt) { as_fake(rt)->scope_begin_calls++; }
+void fake_scope_begin(RuntimeContext *rt) { as_fake(rt)->scope_begin_calls++; }
 
-void fake_scope_end(PTO2Runtime *rt) { as_fake(rt)->scope_end_calls++; }
+void fake_scope_end(RuntimeContext *rt) { as_fake(rt)->scope_end_calls++; }
 
-const PTO2RuntimeOps kFakeOps = {
+const RuntimeOps kFakeOps = {
     .scope_begin = fake_scope_begin,
     .scope_end = fake_scope_end,
     .is_fatal = fake_is_fatal,
@@ -207,7 +207,7 @@ TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit
     fake.ops = &kFakeOps;
     fake.record_every_begin = true;
     fake.gate_four_prepares = true;
-    framework_bind_runtime(reinterpret_cast<PTO2Runtime *>(&fake));
+    framework_bind_runtime(reinterpret_cast<RuntimeContext *>(&fake));
 
     uint32_t storage[4]{};
     uint32_t shape[] = {4};
@@ -217,7 +217,7 @@ TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit
 
     int body_calls = 0;
     for (uint64_t graph_key = 0x1800; graph_key < 0x1804; ++graph_key) {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         const GraphSubmitResult result = rt_submit_graph_impl(graph_key, args, [&](const GraphTaskArgs &) {
             std::lock_guard<std::mutex> lock(fake.mutex);
             body_calls++;
@@ -238,7 +238,7 @@ TEST(HbgGraphAsyncSubmit, FourDistinctGraphMissesDoNotInsertAnIntermediateCommit
 TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     FakeRuntime fake{};
     fake.ops = &kFakeOps;
-    framework_bind_runtime(reinterpret_cast<PTO2Runtime *>(&fake));
+    framework_bind_runtime(reinterpret_cast<RuntimeContext *>(&fake));
 
     uint32_t storage[4]{};
     uint32_t shape[] = {4};
@@ -250,7 +250,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     const std::thread::id caller = std::this_thread::get_id();
     GraphSubmitResult first;
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             // An explicit commit reached from a Graph body must not make the
             // recorder wait for its own in-flight job.
@@ -268,7 +268,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     }
     GraphSubmitResult second;
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
@@ -283,7 +283,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
         fake.overlapped = false;
     }
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             rt_graph_commit();
             std::unique_lock<std::mutex> lock(fake.mutex);
@@ -298,7 +298,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
         });
     }
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
@@ -330,7 +330,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
 TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
     FakeRuntime fake{};
     fake.ops = &kFakeOps;
-    framework_bind_runtime(reinterpret_cast<PTO2Runtime *>(&fake));
+    framework_bind_runtime(reinterpret_cast<RuntimeContext *>(&fake));
 
     uint32_t storage[8]{};
     uint32_t shape[] = {8};
@@ -349,7 +349,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
     fake.later_submit_entered = true;
 
     {
-        PTO2ScopeGuard scope;
+        ScopeGuard scope;
         (void)rt_submit_graph_impl(0x1719, args, [](const GraphTaskArgs &) {});
     }
     rt_graph_commit();

@@ -94,10 +94,10 @@ SOs need from the host SO are passed via explicit function pointer injection
 
 Loaded by the AICPU executor at runtime from a temp file. Uses `RTLD_LAZY`
 because not all symbols may be referenced. Communicates with the runtime
-through a function pointer table (`PTO2RuntimeOps`), not direct symbol
+through a function pointer table (`RuntimeOps`), not direct symbol
 linkage.
 
-`PTO2RuntimeOps` is a binary ABI without size or version negotiation.
+`RuntimeOps` is a binary ABI without size or version negotiation.
 Orchestration SOs and their runtime must therefore be built from the same
 simpler revision. Changing the table's field count, order, or signatures
 invalidates previously built orchestration SOs; cached or prebuilt artifacts

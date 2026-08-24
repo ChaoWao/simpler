@@ -13,7 +13,7 @@
  *
  * Matches the small-case paged_attention orchestration shape while replacing
  * the automatic same-scope dependency wiring with explicit task-to-task deps
- * inside PTO2_SCOPE(PTO2ScopeMode::MANUAL).
+ * inside SIMPLER_SCOPE(PTO2ScopeMode::MANUAL).
  */
 
 #include <algorithm>
@@ -62,10 +62,9 @@ inline uint64_t get_sys_cnt_aicpu() {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
@@ -150,7 +149,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         uint64_t cur_seq = static_cast<uint64_t>(get_tensor_data<int32_t>(context_lens, 1, cl_idx));
         uint64_t bn_this_batch = (cur_seq + block_size - 1) / block_size;
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
-            PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+            SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
                 CYCLE_COUNT_LAP(prof_scope);
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 

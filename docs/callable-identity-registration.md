@@ -72,7 +72,7 @@ temporary file, `dlopen` it, resolve the entry/config/bind symbols, and
 populate `orch_so_table_[callable_id]`. It must
 stop before any real task execution: it does not call the orchestration entry,
 does not configure runtime arguments from user task inputs, does not create a
-`PTO2Runtime`, does not enter runtime scopes, and does not submit scheduler or
+`RuntimeContext`, does not enter runtime scopes, and does not submit scheduler or
 AICore work. `dlopen` may still run ELF or C++ static constructors; the
 contract is that prewarm does not explicitly invoke orchestration logic.
 

@@ -9,9 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Main Interface
+ * Runtime core interface
  *
- * This is the main header for the PTO Runtime2 system.
+ * This is the main header for the runtime.
  * It provides a unified API for task graph construction and execution.
  *
  * Key Features:
@@ -22,7 +22,7 @@
  * - Orchestrator-Scheduler decoupling via shared memory
  *
  * Usage:
- *   1. Create runtime: PTO2Runtime create methods
+ *   1. Create runtime: RuntimeContext create methods
  *   2. Build task graph in orchestration function:
  *      - begin_scope() / end_scope()
  *      - submit_task()
@@ -51,7 +51,7 @@
 /**
  * Runtime execution mode
  */
-enum PTO2RuntimeMode {
+enum RuntimeMode {
     PTO2_MODE_EXECUTE = 0,    // Execute tasks on workers
     PTO2_MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
     PTO2_MODE_GRAPH_ONLY = 2  // Build graph only, no execution
@@ -64,15 +64,15 @@ enum PTO2RuntimeMode {
  * (via orchestration_api.h inline wrappers), so it has zero link
  * dependencies on runtime .cpp files.
  */
-typedef struct PTO2Runtime PTO2Runtime;  // forward declare for ops signatures
+typedef struct RuntimeContext RuntimeContext;  // forward declare for ops signatures
 
-struct PTO2RuntimeOps {
-    TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
-    void (*scope_begin)(PTO2Runtime *rt);
-    void (*scope_end)(PTO2Runtime *rt);
-    void (*orchestration_done)(PTO2Runtime *rt);
-    bool (*is_fatal)(PTO2Runtime *rt);
-    void (*report_fatal)(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...);
+struct RuntimeOps {
+    TaskOutputTensors (*submit_task)(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
+    void (*scope_begin)(RuntimeContext *rt);
+    void (*scope_end)(RuntimeContext *rt);
+    void (*orchestration_done)(RuntimeContext *rt);
+    bool (*is_fatal)(RuntimeContext *rt);
+    void (*report_fatal)(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...);
 
     // Logging (populated by runtime, called by orchestration)
     void (*log_error)(const char *func, const char *fmt, ...);
@@ -83,19 +83,19 @@ struct PTO2RuntimeOps {
 
     // Cross-layer data access (orchestration reads/writes tensor values via runtime)
     // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
+    uint64_t (*get_tensor_data)(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
     void (*set_tensor_data)(
-        PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+        RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
     );
-    TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const CoreTaskArgs &args);
-    TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const CoreTaskArgs &args);
+    TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
+    TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
 
     // This-run core geometry from runtime_finalize_after_wire: MIX clusters
     // (one AIC each) and standalone AIV cores.
-    int32_t (*available_cluster_count)(PTO2Runtime *rt);
-    int32_t (*available_aiv_count)(PTO2Runtime *rt);
+    int32_t (*available_cluster_count)(RuntimeContext *rt);
+    int32_t (*available_aiv_count)(RuntimeContext *rt);
 
-    // Stash the call-site captured by PTO2ScopeGuard into the [ScopeStats]
+    // Stash the call-site captured by ScopeGuard into the [ScopeStats]
     // collector. Always present in the struct to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
@@ -107,9 +107,9 @@ struct PTO2RuntimeOps {
  * config); re-read at AICPU boot to reconstruct ring/heap/dep-pool capacities.
  */
 struct ArenaSizingKey {
-    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
-    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]{};
-    int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]{};
+    uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]{};
+    uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]{};
+    int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]{};
 };
 
 /**
@@ -139,20 +139,20 @@ struct ArenaOffsets {
  * offsets + arena size. Produced once on the host by runtime_reserve_layout();
  * consumed by runtime_init_data_from_layout and runtime_wire_arena_pointers.
  */
-struct PTO2RuntimeArenaLayout {
+struct RuntimeArenaLayout {
     ArenaSizingKey sizing;
     ArenaOffsets offsets;
 };
 
 /**
- * PTO Runtime2 context
+ * Runtime context
  *
  * Contains all state for orchestration and scheduling.
  * In simulated mode, runs in single process with shared address space.
  */
-struct PTO2Runtime {
+struct RuntimeContext {
     // Ops table (first field — used by orchestration .so via function pointers)
-    const PTO2RuntimeOps *ops;
+    const RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode;
 
     // Components
@@ -167,7 +167,7 @@ struct PTO2Runtime {
     bool gm_heap_owned;  // True if we allocated it
 
     // Mode
-    PTO2RuntimeMode mode;
+    RuntimeMode mode;
 
     // Statistics
     int64_t total_cycles;
@@ -180,7 +180,7 @@ struct PTO2Runtime {
     // *before* dereferencing this image. Populated on host by
     // runtime_init_data_from_layout + runtime_wire_arena_pointers; read by
     // aicpu_executor.cpp.
-    PTO2RuntimeArenaLayout prebuilt_layout;
+    RuntimeArenaLayout prebuilt_layout;
 };
 
 // =============================================================================
@@ -189,17 +189,17 @@ struct PTO2Runtime {
 
 /**
  * Phase 1 — declare every sub-region (sm_handle wrapper, orchestrator /
- * scheduler / tensor_map / mailbox / PTO2Runtime header) on the supplied
+ * scheduler / tensor_map / mailbox / RuntimeContext header) on the supplied
  * arena. Pure arithmetic; does not touch device memory and may run on host.
  * Returns the layout descriptor; caller commits/attaches the arena before
  * Phase 2/3.
  */
-PTO2RuntimeArenaLayout runtime_reserve_layout(
+RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
 );
-PTO2RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]
+RuntimeArenaLayout runtime_reserve_layout(
+    DeviceArena &arena, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH],
+    const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]
 );
 
 /**
@@ -212,18 +212,18 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
  * them (never dereference). Safe to run on a host arena that owns a host
  * mirror of the runtime image — the resulting buffer is rtMemcpy-ready.
  *
- * Returns the PTO2Runtime* that sits at layout.off_runtime within the arena.
+ * Returns the RuntimeContext* that sits at layout.off_runtime within the arena.
  * Caller must follow up with runtime_wire_arena_pointers; rt->ops and the
  * AICore-side count fields are left untouched and must be filled by the
  * AICPU at boot.
  */
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
+RuntimeContext *runtime_init_data_from_layout(
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
     void *gm_heap_dev_base, uint64_t heap_size
 );
-PTO2Runtime *runtime_init_data_from_layout(
-    DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
-    void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+RuntimeContext *runtime_init_data_from_layout(
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,
+    void *gm_heap_dev_base, const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH]
 );
 
 /**
@@ -234,8 +234,8 @@ PTO2Runtime *runtime_init_data_from_layout(
  * both host (writing host-mirror addresses) and AICPU (writing device
  * addresses) sides.
  */
-void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt);
-bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt);
+void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt);
+bool runtime_reset_for_reuse(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt);
 
 /**
  * AICPU-only Phase 4 — fill in the few fields the host could not know at
@@ -244,7 +244,7 @@ bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &l
  * orchestrator's core counts (depend on the executor's scheduler context).
  * Call once per boot after runtime_wire_arena_pointers.
  */
-void runtime_finalize_after_wire(PTO2Runtime *rt, int32_t aic_count, int32_t aiv_count);
+void runtime_finalize_after_wire(RuntimeContext *rt, int32_t aic_count, int32_t aiv_count);
 
 /**
  * Destroy runtime. With the prebuilt-arena fast path the arena buffer is
@@ -252,12 +252,12 @@ void runtime_finalize_after_wire(PTO2Runtime *rt, int32_t aic_count, int32_t aiv
  * here — the destructor only forgets sub-structure pointers (idempotent
  * cleanup).
  */
-void runtime_destroy(PTO2Runtime *rt, DeviceArena &arena);
+void runtime_destroy(RuntimeContext *rt, DeviceArena &arena);
 
 /**
  * Set execution mode
  */
-void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
+void runtime_set_mode(RuntimeContext *rt, RuntimeMode mode);
 
 // =============================================================================
 // Orchestration API (called by orchestration function)
@@ -270,7 +270,7 @@ void runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
  * bounded by the scope. When scope_end() is called, the scope
  * releases its reference to all enclosed tasks.
  */
-void rt_scope_begin(PTO2Runtime *rt);
+void rt_scope_begin(RuntimeContext *rt);
 
 /**
  * End current scope
@@ -278,24 +278,24 @@ void rt_scope_begin(PTO2Runtime *rt);
  * Releases scope reference for all tasks submitted since scope_begin().
  * Tasks whose refcount reaches zero will have their buffers released.
  */
-void rt_scope_end(PTO2Runtime *rt);
+void rt_scope_end(RuntimeContext *rt);
 
 /**
  * Mark orchestration as complete
  *
  * Signals that no more tasks will be submitted.
  */
-void rt_orchestration_done(PTO2Runtime *rt);
+void rt_orchestration_done(RuntimeContext *rt);
 
 /**
  * Enter fatal state explicitly from orchestration.
  */
-void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...);
+void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...);
 
 /**
  * Cross-layer data access: read a tensor value by waiting for its producer.
  */
-uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
+uint64_t get_tensor_data(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]);
 
 /**
  * Cross-layer data access: write a value to a tensor at given indices.
@@ -303,7 +303,7 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndi
  * See set_tensor_data in orchestration_api.h for full documentation.
  */
 void set_tensor_data(
-    PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+    RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
 );
 
 /**
@@ -312,7 +312,7 @@ void set_tensor_data(
  */
 #ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
 #define PTO2_ORCHESTRATION_CONFIG_DEFINED
-struct PTO2OrchestrationConfig {
+struct OrchestrationConfig {
     int expected_arg_count;
 };
 #endif

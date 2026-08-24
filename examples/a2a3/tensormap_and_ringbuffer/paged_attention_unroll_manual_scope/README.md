@@ -37,7 +37,7 @@ rewritten rather than adjusted.
 **64**.
 
 Dependencies are declared explicitly inside
-`PTO2_SCOPE(PTO2ScopeMode::MANUAL)`, using the primitive
+`SIMPLER_SCOPE(PTO2ScopeMode::MANUAL)`, using the primitive
 `set_dependencies(deps, n)` form throughout —
 [`../paged_attention_manual_scope/`](../paged_attention_manual_scope/) is the
 directory to read for that API on its own, against unchanged kernels.

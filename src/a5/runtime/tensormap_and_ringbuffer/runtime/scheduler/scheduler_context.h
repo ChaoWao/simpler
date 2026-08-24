@@ -34,7 +34,7 @@
 // Forward declarations — avoid pulling in full headers for pointer/reference params.
 class Runtime;
 struct Handshake;
-struct PTO2Runtime;
+struct RuntimeContext;
 
 /**
  * SchedulerContext: owns all scheduler-side state and methods.
@@ -115,11 +115,11 @@ public:
     //    (skipped on fatal error — emergency_shutdown runs instead)
     // Callers must invoke rt_orchestration_done(rt) before this — that
     // step belongs to the orchestrator lifecycle, not the scheduler.
-    void on_orchestration_done(Runtime *runtime, PTO2Runtime *rt, int32_t thread_idx, int32_t total_tasks);
+    void on_orchestration_done(Runtime *runtime, RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
 
-    // Bind the PTO2Runtime scheduler pointer. Required in device-orchestration
+    // Bind the RuntimeContext scheduler pointer. Required in device-orchestration
     // mode where rt is created by the orchestrator thread after init().
-    void bind_runtime(PTO2Runtime *rt);
+    void bind_runtime(RuntimeContext *rt);
 
     // Serial orch->sched mode pre-dispatch wait. No AICore dispatch happens
     // before orchestrator_done_.
@@ -143,7 +143,7 @@ private:
 
     // --- Scheduler binding & per-core runtime state ---
     alignas(64) PTO2SchedulerState *sched_{nullptr};
-    PTO2Runtime *rt_{nullptr};
+    RuntimeContext *rt_{nullptr};
 
     // Per-core execution state, indexed by core_id (= worker_id)
     CoreExecState core_exec_states_[RUNTIME_MAX_WORKER];
@@ -247,11 +247,11 @@ private:
     }
 
     int pop_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, PTO2TaskSlotState **out, int max_count
+        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
     );
 
     void build_payload(
-        PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
+        PTO2DispatchPayload &dispatch_payload, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
         int32_t block_idx, bool force_gate = false
     );
 
@@ -273,7 +273,7 @@ private:
     };
 
     PublishHandle prepare_subtask_to_core(
-        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2SubtaskSlot subslot,
         bool to_pending, int32_t block_idx, bool force_gate = false
     );
 
@@ -295,7 +295,7 @@ private:
     // Fan out one block's subtasks (1 for AIC/AIV, 1-3 for MIX) into the
     // caller-supplied handles buffer. Returns the number of handles written.
     int prepare_block_for_dispatch(
-        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2ResourceShape shape,
+        int32_t thread_idx, int32_t core_offset, ChipTaskSlotState &slot_state, PTO2ResourceShape shape,
         bool to_pending, int32_t block_idx, PublishHandle *out_handles, bool force_gate = false
     );
 
@@ -335,7 +335,7 @@ private:
         int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
     );
     int32_t stage_consumer_blocks(
-        int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+        int32_t thread_idx, ChipTaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
         CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
     );
     int32_t early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase);
@@ -375,9 +375,9 @@ private:
     );
 
     void complete_slot_task(
-        PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
+        ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
         int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-        PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX
         ,
         uint64_t dispatch_ts, uint64_t finish_ts
@@ -389,17 +389,17 @@ private:
 
     void check_running_cores_for_completion(
         int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
-        bool &made_progress, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        bool &made_progress, ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
     );
 
-    bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);
+    bool enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num);
     int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
     struct SyncStartStageResult {
         int32_t staged_blocks{0};
         int32_t running_cores{0};
     };
     SyncStartStageResult stage_sync_start_cores(
-        PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
+        ChipTaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
     );
     void handle_drain_mode(
         int32_t thread_idx, uint64_t *out_stage_wall_cycles = nullptr, int32_t *out_staged_blocks = nullptr

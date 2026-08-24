@@ -160,7 +160,7 @@ void PTO2DepListPool::report_deadlock(
     LOG_ERROR("  - In-flight tasks: %d", current - last_alive);
     // Head-task dump: what the shared reclaim watermark is actually waiting on.
     if (ring.slot_states != nullptr) {
-        PTO2TaskSlotState &h = ring.get_slot_state_by_task_id(last_alive);
+        ChipTaskSlotState &h = ring.get_slot_state_by_task_id(last_alive);
         uint32_t fc = h.fanout_count;
         uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
         LOG_ERROR(
@@ -177,7 +177,7 @@ void PTO2DepListPool::report_deadlock(
 }
 
 bool PTO2DepListPool::ensure_space(
-    PTO2SharedMemoryRingHeader &ring, int32_t needed, PTO2TaskSlotState *oldest_open_task
+    PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task
 ) {
     if (available() >= needed) return true;
 

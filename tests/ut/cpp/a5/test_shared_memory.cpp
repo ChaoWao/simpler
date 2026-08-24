@@ -99,7 +99,7 @@ TEST_F(SharedMemoryTest, HeaderInitValues) {
     EXPECT_EQ(hdr->sched_stall_task_id.load(), -1);
     EXPECT_EQ(hdr->sched_stall_core.load(), -1);
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto &fc = hdr->rings[r].fc;
         EXPECT_EQ(fc.current_task_index.load(), 0);
         EXPECT_EQ(fc.last_task_alive.load(), 0);
@@ -141,17 +141,17 @@ TEST(StallClassificationTest, NamesAreStableAndDistinct) {
 TEST_F(SharedMemoryTest, Validate) { EXPECT_TRUE(handle->validate()); }
 
 TEST_F(SharedMemoryTest, PerRingIndependence) {
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_NE(handle->header->rings[r].task_descriptors, nullptr) << "Ring " << r;
         EXPECT_NE(handle->header->rings[r].task_payloads, nullptr) << "Ring " << r;
     }
-    for (int r = 1; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 1; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_NE(handle->header->rings[r].task_descriptors, handle->header->rings[0].task_descriptors) << "Ring " << r;
     }
 }
 
 TEST_F(SharedMemoryTest, PointerAlignment) {
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto addr = reinterpret_cast<uintptr_t>(handle->header->rings[r].task_descriptors);
         EXPECT_EQ(addr % PTO2_ALIGN_SIZE, 0u) << "Ring " << r << " descriptors not aligned";
     }
@@ -168,7 +168,7 @@ TEST(SharedMemoryLayout, RegionsNonOverlapping) {
     PTO2SharedMemoryHandle *h = make_handle(arena, /*ws=*/64, /*heap=*/4096);
     ASSERT_NE(h, nullptr);
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         uintptr_t desc_start = (uintptr_t)h->header->rings[r].task_descriptors;
         uintptr_t desc_end = desc_start + 64 * sizeof(PTO2TaskDescriptor);
         uintptr_t payload_start = (uintptr_t)h->header->rings[r].task_payloads;
@@ -176,7 +176,7 @@ TEST(SharedMemoryLayout, RegionsNonOverlapping) {
         EXPECT_GE(payload_start, desc_end) << "Ring " << r << ": payload region should not overlap descriptors";
     }
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH - 1; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH - 1; r++) {
         uintptr_t this_payload_end = (uintptr_t)h->header->rings[r].task_payloads + 64 * sizeof(PTO2TaskPayload);
         uintptr_t next_desc_start = (uintptr_t)h->header->rings[r + 1].task_descriptors;
         EXPECT_GE(next_desc_start, this_payload_end) << "Ring " << r << " and " << (r + 1) << " should not overlap";
@@ -201,7 +201,7 @@ TEST(SharedMemoryCalcSize, LargerWindowGivesLargerSize) {
 TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(PTO2SharedMemoryHeader) % PTO2_ALIGN_SIZE, 0u); }
 
 TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
-    uint64_t ws[PTO2_MAX_RING_DEPTH] = {128, 256, 512, 1024};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {128, 256, 512, 1024};
     uint64_t size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
 
     uint64_t uniform_size = PTO2SharedMemoryHandle::calculate_size(128);
@@ -209,8 +209,8 @@ TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
 }
 
 TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
-    uint64_t ws[PTO2_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[PTO2_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena arena;
@@ -224,7 +224,7 @@ TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
     std::memset(buffer, 0, static_cast<size_t>(sm_size));
     ASSERT_TRUE(handle->init_per_ring(buffer, sm_size, ws, heaps));
 
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_EQ(handle->header->rings[r].task_window_size, ws[r]);
         EXPECT_EQ(handle->header->rings[r].heap_size, heaps[r]);
         EXPECT_EQ(handle->header->rings[r].task_window_mask, static_cast<int32_t>(ws[r] - 1));
@@ -232,17 +232,17 @@ TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
 }
 
 TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
-    uint64_t ws[PTO2_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[PTO2_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
-    int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
     uint64_t total_heap = 0;
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         total_heap += heaps[r];
     }
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     DeviceArena sm_arena;
@@ -252,16 +252,16 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     std::memset(sm, 0, static_cast<size_t>(sm_size));
 
     std::vector<char> gm(static_cast<size_t>(total_heap));
-    PTO2Runtime *rt =
+    RuntimeContext *rt =
         runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
     ASSERT_NE(rt, nullptr);
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_FALSE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
     }
     runtime_wire_arena_pointers(runtime_arena, layout, rt);
 
     EXPECT_EQ(rt->gm_heap_size, total_heap);
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_EQ(layout.sizing.task_window_sizes[r], ws[r]);
         EXPECT_EQ(layout.sizing.heap_sizes[r], heaps[r]);
         EXPECT_EQ(layout.sizing.dep_pool_capacities[r], dep_caps[r]);
@@ -274,40 +274,40 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
 
     rt->sm_handle->sm_base = sm;
     ASSERT_TRUE(runtime_reset_for_reuse(runtime_arena, layout, rt));
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         EXPECT_TRUE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
     }
 }
 
 TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
-    uint64_t ws[PTO2_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[PTO2_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
-    int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena source_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(source_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(source_arena, ws, heaps, dep_caps);
     ASSERT_NE(source_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     std::vector<char> sm(static_cast<size_t>(sm_size));
     std::vector<char> gm(100 * 1024);
-    PTO2Runtime *source_rt =
+    RuntimeContext *source_rt =
         runtime_init_data_from_layout(source_arena, layout, PTO2_MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
     ASSERT_NE(source_rt, nullptr);
     runtime_wire_arena_pointers(source_arena, layout, source_rt);
 
     DeviceArena relocated_arena;
-    PTO2RuntimeArenaLayout relocated_layout = runtime_reserve_layout(relocated_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout relocated_layout = runtime_reserve_layout(relocated_arena, ws, heaps, dep_caps);
     ASSERT_EQ(relocated_layout.offsets.off_runtime, layout.offsets.off_runtime);
     ASSERT_EQ(relocated_arena.total_size(), source_arena.total_size());
     ASSERT_NE(relocated_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
     std::memcpy(relocated_arena.base(), source_arena.base(), source_arena.total_size());
 
-    auto *relocated_rt = static_cast<PTO2Runtime *>(relocated_arena.region_ptr(layout.offsets.off_runtime));
+    auto *relocated_rt = static_cast<RuntimeContext *>(relocated_arena.region_ptr(layout.offsets.off_runtime));
     runtime_wire_arena_pointers(relocated_arena, layout, relocated_rt);
 
     ASSERT_NE(&relocated_rt->scheduler, &source_rt->scheduler);
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto &dep_pool = relocated_rt->scheduler.ring_sched_states[r].dep_pool;
         EXPECT_EQ(dep_pool.reclaim_request_mask, &relocated_rt->scheduler.publication_request_mask);
         EXPECT_EQ(dep_pool.reclaim_ack_mask, &relocated_rt->scheduler.publication_ack_mask);
@@ -317,12 +317,12 @@ TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
 }
 
 TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
-    uint64_t ws[PTO2_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[PTO2_MAX_RING_DEPTH] = {std::numeric_limits<uint64_t>::max(), 1, 0, 0};
-    int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {std::numeric_limits<uint64_t>::max(), 1, 0, 0};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
 
     DeviceArena runtime_arena;
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
+    RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);
     ASSERT_NE(runtime_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     char sm = 0;
@@ -346,7 +346,7 @@ TEST(SharedMemoryBoundary, ZeroWindowSize) {
     DeviceArena arena;
     PTO2SharedMemoryHandle *h = make_handle(arena, /*ws=*/0, /*heap=*/4096);
     if (h) {
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH - 1; r++) {
+        for (int r = 0; r < CHIP_MAX_RING_DEPTH - 1; r++) {
             EXPECT_EQ(h->header->rings[r].task_descriptors, h->header->rings[r + 1].task_descriptors)
                 << "Zero window: all rings' descriptor pointers collapse to same address";
         }

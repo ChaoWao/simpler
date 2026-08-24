@@ -1,8 +1,8 @@
-# PTO2 Runtime System Design
+# `tensormap_and_ringbuffer` Runtime Design
 
 ## Overview
 
-PTO2 (Parallel Task Orchestration v2) is a runtime system for executing task graphs on Ascend AI processors. It coordinates four layers of execution:
+`tensormap_and_ringbuffer` is a runtime for executing task graphs on Ascend AI processors. It coordinates four layers of execution:
 
 - **Host** (x86/ARM CPU): compiles kernels, allocates device memory, initializes the Runtime, and launches AICPU/AICore threads.
 - **AICPU** (device ARM cores): runs the orchestrator (task graph builder) and scheduler threads.
@@ -54,7 +54,7 @@ The primary production runtime. Uses ring buffers for task slots and output memo
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
 - **Thread model**: `aicpu_thread_num - 1` scheduler threads + 1 orchestrator
   thread on AICPU; the default five-thread configuration uses 4 schedulers
-- **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `PTO2_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
+- **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `CHIP_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
 - **Use case**: production workloads; supports streaming, flow control, and large batch sizes
 
 ---
@@ -151,7 +151,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 │  Per-ring regions ×4:       │
 │    PTO2TaskDescriptor[N]    │  N = task_window_size per ring
 │    PTO2TaskPayload[N]       │
-│    PTO2TaskSlotState[N]     │
+│    ChipTaskSlotState[N]     │
 └─────────────────────────────┘
 ```
 
@@ -301,7 +301,7 @@ Solution:
 
 The FATAL message is logged to the device log and the process exits. The solution is to increase the ring size so that it can hold at least all tasks within the largest parallel scope. For example, if a scope submits 13 tasks, `task_window >= 14` is required (13 + 1 to distinguish full from empty).
 
-**Sizing guideline**: `task_window_size` must be larger than the maximum number of tasks in any single `PTO2_SCOPE`. A safe choice is `2 × max_tasks_per_scope` or simply the default 65536 for production.
+**Sizing guideline**: `task_window_size` must be larger than the maximum number of tasks in any single `SIMPLER_SCOPE`. A safe choice is `2 × max_tasks_per_scope` or simply the default 65536 for production.
 
 ---
 
@@ -431,7 +431,7 @@ The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the
 
 Key members:
 
-- `rings[PTO2_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
+- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
 - `tensor_map`, `tensor_pool`: dependency tracking
 - `scope_tasks[]`, `scope_begins[]`, `scope_stack_top`: scope nesting stack (flat buffer partitioned by level)
 - `scheduler`: pointer to scheduler state (for Orch-side wiring helpers and ready queue access)
@@ -475,7 +475,7 @@ The scheduler's completion handler mirrors this:
 
 This protocol guarantees every consumer is accounted for exactly once.
 
-### 7.4 Scope Mechanism (`PTO2_SCOPE`)
+### 7.4 Scope Mechanism (`SIMPLER_SCOPE`)
 
 Scopes control the lifetime of intermediate buffers. Each scope:
 
@@ -483,7 +483,7 @@ Scopes control the lifetime of intermediate buffers. Each scope:
 - On `scope_end`: increments `fanout_refcount` for scope tasks; when it reaches `fanout_count`, the task's packed buffer can be reclaimed
 
 ```cpp
-PTO2_SCOPE(rt) {
+SIMPLER_SCOPE(rt) {
     // Tasks submitted here belong to this scope
     rt_submit_aic_task(FUNC_QK, args);
     rt_submit_aiv_task(FUNC_SF, args);
@@ -500,11 +500,11 @@ eligible for reuse; once `advance_ring_pointers` reaches it,
 Tensor storage in place.
 
 Therefore the `TaskOutputTensors` instance, the references it returns, and
-any pointer derived from them MUST NOT outlive the `PTO2_SCOPE` in which
+any pointer derived from them MUST NOT outlive the `SIMPLER_SCOPE` in which
 submit was called. The typical safe pattern is:
 
 ```cpp
-PTO2_SCOPE() {
+SIMPLER_SCOPE() {
     TaskOutputTensors outs = rt_submit_aic_task(FUNC_QK, args);
     const Tensor &y = outs.get_ref(0);
     // Use y here and in subsequent submits within the same scope.
@@ -515,7 +515,7 @@ Anti-patterns that compile but silently break:
 
 ```cpp
 const Tensor *kept = nullptr;
-PTO2_SCOPE() {
+SIMPLER_SCOPE() {
     TaskOutputTensors outs = rt_submit_aic_task(FUNC_QK, args);
     kept = &outs.get_ref(0);          // escapes the scope
 }
@@ -524,7 +524,7 @@ PTO2_SCOPE() {
 // tensor — a wrong-tensor read with no runtime diagnostic.
 
 TaskOutputTensors outs;               // declared in outer scope
-PTO2_SCOPE() {
+SIMPLER_SCOPE() {
     outs = rt_submit_aic_task(FUNC_QK, args);
 }
 const Tensor &t = outs.get_ref(0);    // same hazard: outs survives scope
@@ -810,7 +810,7 @@ Built by the scheduler from `PTO2TaskDescriptor`:
 3. The orchestrator thread writes the SO to a temp file, calls `dlopen`
 4. `dlsym("aicpu_orchestration_config")` returns configuration (expected arg count)
 5. `dlsym("aicpu_orchestration_entry")` returns the orchestration function pointer
-6. The orchestrator thread creates a `PTO2Runtime`, calls the orchestration function within a `PTO2_SCOPE`
+6. The orchestrator thread creates a `RuntimeContext`, calls the orchestration function within a `SIMPLER_SCOPE`
 7. After orchestration completes: `dlclose`, delete temp file
 
 ### 10.3 Thread Startup Synchronization
@@ -852,7 +852,7 @@ The orchestration API is defined in `orchestration_api.h`. Orchestration code de
 | `rt_submit_task(mixed_kernels, args)` | Submit a mixed task with `MixedKernels` struct |
 | `rt_submit_aic_task(kernel_id, args)` | Convenience: submit AIC-only task |
 | `rt_submit_aiv_task(kernel_id, args)` | Convenience: submit AIV-only task |
-| `PTO2_SCOPE() { ... }` | RAII scope for buffer lifetime |
+| `SIMPLER_SCOPE() { ... }` | RAII scope for buffer lifetime |
 | `rt_orchestration_done()` | Signal orchestration complete |
 
 ### 11.2 Parameter Construction
@@ -883,7 +883,7 @@ Tasks are queued by resource shape, which is derived from the `active_mask` in t
 Each orchestration `.so` must export:
 
 ```cpp
-extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
+extern "C" OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
 extern "C" void aicpu_orchestration_entry(uint64_t* args, int arg_count);
 ```
 
@@ -926,7 +926,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count) {
     // Unpack args: query, key_cache, value_cache, block_table, context_lens, out, config
     for (q_idx = 0; q_idx < q_loop; q_idx++) {
         for (batch_start = 0; batch_start < batch; batch_start += IN_CORE_BATCH) {
-            PTO2_SCOPE() {
+            SIMPLER_SCOPE() {
                 // Describe accumulator tensors (oi, li, mi) with TensorCreateInfo
                 // Submit AIV_HUB to initialize accumulators
                 for (bn = 0; bn < max_bn; bn++) {

@@ -254,7 +254,7 @@ private:
     std::unique_ptr<AlignedStorage> storage_;
     PTO2TaskDescriptor task_{};
     PTO2TaskPayload payload_{};
-    PTO2TaskSlotState slot_{};
+    ChipTaskSlotState slot_{};
     std::array<ChipTensor, TENSOR_SLOTS> boundary_tensors_{};
     std::array<uint64_t, SCALAR_SPAN> boundary_scalars_{};
 };
@@ -456,7 +456,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    PTO2TaskSlotState outer_slot{};
+    ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;
@@ -532,7 +532,7 @@ TEST(GraphExecutionReplay, MaterializesBoundaryScalarPoolWiderThanTaskPayload) {
     outer_task.task_id = TaskId::make(1, 7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    PTO2TaskSlotState outer_slot{};
+    ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;
@@ -598,7 +598,7 @@ TEST(GraphExecutionActivationState, RetriesDoNotClearReadiness) {
 TEST(GraphExecutionActivationState, ExternalReadyBeforePrepareActivatesAtMeet) {
     PTO2SchedulerState scheduler{};
     GraphExecution execution{};
-    PTO2TaskSlotState outer_slot{};
+    ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.graph_context = &execution;
     execution.outer_slot = &outer_slot;
@@ -616,7 +616,7 @@ TEST(GraphExecutionActivationState, ExternalReadyBeforePrepareActivatesAtMeet) {
 TEST(GraphExecutionActivationState, PrepareBeforeExternalReadyActivatesAtMeet) {
     PTO2SchedulerState scheduler{};
     GraphExecution execution{};
-    PTO2TaskSlotState outer_slot{};
+    ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.graph_context = &execution;
     execution.outer_slot = &outer_slot;
@@ -646,8 +646,8 @@ TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
     scheduler.graph_ready_queue.mask = 1;
     scheduler.graph_ready_queue.enqueue_pos.store(0, std::memory_order_relaxed);
     scheduler.graph_ready_queue.dequeue_pos.store(0, std::memory_order_relaxed);
-    PTO2TaskSlotState graph_slots[3]{};
-    for (PTO2TaskSlotState &slot : graph_slots) {
+    ChipTaskSlotState graph_slots[3]{};
+    for (ChipTaskSlotState &slot : graph_slots) {
         slot.task_kind = TaskKind::GRAPH;
     }
 
@@ -670,7 +670,7 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
     scheduler.graph_prepare_queue.mask = 1;
     scheduler.graph_prepare_queue.enqueue_pos.store(0, std::memory_order_relaxed);
     scheduler.graph_prepare_queue.dequeue_pos.store(0, std::memory_order_relaxed);
-    PTO2TaskSlotState graph_slots[3]{};
+    ChipTaskSlotState graph_slots[3]{};
 
     EXPECT_TRUE(scheduler.push_graph_prepare(&graph_slots[0], 10, 3));
     EXPECT_TRUE(scheduler.push_graph_prepare(&graph_slots[1], 11, 3));
@@ -683,7 +683,7 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
 
 TEST(GraphExecutionErrors, InvalidNodeCompletionIsReported) {
     PTO2SchedulerState scheduler{};
-    PTO2TaskSlotState slot{};
+    ChipTaskSlotState slot{};
     slot.task_kind = TaskKind::GRAPH_NODE;
 
     const PTO2SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
@@ -739,7 +739,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     outer_task.task_id = TaskId::make(1, 5);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    PTO2TaskSlotState outer_slot{};
+    ChipTaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;

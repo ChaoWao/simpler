@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Orchestrator Interface
+ * Orchestrator interface
  *
  * The Orchestrator is responsible for:
  * 1. Executing the orchestration function (Turing-complete control flow)
@@ -52,7 +52,7 @@ struct GraphHostState;
  *
  * host_build_graph runs the orchestrator on the host and ships the shared-memory
  * image it produces, so this whole object is host-only: it owns its scratch
- * arrays outright and no device code reads any of them. PTO2Runtime therefore
+ * arrays outright and no device code reads any of them. RuntimeContext therefore
  * holds it by pointer — a by-value member would put non-trivially-copyable state
  * inside the struct bind copies to the device.
  */
@@ -97,7 +97,7 @@ struct PTO2OrchestratorState {
 
     // Hidden alloc tasks complete synchronously inside the orchestrator and
     // therefore bypass the executor's normal worker-completion counter path.
-    // rt_orchestration_done publishes this into PTO2Runtime, which is the copy
+    // rt_orchestration_done publishes this into RuntimeContext, which is the copy
     // the device-side executor adds into its completed_tasks_ progress counter
     // so shutdown/profiling totals remain closed.
     int64_t inline_completed_tasks{0};

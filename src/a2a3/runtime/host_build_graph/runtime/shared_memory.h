@@ -94,7 +94,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Per-ring data pointers (host-side, set by setup_pointers)
     PTO2TaskDescriptor *task_descriptors;
     PTO2TaskPayload *task_payloads;
-    PTO2TaskSlotState *slot_states;
+    ChipTaskSlotState *slot_states;
 
     // Polling-completion state (device-addressed array, one byte per slot).
     // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
@@ -149,9 +149,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // through its slot state's `payload` delta, which the image's restack rebinds to
     // the real address.
 
-    PTO2TaskSlotState &get_slot_state_by_slot(int32_t slot) { return slot_states[slot]; }
+    ChipTaskSlotState &get_slot_state_by_slot(int32_t slot) { return slot_states[slot]; }
 
-    PTO2TaskSlotState &get_slot_state_by_task_id(int32_t local_id) {
+    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id) {
         return slot_states[get_slot_by_task_id(local_id)];
     }
 };
@@ -354,7 +354,7 @@ inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) no
     o.payloads = off;
     off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+    off += PTO2_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
     o.completion_flags = off;
     off += PTO2_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), PTO2_ALIGN_SIZE);
     o.fanin_pool = off;
@@ -453,13 +453,13 @@ compact_live_image(const char *mirror_base, uint64_t task_window_size, const Bin
     // One copy, not one per payload: PTO2TaskPayload is fixed-size, so the mirror and
     // the image share a stride. Each pool is likewise one copy of its own prefix.
     std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(PTO2TaskPayload));
-    std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(PTO2TaskSlotState));
+    std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(ChipTaskSlotState));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
     std::memcpy(out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(ChipTensor));
     std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
-    auto *out_slots = reinterpret_cast<PTO2TaskSlotState *>(out_base + to.slot_states);
+    auto *out_slots = reinterpret_cast<ChipTaskSlotState *>(out_base + to.slot_states);
     auto *out_descriptors = reinterpret_cast<PTO2TaskDescriptor *>(out_base + to.descriptors);
     auto *out_payloads = reinterpret_cast<PTO2TaskPayload *>(out_base + to.payloads);
     const auto *mirror_payloads = reinterpret_cast<const PTO2TaskPayload *>(mirror_base + from.payloads);

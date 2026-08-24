@@ -121,7 +121,7 @@ inline void CompletionCondition::retire() {
 }
 
 struct AsyncWaitEntry {
-    PTO2TaskSlotState *slot_state{nullptr};
+    ChipTaskSlotState *slot_state{nullptr};
     TaskId task_token{TaskId::invalid()};
     CompletionCondition conditions[MAX_COMPLETIONS_PER_TASK];
     int32_t condition_count{0};
@@ -132,7 +132,7 @@ struct AsyncWaitEntry {
 struct AsyncPollResult {
     int32_t completed{0};
     int32_t error_code{SIMPLER_ERROR_NONE};
-    PTO2TaskSlotState *failed_slot_state{nullptr};
+    ChipTaskSlotState *failed_slot_state{nullptr};
 };
 
 inline const char *async_engine_name(AsyncEngine engine) {
@@ -185,7 +185,7 @@ struct AsyncWaitList {
     // entries[]).
     struct DrainCompletionSink {
         PTO2SchedulerState *sched{nullptr};
-        PTO2TaskSlotState **deferred_release_slot_states{nullptr};
+        ChipTaskSlotState **deferred_release_slot_states{nullptr};
         int32_t *deferred_release_count{nullptr};
         int32_t deferred_release_capacity{0};
         int32_t inline_completed{0};
@@ -198,7 +198,7 @@ struct AsyncWaitList {
 
     // Inline-complete a NotDeferred task during drain. Returns false on
     // deferred_release_slot_states overflow.
-    bool try_inline_complete_locked(DrainCompletionSink &sink, PTO2TaskSlotState &slot_state);
+    bool try_inline_complete_locked(DrainCompletionSink &sink, ChipTaskSlotState &slot_state);
 
     // Single-consumer drain: pop each published message in tail order and
     // translate it into wait-list state. An empty sink (sched == nullptr) just
@@ -241,8 +241,8 @@ struct AsyncWaitList {
                     return drained;
                 }
             } else if (msg.kind == MSG_KIND_TASK_NORMAL_DONE) {
-                PTO2TaskSlotState *slot_state_ptr =
-                    reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(msg.addr));
+                ChipTaskSlotState *slot_state_ptr =
+                    reinterpret_cast<ChipTaskSlotState *>(static_cast<uintptr_t>(msg.addr));
                 AsyncWaitEntry *entry = find_entry_by_token(msg.task_token);
                 if (entry == nullptr) {
                     // Producers strictly order: all CONDITIONs for token T are
@@ -305,7 +305,7 @@ struct AsyncWaitList {
     template <bool Profiling>
     AsyncPollResult poll_and_complete(
         AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-        PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
+        ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
         int32_t deferred_release_capacity
 #if SIMPLER_SCHED_PROFILING
         ,

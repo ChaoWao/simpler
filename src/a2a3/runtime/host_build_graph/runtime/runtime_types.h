@@ -189,7 +189,7 @@ struct PTO2OutputLayout {
 // Dependency List Entry
 // =============================================================================
 
-struct PTO2TaskSlotState;  // Forward declaration (defined below)
+struct ChipTaskSlotState;  // Forward declaration (defined below)
 
 // =============================================================================
 // Task Descriptor
@@ -200,7 +200,7 @@ struct PTO2TaskSlotState;  // Forward declaration (defined below)
  *
  * Stored in the TaskDescriptor ring buffer in shared memory.
  * Contains static identification and buffer pointers only.
- * Dynamic scheduling state (fanin/fanout/task_state) is in PTO2TaskSlotState.
+ * Dynamic scheduling state (fanin/fanout/task_state) is in ChipTaskSlotState.
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
@@ -509,7 +509,7 @@ static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
  * deadlock detector, and the cold-path stall dump. completion_flags is the
  * device-side readiness truth; task_state is the host-visible mirror.
  */
-struct alignas(64) PTO2TaskSlotState {
+struct alignas(64) ChipTaskSlotState {
     // Highest local task id among this slot's consumers. Reclaim gate: the slot
     // is safe to retire once the per-ring completed_watermark reaches this id.
     // Whole-graph-resident hbg never reclaims at runtime, so this is
@@ -533,8 +533,8 @@ struct alignas(64) PTO2TaskSlotState {
     // that producer's wake list (CAS push through next_in_wake_list). On
     // completion the producer atomic-exchanges wake_list_head to
     // WAKE_LIST_SENTINEL and routes every waiter. Reset to nullptr at init.
-    std::atomic<PTO2TaskSlotState *> wake_list_head{nullptr};
-    PTO2TaskSlotState *next_in_wake_list{nullptr};
+    std::atomic<ChipTaskSlotState *> wake_list_head{nullptr};
+    ChipTaskSlotState *next_in_wake_list{nullptr};
 
     // --- Set per-submit (depend on task inputs) ---
     ActiveMask active_mask;  // Bitmask of active subtask slots (set once)
@@ -624,8 +624,8 @@ struct alignas(64) PTO2TaskSlotState {
     }
 };
 
-static_assert(sizeof(PTO2TaskSlotState) == 64);
+static_assert(sizeof(ChipTaskSlotState) == 64);
 
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.
-inline PTO2TaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(0x1));
+inline ChipTaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<ChipTaskSlotState *>(static_cast<uintptr_t>(0x1));

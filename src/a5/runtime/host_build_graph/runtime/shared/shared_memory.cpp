@@ -53,7 +53,7 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     auto &ring = header->ring;
     ring.task_descriptors = (PTO2TaskDescriptor *)(base + off.descriptors);
     ring.task_payloads = (PTO2TaskPayload *)(base + off.payloads);
-    ring.slot_states = (PTO2TaskSlotState *)(base + off.slot_states);
+    ring.slot_states = (ChipTaskSlotState *)(base + off.slot_states);
     ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
@@ -158,7 +158,7 @@ void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size, uint64_t hea
     header->ring.task_descriptors_offset = offset;
     offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
     offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
-    offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskSlotState), PTO2_ALIGN_SIZE);
+    offset += PTO2_ALIGN_UP(task_window_size * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
 
     header->total_size = sm_size;
 

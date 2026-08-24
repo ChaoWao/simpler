@@ -74,7 +74,7 @@ PTO2SchedProfilingData scheduler_get_profiling(int thread_idx) {
 void PTO2SchedulerState::print_stats() {
     PTO2SchedulerState *sched = this;
     LOG_DEBUG("=== Scheduler Statistics ===");
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         if (sched->ring_sched_states[r].last_task_alive > 0) {
             LOG_DEBUG("Ring %d:", r);
             LOG_DEBUG("  last_task_alive: %d", sched->ring_sched_states[r].last_task_alive);

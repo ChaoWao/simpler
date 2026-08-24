@@ -53,7 +53,7 @@ struct AICoreCompletionMailboxMessage {
     std::atomic<uint64_t> seq;
     TaskId task_token;
     // CONDITION: completion observation addr (counter / SDMA event record).
-    // TASK_NORMAL_DONE: PTO2TaskSlotState pointer carried over to the consumer
+    // TASK_NORMAL_DONE: ChipTaskSlotState pointer carried over to the consumer
     //   so it can finalize the AsyncWaitEntry.slot_state binding.
     uint64_t addr;
     uint64_t backend_cookie;
@@ -146,7 +146,7 @@ struct AICoreCompletionMailbox {
         }
     }
 
-    // MPSC push for a TASK_NORMAL_DONE sentinel. Carries the PTO2TaskSlotState
+    // MPSC push for a TASK_NORMAL_DONE sentinel. Carries the ChipTaskSlotState
     // pointer in the `addr` field so the consumer can finish binding the
     // AsyncWaitEntry.slot_state without going back to the FIN-handling thread.
     bool try_push_normal_done(TaskId task_token, uint64_t slot_state_addr) {

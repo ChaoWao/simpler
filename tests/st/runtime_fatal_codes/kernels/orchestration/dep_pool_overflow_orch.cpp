@@ -35,10 +35,9 @@ static constexpr int32_t PRODUCER_COUNT = 128;  // > PTO2_FANIN_INLINE_CAP (64)
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig
-aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{
+    return OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
@@ -49,7 +48,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    PTO2_SCOPE() {
+    SIMPLER_SCOPE() {
         TaskId producers[PRODUCER_COUNT];
         for (int32_t i = 0; i < PRODUCER_COUNT; i++) {
             CoreTaskArgs args;

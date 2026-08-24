@@ -19,7 +19,7 @@
 #include "runtime_types.h"
 #include "spin_hint.h"
 
-// host_build_graph host-orch build: PTO2Runtime embeds PTO2SchedulerState by
+// host_build_graph host-orch build: RuntimeContext embeds PTO2SchedulerState by
 // value, so this header is compiled into the host libhost_runtime.so. The AICPU
 // spin_hint.h that defines PLATFORM_SCHEDULER_TIMEOUT_MS is not on the host
 // include path; supply it here. The value only sizes an on-device scheduler
@@ -106,8 +106,8 @@ enum class LoopAction : int8_t {
 struct alignas(64) CoreExecState {
     // --- Hot fields (completion + dispatch, every iteration) ---
     uint64_t reg_addr;                      // offset  0: register base address (set once in handshake)
-    PTO2TaskSlotState *running_slot_state;  // offset  8: slot state for running task (nullptr = empty)
-    PTO2TaskSlotState *pending_slot_state;  // offset 16: slot state for pending task (nullptr = empty)
+    ChipTaskSlotState *running_slot_state;  // offset  8: slot state for running task (nullptr = empty)
+    ChipTaskSlotState *pending_slot_state;  // offset 16: slot state for pending task (nullptr = empty)
     int32_t running_reg_task_id;            // offset 24: register task ID (AICPU_TASK_INVALID = idle)
     int32_t pending_reg_task_id;            // offset 28: pending register task ID (AICPU_TASK_INVALID = none)
     uint32_t dispatch_seq;                  // offset 32: monotonic dispatch counter
@@ -579,7 +579,7 @@ struct alignas(64) SchedChipSwimlaneCounters {
 // (only process completions) until the fixed coordinator finishes launching all blocks.
 struct alignas(64) SyncStartDrainState {
     std::atomic<int32_t> sync_start_pending{0};              // 0=normal; -1=initializing; >0=active (value=block_num)
-    std::atomic<PTO2TaskSlotState *> pending_task{nullptr};  // held task (not re-queued)
+    std::atomic<ChipTaskSlotState *> pending_task{nullptr};  // held task (not re-queued)
     std::atomic<uint64_t> drain_attempt{0};                  // incremented whenever an ack round is reset
     // Parallel staging: after the coordinator confirms global availability it sets
     // stage_go, releasing every thread to stage its OWN cores concurrently (vs the old

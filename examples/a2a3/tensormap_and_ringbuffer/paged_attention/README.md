@@ -14,8 +14,8 @@ Per (batch, head) and per KV block, the orchestration submits four tasks:
 | `PV` | AIC | `P @ V` |
 | `UP` | AIV | online-softmax accumulation into the running output |
 
-Ordering is **not written down**. The tasks sit inside a plain `PTO2_SCOPE()`
-with a `PTO2_SCOPE_GUARD()`, and TensorMap derives `QK → SF → PV → UP` from the
+Ordering is **not written down**. The tasks sit inside a plain `SIMPLER_SCOPE()`
+with a `SIMPLER_SCOPE_GUARD()`, and TensorMap derives `QK → SF → PV → UP` from the
 tensors they share. That is the whole point of the baseline: the dependency
 graph is a consequence of the data, not of the code.
 

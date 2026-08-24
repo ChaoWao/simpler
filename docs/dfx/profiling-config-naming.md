@@ -64,7 +64,7 @@ runtime-specific ones) unambiguous about ownership.
 ### 4. Everything carries the `SIMPLER_` project prefix
 
 `PTO2_` is the device runtime's internal namespace (89 identifiers:
-`PTO2_MAX_RING_DEPTH`, `SIMPLER_ERROR_*`, `PTO2Runtime`, …). Configuration
+`CHIP_MAX_RING_DEPTH`, `SIMPLER_ERROR_*`, `RuntimeContext`, …). Configuration
 surface exposed to users / CI / external consumers is unified under
 `SIMPLER_`, regardless of which internal namespace implements it.
 

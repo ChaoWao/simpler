@@ -125,7 +125,7 @@ constexpr bool dep_has_retain(DepFlags f) { return (f & DEP_RETAIN) != DEP_NONE;
  *   scope_end the slot becomes eligible for reuse, and a later submit will
  *   overwrite the same ChipTensor storage in place. Therefore the
  *   TaskOutputTensors instance, the const ChipTensor& returned by get_ref(), and
- *   any pointer derived from either MUST NOT outlive the PTO2_SCOPE in which
+ *   any pointer derived from either MUST NOT outlive the SIMPLER_SCOPE in which
  *   submit was called — do not move/copy them to outer-scope variables, do
  *   not capture references by std::reference_wrapper or raw pointers across
  *   scope boundaries.

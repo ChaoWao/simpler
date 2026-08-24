@@ -65,10 +65,10 @@
 #define PTO2_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
 // Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)
-// Scope depth maps to ring index via: min(scope_depth, PTO2_MAX_RING_DEPTH - 1)
-#define PTO2_MAX_RING_DEPTH 4
+// Scope depth maps to ring index via: min(scope_depth, CHIP_MAX_RING_DEPTH - 1)
+#define CHIP_MAX_RING_DEPTH 4
 
-// Memory pools (per-ring defaults; total = value × PTO2_MAX_RING_DEPTH)
+// Memory pools (per-ring defaults; total = value × CHIP_MAX_RING_DEPTH)
 #define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
 #define PTO2_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
 #define PTO2_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
@@ -77,11 +77,11 @@
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
 // Hard cap for the scope_tasks buffer. Equals the total in-flight ring slot
-// budget (PTO2_TASK_WINDOW_SIZE × PTO2_MAX_RING_DEPTH): once every ring slot
+// budget (PTO2_TASK_WINDOW_SIZE × CHIP_MAX_RING_DEPTH): once every ring slot
 // is in flight, no more tasks can ever be pushed regardless of buffer size.
 // scope_tasks_push fatals on overflow rather than growing the arena-owned
 // buffer (which would be UB on the arena's malloc'd backing).
-#define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * PTO2_MAX_RING_DEPTH)
+#define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH)
 
 // Ready queue
 #define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
@@ -166,11 +166,11 @@ struct PTO2OutputLayout {
  * Fanin spill entry
  * Stored in the dedicated fanin spill ring buffer.
  */
-struct PTO2TaskSlotState;  // Forward declaration
+struct ChipTaskSlotState;  // Forward declaration
 struct PTO2FaninPool;      // Forward declaration
 
 // One fanin edge: a producer slot pointer with the per-edge DepFlags packed into
-// bits 0..1 of the pointer. PTO2TaskSlotState is alignas(64), so bits 0..5 are
+// bits 0..1 of the pointer. ChipTaskSlotState is alignas(64), so bits 0..5 are
 // always zero in a real pointer. Used for both the inline fanin array and the
 // spill pool, keeping sizeof == sizeof(uintptr_t) so neither footprint grows.
 struct PTO2FaninSpillEntry {
@@ -181,11 +181,11 @@ struct PTO2FaninSpillEntry {
     // are written via set()). Value-init (`PTO2FaninSpillEntry{}`) still zeroes it.
     uintptr_t packed;
 
-    PTO2TaskSlotState *slot_state() const { return reinterpret_cast<PTO2TaskSlotState *>(packed & ~FLAG_MASK); }
+    ChipTaskSlotState *slot_state() const { return reinterpret_cast<ChipTaskSlotState *>(packed & ~FLAG_MASK); }
     DepFlags flags() const { return static_cast<DepFlags>(packed & FLAG_MASK); }
     // Only bits within FLAG_MASK are stored; any bit outside it (a malformed
     // DepFlags value) is masked off so it can never corrupt the slot pointer.
-    void set(PTO2TaskSlotState *s, DepFlags f) {
+    void set(ChipTaskSlotState *s, DepFlags f) {
         packed = reinterpret_cast<uintptr_t>(s) | (static_cast<uintptr_t>(f) & FLAG_MASK);
     }
     void add_flags(DepFlags f) { packed |= (static_cast<uintptr_t>(f) & FLAG_MASK); }
@@ -198,7 +198,7 @@ static_assert(sizeof(PTO2FaninSpillEntry) == sizeof(uintptr_t));
  * Stored in DepListPool ring buffer.
  */
 struct PTO2DepListEntry {
-    PTO2TaskSlotState *slot_state;  // Consumer slot state (direct pointer)
+    ChipTaskSlotState *slot_state;  // Consumer slot state (direct pointer)
     PTO2DepListEntry *next;         // next entry
 };
 
@@ -211,7 +211,7 @@ struct PTO2DepListEntry {
  *
  * Stored in the TaskDescriptor ring buffer in shared memory.
  * Contains static identification and buffer pointers only.
- * Dynamic scheduling state (fanin/fanout/task_state) is in PTO2TaskSlotState.
+ * Dynamic scheduling state (fanin/fanout/task_state) is in ChipTaskSlotState.
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
@@ -473,7 +473,7 @@ enum PTO2TaskLifecycleFlag : uint8_t {
 
 static_assert((PTO2_DISPATCH_PROPAGATED & (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED)) == 0);
 
-struct alignas(64) PTO2TaskSlotState {
+struct alignas(64) ChipTaskSlotState {
     // Fanout lock + list (accessed together under lock in on_task_complete)
     std::atomic<int32_t> fanout_lock;  // Per-task spinlock (0=unlocked, 1=locked)
     uint32_t fanout_count;             // SCOPE_BIT (owning scope) | number of consumers
@@ -505,7 +505,7 @@ struct alignas(64) PTO2TaskSlotState {
     // has_predicate, selective timing tag). Lives on slot_state (not payload) so
     // fanin walks and the completion path read them off the already-hot producer
     // slot_state cache line. Packed into the padding before dep_pool_mark to keep
-    // PTO2TaskSlotState at 64 bytes. Plain-write (set once at submit, before the
+    // ChipTaskSlotState at 64 bytes. Plain-write (set once at submit, before the
     // slot is scheduler-visible), so it MUST NOT share a byte with the atomically
     // mutated lifecycle_flags.
     TaskAttrs task_attrs{};
@@ -665,10 +665,10 @@ struct alignas(64) PTO2TaskSlotState {
     void unlock_fanout() { fanout_lock.store(0, std::memory_order_release); }
 };
 
-static_assert(sizeof(PTO2TaskSlotState) == 64);
-// PTO2FaninSpillEntry packs DepFlags into the low bits of a PTO2TaskSlotState*.
+static_assert(sizeof(ChipTaskSlotState) == 64);
+// PTO2FaninSpillEntry packs DepFlags into the low bits of a ChipTaskSlotState*.
 // That is only lossless while the type is aligned past those tag bits.
 static_assert(
-    alignof(PTO2TaskSlotState) > PTO2FaninSpillEntry::FLAG_MASK,
-    "PTO2TaskSlotState alignment must exceed PTO2FaninSpillEntry::FLAG_MASK so the packed DepFlags bits are free"
+    alignof(ChipTaskSlotState) > PTO2FaninSpillEntry::FLAG_MASK,
+    "ChipTaskSlotState alignment must exceed PTO2FaninSpillEntry::FLAG_MASK so the packed DepFlags bits are free"
 );
