@@ -138,14 +138,17 @@ same DFX smoke steps used by Per-PR run once in each Daily platform job, and
 the A2/A3 `network1` corpus runs through the existing two-machine workflow. The
 main Per-PR scene-test steps keep the default `--manual exclude`, so moving an
 ordinary case to Daily does not require a second workflow exclusion list.
-The dedicated dep-gen, chip-swimlane, PMU, and args-dump steps instead use
+The dedicated dep-gen, chip-swimlane, PMU, args-dump, and scope-stats steps
+instead use
 `include` for the normal Per-PR and Daily modes because they own the full
 corpus under their target paths; a `manual_mode` of `only` remains `only` in
 those steps. Marking a case under one of those paths manual therefore removes
 its duplicate main-step execution without removing its dedicated Per-PR
-coverage. Scope-stats has no dedicated CI smoke: its ordinary scene test stays
-in the main sweep, and artifact validation runs only when
-`--enable-scope-stats` is supplied explicitly.
+coverage. Scope-stats needs its own step for a reason the others do not: its
+scene test runs in the main sweep either way, but `_validate_scope_stats_artifact`
+returns early unless `--enable-scope-stats` is supplied, so without the dedicated
+step the run happens and the `scope_stats.jsonl` it should have produced is never
+asserted on.
 
 Use `"manual": True` on an individual `SceneTestCase.CASES` entry and
 `@pytest.mark.manual` on a standalone pytest test. The reusable scene-test
