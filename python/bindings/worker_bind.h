@@ -330,6 +330,14 @@ inline void bind_worker(nb::module_ &m) {
             "(tensors + pooled arenas + runtime buffers)."
         )
         .def(
+            "device_memory_info",
+            [](Orchestrator &self, int worker_id) {
+                return self.device_memory_info(worker_id);
+            },
+            nb::arg("worker_id"), nb::call_guard<nb::gil_scoped_release>(),
+            "Device-wide ACL_HBM_MEM free/total byte snapshot for a next-level worker."
+        )
+        .def(
             "alloc",
             [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype,
                const CanonicalIdentity &identity) {

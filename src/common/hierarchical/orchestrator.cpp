@@ -560,6 +560,12 @@ uint64_t Orchestrator::committed_device_memory(int worker_id) {
     return wt->control_committed_device_memory();
 }
 
+DeviceMemoryInfo Orchestrator::device_memory_info(int worker_id) {
+    auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+    if (!wt) throw std::runtime_error("Orchestrator::device_memory_info: invalid worker_id");
+    return wt->control_device_memory_info();
+}
+
 TaskSlotState &Orchestrator::slot_state(TaskSlot s) {
     TaskSlotState *p = allocator_->slot_state(s);
     if (!p) throw std::runtime_error("Orchestrator::slot_state: invalid slot id");

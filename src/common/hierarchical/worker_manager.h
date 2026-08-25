@@ -43,6 +43,7 @@
 
 #include "../task_interface/buffer.h"
 #include "../task_interface/call_config.h"
+#include "../worker/device_memory_info.h"
 #include "remote_wire.h"
 #include "types.h"
 
@@ -215,8 +216,12 @@ static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
 static constexpr uint64_t CTRL_REGION_ALLOCATE = 16;
 static constexpr uint64_t CTRL_REGION_RELEASE = 17;
 // Query a chip child's MemoryAllocator-committed HBM (bytes). The child writes
-// the value to CTRL_OFF_RESULT; the parent sums across children for L3.
+// the selected chip's value to CTRL_OFF_RESULT.
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
+// 19..24 are reserved by the Python Global CommDomain chip controls and its
+// L4-to-local-L3 envelope. Query a chip child's device-wide ACL_HBM_MEM
+// snapshot; the child writes one DeviceMemoryInfo at CTRL_OFF_RESULT.
+static constexpr uint64_t CTRL_DEVICE_MEMORY_INFO = 25;
 
 // Control args occupy the base frame's config-sized region:
 //   offset 16: uint64 arg0 (size for malloc/register; ptr for free)
@@ -343,6 +348,7 @@ public:
     virtual void shutdown_child() {}
     virtual uint64_t control_malloc(size_t size);
     virtual uint64_t control_committed_device_memory();
+    virtual DeviceMemoryInfo control_device_memory_info();
     virtual void control_free(uint64_t ptr);
     virtual void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
     virtual void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
@@ -407,6 +413,7 @@ public:
     void shutdown_child() override;
     uint64_t control_malloc(size_t size) override;
     uint64_t control_committed_device_memory() override;
+    DeviceMemoryInfo control_device_memory_info() override;
     void control_free(uint64_t ptr) override;
     void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) override;
     void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) override;
@@ -561,6 +568,7 @@ public:
     // child progress owner may observe a control request while a task is active.
     uint64_t control_malloc(size_t size);
     uint64_t control_committed_device_memory();
+    DeviceMemoryInfo control_device_memory_info();
     void control_free(uint64_t ptr);
     void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
     void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);

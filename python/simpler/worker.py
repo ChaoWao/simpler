@@ -254,6 +254,7 @@ from .task_interface import (
     ChipWorker,
     CommBufferSpec,
     CommDomainHandle,
+    DeviceMemoryInfo,
     GlobalCommDomainHandle,
     GlobalCommDomainView,
     RemoteAddressSpace,
@@ -567,6 +568,8 @@ _CTRL_COMMITTED_DEVICE_MEMORY = 18
 # enclosed command uses remote_l3_protocol.ControlName; values 18-23 belong to
 # chip-child controls.
 _CTRL_GLOBAL_DOMAIN_NODE = 24
+_CTRL_DEVICE_MEMORY_INFO = 25
+_CTRL_OP_NAMES[_CTRL_DEVICE_MEMORY_INFO] = "device_memory_info"
 _LOCAL_GLOBAL_CONTROL_HEADER = struct.Struct("<IIQ")
 _CTRL_OP_NAMES[_CTRL_GLOBAL_DOMAIN_NODE] = "global_domain"
 
@@ -615,6 +618,7 @@ _OFF_DOMAIN_REPLY_COMMITTED = 0
 #   offset 40:                  uint64  result (returned ptr from malloc)
 _CTRL_OFF_ARG0 = 16
 _CTRL_OFF_RESULT = 40
+_DEVICE_MEMORY_INFO = struct.Struct("<QQ")
 
 
 class _NoBufferConsumerError(RuntimeError):
@@ -2924,6 +2928,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_region_release(buf, provider_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
+            elif sub_cmd == _CTRL_DEVICE_MEMORY_INFO:
+                info = cw.device_memory_info()
+                _DEVICE_MEMORY_INFO.pack_into(buf, _CTRL_OFF_RESULT, info.free_bytes, info.total_bytes)
             elif sub_cmd == _CTRL_IMPORT_RELEASE:
                 import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_PREPARE:
@@ -10166,6 +10173,29 @@ class Worker:
             self._check_chip_worker_id(worker_id)
             assert self._orch is not None
             return int(self._orch.committed_device_memory(worker_id))
+
+    def device_memory_info(self, worker_id: int = 0) -> DeviceMemoryInfo:
+        """Return the target device's ACL_HBM_MEM free/total byte snapshot.
+
+        Level 2 queries the in-process chip worker. Level 3 routes by logical
+        *worker_id* to the matching forked chip child. Simulator backends do
+        not synthesize device-wide memory and raise ``NotImplementedError``.
+        """
+        worker_id = int(worker_id)
+        with self._operation_lease("device_memory_info"):
+            if self.level == 2:
+                if str(self._config.get("platform", "")).endswith("sim"):
+                    raise NotImplementedError("device_memory_info is not supported on simulator backends")
+                assert self._chip_worker is not None
+                with self._child_prov_worker_lock(0), self._child_prov_lock:
+                    return self._chip_worker.device_memory_info()
+            if not self._chip_shms:
+                raise NotImplementedError("device_memory_info requires at least one forked chip worker")
+            self._check_chip_worker_id(worker_id)
+            if str(self._config.get("platform", "")).endswith("sim"):
+                raise NotImplementedError("device_memory_info is not supported on simulator backends")
+            assert self._orch is not None
+            return self._orch.device_memory_info(worker_id)
 
     @staticmethod
     def _check_copy_handle(handle: Buffer, nbytes: int, *, writing: bool, api: str) -> None:

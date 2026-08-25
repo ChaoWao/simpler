@@ -47,6 +47,11 @@ class ChipRun;
 class ChipRunLane;
 struct ChipRunLaneState;
 
+class UnsupportedRuntimeOperation : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 class ChipWorker {
 public:
     ChipWorker() = default;
@@ -242,6 +247,7 @@ public:
     /// pipeline slot, or 0 while that slot holds none.
     uint64_t retained_temp_addr(uint32_t slot_id) const;
     size_t committed_device_memory() const;
+    DeviceMemoryInfo device_memory_info() const;
 
 private:
     using CreateDeviceContextFn = void *(*)();
@@ -253,6 +259,7 @@ private:
     using GetRuntimeSizeFn = size_t (*)();
     using GetRuntimeAlignmentFn = size_t (*)();
     using GetCommittedDeviceMemoryFn = size_t (*)(void *);
+    using GetDeviceMemoryInfoFn = decltype(&device_memory_info_ctx);
     // From host_runtime.so. Single platform-side init that does (a) thread
     // attach + device-id record, (b) executor binary takeover, (c) onboard
     // CANN dlog sync. Reads the current log level off HostLogger itself.
@@ -314,6 +321,7 @@ private:
     GetRuntimeSizeFn get_runtime_size_fn_ = nullptr;
     GetRuntimeAlignmentFn get_runtime_alignment_fn_ = nullptr;
     GetCommittedDeviceMemoryFn device_committed_memory_fn_ = nullptr;
+    GetDeviceMemoryInfoFn device_memory_info_fn_ = nullptr;
     SimplerInitFn simpler_init_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;

@@ -137,6 +137,9 @@ uint64_t WorkerEndpoint::control_malloc(size_t) { throw_unsupported_control("con
 uint64_t WorkerEndpoint::control_committed_device_memory() {
     throw_unsupported_control("control_committed_device_memory");
 }
+DeviceMemoryInfo WorkerEndpoint::control_device_memory_info() {
+    throw_unsupported_control("control_device_memory_info");
+}
 void WorkerEndpoint::control_free(uint64_t) { throw_unsupported_control("control_free"); }
 void WorkerEndpoint::control_copy_to(const BufferDescriptor &, const BufferDescriptor &, uint64_t) {
     throw_unsupported_control("control_copy_to");
@@ -1273,6 +1276,15 @@ uint64_t LocalMailboxEndpoint::control_committed_device_memory() {
     return read_control_result(mbox());
 }
 
+DeviceMemoryInfo LocalMailboxEndpoint::control_device_memory_info() {
+    std::lock_guard<std::mutex> lk(mailbox_mu_);
+    write_control_args(mbox(), CTRL_DEVICE_MEMORY_INFO);
+    run_control_command("control_device_memory_info");
+    DeviceMemoryInfo info{};
+    std::memcpy(&info, mbox() + CTRL_OFF_RESULT, sizeof(info));
+    return info;
+}
+
 void LocalMailboxEndpoint::control_prepare(const uint8_t *digest) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
     write_control_args(mbox(), CTRL_PREPARE);
@@ -1477,6 +1489,11 @@ uint64_t WorkerThread::control_malloc(size_t size) {
 uint64_t WorkerThread::control_committed_device_memory() {
     if (!endpoint_) throw std::runtime_error("control_committed_device_memory: null endpoint");
     return endpoint_->control_committed_device_memory();
+}
+
+DeviceMemoryInfo WorkerThread::control_device_memory_info() {
+    if (!endpoint_) throw std::runtime_error("control_device_memory_info: null endpoint");
+    return endpoint_->control_device_memory_info();
 }
 
 void WorkerThread::control_prepare(const uint8_t *digest) {
