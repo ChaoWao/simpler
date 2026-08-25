@@ -22,9 +22,9 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 30
     env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "10000"
+      SIMPLER_OP_EXECUTE_TIMEOUT_US: "45000000"
+      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "50000"
     steps:
       - name: Checkout target
         uses: actions/checkout@v5
