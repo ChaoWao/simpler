@@ -161,13 +161,11 @@ only the `real_occupancy` curve.
 ## 3. Output: `scope_stats.jsonl`
 
 NDJSON. Line 1 is run metadata; each subsequent line is one scope
-sample (`begin` or `end`). Schema version 6 (bumped from 5 when
-`heap_start`/`heap_end` changed from wrapping ring offsets to monotonic
-cumulative bytes — a `version == 5` file's heap fields wrap, a `version == 6`
-file's do not):
+sample (`begin` or `end`). `heap_start`/`heap_end` are monotonic cumulative
+bytes, not wrapping ring offsets:
 
 ```json
-{"version": 6, "fatal": false, "dropped": 0, "total": 4, "task_window_max": [8, 4], "heap_max": [268435456, 268435456], "dep_pool_max": [1024, 1024], "tensormap_max": 65536}
+{"fatal": false, "dropped": 0, "total": 4, "task_window_max": [8, 4], "heap_max": [268435456, 268435456], "dep_pool_max": [1024, 1024], "tensormap_max": 65536}
 {"site": "example_orchestration.cpp:77", "phase": "begin", "depth": 1, "ring": 1, "task_window_start": 0, "task_window_end": 0, "heap_start": 0, "heap_end": 0, "dep_pool_start": 1, "dep_pool_end": 1, "tensormap": 0}
 {"site": "example_orchestration.cpp:77", "phase": "end", "depth": 1, "ring": 1, "task_window_start": 0, "task_window_end": 4, "heap_start": 0, "heap_end": 8192, "dep_pool_start": 1, "dep_pool_end": 6, "tensormap": 5}
 ```
@@ -176,7 +174,6 @@ Metadata line (line 1):
 
 | Field | Type | Meaning |
 | ----- | ---- | ------- |
-| `version` | int | Schema version (`6`) |
 | `fatal` | bool | `true` iff a fatal was latched during the run; records past it are diagnostic-only |
 | `dropped` | uint | Records dropped on device (free_queue empty / ready_queue full); `0` on a healthy run |
 | `total` | uint | Total records the device attempted (collected + dropped) |
