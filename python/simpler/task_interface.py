@@ -73,6 +73,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     read_args_from_blob,
 )
 from _task_interface import (
+    _emit_host_log as _native_emit_host_log,
+)
+from _task_interface import (
+    _host_log_directory as _native_host_log_directory,
+)
+from _task_interface import (
     _initialize_host_log as _native_initialize_host_log,
 )
 
@@ -1230,13 +1236,21 @@ class GlobalCommDomainView:
 
 
 def _initialize_host_log(log_level: int | None = None) -> None:
-    """Seed the extension-owned host-log state before runtime use or fork."""
-    if log_level is None:
-        from . import _log  # noqa: PLC0415
+    """Seed the extension-owned host-log state before runtime use or fork.
 
+    Also points the Python `simpler` logger at that same host logger, so the two
+    stop being separate logging systems that agree only on a threshold. This is
+    the right moment for it: the extension is loaded by definition here, whereas
+    installing the handler at import time would put the extension on the import
+    path of the logging surface.
+    """
+    from . import _log  # noqa: PLC0415
+
+    if log_level is None:
         log_level = _log.get_current_config()
     if not _native_initialize_host_log(int(log_level)):
         raise ValueError(f"unsupported simpler log threshold: {log_level}")
+    _log.attach_unified_log_handler(_native_emit_host_log, _native_host_log_directory)
 
 
 class ChipWorker:

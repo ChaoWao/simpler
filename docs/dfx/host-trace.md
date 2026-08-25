@@ -42,10 +42,15 @@ part in another. The first non-empty directory in a process wins, and a record
 falls back to stderr rather than being lost whenever the file cannot take it: a
 path that does not fit, a failed open, a failed write, or a failed flush.
 
-**What stays on the console regardless:** messages Python logs through its own
-`logging` module. Those are a second logging system — same threshold, different
-envelope, no timestamp — so they are not part of this stream and cannot be
-ordered against it. Routing them through the host logger is a separate change.
+**Python's own log records are part of this stream too.** Seeding the native
+threshold installs a handler on the `simpler` logger that forwards each record
+through `unified_log_*`, so a Python `logger.warning(...)` carries the same
+envelope and the same clock as a C++ record and lands in the same place. It also
+still reaches the root logger, because propagation is left alone — that is what
+keeps a console readable and `caplog` working, and it makes the console a view of
+the log rather than a second half of it. Records logged before a worker is
+initialized have no handler to forward through yet and stay on the root logger.
+See [logging.md](../logging.md).
 
 Each process's file is fully buffered. It is flushed when a depth-zero invocation
 record completes, which is the point at which the records so far describe a whole
