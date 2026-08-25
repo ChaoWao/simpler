@@ -48,22 +48,25 @@ Type changes:
 
 ### 4.1 ChipRingSet (new)
 
-Bundles the three per-ring resources into a single aggregate (`ring_buffer.h`):
+Bundles the per-ring resources into a single aggregate (`ring_buffer.h`):
 
 ```cpp
 struct ChipRingSet {
-    ChipHeapRing   heap_ring;
-    ChipTaskRing   task_ring;
+    TaskAllocator task_allocator;
     FaninPool fanin_pool;
 };
 ```
 
+`TaskAllocator` owns both the task window and the heap. The two are always
+allocated together, so it checks each before committing to either and needs no
+rollback on partial failure — which is why there is no separate heap-ring or
+task-ring type to hold.
+
 ### 4.2 OrchestratorState (modified)
 
 ```cpp
-// Before: single ring
-ChipHeapRing heap_ring;
-ChipTaskRing task_ring;
+// Before: one set of ring resources, held directly
+TaskAllocator task_allocator;
 DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
