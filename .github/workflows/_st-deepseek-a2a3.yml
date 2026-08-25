@@ -35,7 +35,7 @@ jobs:
 
       # Own key family, separate from _st-npu-a2a3.yml's: the main sweep
       # compiles with --manual exclude and never builds these kernels, while
-      # this job compiles only the two DS directories. Sharing the main key
+      # this job compiles only the HBG DS directory. Sharing the main key
       # would let this partial compilation win the immutable-cache save race
       # and starve the main sweep's cache.
       - name: Restore scene-test kernel cache (a2a3)
@@ -60,21 +60,13 @@ jobs:
           source /usr/local/Ascend/cann/set_env.sh
           .venv/bin/python -m simpler_setup.tools.scene_test_compile \
             examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
-            examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode \
             --platform a2a3 --require-pto-isa --compile-workers 8 -q --manual only
 
-      # The DS cases are the only manual cases under these two directories, so
-      # --manual only selects exactly the two smoke classes. They stay manual:
-      # the main sweep runs --manual exclude and must not adopt them back.
-      # Each case needs 2 devices (EP world size); 4 devices let both run
-      # concurrently.
+      # The HBG DS case is manual, so the main sweep runs --manual exclude and
+      # must not adopt it back. The case needs 2 devices for its EP world size.
       - name: Run DeepSeek pytest smokes (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          DS_TESTS="examples/a2a3/host_build_graph/deepseek_v4_flash_decode examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest $DS_TESTS -m "not sdma" --platform a2a3 --exclude-level 4 --manual only --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 4 \
-              --run ".venv/bin/python -m pytest $DS_TESTS -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
-          fi
+          DS_TEST="examples/a2a3/host_build_graph/deepseek_v4_flash_decode"
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
+            --run ".venv/bin/python -m pytest $DS_TEST -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
