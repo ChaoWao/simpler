@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -424,6 +426,41 @@ void SimDeviceRunnerBase::get_graph_definition_staging(uint32_t pipeline_slot, v
     if (block.staging.empty()) return;
     if (addr != nullptr) *addr = block.staging.data();
     if (size != nullptr) *size = block.staging.size();
+}
+
+int SimDeviceRunnerBase::acquire_sm_mirror(uint32_t pipeline_slot, size_t bytes, size_t alignment, void **addr_out) {
+    if (addr_out == nullptr) return -1;
+    *addr_out = nullptr;
+    if (pipeline_slot >= sm_mirrors_.size() || bytes == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+        bytes > SIZE_MAX - (alignment - 1)) {
+        return -1;
+    }
+    RetainedSmMirror &mirror = sm_mirrors_[pipeline_slot];
+    // Grow-only and never shrunk: the task capacity is fixed for a given run
+    // configuration, so past the first bind the image is written into host pages
+    // that are already mapped, and each page of it faults once per process rather
+    // than once per bind.
+    const size_t needed = bytes + alignment - 1;
+    if (mirror.capacity < needed) {
+        // `new[]` on a trivially-typed array default-initializes, so the block
+        // costs no page until a bind writes one; make_unique would zero it. The
+        // outgoing block's bytes are not carried over, because nothing reads a byte
+        // this bind did not write.
+        std::unique_ptr<std::byte[]> storage(new (std::nothrow) std::byte[needed]);
+        if (storage == nullptr) return -1;
+        mirror.storage = std::move(storage);
+        mirror.capacity = needed;
+    }
+    const uintptr_t raw = reinterpret_cast<uintptr_t>(mirror.storage.get());
+    *addr_out = reinterpret_cast<void *>((raw + alignment - 1) & ~static_cast<uintptr_t>(alignment - 1));
+    return 0;
+}
+
+void SimDeviceRunnerBase::release_sm_mirrors() {
+    for (RetainedSmMirror &mirror : sm_mirrors_) {
+        mirror.storage.reset();
+        mirror.capacity = 0;
+    }
 }
 
 void SimDeviceRunnerBase::release_graph_definition_blocks() {

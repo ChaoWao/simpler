@@ -148,6 +148,7 @@ public:
         uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment, void **device_out, void **staging_out
     );
     void get_graph_definition_staging(uint32_t pipeline_slot, void **addr, std::size_t *size);
+    int acquire_sm_mirror(uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment, void **addr_out);
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -972,6 +973,9 @@ protected:
     int finalize_common();
     void release_graph_definition_blocks();
 
+    /** Drop every retained host SM mirror, returning its pages to the allocator. */
+    void release_sm_mirrors();
+
     /**
      * Drop the retained graph-definition blocks without freeing the device side.
      *
@@ -1150,6 +1154,26 @@ protected:
         std::vector<std::byte> staging;
     };
     std::array<RetainedGraphBlock, PTO_PIPELINE_MAX_DEPTH> graph_definition_blocks_{};
+    // Host mirror of the runtime shared memory, one retained buffer per pipeline
+    // slot — see HostApi acquire_sm_mirror. A host-side orchestrator writes its
+    // whole shared-memory image here and the bind ships the live prefix, so the
+    // buffer is capacity-sized (tens of MB) and stays mapped across binds: one
+    // buffer per slot rather than one per bind, because two binds in different
+    // slots are in flight at once. `capacity` counts the raw block, which is over-allocated
+    // by the requested alignment so the aligned address handed out has the
+    // requested bytes behind it.
+    //
+    // The block is never value-initialized. The caller's layout is init-on-write
+    // and it ships only the prefixes it wrote, so the resident set is the pages a
+    // bind touches rather than the whole capacity — which is also why this is not a
+    // std::vector: `resize` would zero every page of a capacity the caller writes
+    // a fraction of, and would copy the old bytes on growth for a buffer whose
+    // contents mean nothing between binds.
+    struct RetainedSmMirror {
+        std::unique_ptr<std::byte[]> storage;
+        std::size_t capacity{0};
+    };
+    std::array<RetainedSmMirror, PTO_PIPELINE_MAX_DEPTH> sm_mirrors_{};
 
     // One independently committed set of the three pooled device regions. A
     // run reaches its set through the arena bank its lease selects, so

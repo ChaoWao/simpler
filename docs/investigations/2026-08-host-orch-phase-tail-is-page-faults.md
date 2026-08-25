@@ -206,8 +206,11 @@ Two lessons, both already cost time here:
 
 ## Where a fix would go
 
-Not attempted here — this entry establishes the cause only. In order of the evidence
-behind them:
+**All four have shipped — see the amendments below before treating any of them as open
+work.** Items 1-3 landed as #1981 (the recorder thread owns its recording storage), item 4
+as #1988 and the retained SM mirror. What the list got right was the mechanism; what it
+got wrong is that none of it reached the ~1100 minor faults the submitting thread takes
+per bind, which is what is actually left. In order of the evidence behind them:
 
 1. **Stop returning the recording's memory to the kernel between orchestrations.** The 2.17 MB
    hazard-map arena and the per-node vectors are re-acquired every orchestration for a
@@ -230,6 +233,13 @@ behind them:
 Any of these must be measured by fault *count* first, and only then by duration, on the
 same rank and with `args` carried alongside as a load proxy — see
 `.claude/rules/discipline.md` §4 and the entries on this file's dead ends.
+
+**What the list missed.** #1981 removed every allocation items 1-3 name and reported that
+the submitting thread's ~1100 faults per bind *did not move*, so they were never the
+recording's. The retained mirror is the second independent measurement of the same thing.
+Attributing those ~1100 needs `mincore()` on a buffer's pages before the write that would
+fault them — the `page-faults` perf event carries no ADDR, which has been checked — not
+another guess at which allocation it is.
 
 ## Amendment 2026-08-23 — the Definition image is not part of this tail
 
@@ -263,6 +273,72 @@ points at the recording's own storage and not at the largest thing a bind alloca
 The control-plane duration is **not** resolvable from this A/B either (+0.355 ms
 then −0.166 ms), which is the expected outcome of a change worth ~0.1 ms on a box
 whose load average sat between 40 and 66 throughout.
+
+## Amendment 2026-08-25 — retaining the SM mirror, and why a retained buffer must not be zeroed
+
+The host mirror of the runtime shared memory is now the platform runner's, one
+buffer per pipeline slot held across binds until Worker finalization, instead of a
+`new uint8_t[]` per bind. At dsv4's `ring_task_window` of 16384 that buffer is
+**82.46 MB**, so every bind used to be one `mmap` and one guaranteed `munmap` of
+that size — the mapping traffic this entry's off-tree reproduction prices at 10x
+on every other fault in the address space.
+
+Interleaved A/B on dsv4 (`base, retained, base, retained`, three rounds over two
+ranks, so six binds and four warm ones per arm), `mallinfo2` and `smaps_rollup`
+sampled at four points per bind. A **third** arm is included because the first
+implementation of the retained buffer was a `std::vector<std::byte>`, and it is
+the instructive one:
+
+| per process | base (one block per bind) | retained, `vector::resize` | retained, uninitialized block |
+| ----------- | ------------------------- | -------------------------- | ----------------------------- |
+| `hblkhd` at `bind_end`, 6 of 6 binds | 435.82 MB (falls back) | 518.28 MB (holds) | 518.28 MB (holds) |
+| `host_orch` minflt, the two **cold** binds | 1218 / 1022, 1164 / 1173 | **20194 / 21403, 21213 / 16107** | 1098 / 1130, 1059 / 1018 |
+| `host_orch` minflt, four warm binds (median) | 1197.5, 1204.5 | 1256.0, 1273.0 | 1229.5, **950.5** |
+| Rss at the last `bind_end` | 45.446 GB, 45.474 GB | 45.589 GB, 45.588 GB | 45.479 GB, 45.522 GB |
+
+**What resolves.** Two things, both counts, both agreeing on every bind of every
+run:
+
+- `hblkhd` stops returning to its pre-bind value. That is the mirror being mapped
+  and unmapped per bind, and then not.
+- **A retained buffer has to be handed over uninitialized.**
+  `std::vector::resize` value-initializes, so the first bind of each rank faulted
+  in the *whole* capacity — 82460928 / 4096 = 20132 pages, which is exactly the
+  ~20k excess above — and left all 82 MB resident for the rest of the run. The
+  owning-block version faults only the pages a bind writes, so its cold binds
+  match base and its Rss is within the run-to-run spread of it. A container was
+  the wrong reach here precisely because the layout is init-on-write: zeroing is
+  work whose result nothing reads.
+
+**What does not resolve.** `host_orch`'s own warm-bind fault count, in either
+direction. Base sits in [1160, 1256] across its eight warm binds; the retained
+block spans [181, 1268], with two binds well below anything base reached and a
+median that moves +32 on one repetition and −254 on the other. The mirror is
+~6 THP faults of a ~1200-fault bind (see the decomposition above), so this
+was never a signal this instrument could carry. Control-plane duration likewise:
+minimum-of-sums 1.724 → 1.795 ms then 1.532 → 1.010 ms, opposite signs.
+
+**One reading retracted.** An earlier pass over these logs attributed a
+sign-consistent +3-6% warm-minflt rise in the `vector` arm to glibc's dynamic
+`mmap`/`trim` thresholds no longer being raised by the freed 82 MB block, on the
+strength of `fordblks` at `bind_begin` reading 13.6 MB on base against 1.4 MB
+retained. That comparison is invalid: it pairs the *first* bind of each arm, whose
+heap state predates the mirror in both, and by the last bind both arms sit at
+~14.1 MB. The threshold mechanism is real in glibc, but nothing here measures it,
+and the retained-block arm reverses the sign it was invented to explain.
+
+**What is left, and what it is not.** Not the hazard-map arena: #1981 made the
+recorder thread own it, so it is stood up once per thread and `reset()` after
+that. Every item of "Where a fix would go" above is now implemented, and the
+~1100 faults the submitting thread takes per bind survived all of them — #1981
+reported them unmoved when the recording's allocations went away, and this arm
+says the same about the mirror's. Two things follow. The decomposition in this
+entry attributed those faults to allocations that no longer happen, so it no
+longer explains the steady state; and node/tensor storage is already retained at
+its high-water mark, so pre-reserving it to `GRAPH_MAX_NODES` x
+`CORE_MAX_TENSOR_ARGS` (4 MB per recorder thread, ~32 MB across the prewarmed
+pool) would only move each thread's *first* recording off the growth path, not
+touch a warm bind.
 
 ## References
 
