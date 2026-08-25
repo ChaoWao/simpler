@@ -18,7 +18,7 @@
  *    producer named in its inline fanin has set its completion_flags byte;
  *    a producer publishes completion + drains its wake list on finish
  * 3. Publishing the host-visible task_state mirror (PENDING -> COMPLETED) and
- *    advancing the per-ring completed_watermark (consumer-retirement signal)
+ *    advancing the completed_watermark (consumer-retirement signal)
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
@@ -39,7 +39,7 @@
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId for the early-dispatch doorbell
 #include "async_wait.h"
 #include "graph_execution.h"
-#include "ring_buffer.h"
+#include "task_allocator.h"
 #include "runtime_types.h"
 #include "shared_memory.h"
 
@@ -474,21 +474,19 @@ struct SchedulerState {
     // Shared memory access
     SharedMemoryHeader *sm_header;
 
-    // Per-ring state
-    struct alignas(64) RingSchedState {
-        // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
-        SharedMemoryRingHeader *ring;
-        std::atomic<int32_t> advance_lock;  // multi-thread CAS
+    // The task table's header, as a device address
+    struct alignas(64) TaskHeaderView {
+        SharedMemoryTaskHeader *tasks;
 
-        // Polling: no per-ring dep_pool. Readiness is derived from the SM ring's
+        // Polling: no dep_pool. Readiness is derived from the task table's
         // completion_flags; there is no arena-side wiring pool to reserve or wire.
-        // The `ring` field stores the device address of the SM ring header —
+        // The `tasks` field stores the device address of the SM task header —
         // computed via offset arithmetic, no SM dereference.
         bool init_data_from_layout(void *sm_dev_base);
         void destroy();
-    } ring_sched_state;
+    } task_view;
 
-    // Ready queues remain global (scheduling is ring-agnostic)
+    // Ready queues are global: scheduling does not partition by task id
     ChipReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
@@ -570,7 +568,7 @@ struct SchedulerState {
         }
     }
 
-    // ---- Polling completion primitives (single-ring hbg) ----------------------
+    // ---- Polling completion primitives ---------------------------------------
     // Readiness: a task is ready iff every producer named in its inline fanin has
     // set its completion_flags byte. Single-ring: all producers are ring 0, so
     // there is no per-edge ring indirection.
@@ -586,10 +584,10 @@ struct SchedulerState {
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     int classify_fanin_state(const ChipTaskSlotState *s) const {
         const TaskPayload &p = *s->payload;
-        const SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        const SharedMemoryTaskHeader &tasks = *task_view.tasks;
         const int32_t *fanin = p.fanin_data();
         for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
-            if (!ring.is_completion_flag_set(fanin[i])) return i;
+            if (!tasks.is_completion_flag_set(fanin[i])) return i;
         }
         return -1;
     }
@@ -599,7 +597,7 @@ struct SchedulerState {
     // ready only when every fanin is met, else re-target the next unmet producer
     // and retry. Monotonic completion_flags guarantee termination.
     void register_wake(ChipTaskSlotState *producer, ChipTaskSlotState *consumer) {
-        SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        SharedMemoryTaskHeader &tasks = *task_view.tasks;
         while (true) {
             ChipTaskSlotState *expected = producer->wake_list_head.load(std::memory_order_relaxed);
             while (expected != WAKE_LIST_SENTINEL) {
@@ -615,7 +613,7 @@ struct SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &ring.get_slot_state_by_task_id(consumer->payload->fanin_data()[state]);
+            producer = &tasks.get_slot_state_by_task_id(consumer->payload->fanin_data()[state]);
         }
     }
 
@@ -624,13 +622,13 @@ struct SchedulerState {
     // (route/re-register each waiter), then CAS-advance the monotonic
     // completed_watermark (load-bearing: the host wait_for_consumers gates on
     // watermark >= producer.last_consumer_local_id). Whole-graph-resident hbg
-    // has no device slot reclaim, so no advance_ring_pointers here.
+    // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
         const int32_t task_id = static_cast<int32_t>(slot_state.task->task_id.local());
-        SharedMemoryRingHeader &ring = *ring_sched_state.ring;
+        SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
-        ring.set_completion_flag(task_id);
+        tasks.set_completion_flag(task_id);
 
         ChipTaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
         while (waiter != nullptr && waiter != WAKE_LIST_SENTINEL) {
@@ -644,7 +642,7 @@ struct SchedulerState {
             if (state < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_wake(&ring.get_slot_state_by_task_id(waiter->payload->fanin_data()[state]), waiter);
+                register_wake(&tasks.get_slot_state_by_task_id(waiter->payload->fanin_data()[state]), waiter);
             }
             waiter = next;
         }
@@ -656,7 +654,7 @@ struct SchedulerState {
         // makes the final value order-dependent: a low-id task completing after a
         // higher one would leave the watermark stuck below the true prefix, hanging
         // any wait_for_consumers whose last_consumer sits in the gap.
-        ring.update_completed_watermark();
+        tasks.update_completed_watermark();
     }
 
     // Polling: there is no ready-claim CAS (a producer routes each waiter exactly
@@ -1091,7 +1089,7 @@ struct SchedulerState {
         if (!graph_completed) return outcome;
 
         // Internal nodes count as zero stream tasks. The final node publishes
-        // the outer ring task exactly once, waking external consumers and
+        // the outer task exactly once, waking external consumers and
         // contributing the one task the host actually submitted.
         if (execution->outer_slot != nullptr) {
             on_mixed_task_complete(*execution->outer_slot);
@@ -1170,10 +1168,9 @@ struct SchedulerState {
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never
     // dereferenced here). Safe to call on a host arena that holds the
-    // prebuilt image buffer. (The orchestrator counterpart takes
-    // task_window_size for ring task_descriptors address arithmetic; the
-    // scheduler only needs the SM header / ring header base addresses,
-    // both window-size-independent.)
+    // prebuilt image buffer. (The orchestrator counterpart takes task_capacity
+    // for its task_descriptors address arithmetic; the scheduler only needs the
+    // SM header and task header base addresses, both capacity-independent.)
     bool init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
 
     // Phase 3b: write the arena-internal pointer fields

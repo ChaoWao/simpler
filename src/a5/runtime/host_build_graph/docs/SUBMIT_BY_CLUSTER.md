@@ -111,9 +111,9 @@ the run.
 
 `host_build_graph` is whole-graph-resident. Task slots, heap bytes, fanin IDs,
 and TensorMap entries are not reclaimed while the graph is executing. The graph
-must fit the configured task window and TensorMap pool before launch; its heap
-takes no configuration, since the device region is committed after orchestration
-at the size the graph turned out to need.
+must fit the configured task count (`runtime_env.ring_task_window`) and the
+TensorMap pool before launch; the heap is not a third capacity, since its device
+region is committed after orchestration at the size the graph turned out to need.
 
 ## Validation
 

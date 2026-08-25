@@ -15,7 +15,7 @@
  * It provides a unified API for task graph construction and execution.
  *
  * Key Features:
- * - Ring buffer based memory management (zero allocation overhead)
+ * - Bump-allocated task table and graph heap (zero allocation overhead)
  * - Lazy invalidation TensorMap for dependency discovery
  * - Manual scopes that bypass TensorMap discovery for explicit dependencies
  * - Per-task spinlocks for concurrent fanout updates
@@ -41,7 +41,7 @@
 #include "graph_cache.h"
 #include "submit_types.h"
 #include "shared_memory.h"
-#include "ring_buffer.h"
+#include "task_allocator.h"
 #include "tensormap.h"
 #include "scheduler/scheduler.h"
 #include "orchestrator.h"
@@ -151,9 +151,10 @@ struct RuntimeArenaLayout {
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
 
-    // Cached parameter (re-used by init_data + wire stages). hbg is single-ring,
-    // so this is the one ring's.
-    uint64_t task_window_size{0};
+    // The task-table slot count this image was built for, resolved per bind from
+    // runtime_env.ring_task_window. The device needs it to bound the pitch it
+    // attaches with.
+    uint64_t task_capacity{0};
 
     // Total arena byte size post-commit. Used by host to size the prebuilt
     // image buffer and as the rtMemcpy length, and requested of the device as
@@ -234,7 +235,7 @@ static_assert(
  * device memory and may run on host. Returns the layout descriptor; caller
  * commits/attaches the arena before Phase 2/3.
  */
-RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size);
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_capacity);
 
 /**
  * Phase 2 — write the data half of the runtime arena: standalone fields,
@@ -307,7 +308,7 @@ void rt_scope_begin(RuntimeContext *rt);
  *
  * Closes the innermost scope, and when that is the outermost MANUAL one, returns
  * later submits to TensorMap discovery. A scope bounds no task or buffer lifetime
- * here: the ring is whole-graph-resident, so no task slot and no heap byte is
+ * here: the task table is whole-graph-resident, so no task slot and no heap byte is
  * reclaimed before the run ends.
  */
 void rt_scope_end(RuntimeContext *rt);

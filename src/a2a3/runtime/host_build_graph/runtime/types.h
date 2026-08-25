@@ -386,8 +386,10 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
      *
      * count == 0 is a valid "set empty" — it clears any previously stored deps
      * and returns. This lets callers that build the dep set conditionally pass
-     * the result through unguarded, including in the no-dep branch:
-     *   TaskId deps[3];
+     * the result through unguarded, including in the no-dep branch. Fill with
+     * TaskId::invalid() so an entry the branches never write is rejected by the
+     * orchestrator rather than read as a task id:
+     *   TaskId deps[3] = {TaskId::invalid(), TaskId::invalid(), TaskId::invalid()};
      *   uint32_t n = 0;
      *   if (have_prev) deps[n++] = prev;
      *   if (is_last)   deps[n++] = alloc;

@@ -15,10 +15,11 @@
  * A single structure owns three correlated per-task resources:
  *
  *   1. A monotonic task id (`next_task_id_`), allocated by the Orchestrator.
- *      Unlike L2's `TaskAllocator` the id is NOT masked into a fixed-size
- *      window — slot state lives in parent-process heap (never crossed into
- *      child workers), so a ring index buys us nothing at L3 (see the plan's
- *      L2 Consistency Audit, allowed exception #6).
+ *      The id is NOT masked into a fixed-size window — slot state lives in
+ *      parent-process heap (never crossed into child workers), so a ring index
+ *      buys us nothing at L3 (see the plan's L2 Consistency Audit, allowed
+ *      exception #6). Of the two L2 `TaskAllocator`s only
+ *      tensormap_and_ringbuffer's masks; host_build_graph's never wraps either.
  *   2. `MAX_RING_DEPTH` independent shared-memory heap slabs (Strict-1,
  *      matches L2's `CHIP_MAX_RING_DEPTH = 4`). Each slab has its own
  *      `mmap(MAP_SHARED)` region, bump cursor, FIFO reclamation pointer,

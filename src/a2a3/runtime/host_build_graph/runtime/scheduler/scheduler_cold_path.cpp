@@ -226,25 +226,26 @@ void SchedulerContext::log_stall_diagnostics(
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
 
-    // T0 owns the shared-ring scan; printing it from other threads would
+    // T0 owns the task-table scan; printing it from other threads would
     // produce identical TASK lines once per scheduler thread.
     if (thread_idx == 0) {
-        int32_t cnt_ready = 0, cnt_waiting = 0, cnt_running = 0, submitted_in_ring = 0;
-        SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
-        int32_t ring_task_count = ring.fc.current_task_index.load(std::memory_order_relaxed);
-        submitted_in_ring += ring_task_count;
-        for (int32_t si = 0; si < ring_task_count; si++) {
-            ChipTaskSlotState &slot_state = ring.get_slot_state_by_task_id(si);
+        int32_t cnt_ready = 0, cnt_waiting = 0, cnt_running = 0;
+        SharedMemoryTaskHeader &tasks = *sched_->task_view.tasks;
+        // `task_count` is the run's task total, which both callers pass from
+        // total_tasks_. It bounds the scan as well as the SUMMARY line: every slot
+        // below it was claimed by the host orchestrator, and no slot above it was.
+        for (int32_t si = 0; si < task_count; si++) {
+            ChipTaskSlotState &slot_state = tasks.get_slot_state_by_task_id(si);
             ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
-            // fanin ids vs the ring completion_flags (rc = satisfied producers,
+            // fanin ids vs the completion_flags (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
             int32_t fi = slot_state.payload != nullptr ? slot_state.payload->fanin_count : 0;
             int32_t rc = 0;
             if (slot_state.payload != nullptr) {
                 const int32_t *fanin = slot_state.payload->fanin_data();
                 for (int32_t k = 0; k < fi; k++) {
-                    if (ring.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
+                    if (tasks.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
                 }
             }
             int32_t kid_aic = slot_state.task->kernel_id[0];
@@ -302,12 +303,11 @@ void SchedulerContext::log_stall_diagnostics(
                 thread_idx, idle_iterations, 0, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, fi - rc
             );
         }
-        int32_t effective_total = task_count > 0 ? task_count : submitted_in_ring;
         int32_t c = completed_tasks_.load(std::memory_order_relaxed);
         LOG_INFO(
             "[STALL thread=%d idle_iterations=%d] SUMMARY completed=%d/%d last_progress_iteration=%d "
             "scan_ready=%d scan_waiting=%d scan_running=%d",
-            thread_idx, idle_iterations, c, effective_total, last_progress_count, cnt_ready, cnt_waiting, cnt_running
+            thread_idx, idle_iterations, c, task_count, last_progress_count, cnt_ready, cnt_waiting, cnt_running
         );
     }
 
@@ -905,21 +905,10 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
 #endif
 
     // Initialize task counters. Task count comes from shared memory.
-    if (runtime->get_gm_sm_ptr()) {
-        auto *header = static_cast<SharedMemoryHeader *>(runtime->get_gm_sm_ptr());
-        // Read at one-time boot init, before the SM is reset for the run, so a ring
-        // not yet written holds uninitialized memory (0xbe... under ASAN's
-        // malloc-fill). Only a plausible count is taken — (0,
-        // CHIP_TASK_WINDOW_SIZE], since the ring cannot hold more than its task
-        // window — so any garbage pattern, negative or positive, leaves the count
-        // at 0, which is the correct value at boot.
-        int32_t window_tasks = 0;
-        int32_t ring_tasks = header->ring.fc.current_task_index.load(std::memory_order_acquire);
-        if (ring_tasks > 0 && ring_tasks <= CHIP_TASK_WINDOW_SIZE) window_tasks = ring_tasks;
-        total_tasks_ = window_tasks;
-    } else {
-        total_tasks_ = 0;
-    }
+    // 0 is the correct count at boot: the graph is not attached yet, and
+    // on_orchestration_done latches the host-built total before releasing any
+    // scheduler thread.
+    total_tasks_ = 0;
     completed_tasks_.store(0, std::memory_order_release);
 
     // prepare_subtask_to_core fully writes a per-core payload / deferred-slab slot
@@ -1041,10 +1030,9 @@ void SchedulerContext::bind_runtime(RuntimeContext *rt) {
 // =============================================================================
 // Post-orchestration bookkeeping. Runs once on the boot leader after the
 // host-built image is attached; latches total_tasks_ and folds inline-completed
-// tasks (or shuts down on a fatal orchestration error). The caller publishes
-// runtime_init_ready_ (release) after this returns — that store is what makes
-// total_tasks_ visible to the scheduler threads, which acquire it before
-// dispatching.
+// tasks (or shuts down on a fatal orchestration error). classify_ready_ is
+// released after this call and is what publishes total_tasks_ to the peer threads,
+// which acquire it before classify_partition reads the count.
 // =============================================================================
 void SchedulerContext::on_orchestration_done(
     Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
@@ -1053,18 +1041,12 @@ void SchedulerContext::on_orchestration_done(
 
     // Allocate the per-S CompletedTaskQueues here on the boot leader, before it
     // releases runtime_init_ready_ — no scheduler thread can push until then.
-    // Completed-but-unresolved tasks in flight are bounded by BOTH the total task
-    // count and the ring's task window (a task must occupy a ring slot to run and
-    // complete), so size to the tighter of the two, rounded up to a power of two
-    // and floored at 256. The window already caps this, so there is no artificial
-    // ceiling and a producer never has to spin on a full queue.
+    // Completed-but-unresolved tasks in flight are bounded by the run's task count
+    // (a task must have been submitted to run and complete), so size to that,
+    // rounded up to a power of two and floored at 256. That bound is exact, so
+    // there is no artificial ceiling and a producer never has to spin on a full
+    // queue.
     uint64_t sp_bound = static_cast<uint64_t>(total_tasks);
-    if (sched_->ring_sched_state.ring != nullptr) {
-        uint64_t window = static_cast<uint64_t>(sched_->ring_sched_state.ring->task_window_mask) + 1;
-        if (window < sp_bound) {
-            sp_bound = window;
-        }
-    }
     uint64_t sp_cap = 256;
     while (sp_cap < sp_bound) {
         sp_cap <<= 1;
@@ -1120,20 +1102,20 @@ void SchedulerContext::on_orchestration_done(
 // their external fanin follows the same ready/wake classification as any other
 // outer task.
 void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) {
-    if (completed_.load(std::memory_order_acquire) || sched_->ring_sched_state.ring == nullptr) {
+    if (completed_.load(std::memory_order_acquire) || sched_->task_view.tasks == nullptr) {
         return;
     }
-    SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
-    const int32_t submitted = ring.fc.current_task_index.load(std::memory_order_acquire);
+    SharedMemoryTaskHeader &tasks = *sched_->task_view.tasks;
+    const int32_t submitted = total_tasks_;
     // Disjoint contiguous slices covering [0, submitted): thread t owns
     // [submitted*t/nthreads, submitted*(t+1)/nthreads). int64 math avoids overflow.
     const int32_t lo = static_cast<int32_t>((static_cast<int64_t>(submitted) * thread_idx) / nthreads);
     const int32_t hi = static_cast<int32_t>((static_cast<int64_t>(submitted) * (thread_idx + 1)) / nthreads);
     for (int32_t id = lo; id < hi; id++) {
-        if (ring.is_completion_flag_set(id)) {
+        if (tasks.is_completion_flag_set(id)) {
             continue;  // completed on the host (hidden alloc); nothing to dispatch
         }
-        ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(id);
+        ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(id);
         if (slot.task_kind == TaskKind::GRAPH) {
             if (graph_execution_localize(slot) == nullptr) slot.graph_context = nullptr;
             if (!sched_->push_graph_prepare(&slot, slot.task->task_id.raw, thread_idx)) return;
@@ -1143,7 +1125,7 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
             sched_->push_ready_routed(&slot);
         } else {
             int32_t prod_local = slot.payload->fanin_data()[state];
-            sched_->register_wake(&ring.get_slot_state_by_task_id(prod_local), &slot);
+            sched_->register_wake(&tasks.get_slot_state_by_task_id(prod_local), &slot);
         }
     }
 }

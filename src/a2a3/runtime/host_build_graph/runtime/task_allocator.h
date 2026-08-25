@@ -9,11 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Ring Buffer Data Structures
- *
  * TaskAllocator - Unified task slot + output buffer allocation
- *   - Combines task ring (slot allocation) and heap ring (output buffer allocation)
- *   - O(1) forward bump allocation for both task slots and heap buffers
+ *   - Combines task-table slot allocation and heap output-buffer allocation
+ *   - O(1) forward bump allocation for both
  *   - Neither resource is reclaimed during a run, so exhaustion of either is a
  *     capacity error reported on the spot, never back-pressure to wait on
  *
@@ -37,41 +35,41 @@
 /**
  * Unified task slot + heap buffer allocator.
  *
- * Since task and heap are always allocated together and the orchestrator is
- * single-threaded, both pointers (task index, heap top) are tracked locally
- * and published to shared memory via plain store — no fetch_add or CAS needed.
+ * Task ids and heap bytes are handed out by two local bump counters. The
+ * orchestrator is single-threaded and nothing outside it observes either
+ * counter, so neither needs an atomic or a published copy: the run's task total
+ * is read back through active_count() once orchestration ends.
  *
  * The alloc() method checks both resources BEFORE committing to either,
  * eliminating the need for rollback on partial failure.
  *
  * host_build_graph is whole-graph-resident: the device runs only after the host
  * has built the entire graph, so no task slot or heap byte is ever reclaimed
- * while allocation is in progress. Both rings are therefore forward-only, and a
- * request that does not fit can never become satisfiable by waiting — alloc()
+ * while allocation is in progress. Both counters are therefore forward-only, and
+ * a request that does not fit can never become satisfiable by waiting — alloc()
  * reports the exhausted resource and fails on the spot.
+ *
+ * A task id is also its slot index: ids are capped at `capacity` and never
+ * recycled, so the task table is a flat array indexed by id, with no wrap.
  */
 class TaskAllocator {
 public:
     /**
-     * Initialize the allocator with task ring and heap ring resources.
+     * Initialize the allocator with its task capacity and heap resources.
      *
      * All pointer arguments are device addresses (live in SM / GM heap); this
      * function only stores them, no dereferences, so it is safe to invoke
      * from host code that constructs a prebuilt arena image.
      *
-     * The ring starts at task id 0, matching the SM flow-control counter that
-     * current_index_ptr points at (ChipRingFlowControl::init() runs on the AICPU
-     * during SM reset), so local_task_id_ stays in sync without reading the SM.
-     * Because ids are never reclaimed, alloc() caps them at window_size — they
-     * cannot run away toward INT32_MAX.
+     * `capacity` is the number of task slots the caller's task table holds — what
+     * the bind resolved from runtime_env.ring_task_window, defaulting to
+     * CHIP_DEFAULT_GRAPH_TASKS. It need not be a power of two: a task id indexes
+     * its slot directly, so nothing masks with it. Because ids are never
+     * reclaimed, alloc() caps them at `capacity` — they cannot run away toward
+     * INT32_MAX.
      */
-    void init(
-        int32_t window_size, std::atomic<int32_t> *current_index_ptr, void *heap_base, uint64_t heap_size,
-        std::atomic<int32_t> *error_code_ptr
-    ) {
-        window_size_ = window_size;
-        window_mask_ = window_size - 1;
-        current_index_ptr_ = current_index_ptr;
+    void init(int32_t capacity, void *heap_base, uint64_t heap_size, std::atomic<int32_t> *error_code_ptr) {
+        capacity_ = capacity;
         heap_base_ = heap_base;
         heap_size_ = heap_size;
         error_code_ptr_ = error_code_ptr;
@@ -90,9 +88,8 @@ public:
     /**
      * Allocate a task slot and its associated output buffer in one call.
      *
-     * Both task index and heap top are maintained as local counters and
-     * published to shared memory only on success. Since the orchestrator is
-     * single-threaded, no CAS or fetch_add is needed — just check-then-commit.
+     * Both the task id and the heap top are local counters, so this is a plain
+     * check-then-commit with no atomic and no rollback.
      *
      * A fatal latched elsewhere short-circuits the allocation: the caller maps
      * the failed result to orch_mark_fatal without overwriting the first code.
@@ -105,21 +102,21 @@ public:
             output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
 
         if (error_code_ptr_ != nullptr && error_code_ptr_->load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
-            return {-1, -1, nullptr, nullptr};
+            return {-1, nullptr, nullptr};
         }
 
         // Check both resources; commit only if both are available.
-        if (local_task_id_ >= window_size_) {
+        if (local_task_id_ >= capacity_) {
             report_capacity_exhausted(/*heap_blocked=*/false, aligned_size);
-            return {-1, -1, nullptr, nullptr};
+            return {-1, nullptr, nullptr};
         }
         void *heap_ptr = try_bump_heap(aligned_size);
         if (heap_ptr == nullptr) {
             report_capacity_exhausted(/*heap_blocked=*/true, aligned_size);
-            return {-1, -1, nullptr, nullptr};
+            return {-1, nullptr, nullptr};
         }
-        int32_t task_id = commit_task();
-        return {task_id, task_id & window_mask_, heap_ptr, static_cast<char *>(heap_ptr) + aligned_size};
+        int32_t task_id = local_task_id_++;
+        return {task_id, heap_ptr, static_cast<char *>(heap_ptr) + aligned_size};
     }
 
     bool reserve_deferred_heap(int32_t output_size, void **packed_base, void **packed_end) {
@@ -140,13 +137,13 @@ public:
     // State queries
     // =========================================================================
 
-    // Nothing retires during a run, so every task allocated so far is still
-    // live and the ring's head doubles as its occupancy.
+    // Nothing retires during a run, so every task allocated so far is still live
+    // and the next id doubles as the occupancy. Once orchestration has ended this
+    // is therefore also the run's task total, and the only place it is read from:
+    // no copy of the count is published anywhere else.
     int32_t active_count() const { return local_task_id_; }
 
-    int32_t task_head() const { return local_task_id_; }
-
-    int32_t window_size() const { return window_size_; }
+    int32_t capacity() const { return capacity_; }
 
     uint64_t heap_available() const { return heap_size_ - heap_top_; }
 
@@ -155,10 +152,8 @@ public:
     uint64_t heap_used_bytes() const { return heap_top_; }
 
 private:
-    // --- Task Ring ---
-    int32_t window_size_ = 0;
-    int32_t window_mask_ = 0;
-    std::atomic<int32_t> *current_index_ptr_ = nullptr;
+    // --- Task table ---
+    int32_t capacity_ = 0;
 
     // --- Heap ---
     void *heap_base_ = nullptr;
@@ -174,16 +169,6 @@ private:
     // =========================================================================
     // Internal helpers
     // =========================================================================
-
-    /**
-     * Commit a task slot: bump local counter and publish to shared memory.
-     * Must only be called after space check has passed.
-     */
-    int32_t commit_task() {
-        int32_t task_id = local_task_id_++;
-        current_index_ptr_->store(local_task_id_, std::memory_order_release);
-        return task_id;
-    }
 
     /**
      * Bump the heap pointer for the given allocation size.
@@ -212,34 +197,36 @@ private:
      * Nothing is reclaimed during a run, so this is a sizing verdict with no wait
      * that could still succeed.
      *
-     * The task window is a configured capacity, so its branch is the one a real
-     * bind reaches. The heap is not configured: a bind hands this allocator the
-     * whole HEAP_VIRTUAL_CAPACITY span and commits the device region afterwards, so
-     * a graph that does not fit the device fails at that commit and not here. The
-     * heap branch stays because the allocator is also constructed directly, against
-     * a small heap, by the unit tests that cover this report.
+     * The task capacity is a configured size, so its branch is the one a real bind
+     * reaches. The heap is not configured: a bind hands
+     * this allocator the whole HEAP_VIRTUAL_CAPACITY span and commits the device
+     * region afterwards, so a graph that does not fit the device fails at that
+     * commit and not here. The heap branch stays because the allocator is also
+     * constructed directly, against a small heap, by the unit tests that cover
+     * this report.
      */
     void report_capacity_exhausted(bool heap_blocked, uint64_t requested_bytes) {
         LOG_ERROR("========================================");
         if (heap_blocked) {
             LOG_ERROR("FATAL: Graph Heap Exhausted!");
         } else {
-            LOG_ERROR("FATAL: Task Window Exhausted!");
+            LOG_ERROR("FATAL: Graph Too Large!");
         }
         LOG_ERROR("========================================");
         LOG_ERROR("The whole graph must fit at once; nothing is reclaimed mid-run.");
-        LOG_ERROR("  Task window: used=%d/%d", local_task_id_, window_size_);
+        LOG_ERROR("  Tasks:      used=%d/%d", local_task_id_, capacity_);
         LOG_ERROR(
-            "  Graph heap:  used=%" PRIu64 "/%" PRIu64 ", available=%" PRIu64, heap_top_, heap_size_, heap_available()
+            "  Graph heap: used=%" PRIu64 "/%" PRIu64 ", available=%" PRIu64, heap_top_, heap_size_, heap_available()
         );
-        LOG_ERROR("  Requested:   %" PRIu64 " bytes + 1 task slot", requested_bytes);
+        LOG_ERROR("  Requested:  %" PRIu64 " bytes + 1 task slot", requested_bytes);
         LOG_ERROR("Solution:");
         if (heap_blocked) {
             LOG_ERROR("  Shrink the graph's intermediate tensors; this heap has no configuration knob");
         } else {
             LOG_ERROR(
-                "  Increase task window (current: %d); CallConfig.runtime_env.ring_task_window=<pow2> (e.g. %d)",
-                window_size_, window_size_ * 2
+                "  Raise the task capacity (current: %d) via CallConfig.runtime_env.ring_task_window, or shrink "
+                "the graph",
+                capacity_
             );
         }
         LOG_ERROR("========================================");

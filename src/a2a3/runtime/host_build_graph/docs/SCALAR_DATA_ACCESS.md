@@ -70,11 +70,11 @@ it derives for itself, from a heap block whose prior contents it never reads.
 
 Before a wait slot is used, the runtime verifies:
 
-- the task ID is valid and belongs to the single HBG ring;
-- the selected ring slot has a bound task descriptor; and
+- the task ID is valid and carries ring 0, the only ring HBG places tasks on;
+- the task table slot that ID indexes has a bound task descriptor; and
 - the descriptor's full task ID matches the tensor's owner/producer ID.
 
-The full-ID check prevents a masked ring-slot lookup from aliasing an unused or
+The full-ID check prevents a slot lookup from aliasing an unused or
 different task. A failure latches `SIMPLER_ERROR_INVALID_ARGS` and the run returns
 status `-5`; reads return zero and writes stop only after that fatal status is
 recorded.

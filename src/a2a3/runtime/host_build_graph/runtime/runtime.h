@@ -169,10 +169,10 @@ public:
     // NOTE: Made public for direct access from aicore code
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
 
-    // Total tasks submitted by the host orchestrator — handed to the scheduler
-    // (SchedulerContext::on_orchestration_done) in place of latching the SM ring
-    // head on device. host_build_graph builds the whole graph on the host, so
-    // the boot thread reads this instead of counting SM ring heads.
+    // Total tasks the host orchestrator submitted, handed to the scheduler by
+    // SchedulerContext::on_orchestration_done. host_build_graph builds the whole
+    // graph on the host, so this scalar is the count's only carrier: the shared
+    // memory header holds no task counter for the boot thread to read.
     int32_t host_total_tasks;
 
     // Size of the shipped shared-memory image, argument pools included. Set by the

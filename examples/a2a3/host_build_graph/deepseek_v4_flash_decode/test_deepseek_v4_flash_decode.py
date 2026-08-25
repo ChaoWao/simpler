@@ -108,14 +108,6 @@ class TestDeepseekV4FlashDecodeHostBuildGraph(SceneTestCase):
             "config": {
                 "device_count": N_RANKS,
                 "num_sub_workers": 0,
-                # Ring sizing matches the TMR case: both runtimes now build the
-                # same static per-expert tile grid, so both allocate tile scratch
-                # for all 32 experts of every MoE layer.
-                "runtime_env": {
-                    "ring_task_window": 16384,
-                    "ring_heap": 2 << 30,
-                    "ring_dep_pool": 16384,
-                },
             },
             "params": {"seed": 1234},
         }

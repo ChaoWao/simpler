@@ -41,8 +41,9 @@ struct RuntimeContext;
 // reclaims a slot, so the queued ChipTaskSlotState* stays valid until P reads it.
 // Single producer (the owning S thread) / single consumer (P): plain
 // acquire/release on head/tail, no CAS. Capacity is a power of two sized to the
-// in-flight bound (min of total tasks and the ring window), so a producer does
-// not spin on a full queue in practice; the spin is a correctness backstop only
+// run's task count, which bounds the completed-but-unresolved tasks in flight
+// exactly, so a producer does not spin on a full queue in practice; the spin is a
+// correctness backstop only
 // (P drains independently, so it always makes progress). The std::atomic cursors
 // make this type non-copyable / non-movable, so `buf` cannot be double-freed
 // through an accidental copy.

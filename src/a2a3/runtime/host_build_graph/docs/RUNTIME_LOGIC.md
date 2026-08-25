@@ -123,7 +123,7 @@ scheduler reads, the count of tasks completed inline during orchestration, is a
 scalar `rt_orchestration_done` publishes into the runtime header.
 
 **Why the scheduler state is device-written.** `SchedulerState` holds no
-per-run content: `sm_header` and the ring pointer derive from a pooled SM base,
+per-run content: `sm_header` and the task-header pointer derive from a pooled SM base,
 queue capacities are compile-time constants, hbg never advances
 `last_task_alive`, and it has no host-side entry point at all. So the host would
 only be writing an initialization pattern — 203,392 bytes
@@ -172,32 +172,38 @@ pins the invariant that makes that safe.
 
 ### 3.2 Bounded H2D Upload
 
-The shared-memory mirror is sized to ring capacity (task window) but a run only
+The shared-memory mirror is dimensioned for the run's configured task count
+(`runtime_env.ring_task_window`, default `CHIP_DEFAULT_GRAPH_TASKS`) but a run only
 writes `[0, total_tasks)`, and the device boots scheduler-only and reads no SM slot
 past `total_tasks`. So the SM H2D shipped each run is bounded, not capacity-sized —
 the contract that keeps `bind` proportional to the workload.
 
 The header is zeroed on the host; `descriptors`, `payloads`, `slot_states` and
-`completion_flags` are each written per task at submit and H2D-uploaded bounded to
-`[0, total_tasks)`. Per-slot reset is init-on-write in `orch::prepare_task` as each
-slot is claimed — there is no window-wide reset. The four segments travel as four
-copies rather than one because ring-sized tails separate their live prefixes.
+`completion_flags` are each written per task at submit. Per-slot reset is
+init-on-write in `orch::prepare_task` as each slot is claimed — there is no
+table-wide reset. In the mirror those four live prefixes are a full reservation
+apart, so `compact_live_image` restacks them (plus the three argument pools) into
+an image pitched to `total_tasks`, where they are contiguous and travel as **one**
+`copy_to_device`. The device attaches with the same pitch.
 
 ## 4. Whole-Graph Capacity
 
-The runtime uses one task ring, one graph heap, and one TensorMap pool. They are
+The runtime uses one task table, one graph heap, and one TensorMap pool. They are
 capacity-bounded storage, not streaming flow-control buffers:
 
-- the task ring and the graph heap are forward-only bump allocators;
+- the task table and the graph heap are forward-only bump allocators;
 - task slots and heap bytes are never recycled mid-run; and
 - TensorMap entries are held for the whole run.
 
 There is no reclaim channel from the scheduler back to the allocator, so the
-allocators carry no reclaim pointer and no back-pressure wait.
+allocators carry no reclaim pointer and no back-pressure wait. A task id is
+therefore also its slot index: ids run `0..capacity-1`, never wrap, and every
+segment is indexed by the id directly — there is no slot mask, so the capacity need
+not be a power of two.
 
 `completed_watermark` records the contiguous prefix of completed device tasks.
-It supports completion/consumer metadata only; it does not reclaim the task ring
-or heap.
+It supports completion/consumer metadata only; it reclaims neither task slots
+nor heap.
 
 There is no post-run sweep that makes graph space reusable. Runtime destruction
 releases the complete arena, and the next run starts from a newly initialized
@@ -205,19 +211,22 @@ image.
 
 ### 4.1 Allocation Failure
 
-The graph must fit the configured task window, the fanin capacity, and the
-TensorMap pool. Because nothing is reclaimed, a request that does not fit can
-never become satisfiable — the allocator names the exhausted resource and fails
-on the spot. There is no wait and no timeout.
+The graph must fit the configured task count, the fanin capacity, and the TensorMap
+pool. The task count comes from `runtime_env.ring_task_window` (default
+`CHIP_DEFAULT_GRAPH_TASKS`); the host mirror is allocated at that size and
+committed by first touch, so a run pays only for the slots it writes. Because
+nothing is reclaimed, a request that does not fit can never become satisfiable —
+the allocator names the exhausted resource and fails on the spot. There is no wait
+and no timeout.
 
 Representative allocator output is:
 
 ```text
-FATAL: Task Window Exhausted!
+FATAL: Graph Too Large!
 The whole graph must fit at once; nothing is reclaimed mid-run.
-  Task window: used=.../...
-  Graph heap:  used=.../..., available=...
-  Requested:   ... bytes + 1 task slot
+  Tasks:      used=.../...
+  Graph heap: used=.../..., available=...
+  Requested:  ... bytes + 1 task slot
 ```
 
 This is host-orchestration logging. The allocator records the corresponding

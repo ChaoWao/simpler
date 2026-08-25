@@ -361,12 +361,10 @@ struct ChipTensorMap {
     int32_t next_entry_idx{0};  // id when next entry insert
     int32_t free_num{0};        // free entry number in entry pool
 
-    // Per-task entry tracking for O(1) unlinking of covered producers.
-    // Indexed by [local_id & (task_window_size - 1)]
+    // Per-task entry tracking for O(1) unlinking of covered producers. A task id
+    // is its own slot index, so this is indexed by local_id directly.
     std::unique_ptr<ChipTensorMapEntry *[]> task_entry_heads;
-    int32_t task_window_size{0};  // Task window size (for slot masking)
-
-    uint32_t get_task_local_id_slot(uint32_t task_local_id) const { return task_local_id & (task_window_size - 1); }
+    int32_t max_tasks{0};  // Slots task_entry_heads is dimensioned for
 
     // Pool occupancy, read by the tensormap-exhaustion diagnostic and by the
     // Graph recording's capacity precheck.
@@ -429,32 +427,32 @@ struct ChipTensorMap {
 
     /**
      * Allocate the four arrays and leave the map empty. num_buckets must be a
-     * power of two; task_window_size must be a power of two, since a producer's
-     * task chain is selected by `local_id & (task_window_size - 1)`.
+     * power of two; `new_max_tasks` is the number of task chains to reserve, one
+     * per task id the caller can place.
      *
      * Returns false when an allocation fails, so a caller that still has an
      * alternative path can take it rather than proceed without a hazard map.
      *
-     * Clearing is O(num_buckets + task_window_size), not O(pool_size): the entry
+     * Clearing is O(num_buckets + max_tasks), not O(pool_size): the entry
      * pool is left uninitialized and new_entry() puts each slot into the clean
      * unlinked state on first use, and free_entry_list is a stack meaningful only
      * below free_num.
      */
-    bool init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size);
+    bool init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_max_tasks);
 
     /**
      * Empty an already-initialized map without touching its allocations.
      *
      * Same post-state as init(): every bucket and task-chain head null, both pool
      * cursors at zero, the entry pool left to init-on-write. Costs
-     * O(num_buckets + task_window_size) stores against pages that are already
+     * O(num_buckets + max_tasks) stores against pages that are already
      * resident, where init() pays the allocation and the first touch of each. A
      * caller that records one body after another on the same map uses this.
      *
-     * Keeps the bucket count and task window init() reserved. Taking a new window
-     * here would have to be checked against the reserved length rather than the
-     * current one, and nothing tracks the reserved length once a smaller window has
-     * been set -- so the sizes stay init()'s and this takes no argument.
+     * Keeps the bucket count and task-chain count init() reserved. Taking a new
+     * count here would have to be checked against the reserved length rather than
+     * the current one, and nothing tracks the reserved length once a smaller count
+     * has been set -- so the sizes stay init()'s and this takes no argument.
      */
     void reset();
 
@@ -462,7 +460,7 @@ struct ChipTensorMap {
      * Same as init() with default sizes (CHIP_TENSORMAP_NUM_BUCKETS,
      * CHIP_TENSORMAP_POOL_SIZE).
      */
-    bool init_default(int32_t new_task_window_size);
+    bool init_default(int32_t new_max_tasks);
 
     /**
      * Lookup producer for a tensor region
@@ -567,7 +565,7 @@ struct ChipTensorMap {
 #endif
         uint32_t bucket_index = hash(addr);
         auto local_id = producer_task_id.local();
-        int32_t task_slot = local_id & (task_window_size - 1);
+        const int32_t task_slot = local_id;
 
         entry->producer_task_id = producer_task_id;
 
@@ -605,7 +603,7 @@ struct ChipTensorMap {
         if (entry.prev_in_task == nullptr) {
             // Entry is the head of its task chain, update task_entry_heads
             int32_t local_id = static_cast<int32_t>(entry.producer_task_id.local());
-            int32_t task_slot = local_id & (task_window_size - 1);
+            const int32_t task_slot = local_id;
             task_entry_heads[task_slot] = entry.next_in_task;
         } else {
             entry.prev_in_task->next_in_task = entry.next_in_task;

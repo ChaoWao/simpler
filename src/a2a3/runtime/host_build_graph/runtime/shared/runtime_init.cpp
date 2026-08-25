@@ -24,7 +24,7 @@
 
 #include "orchestrator.h"
 #include "runtime_core.h"
-#include "ring_buffer.h"
+#include "task_allocator.h"
 #include "shared_memory.h"
 #include "tensormap.h"
 #include "scheduler/scheduler.h"
@@ -63,11 +63,10 @@ void ready_queue_destroy(ChipReadyQueue *queue) {
 // Scheduler
 // =============================================================================
 
-bool SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
-    // ring stores the device address of the SM ring header — pure offset
+bool SchedulerState::TaskHeaderView::init_data_from_layout(void *sm_dev_base) {
+    // `tasks` is the device address of the SM task header — pure offset
     // arithmetic, no SM load.
-    ring = sm_layout::ring_header_addr(sm_dev_base);
-    advance_lock.store(0, std::memory_order_relaxed);
+    tasks = sm_layout::task_header_addr(sm_dev_base);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
     // the completion flag) happens init-on-write in orch::prepare_task as each slot
@@ -76,7 +75,7 @@ bool SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
     return true;
 }
 
-void SchedulerState::RingSchedState::destroy() { ring = nullptr; }
+void SchedulerState::TaskHeaderView::destroy() { tasks = nullptr; }
 
 SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     SchedulerLayout layout{};
@@ -111,7 +110,7 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
 #endif
 
-    if (!sched->ring_sched_state.init_data_from_layout(sm_dev_base)) {
+    if (!sched->task_view.init_data_from_layout(sm_dev_base)) {
         return false;
     }
 
@@ -177,7 +176,7 @@ void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceAr
 
 void SchedulerState::destroy() {
     SchedulerState *sched = this;
-    sched->ring_sched_state.destroy();
+    sched->task_view.destroy();
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
     }
@@ -198,42 +197,40 @@ void SchedulerState::destroy() {
 // =============================================================================
 
 bool OrchestratorState::init(
-    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler_arg
+    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
     *orch = OrchestratorState{};
 
-    // A power-of-two window lets the slot index mask instead of dividing.
-    always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
+    always_assert(max_tasks > 0);
 
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
     orch->fatal = false;
     orch->scheduler = scheduler_arg;
 
     auto *orch_err = sm_layout::orch_error_code_addr(sm_base);
-    auto *cur_idx_dev = sm_layout::ring_current_task_index_addr(sm_base);
 
-    orch->task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
+    orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, orch_err);
 
     // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
     // so it holds for whichever SM this orchestrator was pointed at. The cursors
     // reset with the rest of the state above.
     auto *sm_bytes = static_cast<char *>(sm_base);
-    const auto pools = sm_layout::ring_segment_offsets(sm_layout::mirror_extents(task_window_size));
+    const auto pools = sm_layout::segment_offsets(sm_layout::mirror_extents(max_tasks));
     orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
     orch->tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(sm_bytes + pools.tensor_pool);
     orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
 
     // Polling: no fanin-spill pool — producer ids are inline on the payload.
-    const auto window = static_cast<size_t>(task_window_size);
-    orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[window]);
+    const auto slots = static_cast<size_t>(max_tasks);
+    orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[slots]);
     if (orch->fanin_seen_epoch == nullptr) {
-        LOG_ERROR("Orchestrator scratch allocation failed (task_window=%" PRIu64 ")", task_window_size);
+        LOG_ERROR("Orchestrator scratch allocation failed (max_tasks=%" PRIu64 ")", max_tasks);
         return false;
     }
-    memset(orch->fanin_seen_epoch.get(), 0, window * sizeof(uint32_t));
+    memset(orch->fanin_seen_epoch.get(), 0, slots * sizeof(uint32_t));
 
-    if (!orch->tensor_map.init_default(static_cast<int32_t>(task_window_size))) {
+    if (!orch->tensor_map.init_default(static_cast<int32_t>(max_tasks))) {
         return false;
     }
 
@@ -249,10 +246,10 @@ void OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->schedul
 // Top-level runtime arena
 // =============================================================================
 
-RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size) {
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_capacity) {
     RuntimeArenaLayout layout{};
 
-    layout.task_window_size = task_window_size;
+    layout.task_capacity = task_capacity;
 
     // Reservation order is the zone partition (see RuntimeArenaLayout):
     // everything the device initializes itself, then the one copied range. Each

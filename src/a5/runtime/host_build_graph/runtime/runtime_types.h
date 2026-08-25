@@ -70,21 +70,29 @@
 // =============================================================================
 
 // Task management
-// Actual window size is passed at runtime to runtime_create_from_sm().
-// The slot is local_id masked by the window size, which is why the window is a power of two.
-#define CHIP_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
+//
+// The task table is a flat array of slots, indexed directly by local task id:
+// ids start at 0, are never recycled, and alloc() caps them at the table's size,
+// so there is no wrap and no slot mask. The size need not be a power of two —
+// nothing masks with it.
+//
+// This is the default; `CallConfig.runtime_env.ring_task_window` overrides it per
+// task. The host mirror is allocated at whatever size is in effect and committed
+// by first touch, so a run pays only for the slots and argument-pool bytes it
+// actually writes. Raising it costs virtual address space, bounded by the int32
+// reach of a payload's self-relative region deltas (checked in
+// SharedMemoryHandle::init).
+#define CHIP_DEFAULT_GRAPH_TASKS 16384
 
-// host_build_graph has one ring, and carries no per-ring dimension anywhere:
-// host-orch builds the whole graph on the host, it fits that ring, and the
-// device runs it once without reclaim (execution-time recycle removed). tmr's
-// multi-ring design existed only to
-// let inner scopes reclaim independently under small rings; with no reclaim and
-// a whole-graph-resident ring, per-depth isolation is moot, so every scope depth
-// uses the same ring. The RuntimeEnv ABI still carries RUNTIME_ENV_RING_COUNT
-// slots because it is shared with tmr; this runtime reads slot 0 (see
-// bind_callable_to_runtime_impl).
+// host_build_graph carries no per-scope-depth task partition: host-orch builds
+// the whole graph on the host and the device runs it once without reclaim. tmr's
+// multi-ring design existed only to let inner scopes reclaim independently under
+// small rings; with no reclaim and a whole-graph-resident task table, per-depth
+// isolation is moot. The RuntimeEnv ABI still carries RUNTIME_ENV_RING_COUNT
+// slots because it is shared with tmr; this runtime reads none of them and warns
+// when one is set (see bind_callable_to_runtime_impl).
 
-// Memory pools (total = value, single ring)
+// Memory pools (total = value)
 #define CHIP_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
 #define CHIP_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
@@ -191,10 +199,11 @@ typedef enum {
 
 /**
  * Result of a unified task allocation.
+ *
+ * There is no separate slot: a task id indexes the task table directly.
  */
 struct TaskAllocResult {
-    int32_t task_id;    // Absolute task ID (not wrapped)
-    int32_t slot;       // task_id & (window_size - 1)
+    int32_t task_id;    // Task id, which is also its task-table index
     void *packed_base;  // Heap allocation result (nullptr if failure)
     void *packed_end;   // packed_base + aligned output_size
 
@@ -463,7 +472,7 @@ struct TaskPayload {
         // The ring's payload storage is reused raw memory that no constructor runs
         // over, so an unset predicate reads back as whatever the slot last held —
         // and compact_live_image translates predicate.addr as a graph-heap address
-        // for every submitted slot. An ordinary ring task overwrites this right
+        // for every submitted slot. An ordinary task overwrites this right
         // after init(); a hidden-alloc task has nothing following it, so this is
         // the only value its predicate ever gets.
         predicate = DispatchPredicate{};
@@ -593,7 +602,7 @@ struct alignas(64) ChipTaskSlotState {
     std::atomic<int16_t> next_block_idx{0};
 
     // Graph scheduling metadata occupies the slot's tail padding. Ordinary
-    // ring tasks keep the index invalid and the context null.
+    // Ordinary tasks keep the index invalid and the context null.
     int32_t graph_node_index{-1};
     void *graph_context{nullptr};
 

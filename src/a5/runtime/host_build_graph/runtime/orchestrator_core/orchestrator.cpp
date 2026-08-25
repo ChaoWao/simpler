@@ -1126,8 +1126,7 @@ static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
         memset(
-            orch->fanin_seen_epoch.get(), 0,
-            static_cast<size_t>(orch->sm_header->ring.task_window_size) * sizeof(uint32_t)
+            orch->fanin_seen_epoch.get(), 0, static_cast<size_t>(orch->task_allocator.capacity()) * sizeof(uint32_t)
         );
         next = 1;
     }
@@ -1158,18 +1157,18 @@ struct FaninBuilder {
     // re-resolve the delta per producer. Requires the regions bound before construction.
     int32_t *slots{nullptr};
 
-    bool mark_seen(uint8_t prod_ring, int32_t prod_slot) {
-        // Dedup only: a producer this orchestrator did not place has no slot in the
+    bool mark_seen(TaskId producer_task_id) {
+        // Dedup only: a producer this orchestrator did not place has no entry in the
         // epoch table, so it is reported as not-yet-seen and the caller appends it
-        // rather than rejecting it. hbg places every task on its one ring, so the
-        // assert is the invariant; enforcing it on the caller's side would be a new
-        // fatal path.
-        debug_assert(prod_ring == 0 && "hbg places every task on its one ring");
-        if (prod_ring != 0 || prod_slot < 0) {
+        // rather than rejecting it. hbg places every task on ring 0, so the assert is
+        // the invariant; enforcing it on the caller's side would be a new fatal path.
+        debug_assert(producer_task_id.ring() == 0 && "hbg places every task on ring 0");
+        const int32_t prod_local = static_cast<int32_t>(producer_task_id.local());
+        if (producer_task_id.ring() != 0 || prod_local < 0) {
             return false;
         }
         uint32_t *seen = orch->fanin_seen_epoch.get();
-        uint32_t slot = static_cast<uint32_t>(prod_slot);
+        uint32_t slot = static_cast<uint32_t>(prod_local);
         if (seen[slot] == seen_epoch) {
             return true;
         }
@@ -1179,8 +1178,7 @@ struct FaninBuilder {
 };
 
 static bool append_fanin_or_fail(
-    OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
-    TaskId producer_task_id, FaninBuilder *fanin_builder
+    OrchestratorState *orch, ChipTaskSlotState *prod_state, TaskId producer_task_id, FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
     // to this producer (defensive — whole-graph-resident hbg does not reuse slots
@@ -1189,8 +1187,8 @@ static bool append_fanin_or_fail(
     if (prod_state->task == nullptr || prod_state->task->task_id.local() != producer_task_id.local()) {
         return true;
     }
-    // Dedup by (ring, slot). Single-ring hbg: prod_ring is always 0.
-    if (fanin_builder->mark_seen(prod_ring, prod_slot)) {
+    // Dedup by producer local id, which is also its task-table slot.
+    if (fanin_builder->mark_seen(producer_task_id)) {
         return true;
     }
     if (fanin_builder->count >= CHIP_MAX_FANIN) {
@@ -1219,7 +1217,7 @@ static bool append_fanin_or_fail(
 
 struct PreparedTask {
     TaskId task_id = TaskId::invalid();
-    TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
+    TaskAllocResult alloc_result = {-1, nullptr, nullptr};
     TaskDescriptor *task = nullptr;
     TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
@@ -1243,7 +1241,6 @@ static bool prepare_task(
     TaskAttrs task_attrs, PreparedTask *out
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
-    uint8_t ring_id = 0;
     auto &allocator = orch->task_allocator;
 
     int16_t block_num = args.launch_spec.block_num();
@@ -1264,10 +1261,10 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
-    out->slot_state = &orch->sm_header->ring.get_slot_state_by_slot(out->alloc_result.slot);
-    out->task = &orch->sm_header->ring.task_descriptors[out->alloc_result.slot];
-    out->payload = &orch->sm_header->ring.task_payloads[out->alloc_result.slot];
+    out->task_id = TaskId::make(0, static_cast<uint32_t>(out->alloc_result.task_id));
+    out->slot_state = &orch->sm_header->tasks.get_slot_state_by_task_id(out->alloc_result.task_id);
+    out->task = &orch->sm_header->tasks.task_descriptors[out->alloc_result.task_id];
+    out->payload = &orch->sm_header->tasks.task_payloads[out->alloc_result.task_id];
 
     // Bind the three argument regions before prefetch() and init(), both of which
     // dereference them. The scalar cursor advances in whole cache lines because init()
@@ -1275,11 +1272,11 @@ static bool prepare_task(
     // write into the next task's region. A tensor region is aligned for any count,
     // simpler::hbg::Tensor being two cache lines. The fanin cursor advances at publish, not
     // here — see the comment where it does.
-    const uint64_t window = orch->sm_header->ring.task_window_size;
+    const uint64_t max_tasks = static_cast<uint64_t>(orch->task_allocator.capacity());
     const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
-    debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= window * MAX_TENSOR_ARGS);
-    debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
-    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + CHIP_MAX_FANIN <= window * CHIP_MAX_FANIN);
+    debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= max_tasks * MAX_TENSOR_ARGS);
+    debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= max_tasks * MAX_SCALAR_ARGS);
+    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + CHIP_MAX_FANIN <= max_tasks * CHIP_MAX_FANIN);
     out->payload->bind_regions(
         orch->tensor_pool + orch->tensor_pool_cursor, orch->scalar_pool + orch->scalar_pool_cursor,
         orch->fanin_pool + orch->fanin_pool_cursor
@@ -1293,13 +1290,13 @@ static bool prepare_task(
     // past total_tasks, so this claim-time write is the only per-slot SM reset and
     // the unclaimed tail is neither initialized nor read.
     out->slot_state->reset_for_reuse();
-    orch->sm_header->ring.completion_flags[out->alloc_result.slot].store(0, std::memory_order_relaxed);
+    orch->sm_header->tasks.completion_flags[out->alloc_result.task_id].store(0, std::memory_order_relaxed);
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
     // Re-bind payload/task pointers each submit. Value is per-slot constant
     // (same as &task_payloads[slot] / &task_descriptors[slot]), but writing
-    // here lets RingSchedState::init() skip the O(window_size) bind loop.
+    // here lets TaskHeaderView::init() skip the O(max_tasks) bind loop.
     // Both writes hit the same 64B slot_state cache line we're about to
     // dirty below, so the extra cost is two stores on an already-hot line.
     // Must precede the Orch-side wiring publish at the end of
@@ -1314,8 +1311,6 @@ static bool prepare_task(
     // Fields already zeroed by the reset_for_reuse() above:
     //   wake_list_head=nullptr, next_in_wake_list=nullptr,
     //   any_subtask_deferred=false, completed_subtasks=0, next_block_idx=0
-    // Fields immutable after RingSchedState::init():
-    //   ring_id
     // task_state is set to PENDING here as the orchestrator populates the slot
     // (host_build_graph does not recycle slots at runtime, so there is no
     // post-CONSUMED reset path).
@@ -1506,12 +1501,10 @@ static TaskOutputTensors submit_task_common(
         if (capture_dep_graph) {
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
-        uint8_t dep_ring_id = dep_task_id.ring();
-        SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
+        SharedMemoryTaskHeader &dep_tasks = orch->sm_header->tasks;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
-        int32_t dep_slot = dep_ring.get_slot_by_task_id(dep_local_task_id);
-        ChipTaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
-        if (!append_fanin_or_fail(orch, dep_ring_id, dep_slot, producer_slot_state, dep_task_id, &fanin_builder)) {
+        ChipTaskSlotState *producer_slot_state = &dep_tasks.get_slot_state_by_task_id(dep_local_task_id);
+        if (!append_fanin_or_fail(orch, producer_slot_state, dep_task_id, &fanin_builder)) {
             return result;
         }
     }
@@ -1523,11 +1516,10 @@ static TaskOutputTensors submit_task_common(
     };
 
     auto runtime_emit = [&](TaskId producer_task_id) -> bool {
-        uint8_t prod_ring = producer_task_id.ring();
-        SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
-        int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
-        ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
-        return append_fanin_or_fail(orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder);
+        SharedMemoryTaskHeader &producer_tasks = orch->sm_header->tasks;
+        ChipTaskSlotState *prod_state =
+            &producer_tasks.get_slot_state_by_task_id(static_cast<int32_t>(producer_task_id.local()));
+        return append_fanin_or_fail(orch, prod_state, producer_task_id, &fanin_builder);
     };
 
     // The capture branch instantiates compute_task_fanin with a live Annotate;
@@ -1760,26 +1752,26 @@ bool graph_submit_outer(
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
     auto &allocator = orch->task_allocator;
-    if (allocator.active_count() >= allocator.window_size() ||
+    if (allocator.active_count() >= allocator.capacity() ||
         (!defer_heap && static_cast<uint64_t>(owned_heap) > allocator.heap_available())) {
-        LOG_WARN("%s", "[GraphExecution] task-window/heap preflight failed; using ordinary path");
+        LOG_WARN("%s", "[GraphExecution] task-capacity/heap preflight failed; using ordinary path");
         return false;
     }
 
     // The argument pools hold MAX_TENSOR_ARGS ChipTensors and MAX_SCALAR_ARGS scalars
-    // per window slot, a budget no CoreTaskArgs task can exceed. A Graph boundary is
+    // per task slot, a budget no CoreTaskArgs task can exceed. A Graph boundary is
     // GraphTaskArgs-wide, so a wide one draws more than the single slot it occupies is
     // worth — GraphBoundaryPool.WidestBoundaryExceedsOneSlotBudget pins how much. The
     // cursors bump through a fixed mirror whose last segment is the scalar pool, so an
     // overdraw writes past that mirror rather than merely exhausting a quota. Test it
     // ahead of the slot claim and decline the Graph path, which leaves the caller to
     // replay the block as ordinary tasks.
-    const uint64_t task_window = orch->sm_header->ring.task_window_size;
+    const uint64_t max_tasks = static_cast<uint64_t>(orch->task_allocator.capacity());
     const int32_t tensor_slots =
         static_cast<int32_t>(graph_boundary_tensor_pool_slots(static_cast<uint32_t>(args.tensor_count())));
     const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
-    if (static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots > task_window * MAX_TENSOR_ARGS ||
-        static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span > task_window * MAX_SCALAR_ARGS) {
+    if (static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots > max_tasks * MAX_TENSOR_ARGS ||
+        static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span > max_tasks * MAX_SCALAR_ARGS) {
         LOG_WARN("%s", "[GraphExecution] boundary exceeds the argument pools; using ordinary path");
         return false;
     }
@@ -1800,10 +1792,10 @@ bool graph_submit_outer(
         return false;
     }
     const TaskId task_id = TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
-    SharedMemoryRingHeader &ring = orch->sm_header->ring;
-    TaskDescriptor &task = ring.task_descriptors[allocation.slot];
-    TaskPayload &payload = ring.task_payloads[allocation.slot];
-    ChipTaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
+    SharedMemoryTaskHeader &tasks = orch->sm_header->tasks;
+    TaskDescriptor &task = tasks.task_descriptors[allocation.task_id];
+    TaskPayload &payload = tasks.task_payloads[allocation.task_id];
+    ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(allocation.task_id);
 
     // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
     // completion flag are established here, at the claim, because nothing else
@@ -1811,7 +1803,7 @@ bool graph_submit_outer(
     // list against every consumer, and a stale completion flag would report the
     // Graph done before it ran.
     slot.reset_for_reuse();
-    ring.completion_flags[allocation.slot].store(0, std::memory_order_relaxed);
+    tasks.completion_flags[allocation.task_id].store(0, std::memory_order_relaxed);
 
     slot.bind_buffers(&payload, &task);
     // Graph boundaries use the same compact argument pools as ordinary tasks. The
@@ -1851,16 +1843,14 @@ bool graph_submit_outer(
 
     FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
     auto emit = [&](TaskId producer_id) -> bool {
-        const int32_t producer_local = static_cast<int32_t>(producer_id.local());
-        const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);
-        ChipTaskSlotState *producer = &ring.get_slot_state_by_slot(producer_slot);
-        return append_fanin_or_fail(orch, producer_id.ring(), producer_slot, producer, producer_id, &fanin_builder);
+        ChipTaskSlotState *producer = &tasks.get_slot_state_by_task_id(static_cast<int32_t>(producer_id.local()));
+        return append_fanin_or_fail(orch, producer, producer_id, &fanin_builder);
     };
-    // An outer GRAPH task is a ring task like any other, so the dependency graph
+    // An outer GRAPH task is an ordinary task, so the dependency graph
     // has to carry it: without this the whole Graph — and every edge into it —
     // is absent from deps.json, leaving a run of 40 replays described by only its
     // handful of non-Graph tasks. It dispatches no kernel of its own and the
-    // sub-DAG it replays owns no ring slots, so what is captured is its boundary:
+    // sub-DAG it replays owns no task slots, so what is captured is its boundary:
     // the args it consumes and the edges those produce.
     const bool capture_dep_graph = dep_gen_host_graph_enabled();
     if (capture_dep_graph) {
@@ -1956,10 +1946,10 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
 }
 
 // Record one internal Graph node while recording, without consuming a
-// ring task-window slot. Builds the node's metadata and materialized outputs
+// task-table slot. Builds the node's metadata and materialized outputs
 // exactly as submit_task_common would, but assigns output buffers from the
 // bit-63 virtual address range and derives internal fanins from tensor-source
-// classification — so no ring slot, tensormap entry, fanin-pool entry, or upload
+// classification — so no task slot, tensormap entry, fanin-pool entry, or upload
 // is produced for the node. The resulting Definition is later attached to the
 // outer GRAPH shells already submitted by the main thread. The returned
 // TaskOutputTensors borrow the node's own tensor storage; moving the node into
@@ -2753,9 +2743,9 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // every consumer register_wakes on a producer that never runs on device and
         // the run hangs. (The device watermark walk transparently steps past this
         // pre-set flag when a later on-device task completes.)
-        SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
+        SharedMemoryTaskHeader &done_tasks = orch->sm_header->tasks;
         int32_t done_local = static_cast<int32_t>(prepared.task_id.local());
-        done_ring.set_completion_flag(done_local);
+        done_tasks.set_completion_flag(done_local);
     }
     orch->inline_completed_tasks++;
 
