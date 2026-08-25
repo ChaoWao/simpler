@@ -165,15 +165,10 @@ runs:
         exit "$failed"
         DFX_DRIVER
 
-        if [[ "$DFX_PLATFORM" == "a2a3" && "$(uname -m)" != "x86_64" ]]; then
+        if [[ "$DFX_PLATFORM" == "a2a3" ]]; then
           task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
             --run "bash '$DRIVER' a2a3 \$TASK_DEVICE"
         else
-          if [[ "$DFX_PLATFORM" == "a2a3" ]]; then
-            DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-            bash "$DRIVER" a2a3 "$DEVICE_LIST"
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "bash '$DRIVER' a5 \$TASK_DEVICE"
-          fi
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+            --run "bash '$DRIVER' a5 \$TASK_DEVICE"
         fi
