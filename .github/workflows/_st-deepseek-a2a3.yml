@@ -68,5 +68,5 @@ jobs:
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           DS_TEST="examples/a2a3/host_build_graph/deepseek_v4_flash_decode"
-          task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
+          task-submit --timeout 1800 --max-time 1800 --device 4,5 \
             --run ".venv/bin/python -m pytest $DS_TEST -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
