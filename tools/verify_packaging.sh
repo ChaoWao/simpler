@@ -50,13 +50,15 @@ smoke() {
     echo "::group::[${mode}] import surface"
     (
         cd "${PACKAGING_SMOKE_DIR}"
-        python -c "
+        REPO_ROOT="${REPO_ROOT}" python -c "
 import os
+import pathlib
 
 import simpler, simpler_setup
 from simpler.worker import Worker
 from simpler.task_interface import ChipWorker
 from simpler.orchestrator import Orchestrator
+from simpler_setup.environment import PROJECT_ROOT
 from simpler_setup.runtime_builder import RuntimeBuilder
 from simpler_setup.runtime_compiler import RuntimeCompiler
 from simpler_setup.kernel_compiler import KernelCompiler
@@ -74,6 +76,23 @@ for rel in ('pipe_sync.h', os.path.join('common', 'dma_workspace.h')):
     assert any(os.path.isfile(os.path.join(d, rel)) for d in inc_dirs), \
         'incore helper not shipped: ' + rel + '; include dirs: ' + repr(inc_dirs)
 print('incore helpers OK:', inc_dirs)
+# Verify the cmake includes a runtime configure needs are reachable. The platform
+# CMakeLists reach them through SIMPLER_CMAKE_DIR, which runtime_compiler.py
+# resolves to PROJECT_ROOT/cmake — the installed simpler_setup/_assets/cmake in a
+# wheel, the repo's cmake/ in a source-tree layout. An install rule that forgets
+# to ship them leaves every runtime configure dying on 'include could not find
+# requested file', which reaches the user as an empty compile database. Compare
+# against the repo so a file added to cmake/ is covered without editing a list,
+# and walk it recursively: install(DIRECTORY) ships nested paths, so a check that
+# only looked at immediate children would stop covering the directory the moment
+# anyone nested a file in it.
+cmake_dir = PROJECT_ROOT / 'cmake'
+repo_cmake_dir = pathlib.Path(os.environ['REPO_ROOT'], 'cmake')
+expected = sorted(str(p.relative_to(repo_cmake_dir)) for p in repo_cmake_dir.rglob('*') if p.is_file())
+missing = [rel for rel in expected if not (cmake_dir / rel).is_file()]
+assert expected, 'no cmake includes found in the repository to compare against'
+assert not missing, 'cmake includes not shipped: ' + repr(missing) + '; resolved dir: ' + str(cmake_dir)
+print('cmake includes OK:', cmake_dir, expected)
 "
     )
     echo "::endgroup::"

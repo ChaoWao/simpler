@@ -31,6 +31,7 @@ simpler_setup/            ← test framework + build/runtime assembly (simpler_s
     paged_attention.py    attention reference (used by multiple paged_attention tests)
   _assets/                (wheel-only, populated by CMake install)
     src/                  source tree mirror
+    cmake/                the includes a runtime configure needs, via SIMPLER_CMAKE_DIR
     build/lib/            pre-built per-arch/platform/runtime .so/.o
 
 _task_interface.*.so      nanobind extension at site-packages root
@@ -69,10 +70,10 @@ NPU hardware (`a2a3`/`a5` with CANN toolkit).
 
 `simpler_setup.environment.PROJECT_ROOT` auto-detects between:
 
-- **Wheel install**: `simpler_setup/_assets/` exists → `PROJECT_ROOT = .../site-packages/simpler_setup/_assets`. The wheel's bundled `_assets/src/` and `_assets/build/lib/` provide everything needed at runtime.
-- **Source tree / editable install**: `_assets/` doesn't exist → `PROJECT_ROOT = repo root`. Live `src/` and `build/lib/` are used.
+- **Wheel install**: `simpler_setup/_assets/` exists → `PROJECT_ROOT = .../site-packages/simpler_setup/_assets`. Everything the runtime reads at that root has to be installed there: `_assets/src/`, `_assets/build/lib/`, and `_assets/cmake/`, which is where `SIMPLER_CMAKE_DIR` lands and therefore what the platform `CMakeLists.txt` include. An asset directory the install block forgets fails only at use — a runtime configure dies on `include could not find requested file` — so `tools/verify_packaging.sh` asserts the set exists in every mode.
+- **Source tree / editable install**: `_assets/` doesn't exist → `PROJECT_ROOT = repo root`. Live `src/`, `cmake/` and `build/lib/` are used.
 
-Anything that needs to find `src/`, `build/lib/`, or `build/cache/` MUST go through `simpler_setup.environment.PROJECT_ROOT` — never `Path(__file__).parent.parent...`.
+Anything that needs to find `src/`, `cmake/`, `build/lib/`, or `build/cache/` MUST go through `simpler_setup.environment.PROJECT_ROOT` — never `Path(__file__).parent.parent...`.
 
 ## Import rules
 
