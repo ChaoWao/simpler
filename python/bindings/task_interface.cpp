@@ -1699,6 +1699,27 @@ NB_MODULE(_task_interface, m) {
         "Return whether this extension currently emits TIMING-level host spans."
     );
     m.def(
+        "_host_log_directory",
+        [] {
+            const char *bound = HostLogger::get_instance().log_directory();
+            return bound == nullptr ? std::string() : std::string(bound);
+        },
+        "The directory this process's host log is written to, or an empty string while it writes to stderr."
+    );
+    m.def(
+        "_emit_host_log",
+        [](int level, const std::string &func, const std::string &message) {
+            if (!simpler::log::is_valid_level(level)) return false;
+            HostLogger::get_instance().log(
+                static_cast<simpler::log::LogLevel>(level), func.c_str(), "%s", message.c_str()
+            );
+            return true;
+        },
+        nb::arg("level"), nb::arg("func"), nb::arg("message"),
+        "Emit one already-formatted message through the host logger, so a Python record carries the same envelope, "
+        "clock and destination as a C++ one. Returns false for a level outside the ladder."
+    );
+    m.def(
         "_initialize_host_log",
         [](int level) {
             if (!simpler::log::is_valid_level(level)) return false;

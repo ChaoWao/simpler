@@ -245,7 +245,7 @@ Onboard AICPU uses the CANN dlog format. Device TIMING uses CANN WARN and adds a
 | Stage | Action | Source |
 | ----- | ------ | ------ |
 | Python import | Register `TIMING` / `NUL`; default the `simpler` logger to TIMING | `python/simpler/_log.py` |
-| `Worker.init()` | Normalize the Python logger level and seed native state before the first fork | `python/simpler/worker.py` |
+| `Worker.init()` | Normalize the Python logger level, seed native state before the first fork, and point the `simpler` logger at the host logger | `python/simpler/worker.py` |
 | `ChipWorker.init()` | Re-seed inherited native state in a chip child, then enter C++ | `python/simpler/task_interface.py` |
 | `_ChipWorker.init()` | Load sim context and host runtime, then bind each module's logger state | `src/common/worker/chip_worker.cpp` |
 | `simpler_init` | Onboard maps the bound threshold to CANN; attach and take executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
@@ -257,6 +257,35 @@ The Python level is still sampled during worker initialization. Calling
 reinitialize the worker to apply a new Python configuration. Within a process,
 all bound host modules observe a native state update immediately instead of
 requiring threshold fan-out to every DSO.
+
+### The Python logger is a client, not a second system
+
+Seeding the native threshold also installs a handler on the `simpler` logger that
+forwards each record through `unified_log_*`. Before that, Python and C++ agreed
+only on a threshold: a Python record carried `[%(levelname)s] %(message)s` — no
+timestamp, no thread id — so it could not be ordered against a C++ record no
+matter where either was written, and it went to whatever handler happened to be
+on the root logger rather than to the host logger's own output. Now one envelope,
+one clock and one destination cover every record in the process.
+
+Two properties this deliberately keeps:
+
+- **Propagation is untouched**, so a record still reaches the root logger as
+  well. That is what keeps an interactive console readable and what keeps
+  `caplog.at_level(..., logger="simpler")` working in the tests that assert on
+  warnings. The host log is the complete copy; the console is a view of it.
+- **The handler is installed where the threshold is seeded, not at import.**
+  `import simpler` must keep working when `_task_interface` is missing or stale —
+  the build-stamp guard in `simpler/task_interface.py` raises on every
+  source-tree move until a rebuild — so putting the extension on the import path
+  of the logging surface would lose the logger exactly when it is needed to say
+  why. Records logged before a worker is initialized stay on the root logger's
+  handler.
+
+A record's level is rounded toward the milder name on the way through (`35`
+becomes `WARN`), the opposite of how a *threshold* is normalized: asking for a
+threshold of 35 must not silently admit warnings, but a record at 35 is a warning
+someone gave a custom number.
 
 ### Forked chip subprocesses
 
