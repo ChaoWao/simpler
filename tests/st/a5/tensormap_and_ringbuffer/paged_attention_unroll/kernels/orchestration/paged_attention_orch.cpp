@@ -124,17 +124,20 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         static_cast<uint32_t>(total_blocks_count * block_size), static_cast<uint32_t>(head_dim)
     };
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
-    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type, false);
-    ChipTensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type, false);
-    ChipTensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type, false);
-    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
+    simpler::tmr::Tensor query = simpler::tmr::make_tensor_external(query_ptr, query_shapes, 2, data_type, false);
+    simpler::tmr::Tensor key_cache = simpler::tmr::make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type, false);
+    simpler::tmr::Tensor value_cache =
+        simpler::tmr::make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type, false);
+    simpler::tmr::Tensor out = simpler::tmr::make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(block_num)};
-    ChipTensor block_table =
-        make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
+    simpler::tmr::Tensor block_table = simpler::tmr::make_tensor_external(
+        orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false
+    );
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    ChipTensor context_lens =
-        make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
+    simpler::tmr::Tensor context_lens = simpler::tmr::make_tensor_external(
+        orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false
+    );
 
 #ifdef ENABLE_PROFILING
     CYCLE_COUNT_LAP(prof_ext_tensor);
@@ -161,19 +164,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                 uint32_t qi_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t qi_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                ChipTensor qi = query.view(qi_shapes, qi_offsets);
+                simpler::tmr::Tensor qi = query.view(qi_shapes, qi_offsets);
                 uint32_t out_view_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t out_view_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                ChipTensor out_view = out.view(out_view_shapes, out_view_offsets, true);
+                simpler::tmr::Tensor out_view = out.view(out_view_shapes, out_view_offsets, true);
 #ifdef ENABLE_PROFILING
                 prof_view_count += 2;
                 CYCLE_COUNT_LAP(prof_tensor_view);
 #endif
                 CYCLE_COUNT_LAP(prof_param_setup);
                 TaskOutputTensors alloc_outs = alloc_tensors(tile2d_ci, scalar_ci, scalar_ci);
-                const ChipTensor &oi = alloc_outs.get_ref(0);
-                const ChipTensor &li_update = alloc_outs.get_ref(1);
-                const ChipTensor &mi_update = alloc_outs.get_ref(2);
+                const simpler::tmr::Tensor &oi = alloc_outs.get_ref(0);
+                const simpler::tmr::Tensor &li_update = alloc_outs.get_ref(1);
+                const simpler::tmr::Tensor &mi_update = alloc_outs.get_ref(2);
 #ifdef ENABLE_PROFILING
                 prof_submit_count++;
                 CYCLE_COUNT_LAP(prof_submit_task);
@@ -207,7 +210,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_qk.add_scalar(n_blocks, b_idx * block_num + bn);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                    const ChipTensor &sij_buf = qk_outs.get_ref(0);
+                    const simpler::tmr::Tensor &sij_buf = qk_outs.get_ref(0);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
@@ -229,9 +232,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_sf.add_scalar(scale_value, n_blocks, valid_len_last);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                    const ChipTensor &pij_buf = sf_outs.get_ref(0);
-                    const ChipTensor &mi = sf_outs.get_ref(1);
-                    const ChipTensor &li = sf_outs.get_ref(2);
+                    const simpler::tmr::Tensor &pij_buf = sf_outs.get_ref(0);
+                    const simpler::tmr::Tensor &mi = sf_outs.get_ref(1);
+                    const simpler::tmr::Tensor &li = sf_outs.get_ref(2);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
@@ -244,7 +247,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_pv.add_scalar(n_blocks, b_idx * block_num + bn);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                    const ChipTensor &oi_new = pv_outs.get_ref(0);
+                    const simpler::tmr::Tensor &oi_new = pv_outs.get_ref(0);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);

@@ -95,8 +95,9 @@ void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, c
 // Uses cycle-based timeout (checked every 1024 spins).
 // Returns false on timeout (sets orch.fatal).
 MAYBE_UNINITIALIZED_BEGIN
-static bool
-wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
+static bool wait_for_tensor_ready(
+    RuntimeContext *rt, const simpler::tmr::Tensor &tensor, bool wait_for_consumers, const char *caller
+) {
     TaskId owner = tensor.owner_task_id;
     OrchestratorState &orch = rt->orchestrator;
 
@@ -210,11 +211,12 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
 }
 MAYBE_UNINITIALIZED_END
 
-uint64_t get_tensor_data(RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[]) {
+uint64_t
+get_tensor_data(RuntimeContext *rt, const simpler::tmr::Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
             __FUNCTION__, "get_tensor_data: buffer not allocated (addr=0). "
-                          "Use the ChipTensor returned by add_output(TensorCreateInfo) after submit returns."
+                          "Use the simpler::tmr::Tensor returned by add_output(TensorCreateInfo) after submit returns."
         );
         return 0;
     }
@@ -232,12 +234,12 @@ uint64_t get_tensor_data(RuntimeContext *rt, const ChipTensor &tensor, uint32_t 
 }
 
 void set_tensor_data(
-    RuntimeContext *rt, const ChipTensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+    RuntimeContext *rt, const simpler::tmr::Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
 ) {
     if (tensor.buffer.addr == 0) {
         unified_log_error(
             __FUNCTION__, "set_tensor_data: buffer not allocated (addr=0). "
-                          "Use the ChipTensor returned by add_output(TensorCreateInfo) after submit returns."
+                          "Use the simpler::tmr::Tensor returned by add_output(TensorCreateInfo) after submit returns."
         );
         return;
     }

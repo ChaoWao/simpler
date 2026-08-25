@@ -29,8 +29,6 @@ from simpler.task_interface import ArgDirection as D
 from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
-KERNELS_BASE = "../../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
-# The predicated_dispatch orchestration is the one host_build_graph case whose
 # graph carries all three edge sources, so it covers the tensormap (Step B) and
 # explicit (STEP 1) capture hooks the vector_example case above cannot reach.
 PREDICATED_KERNELS = "../../predicated_dispatch/kernels"
@@ -94,26 +92,26 @@ class TestDepGenHostBuildGraph(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{KERNELS_BASE}/orchestration/example_orchestration.cpp",
+            "source": "kernels/orchestration/example_orchestration.cpp",
             "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT],
         },
         "incores": [
             {
                 "func_id": 0,
-                "source": f"{KERNELS_BASE}/aiv/kernel_add.cpp",
+                "source": "kernels/aiv/kernel_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
-                "source": f"{KERNELS_BASE}/aiv/kernel_add_scalar.cpp",
+                "source": "kernels/aiv/kernel_add_scalar.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.OUT],
             },
             {
                 "func_id": 2,
-                "source": f"{KERNELS_BASE}/aiv/kernel_mul.cpp",
+                "source": "kernels/aiv/kernel_mul.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },

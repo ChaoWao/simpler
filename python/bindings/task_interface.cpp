@@ -1620,7 +1620,7 @@ ChipTensor materialize_one(const Tensor &r, nb::dict resolved) {
     // non-row-major layout (transpose / permute / step-slice), which ChipTensor expresses natively.
     return make_tensor_strided(
         reinterpret_cast<void *>(static_cast<uintptr_t>(base + r.byte_offset)), r.shapes, r.strides, r.ndims, r.dtype,
-        /*manual_dep=*/false, /*version=*/0, static_cast<AddressSpace>(addr_space)
+        static_cast<AddressSpace>(addr_space)
     );
 }
 
@@ -2028,7 +2028,7 @@ NB_MODULE(_task_interface, m) {
                 // start_offset == 0, buffer.size == numel * element_size.
                 return make_tensor_external(
                     reinterpret_cast<void *>(static_cast<uintptr_t>(data)), shp, static_cast<uint32_t>(n), dtype,
-                    /*manual_dep=*/false, /*version=*/0, child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
+                    child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
                 );
             },
             // The keyword stays `child_memory` while the C++ field is `address_space`: it is the
@@ -2076,7 +2076,7 @@ NB_MODULE(_task_interface, m) {
                 // Re-establish a contiguous layout over the same buffer base.
                 self.init_external(
                     reinterpret_cast<void *>(self.buffer.addr), numel * get_element_size(self.dtype), shp,
-                    static_cast<uint32_t>(n), self.dtype, self.version, self.manual_dep, self.address_space
+                    static_cast<uint32_t>(n), self.dtype, self.address_space
                 );
             }
         )
@@ -2131,7 +2131,7 @@ NB_MODULE(_task_interface, m) {
         .def_prop_ro(
             "is_contiguous",
             [](const ChipTensor &self) -> bool {
-                return self.is_contiguous;
+                return self.is_contiguous();
             }
         )
 

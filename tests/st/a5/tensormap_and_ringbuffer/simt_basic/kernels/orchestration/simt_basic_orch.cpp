@@ -32,9 +32,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &src = orch_args.tensor(0).ref();
-    const ChipTensor &indices = orch_args.tensor(1).ref();
-    const ChipTensor &out = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &src = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &indices = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(2).ref();
 
     // SIMPLER_SCOPE ensures rt_submit_aiv_task flushes through the task
     // ringbuffer before the entry returns. No set_core_num — let the

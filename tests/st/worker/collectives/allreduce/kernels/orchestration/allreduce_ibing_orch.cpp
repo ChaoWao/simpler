@@ -11,7 +11,7 @@
 /**
  * IBing AllReduce orchestration — kernel shim.
  *
- * Three ChipTensor args plus two scalars:
+ * Three simpler::tmr::Tensor args plus two scalars:
  *
  *   tensor(0) input   INPUT           (plain device mem, staged in by bootstrap)
  *   tensor(1) output  OUTPUT_EXISTING (plain device mem, flushed by bootstrap)
@@ -39,9 +39,9 @@ allreduce_ibing_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void allreduce_ibing_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &input = orch_args.tensor(0).ref();
-    const ChipTensor &output = orch_args.tensor(1).ref();
-    const ChipTensor &scratch = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &input = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &output = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &scratch = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(input);

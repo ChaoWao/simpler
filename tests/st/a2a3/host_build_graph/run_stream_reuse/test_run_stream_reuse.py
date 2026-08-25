@@ -23,6 +23,7 @@ next launch then replaces it.
 plateau after the first launch until another code publication.
 """
 
+import copy
 import itertools
 
 import pytest
@@ -33,15 +34,24 @@ from simpler.worker import Worker
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
-_VECTOR_KERNELS = "../vector_example/kernels"
 _REPEATED_RUNS = 4
+_TMR_KERNELS = "../../tensormap_and_ringbuffer/run_stream_reuse/kernels"
+
+
+def _rebase_callable(callable_spec: dict, kernels_dir: str) -> dict:
+    """Copy a CALLABLE with every `kernels/...` source rebased onto `kernels_dir`."""
+    out = copy.deepcopy(callable_spec)
+    out["orchestration"]["source"] = out["orchestration"]["source"].replace("kernels", kernels_dir, 1)
+    for incore in out["incores"]:
+        incore["source"] = incore["source"].replace("kernels", kernels_dir, 1)
+    return out
 
 
 @scene_test(level=2, runtime="host_build_graph")
 class _SubtractCallable(SceneTestCase):
     CALLABLE = {
         "orchestration": {
-            "source": f"{_VECTOR_KERNELS}/orchestration/example_orch.cpp",
+            "source": "kernels/orchestration/example_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT],
         },
@@ -54,13 +64,13 @@ class _SubtractCallable(SceneTestCase):
             },
             {
                 "func_id": 1,
-                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
+                "source": "kernels/aiv/kernel_add_scalar.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.OUT],
             },
             {
                 "func_id": 2,
-                "source": f"{_VECTOR_KERNELS}/aiv/kernel_mul.cpp",
+                "source": "kernels/aiv/kernel_mul.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },
@@ -77,26 +87,26 @@ class TestRunStreamReuseHbg(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{_VECTOR_KERNELS}/orchestration/example_orch.cpp",
+            "source": "kernels/orchestration/example_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT],
         },
         "incores": [
             {
                 "func_id": 0,
-                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add.cpp",
+                "source": "kernels/aiv/kernel_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
-                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
+                "source": "kernels/aiv/kernel_add_scalar.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.OUT],
             },
             {
                 "func_id": 2,
-                "source": f"{_VECTOR_KERNELS}/aiv/kernel_mul.cpp",
+                "source": "kernels/aiv/kernel_mul.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },
@@ -436,7 +446,9 @@ class TestRunStreamReuseHbg(SceneTestCase):
 class TestRunStreamReuseTmr(SceneTestCase):
     """TMR preparation keeps the same publication-aware stream rule."""
 
-    CALLABLE = TestRunStreamReuseHbg.CALLABLE
+    # Its own copies under the tensormap_and_ringbuffer tree: a source names one
+    # runtime's Tensor, so it cannot be compiled under both.
+    CALLABLE = _rebase_callable(TestRunStreamReuseHbg.CALLABLE, _TMR_KERNELS)
     CASES = TestRunStreamReuseHbg.CASES
 
     generate_args = TestRunStreamReuseHbg.generate_args

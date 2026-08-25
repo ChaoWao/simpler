@@ -43,10 +43,10 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &a = orch_args.tensor(0).ref();
-    const ChipTensor &w1 = orch_args.tensor(1).ref();
-    const ChipTensor &w2 = orch_args.tensor(2).ref();
-    const ChipTensor &f = orch_args.tensor(3).ref();  // external output, written in place
+    const simpler::hbg::Tensor &a = orch_args.tensor(0).ref();
+    const simpler::hbg::Tensor &w1 = orch_args.tensor(1).ref();
+    const simpler::hbg::Tensor &w2 = orch_args.tensor(2).ref();
+    const simpler::hbg::Tensor &f = orch_args.tensor(3).ref();  // external output, written in place
 
     uint32_t SIZE = a.shapes[0];
     uint32_t shapes[1] = {SIZE};
@@ -58,7 +58,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     p0.add_input(a);
     p0.add_output(b_ci);
     TaskOutputTensors b_out = rt_submit_aiv_task(FUNC_LOG_SQRT, p0);
-    ChipTensor b = b_out.get_ref(0);
+    simpler::hbg::Tensor b = b_out.get_ref(0);
 
     // task1: c = b @ w1
     CoreTaskArgs p1;
@@ -66,7 +66,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     p1.add_input(w1);
     p1.add_output(cd_ci);
     TaskOutputTensors c_out = rt_submit_aic_task(FUNC_MATMUL, p1);
-    ChipTensor c = c_out.get_ref(0);
+    simpler::hbg::Tensor c = c_out.get_ref(0);
 
     // task2: d = b @ w2
     CoreTaskArgs p2;
@@ -74,7 +74,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     p2.add_input(w2);
     p2.add_output(cd_ci);
     TaskOutputTensors d_out = rt_submit_aic_task(FUNC_MATMUL, p2);
-    ChipTensor d = d_out.get_ref(0);
+    simpler::hbg::Tensor d = d_out.get_ref(0);
 
     // task3: f = exp(c + d)
     CoreTaskArgs p3;

@@ -82,12 +82,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     void *out_ptr = orch_args.tensor(5).ref().data_as<void>();
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(block_num)};
-    ChipTensor block_table =
-        make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
+    simpler::tmr::Tensor block_table = simpler::tmr::make_tensor_external(
+        orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false
+    );
 
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    ChipTensor context_lens =
-        make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
+    simpler::tmr::Tensor context_lens = simpler::tmr::make_tensor_external(
+        orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false
+    );
 
     uint64_t max_bn = 0;
     for (uint64_t b = 0; b < batch; b++) {
@@ -104,10 +106,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t value_cache_shapes[2] = {static_cast<uint32_t>(kv_total_rows), static_cast<uint32_t>(head_dim)};
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
 
-    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
-    ChipTensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
-    ChipTensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
-    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32, true);
+    simpler::tmr::Tensor query = simpler::tmr::make_tensor_external(query_ptr, query_shapes, 2, data_type);
+    simpler::tmr::Tensor key_cache = simpler::tmr::make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
+    simpler::tmr::Tensor value_cache = simpler::tmr::make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
+    simpler::tmr::Tensor out = simpler::tmr::make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32, true);
 
     constexpr uint64_t IN_CORE_BATCH = 16;
     uint64_t num_chunks = (batch + IN_CORE_BATCH - 1) / IN_CORE_BATCH;
@@ -126,9 +128,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TensorCreateInfo oi_batch_ci(oi_acc_shapes, 2, DataType::FLOAT32);
                 TensorCreateInfo scalar_acc_ci(scalar_acc_shapes, 1, DataType::FLOAT32);
                 TaskOutputTensors alloc_outs = alloc_tensors(oi_batch_ci, scalar_acc_ci, scalar_acc_ci);
-                const ChipTensor &oi_batch = alloc_outs.get_ref(0);
-                const ChipTensor &li_batch = alloc_outs.get_ref(1);
-                const ChipTensor &mi_batch = alloc_outs.get_ref(2);
+                const simpler::tmr::Tensor &oi_batch = alloc_outs.get_ref(0);
+                const simpler::tmr::Tensor &li_batch = alloc_outs.get_ref(1);
+                const simpler::tmr::Tensor &mi_batch = alloc_outs.get_ref(2);
 
                 // Inner-loop create infos: shapes are loop-invariant, hoist out of bn loop
                 uint32_t sij_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(block_size)};
@@ -153,7 +155,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         params_qk.add_scalar(num_heads);
                         params_qk.add_scalar(batch_start);
                         TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                        const ChipTensor &sij_b = qk_outs.get_ref(0);
+                        const simpler::tmr::Tensor &sij_b = qk_outs.get_ref(0);
 
                         CoreTaskArgs params_sf;
                         params_sf.add_input(sij_b);
@@ -166,9 +168,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         params_sf.add_scalar(bn);
                         params_sf.add_scalar(batch_start);
                         TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                        const ChipTensor &pij_b = sf_outs.get_ref(0);
-                        const ChipTensor &mij_b = sf_outs.get_ref(1);
-                        const ChipTensor &lij_b = sf_outs.get_ref(2);
+                        const simpler::tmr::Tensor &pij_b = sf_outs.get_ref(0);
+                        const simpler::tmr::Tensor &mij_b = sf_outs.get_ref(1);
+                        const simpler::tmr::Tensor &lij_b = sf_outs.get_ref(2);
 
                         CoreTaskArgs params_pv;
                         params_pv.add_input(pij_b);
@@ -180,7 +182,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         params_pv.add_scalar(block_num);
                         params_pv.add_scalar(batch_start);
                         TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                        const ChipTensor &oi_new_b = pv_outs.get_ref(0);
+                        const simpler::tmr::Tensor &oi_new_b = pv_outs.get_ref(0);
 
                         uint64_t is_first = (bn == 0) ? 1 : 0;
                         uint64_t is_last = (bn == max_bn - 1) ? 1 : 0;

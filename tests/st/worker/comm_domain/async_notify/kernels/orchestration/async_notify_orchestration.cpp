@@ -32,10 +32,10 @@ __attribute__((visibility("default"))) void async_notify_orchestration(const Chi
         return;
     }
 
-    const ChipTensor &input = orch_args.tensor(0).ref();
-    const ChipTensor &output = orch_args.tensor(1).ref();
-    const ChipTensor &result = orch_args.tensor(2).ref();
-    const ChipTensor &notify_counter = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &input = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &output = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &result = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &notify_counter = orch_args.tensor(3).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
 
     CoreTaskArgs params_producer;
@@ -52,7 +52,7 @@ __attribute__((visibility("default"))) void async_notify_orchestration(const Chi
     params_notify.add_scalar(notify_counter.buffer.addr);
     params_notify.add_scalar(static_cast<uint64_t>(1));
     TaskOutputTensors notify_outputs = rt_submit_aiv_task(2, params_notify);
-    ChipTensor notify_token = notify_outputs.get_ref(0);
+    simpler::tmr::Tensor notify_token = notify_outputs.get_ref(0);
 
     CoreTaskArgs params_consumer;
     params_consumer.add_input(notify_token);

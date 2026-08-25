@@ -20,8 +20,10 @@
 // ChipTensor layout
 // ---------------------------------------------------------------------------
 
-// ABI contract: size must match the wire serialization format (2 cache lines).
-TEST(ChildMemory, TensorAbiSize) { EXPECT_EQ(sizeof(ChipTensor), 128u); }
+// ABI contract: ChipStorageTaskArgs is handed to runtime.so through a `const void *`,
+// so nothing checks this element's size at the call. 72 B is geometry plus a resolved
+// address; a change here silently mis-reads every argument.
+TEST(ChildMemory, TensorAbiSize) { EXPECT_EQ(sizeof(ChipTensor), 72u); }
 
 TEST(ChildMemory, DefaultIsZero) {
     ChipTensor t{};

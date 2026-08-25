@@ -34,8 +34,8 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *input_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-    __gm__ ChipTensor *result_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ TaskTensor *input_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ TaskTensor *result_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
     int rank_count = static_cast<int>(args[2]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
 

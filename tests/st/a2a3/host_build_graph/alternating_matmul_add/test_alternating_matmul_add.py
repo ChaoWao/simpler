@@ -20,8 +20,6 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
-TMR_CASE = "../../tensormap_and_ringbuffer/alternating_matmul_add"
-
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestAlternatingMatmulAddHostBuildGraph(SceneTestCase):
@@ -32,20 +30,20 @@ class TestAlternatingMatmulAddHostBuildGraph(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{TMR_CASE}/kernels/orchestration/alternating_orch.cpp",
+            "source": "kernels/orchestration/alternating_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT, D.IN, D.IN, D.OUT],
         },
         "incores": [
             {
                 "func_id": 0,
-                "source": f"{TMR_CASE}/kernels/aic/kernel_matmul.cpp",
+                "source": "kernels/aic/kernel_matmul.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
-                "source": f"{TMR_CASE}/kernels/aiv/kernel_add.cpp",
+                "source": "kernels/aiv/kernel_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },

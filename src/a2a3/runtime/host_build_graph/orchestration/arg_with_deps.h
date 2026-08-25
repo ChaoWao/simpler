@@ -46,7 +46,7 @@
 template <size_t MAX_DEP_COUNT = 16>
 class CoreTaskArgsWithDeps : private CoreTaskArgs {
 public:
-    // ChipTensor / scalar setters — forward to Arg
+    // simpler::hbg::Tensor / scalar setters — forward to Arg
     using CoreTaskArgs::add_inout;
     using CoreTaskArgs::add_input;
     using CoreTaskArgs::add_no_dep;

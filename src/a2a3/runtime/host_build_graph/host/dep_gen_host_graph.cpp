@@ -91,7 +91,7 @@ const char *arg_type_str(TensorArgType t) {
 // TENSORMAP source only — the explicit/creator paths have no matched tensormap
 // entry to copy from.
 //
-// Slice description follows the strided ChipTensor model: (start_offset, strides[])
+// Slice description follows the strided simpler::hbg::Tensor model: (start_offset, strides[])
 // in element units. Byte offset of element coords[] is
 //   (start_offset + Σ coords[i] · strides[i]) · dtype_bytes
 struct EdgeAnnot {
@@ -101,7 +101,7 @@ struct EdgeAnnot {
     EdgeSource source;
     OverlapStatus overlap;  // only meaningful for TENSORMAP
     uint64_t tensor_id;     // 0 for EXPLICIT
-    // Consumer side (the ChipTensor the submitting task is reading).
+    // Consumer side (the simpler::hbg::Tensor the submitting task is reading).
     uint8_t consumer_dtype;
     uint32_t consumer_ndims;
     uint32_t consumer_shape[MAX_TENSOR_DIMS];
@@ -128,7 +128,7 @@ struct TensorTableEntry {
 // One arg slot of a task, captured for the `tasks[].args[]` block so downstream
 // viewers can render per-task input / output compartments without scanning every
 // edge. `has_tensor_info` is false only for OUTPUT slots: the runtime has not
-// materialized a ChipTensor for them at submit_task time.
+// materialized a simpler::hbg::Tensor for them at submit_task time.
 struct TaskArgEntry {
     int32_t idx;
     TensorArgType arg_type;
@@ -171,9 +171,9 @@ uint64_t make_tensor_id(uint64_t buffer_addr, int32_t version) {
     return h;
 }
 
-// Copy a ChipTensor's slice description (shape + start_offset + stride) into an
+// Copy a simpler::hbg::Tensor's slice description (shape + start_offset + stride) into an
 // EdgeAnnot's consumer_* fields.
-void fill_consumer(EdgeAnnot &e, const ChipTensor &t) {
+void fill_consumer(EdgeAnnot &e, const simpler::hbg::Tensor &t) {
     e.consumer_dtype = static_cast<uint8_t>(t.dtype);
     e.consumer_ndims = t.ndims;
     e.consumer_start_offset = t.start_offset;
@@ -237,7 +237,7 @@ HostGraphState &state() {
 // Register a tensor in the tensors[] table on first sight of (addr, version).
 // buffer_numel describes the underlying storage size in elements; per-edge
 // fields describe the slice via (start_offset, strides[]).
-uint64_t register_tensor(HostGraphState &s, const ChipTensor &t) {
+uint64_t register_tensor(HostGraphState &s, const simpler::hbg::Tensor &t) {
     uint64_t id = make_tensor_id(t.buffer.addr, t.version);
     if (s.tensor_index.find(id) != s.tensor_index.end()) {
         return id;
@@ -407,12 +407,12 @@ void dep_gen_host_graph_begin_task(
         slot.idx = i;
         slot.arg_type = arg_types[i];
         if (arg_types[i] == TensorArgType::OUTPUT) {
-            // OUTPUT slots carry create_info, not a ChipTensor, until the runtime
+            // OUTPUT slots carry create_info, not a simpler::hbg::Tensor, until the runtime
             // materializes the buffer. Viewers render this as a placeholder
             // "alloc" output slot.
             slot.has_tensor_info = false;
         } else {
-            const ChipTensor &t = tensors[i].ref();
+            const simpler::hbg::Tensor &t = tensors[i].ref();
             slot.tensor_id = register_tensor(s, t);
             slot.has_tensor_info = true;
             slot.dtype = static_cast<uint8_t>(t.dtype);
@@ -446,7 +446,7 @@ void dep_gen_host_graph_add_explicit_edge(uint64_t producer_raw) {
     s.edges.push_back(e);
 }
 
-void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer) {
+void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx, const simpler::hbg::Tensor &consumer) {
     HostGraphState &s = state();
     if (!s.enabled || !s.in_task) {
         return;
@@ -465,7 +465,7 @@ void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx,
 }
 
 void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry,
+    uint64_t producer_raw, int32_t arg_idx, const simpler::hbg::Tensor &consumer, const ChipTensorMapEntry &entry,
     OverlapStatus overlap
 ) {
     HostGraphState &s = state();

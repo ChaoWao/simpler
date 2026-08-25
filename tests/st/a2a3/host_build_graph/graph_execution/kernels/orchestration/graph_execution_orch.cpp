@@ -22,9 +22,9 @@
 namespace {
 
 void layer(const GraphTaskArgs &args, int variant) {
-    const ChipTensor &a = args.tensor(0).ref();
-    const ChipTensor &b = args.tensor(1).ref();
-    const ChipTensor &output = args.tensor(2).ref();
+    const simpler::hbg::Tensor &a = args.tensor(0).ref();
+    const simpler::hbg::Tensor &b = args.tensor(1).ref();
+    const simpler::hbg::Tensor &output = args.tensor(2).ref();
 
     const std::array<uint32_t, 1> shape{a.shapes[0]};
     TensorCreateInfo intermediate(shape.data(), static_cast<uint32_t>(shape.size()), DataType::FLOAT32);
@@ -35,7 +35,7 @@ void layer(const GraphTaskArgs &args, int variant) {
     const std::array<TaskId, 1> external_dep{a.owner_task_id};
     add_args.set_dependencies(external_dep.data(), static_cast<uint32_t>(external_dep.size()));
     TaskOutputTensors add_outputs = rt_submit_aiv_task(FUNC_ADD, add_args);
-    ChipTensor sum = add_outputs.get_ref(0);
+    simpler::hbg::Tensor sum = add_outputs.get_ref(0);
 
     CoreTaskArgs fence_args;
     fence_args.add_inout(sum);
@@ -51,14 +51,14 @@ void layer(const GraphTaskArgs &args, int variant) {
     }
     left_args.set_allow_early_resolve(true);
     TaskOutputTensors left_outputs = rt_submit_aiv_task(FUNC_ADD_SCALAR, left_args);
-    ChipTensor left = left_outputs.get_ref(0);
+    simpler::hbg::Tensor left = left_outputs.get_ref(0);
 
     CoreTaskArgs right_args;
     right_args.add_input(sum);
     right_args.add_output(intermediate);
     right_args.add_scalar(args.scalar(variant == 0 ? 1 : 0));
     TaskOutputTensors right_outputs = rt_submit_aiv_task(FUNC_ADD_SCALAR, right_args);
-    ChipTensor right = right_outputs.get_ref(0);
+    simpler::hbg::Tensor right = right_outputs.get_ref(0);
 
     CoreTaskArgs mul_args;
     mul_args.add_input(left, right);
@@ -80,8 +80,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
-    const ChipTensor &a = args.tensor(0).ref();
-    const ChipTensor &b = args.tensor(1).ref();
+    const simpler::hbg::Tensor &a = args.tensor(0).ref();
+    const simpler::hbg::Tensor &b = args.tensor(1).ref();
 
     const std::array<uint32_t, 1> shape{a.shapes[0]};
     TensorCreateInfo seeded_input_info(shape.data(), static_cast<uint32_t>(shape.size()), DataType::FLOAT32);
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     seed_args.add_output(seeded_input_info);
     seed_args.add_scalar(0.0F);
     TaskOutputTensors seed_outputs = rt_submit_aiv_task(FUNC_ADD_SCALAR, seed_args);
-    ChipTensor seeded_a = seed_outputs.get_ref(0);
+    simpler::hbg::Tensor seeded_a = seed_outputs.get_ref(0);
 
     const std::array<float, 3> left_deltas{1.0F, 3.0F, 5.0F};
     const std::array<float, 3> right_deltas{2.0F, 4.0F, 6.0F};

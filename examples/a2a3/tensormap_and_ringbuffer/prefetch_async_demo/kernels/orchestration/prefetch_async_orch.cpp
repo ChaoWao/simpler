@@ -38,8 +38,8 @@ __attribute__((visibility("default"))) void prefetch_async_orchestration(const C
         return;
     }
 
-    const ChipTensor &in = orch_args.tensor(0).ref();
-    const ChipTensor &out = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &in = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(1).ref();
 
     CoreTaskArgs task_args;
     task_args.add_input(in);

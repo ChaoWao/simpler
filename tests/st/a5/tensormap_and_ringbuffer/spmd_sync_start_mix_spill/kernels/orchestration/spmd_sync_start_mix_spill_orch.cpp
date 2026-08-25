@@ -50,7 +50,7 @@ static MixedKernels mix_kernels() {
     return mk;
 }
 
-static TaskId submit_aiv_producer(const ChipTensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
+static TaskId submit_aiv_producer(const simpler::tmr::Tensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -60,7 +60,7 @@ static TaskId submit_aiv_producer(const ChipTensor &out, int16_t core_num, int64
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-static void submit_mix_sync_consumer(const ChipTensor &out, int16_t core_num, int64_t base_cl, TaskId dep) {
+static void submit_mix_sync_consumer(const simpler::tmr::Tensor &out, int16_t core_num, int64_t base_cl, TaskId dep) {
     CoreTaskArgsWithDeps<4> args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -72,8 +72,8 @@ static void submit_mix_sync_consumer(const ChipTensor &out, int16_t core_num, in
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_output = orch_args.tensor(0).ref();
-    const ChipTensor &layout = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &layout = orch_args.tensor(1).ref();
     const bool early_on = orch_args.scalar(0) != 0;
 
     // The spill this case exercises needs the producer on EVERY AIV core and the

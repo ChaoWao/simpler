@@ -23,8 +23,8 @@
 #include "tensor.h"
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ ChipTensor *mailbox_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-    __gm__ ChipTensor *result_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ TaskTensor *mailbox_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ TaskTensor *result_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
     __gm__ float *mailbox =
         reinterpret_cast<__gm__ float *>(mailbox_tensor->buffer.addr) + mailbox_tensor->start_offset;
     __gm__ float *result = reinterpret_cast<__gm__ float *>(result_tensor->buffer.addr) + result_tensor->start_offset;

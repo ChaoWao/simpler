@@ -30,10 +30,10 @@ namespace {
 // A cache miss records two AIC and two AIV tasks. Cache hits submit one outer
 // Graph task and let Scheduler materialize this saved topology.
 void decoder_layer(const GraphTaskArgs &args) {
-    const ChipTensor &input = args.tensor(0).ref();
-    const ChipTensor &weight_1 = args.tensor(1).ref();
-    const ChipTensor &weight_2 = args.tensor(2).ref();
-    const ChipTensor &output = args.tensor(3).ref();
+    const simpler::hbg::Tensor &input = args.tensor(0).ref();
+    const simpler::hbg::Tensor &weight_1 = args.tensor(1).ref();
+    const simpler::hbg::Tensor &weight_2 = args.tensor(2).ref();
+    const simpler::hbg::Tensor &output = args.tensor(3).ref();
 
     const std::array<uint32_t, 1> shape{input.shapes[0]};
     TensorCreateInfo normalized_info(shape.data(), static_cast<uint32_t>(shape.size()), DataType::FLOAT16);
@@ -43,19 +43,19 @@ void decoder_layer(const GraphTaskArgs &args) {
     norm_args.add_input(input);
     norm_args.add_output(normalized_info);
     TaskOutputTensors normalized_outputs = rt_submit_aiv_task(FUNC_LOG_SQRT, norm_args);
-    ChipTensor normalized = normalized_outputs.get_ref(0);
+    simpler::hbg::Tensor normalized = normalized_outputs.get_ref(0);
 
     CoreTaskArgs left_args;
     left_args.add_input(normalized, weight_1);
     left_args.add_output(projected_info);
     TaskOutputTensors left_outputs = rt_submit_aic_task(FUNC_MATMUL, left_args);
-    ChipTensor left = left_outputs.get_ref(0);
+    simpler::hbg::Tensor left = left_outputs.get_ref(0);
 
     CoreTaskArgs right_args;
     right_args.add_input(normalized, weight_2);
     right_args.add_output(projected_info);
     TaskOutputTensors right_outputs = rt_submit_aic_task(FUNC_MATMUL, right_args);
-    ChipTensor right = right_outputs.get_ref(0);
+    simpler::hbg::Tensor right = right_outputs.get_ref(0);
 
     CoreTaskArgs activation_args;
     activation_args.add_input(left, right);

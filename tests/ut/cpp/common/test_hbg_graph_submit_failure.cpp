@@ -95,7 +95,7 @@ protected:
 TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommit) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -167,7 +167,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
 TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShells) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -279,7 +279,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
 TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -310,7 +310,7 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
 TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecording) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -343,7 +343,7 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
 TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernellessNode) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -367,7 +367,7 @@ TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernelle
 TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     GraphTaskArgs boundary_args;
@@ -411,7 +411,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
 TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     GraphTaskArgs boundary_args;
@@ -460,7 +460,7 @@ protected:
     void expect_recording_refused(uint64_t graph_key, BuildPredicate build_predicate) {
         std::array<uint32_t, 16> storage{};
         uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-        ChipTensor boundary = make_tensor_external(storage.data(), shape, 1, DataType::INT32);
+        simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1, DataType::INT32);
         GraphTaskArgs boundary_args;
         boundary_args.add_input(boundary);
 
@@ -484,7 +484,7 @@ protected:
         EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
     }
 
-    static CoreTaskPredicate predicate_on(const ChipTensor &operand, uint32_t index) {
+    static CoreTaskPredicate predicate_on(const simpler::hbg::Tensor &operand, uint32_t index) {
         CoreTaskPredicate pred;
         pred.operand.tensor = &operand;
         pred.operand.ndims = 1;
@@ -498,7 +498,7 @@ protected:
 TEST_F(HbgGraphPredicateRejectionTest, OperandIndexOutsideTheExtentAbortsTheRecording) {
     // Index 16 on a 16-element operand: the flat offset is one element past the
     // extent, so the address it names belongs to whatever follows the buffer.
-    expect_recording_refused(0x2001, [](const ChipTensor &boundary) {
+    expect_recording_refused(0x2001, [](const simpler::hbg::Tensor &boundary) {
         return predicate_on(boundary, 16);
     });
 }
@@ -508,8 +508,9 @@ TEST_F(HbgGraphPredicateRejectionTest, OperandOnAnUnclassifiableTensorAbortsTheR
     // cannot name a base the replay could rebind against.
     std::array<uint32_t, 16> foreign_storage{};
     uint32_t shape[] = {static_cast<uint32_t>(foreign_storage.size())};
-    const ChipTensor foreign = make_tensor_external(foreign_storage.data(), shape, 1, DataType::INT32);
-    expect_recording_refused(0x2002, [&foreign](const ChipTensor &) {
+    const simpler::hbg::Tensor foreign =
+        simpler::hbg::make_tensor_external(foreign_storage.data(), shape, 1, DataType::INT32);
+    expect_recording_refused(0x2002, [&foreign](const simpler::hbg::Tensor &) {
         return predicate_on(foreign, 0);
     });
 }
@@ -522,7 +523,7 @@ TEST_F(HbgGraphPredicateRejectionTest, OperandOnAnUnclassifiableTensorAbortsTheR
 TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessNodeIsNotRecorded) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1, DataType::INT32);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1, DataType::INT32);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
 
@@ -553,8 +554,8 @@ TEST_F(HbgGraphSubmitFailureTest, ASecondKeyRecordsAlongsideTheFirst) {
     std::array<uint32_t, 16> storage_a{};
     std::array<uint32_t, 16> storage_b{};
     uint32_t shape[] = {static_cast<uint32_t>(storage_a.size())};
-    ChipTensor boundary_a = make_tensor_external(storage_a.data(), shape, 1);
-    ChipTensor boundary_b = make_tensor_external(storage_b.data(), shape, 1);
+    simpler::hbg::Tensor boundary_a = simpler::hbg::make_tensor_external(storage_a.data(), shape, 1);
+    simpler::hbg::Tensor boundary_b = simpler::hbg::make_tensor_external(storage_b.data(), shape, 1);
     GraphTaskArgs args_a;
     args_a.add_input(boundary_a);
     GraphTaskArgs args_b;
@@ -611,7 +612,7 @@ TEST_F(HbgGraphSubmitFailureTest, ConcurrentDefinitionsFinalizeInSubmissionOrder
     constexpr size_t kGraphCount = 4;
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs args;
     args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
@@ -660,8 +661,8 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
     std::array<uint32_t, 16> storage_a{};
     std::array<uint32_t, 16> storage_b{};
     uint32_t shape[] = {static_cast<uint32_t>(storage_a.size())};
-    ChipTensor boundary_a = make_tensor_external(storage_a.data(), shape, 1);
-    ChipTensor boundary_b = make_tensor_external(storage_b.data(), shape, 1);
+    simpler::hbg::Tensor boundary_a = simpler::hbg::make_tensor_external(storage_a.data(), shape, 1);
+    simpler::hbg::Tensor boundary_b = simpler::hbg::make_tensor_external(storage_b.data(), shape, 1);
     GraphTaskArgs args_a;
     args_a.add_input(boundary_a);
     GraphTaskArgs args_b;
@@ -710,7 +711,7 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
 TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredShell) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
@@ -782,7 +783,7 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
     auto record_with = [&](void *boundary_addr, uint64_t graph_key) -> std::optional<BoundaryRecording> {
         const size_t definitions_before = graph_host_definitions(*graph_state).entries.size();
         const size_t uploads_before = graph_host_upload_count(*graph_state);
-        ChipTensor boundary = make_tensor_external(boundary_addr, shape, 1);
+        simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(boundary_addr, shape, 1);
         GraphTaskArgs boundary_args;
         boundary_args.add_input(boundary);
 

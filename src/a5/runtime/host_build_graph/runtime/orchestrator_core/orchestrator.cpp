@@ -77,20 +77,20 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {
 // instantiation. Shared by the ordinary submit path and the outer GRAPH task so
 // both describe an edge the same way.
 struct DepGraphAnnotate {
-    void creator(int32_t arg_idx, const ChipTensor &consumer, TaskId producer) const {
+    void creator(int32_t arg_idx, const simpler::hbg::Tensor &consumer, TaskId producer) const {
         dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
     }
     void tensormap(
-        int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry, OverlapStatus overlap
+        int32_t arg_idx, const simpler::hbg::Tensor &consumer, const ChipTensorMapEntry &entry, OverlapStatus overlap
     ) const {
         dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
     }
 };
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit_edge(uint64_t) {}
 __attribute__((weak, visibility("hidden"))) void
-dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
+dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const simpler::hbg::Tensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t, int32_t, const ChipTensor &, const ChipTensorMapEntry &, OverlapStatus
+    uint64_t, int32_t, const simpler::hbg::Tensor &, const ChipTensorMapEntry &, OverlapStatus
 ) {}
 
 // AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
@@ -306,7 +306,7 @@ struct GraphRecordedScalarSourceRef {
 // within it rather than the absolute address submit would resolve. The tensor is
 // copied because the caller only lends it for the duration of the submit call.
 struct GraphRecordedPredicate {
-    ChipTensor operand;
+    simpler::hbg::Tensor operand;
     GraphRecordedTensorSourceRef source;
     uint64_t elem_offset{0};
     int64_t target{0};
@@ -326,7 +326,7 @@ struct GraphRecordedNode {
     // this one stays per node: its heap buffer has to outlive every later node's
     // recording. The arrays whose addresses are never borrowed live flat on the
     // recording instead — see GraphRecording.
-    std::vector<ChipTensor> tensors;
+    std::vector<simpler::hbg::Tensor> tensors;
     // Ranges into the recording's flat arrays. tensor_sources has one entry per
     // tensor, so tensors.size() is its count.
     uint32_t tensor_source_offset{0};
@@ -394,7 +394,7 @@ struct GraphRecordedOutputRange {
 struct GraphBoundary {
     const GraphTaskArgs *args{nullptr};
     int32_t scalar_count{0};
-    std::vector<ChipTensor> tensors;
+    std::vector<simpler::hbg::Tensor> tensors;
     std::vector<TensorArgType> types;
 };
 
@@ -413,7 +413,7 @@ struct GraphRecording {
     // How many of `nodes` this recording has filled. The array itself is never cleared:
     // each slot's `tensors` is the one allocation a recorded node makes, and a node
     // carries at most CORE_MAX_TENSOR_ARGS of them, so a slot's buffer is bounded at
-    // 32 x sizeof(ChipTensor) = 4 KB and a thread's retained node storage at
+    // 32 x sizeof(simpler::hbg::Tensor) = 4 KB and a thread's retained node storage at
     // GRAPH_MAX_NODES x 4 KB. Keeping them costs that bound once; clearing them costs
     // one allocation per node per recording, forever.
     size_t node_count{0};
@@ -455,7 +455,7 @@ struct GraphRecording {
 
     const GraphTaskArgs *boundary_args() const { return boundary == nullptr ? nullptr : boundary->args; }
     int32_t boundary_scalar_count() const { return boundary == nullptr ? 0 : boundary->scalar_count; }
-    const std::vector<ChipTensor> &boundary_tensors() const { return boundary->tensors; }
+    const std::vector<simpler::hbg::Tensor> &boundary_tensors() const { return boundary->tensors; }
     const std::vector<TensorArgType> &boundary_types() const { return boundary->types; }
 };
 
@@ -583,7 +583,7 @@ uint64_t graph_full_key(uint64_t callable_hash, uint64_t graph_key) {
     return graph_hash_bytes(h, &graph_key, sizeof(graph_key));
 }
 
-bool graph_tensor_exact(const ChipTensor &lhs, const ChipTensor &rhs) {
+bool graph_tensor_exact(const simpler::hbg::Tensor &lhs, const simpler::hbg::Tensor &rhs) {
     if (lhs.ndims > MAX_TENSOR_DIMS || rhs.ndims > MAX_TENSOR_DIMS || lhs.buffer.addr != rhs.buffer.addr ||
         lhs.buffer.size != rhs.buffer.size || lhs.start_offset != rhs.start_offset || lhs.version != rhs.version ||
         lhs.ndims != rhs.ndims || lhs.dtype != rhs.dtype || lhs.manual_dep != rhs.manual_dep ||
@@ -595,7 +595,7 @@ bool graph_tensor_exact(const ChipTensor &lhs, const ChipTensor &rhs) {
 }
 
 bool graph_tensor_from_boundary(
-    const GraphRecording &recording, const ChipTensor &tensor, GraphRecordedTensorSourceRef *source
+    const GraphRecording &recording, const simpler::hbg::Tensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
     for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
         if (!graph_tensor_exact(tensor, recording.boundary_tensors()[i])) continue;
@@ -605,7 +605,7 @@ bool graph_tensor_from_boundary(
         return true;
     }
     for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
-        const ChipTensor &boundary = recording.boundary_tensors()[i];
+        const simpler::hbg::Tensor &boundary = recording.boundary_tensors()[i];
         if (tensor.buffer.addr != boundary.buffer.addr || tensor.buffer.size != boundary.buffer.size ||
             tensor.start_offset < boundary.start_offset) {
             continue;
@@ -733,8 +733,8 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
 }
 
 bool graph_classify_tensor(
-    const GraphRecording &recording, const GraphRecordedNode &current, int32_t task_index, const ChipTensor &tensor,
-    GraphRecordedTensorSourceRef *source
+    const GraphRecording &recording, const GraphRecordedNode &current, int32_t task_index,
+    const simpler::hbg::Tensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
     if (graph_tensor_from_boundary(recording, tensor, source)) return true;
     const uintptr_t tensor_addr = static_cast<uintptr_t>(tensor.buffer.addr);
@@ -768,7 +768,8 @@ bool graph_classify_tensor(
     return true;
 }
 
-GraphBoundarySignature graph_boundary_signature(const ChipTensor &tensor, TensorArgType type, uint16_t alias_rep) {
+GraphBoundarySignature
+graph_boundary_signature(const simpler::hbg::Tensor &tensor, TensorArgType type, uint16_t alias_rep) {
     GraphBoundarySignature signature{};
     signature.buffer_size = tensor.buffer.size;
     std::copy(std::begin(tensor.shapes), std::end(tensor.shapes), std::begin(signature.shapes));
@@ -1049,7 +1050,7 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
         }
     }
     for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
-        const ChipTensor &tensor = recording.boundary_tensors()[i];
+        const simpler::hbg::Tensor &tensor = recording.boundary_tensors()[i];
         if (tensor.ndims > MAX_TENSOR_DIMS) return false;
         uint16_t alias_rep = static_cast<uint16_t>(i);
         for (size_t j = 0; j < i; ++j) {
@@ -1272,7 +1273,7 @@ static bool prepare_task(
     // dereference them. The scalar cursor advances in whole cache lines because init()
     // rounds its scalar memcpy up to one; a packed advance would let that rounding
     // write into the next task's region. A tensor region is aligned for any count,
-    // ChipTensor being two cache lines. The fanin cursor advances at publish, not
+    // simpler::hbg::Tensor being two cache lines. The fanin cursor advances at publish, not
     // here — see the comment where it does.
     const uint64_t window = orch->sm_header->ring.task_window_size;
     const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
@@ -1578,7 +1579,7 @@ static TaskOutputTensors submit_task_common(
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
-    // no Arg/ChipTensor access. Both branches write predicate.op explicitly because
+    // no Arg/simpler::hbg::Tensor access. Both branches write predicate.op explicitly because
     // payload slots are ring-reused; op == NONE means "always dispatch".
     {
         const CoreTaskPredicate &pred = args.predicate();
@@ -1649,11 +1650,15 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
 
     bool alias_mismatch = false;
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
-        const ChipTensor &tensor = args.tensor(i).ref();
+        const simpler::hbg::Tensor &tensor = args.tensor(i).ref();
         const GraphBoundarySignature &signature = signatures[i];
         if (tensor.ndims > MAX_TENSOR_DIMS) {
-            debug_assert(tensor.ndims <= MAX_TENSOR_DIMS && "Graph boundary ChipTensor rank is not supported");
-            LOG_WARN("[GraphExecution] ChipTensor rank %u exceeds the fixed Graph boundary limit", tensor.ndims);
+            debug_assert(
+                tensor.ndims <= MAX_TENSOR_DIMS && "Graph boundary simpler::hbg::Tensor rank is not supported"
+            );
+            LOG_WARN(
+                "[GraphExecution] simpler::hbg::Tensor rank %u exceeds the fixed Graph boundary limit", tensor.ndims
+            );
             return false;
         }
         const auto shape_end = std::begin(tensor.shapes) + tensor.ndims;
@@ -1674,7 +1679,7 @@ bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskAr
         }
         uint16_t alias_rep = static_cast<uint16_t>(i);
         for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &other = args.tensor(j).ref();
+            const simpler::hbg::Tensor &other = args.tensor(j).ref();
             if (other.buffer.addr == tensor.buffer.addr && other.buffer.size == tensor.buffer.size) {
                 alias_rep = static_cast<uint16_t>(j);
                 break;
@@ -1697,8 +1702,8 @@ bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &
         return false;
     }
     for (int32_t i = 0; i < args.tensor_count(); ++i) {
-        const ChipTensor &expected = boundary.tensors[static_cast<size_t>(i)];
-        const ChipTensor &actual = args.tensor(i).ref();
+        const simpler::hbg::Tensor &expected = boundary.tensors[static_cast<size_t>(i)];
+        const simpler::hbg::Tensor &actual = args.tensor(i).ref();
         if (actual.ndims > MAX_TENSOR_DIMS || actual.buffer.size != expected.buffer.size ||
             actual.ndims != expected.ndims || actual.dtype != expected.dtype ||
             args.tag(i) != boundary.types[static_cast<size_t>(i)] || actual.manual_dep != expected.manual_dep ||
@@ -1714,7 +1719,7 @@ bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &
         uint16_t expected_alias = static_cast<uint16_t>(i);
         uint16_t actual_alias = static_cast<uint16_t>(i);
         for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &expected_other = boundary.tensors[static_cast<size_t>(j)];
+            const simpler::hbg::Tensor &expected_other = boundary.tensors[static_cast<size_t>(j)];
             if (expected_other.buffer.addr == expected.buffer.addr &&
                 expected_other.buffer.size == expected.buffer.size) {
                 expected_alias = static_cast<uint16_t>(j);
@@ -1722,7 +1727,7 @@ bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &
             }
         }
         for (int32_t j = 0; j < i; ++j) {
-            const ChipTensor &actual_other = args.tensor(j).ref();
+            const simpler::hbg::Tensor &actual_other = args.tensor(j).ref();
             if (actual_other.buffer.addr == actual.buffer.addr && actual_other.buffer.size == actual.buffer.size) {
                 actual_alias = static_cast<uint16_t>(j);
                 break;
@@ -2024,17 +2029,17 @@ TaskOutputTensors graph_record_submit_node(
     node.total_output_size = aligned_output;
 
     // Build the tensor list exactly as TaskPayload::init: inputs/inouts copy
-    // the caller's ChipTensor; outputs materialize from the create-info onto the
+    // the caller's simpler::hbg::Tensor; outputs materialize from the create-info onto the
     // scratch buffer and carry this node's owner id.
     const int32_t tensor_count = args.tensor_count();
     // assign(), not resize(): a reused slot's elements would otherwise keep whatever the
-    // previous body left in the fields the fill does not reach. ChipTensor::init_from
+    // previous body left in the fields the fill does not reach. simpler::hbg::Tensor::init_from
     // writes strides only up to the new tensor's ndims, so a narrower tensor in the same
     // slot would inherit the wider one's trailing strides. Value-initializing every
     // element is what resize() did on a freshly allocated vector, and it keeps the buffer.
-    node.tensors.assign(static_cast<size_t>(tensor_count), ChipTensor{});
+    node.tensors.assign(static_cast<size_t>(tensor_count), simpler::hbg::Tensor{});
     for (int32_t i = 0; i < tensor_count; ++i) {
-        ChipTensor &slot_tensor = node.tensors[static_cast<size_t>(i)];
+        simpler::hbg::Tensor &slot_tensor = node.tensors[static_cast<size_t>(i)];
         if (args.tag(i) != TensorArgType::OUTPUT) {
             slot_tensor.copy(args.tensor(i).ref());
         } else {
@@ -2100,7 +2105,7 @@ TaskOutputTensors graph_record_submit_node(
         GraphRecordedPredicate recorded;
         recorded.op = pred.op;
         recorded.target = pred.target;
-        const ChipTensor *operand = pred.operand.tensor;
+        const simpler::hbg::Tensor *operand = pred.operand.tensor;
         // OWN_OUTPUT would read the node's own output before the node runs, so it
         // names no value the predicate could be evaluating. An index vector that
         // leaves the operand's extent is caught here too: materialize would
@@ -2189,7 +2194,7 @@ TaskOutputTensors graph_record_submit_node(
         if (dep_index < 0) {
             const bool represented_by_boundary = std::any_of(
                 recording.boundary_tensors().begin(), recording.boundary_tensors().end(),
-                [dep](const ChipTensor &tensor) {
+                [dep](const simpler::hbg::Tensor &tensor) {
                     return tensor.owner_task_id == dep;
                 }
             );
@@ -2362,7 +2367,7 @@ bool OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArg
     }
     // The entry was created from this very boundary at graph_begin, and the handle names
     // that entry rather than being searched for, so a mismatch here is unreachable. The
-    // comparison walks up to 128 ChipTensor descriptors on the thread whose start-up
+    // comparison walks up to 128 simpler::hbg::Tensor descriptors on the thread whose start-up
     // latency this path exists to keep short, so it is an assertion: debug builds still
     // catch a boundary that stopped matching, release builds compile it out.
     debug_assert(

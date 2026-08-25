@@ -131,9 +131,10 @@ __attribute__((visibility("default"))) void worker_chip_orch_comm_orchestration(
             return;
         }
 
-        ChipTensor input =
-            make_tensor_external(reinterpret_cast<void *>(static_cast<uintptr_t>(input_view.gm_addr)), shape, 1, dtype);
-        ChipTensor output = make_tensor_external(
+        simpler::tmr::Tensor input = simpler::tmr::make_tensor_external(
+            reinterpret_cast<void *>(static_cast<uintptr_t>(input_view.gm_addr)), shape, 1, dtype
+        );
+        simpler::tmr::Tensor output = simpler::tmr::make_tensor_external(
             reinterpret_cast<void *>(static_cast<uintptr_t>(output_view.gm_addr)), shape, 1, dtype
         );
         CoreTaskArgs params;

@@ -16,8 +16,6 @@ from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, sce
 from simpler_setup.goldens.paged_attention import compute_golden as _pa_compute_golden
 from simpler_setup.goldens.paged_attention import generate_inputs as _pa_generate_inputs
 
-TMR_CASE = "../../tensormap_and_ringbuffer/paged_attention_unroll_manual_scope"
-
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestPagedAttentionUnrollManualScopeHostBuildGraph(SceneTestCase):
@@ -28,7 +26,7 @@ class TestPagedAttentionUnrollManualScopeHostBuildGraph(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{TMR_CASE}/kernels/orchestration/paged_attention_orch.cpp",
+            "source": "kernels/orchestration/paged_attention_orch.cpp",
             "function_name": "build_paged_attention_graph",
             "signature": [D.IN, D.IN, D.IN, D.IN, D.IN, D.OUT],
         },
@@ -36,28 +34,28 @@ class TestPagedAttentionUnrollManualScopeHostBuildGraph(SceneTestCase):
             {
                 "func_id": 0,
                 "name": "QK",
-                "source": f"{TMR_CASE}/kernels/aic/aic_qk_matmul.cpp",
+                "source": "kernels/aic/aic_qk_matmul.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 2,
                 "name": "PV",
-                "source": f"{TMR_CASE}/kernels/aic/aic_pv_matmul.cpp",
+                "source": "kernels/aic/aic_pv_matmul.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
                 "name": "SF",
-                "source": f"{TMR_CASE}/kernels/aiv/aiv_softmax_prepare.cpp",
+                "source": "kernels/aiv/aiv_softmax_prepare.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.OUT, D.OUT, D.OUT],
             },
             {
                 "func_id": 3,
                 "name": "UP",
-                "source": f"{TMR_CASE}/kernels/aiv/aiv_online_update.cpp",
+                "source": "kernels/aiv/aiv_online_update.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.IN, D.INOUT, D.INOUT, D.INOUT, D.INOUT],
             },

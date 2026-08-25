@@ -109,7 +109,7 @@ TEST_F(HbgSlotClaimTest, OrdinarySubmitClaimsAPoisonedSlot) {
 
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     CoreTaskArgs args;
@@ -128,7 +128,7 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
 
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     // A Graph boundary carries the wider arg type: graph_begin deep-copies it for the
@@ -159,7 +159,7 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
 TEST_F(HbgSlotClaimTest, CachedGraphReplayClaimsAPoisonedSlot) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
-    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
 
     orch.begin_scope();
     // A Graph boundary carries the wider arg type: graph_begin deep-copies it for the

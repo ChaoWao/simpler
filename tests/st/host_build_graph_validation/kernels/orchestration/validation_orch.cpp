@@ -38,8 +38,8 @@ void submit_overflowing_mix_task() {
     rt_submit_task(kernels, args);
 }
 
-ChipTensor tensor_with_unbound_owner(const ChipTensor &external) {
-    ChipTensor forged = external;
+simpler::hbg::Tensor tensor_with_unbound_owner(const simpler::hbg::Tensor &external) {
+    simpler::hbg::Tensor forged = external;
     forged.owner_task_id = TaskId::make(0, 17);
     return forged;
 }
@@ -54,7 +54,7 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &external = orch_args.tensor(0).ref();
+    const simpler::hbg::Tensor &external = orch_args.tensor(0).ref();
     uint64_t case_id = orch_args.scalar(0);
     uint32_t index[1] = {0};
 

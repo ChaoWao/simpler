@@ -53,9 +53,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
  */
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // golden shape = kernel shape, use orch_args.tensor(i).ref() directly
-    const ChipTensor &ext_a = orch_args.tensor(0).ref();
-    const ChipTensor &ext_b = orch_args.tensor(1).ref();
-    const ChipTensor &ext_f = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_a = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_b = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_f = orch_args.tensor(2).ref();
 
     uint32_t SIZE = orch_args.tensor(0).ref().shapes[0];
     LOG_INFO("===============SIZE=%u", SIZE);
@@ -69,7 +69,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     params_t0.add_input(ext_b);
     params_t0.add_output(inter_ci);
     TaskOutputTensors outs_t0 = rt_submit_aiv_task(0, params_t0);  // kernel_add
-    const ChipTensor &c = outs_t0.get_ref(0);
+    const simpler::tmr::Tensor &c = outs_t0.get_ref(0);
 
     // Inner scope: owns t1, t2, t3, t4; intermediates d, e, g release on scope end.
     // c flows in from outer scope (outer-scope tensors are visible to inner scopes).
@@ -81,7 +81,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t1.add_scalar(1.0f);
         params_t1.add_scalar(3u);
         TaskOutputTensors outs_t1 = rt_submit_aiv_task(1, params_t1);  // kernel_add_scalar
-        const ChipTensor &d = outs_t1.get_ref(0);
+        const simpler::tmr::Tensor &d = outs_t1.get_ref(0);
 
         // t2: e = c + 2 (kernel_id=1, kernel_add_scalar)
         CoreTaskArgs params_t2;
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t2.add_scalar(2.0f);
         params_t2.add_scalar(3u);
         TaskOutputTensors outs_t2 = rt_submit_aiv_task(1, params_t2);  // kernel_add_scalar
-        const ChipTensor &e = outs_t2.get_ref(0);
+        const simpler::tmr::Tensor &e = outs_t2.get_ref(0);
 
         // t3: g = d * e (kernel_id=2, kernel_mul)
         CoreTaskArgs params_t3;
@@ -99,7 +99,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t3.add_output(inter_ci);
         params_t3.add_scalar(3u);
         TaskOutputTensors outs_t3 = rt_submit_aiv_task(2, params_t3);  // kernel_mul
-        const ChipTensor &g = outs_t3.get_ref(0);
+        const simpler::tmr::Tensor &g = outs_t3.get_ref(0);
 
         // t4: f = g + c (kernel_id=0, kernel_add)
         CoreTaskArgs params_t4;

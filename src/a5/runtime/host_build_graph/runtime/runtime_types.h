@@ -15,7 +15,7 @@
  * This header defines all fundamental types used by the PTO Runtime2 system:
  * - Configuration constants
  * - Worker types and task states
- * - ChipTensor regions and task parameters
+ * - simpler::hbg::Tensor regions and task parameters
  * - Task descriptors with fanin/fanout tracking
  * - Dependency list entries
  *
@@ -142,7 +142,7 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 
 // Alignment of every per-task region inside an argument pool. Each region starts
 // and ends on a cache line so TaskPayload::init's round-up scalar memcpy stays
-// inside the task's own region — see its comment. ChipTensor is already 2 cache
+// inside the task's own region — see its comment. simpler::hbg::Tensor is already 2 cache
 // lines, so only the fanin and scalar regions need the round-up.
 inline constexpr int32_t ARG_POOL_ALIGN = 64;
 
@@ -312,7 +312,7 @@ struct TaskPayload {
     // classify_fanin_state against the ring completion_flags. Hard-capped at
     // CHIP_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
     // dependencies live in the Definition's fanin CSR instead.
-    simpler::hbg::SelfRelativePtr<ChipTensor> tensors;
+    simpler::hbg::SelfRelativePtr<simpler::hbg::Tensor> tensors;
     simpler::hbg::SelfRelativePtr<uint64_t> scalars;
     simpler::hbg::SelfRelativePtr<int32_t> fanin;
 
@@ -378,8 +378,8 @@ struct TaskPayload {
     // accessor: one inside a loop would re-resolve the delta on every iteration, and
     // a store through an unrelated pointer in the loop body is enough to stop the
     // compiler hoisting that load — build_payload's args[] writes are exactly that.
-    ChipTensor *tensor_data() { return tensors.get(); }
-    const ChipTensor *tensor_data() const { return tensors.get(); }
+    simpler::hbg::Tensor *tensor_data() { return tensors.get(); }
+    const simpler::hbg::Tensor *tensor_data() const { return tensors.get(); }
     uint64_t *scalar_data() { return scalars.get(); }
     const uint64_t *scalar_data() const { return scalars.get(); }
     int32_t *fanin_data() { return fanin.get(); }
@@ -392,7 +392,7 @@ struct TaskPayload {
      * A Graph node passes nullptr for fanin: its dependencies come from the
      * Definition's CSR, so the region does not exist and fanin_count stays 0.
      */
-    void bind_regions(ChipTensor *tensor_region, uint64_t *scalar_region, int32_t *fanin_region) {
+    void bind_regions(simpler::hbg::Tensor *tensor_region, uint64_t *scalar_region, int32_t *fanin_region) {
         tensors.set(tensor_region);
         scalars.set(scalar_region);
         fanin.set(fanin_region);
@@ -405,7 +405,7 @@ struct TaskPayload {
      * instructions as a free function (`this` is just a register), no cache impact.
      */
     void prefetch(int32_t tensor_count, int32_t scalar_count) const {
-        const ChipTensor *t = tensor_data();
+        const simpler::hbg::Tensor *t = tensor_data();
         for (int32_t i = 0; i < tensor_count; i++) {
             __builtin_prefetch(&t[i], 1, 3);
             __builtin_prefetch(reinterpret_cast<const char *>(&t[i]) + 64, 1, 3);
@@ -440,7 +440,7 @@ struct TaskPayload {
         debug_assert(args.tensor_count() == 0 || tensor_data() != nullptr);
         debug_assert(args.scalar_count() == 0 || scalar_data() != nullptr);
 
-        ChipTensor *dst = tensor_data();
+        simpler::hbg::Tensor *dst = tensor_data();
         for (int32_t i = 0; i < args.tensor_count(); i++) {
             if (args.tag(i) != TensorArgType::OUTPUT) {
                 dst[i].copy(args.tensor(i).ref());
@@ -526,7 +526,7 @@ static_assert(
     std::is_trivially_copyable_v<TaskPayload> && std::is_standard_layout_v<TaskPayload>,
     "TaskPayload crosses to the device by memcpy"
 );
-static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
+static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be 2 cache lines");
 
 /**
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)

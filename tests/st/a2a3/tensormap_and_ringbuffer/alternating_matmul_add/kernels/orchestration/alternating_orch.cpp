@@ -47,13 +47,13 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    // ChipTensor args
-    const ChipTensor &ext_A = orch_args.tensor(0).ref();
-    const ChipTensor &ext_B = orch_args.tensor(1).ref();
-    const ChipTensor &ext_C = orch_args.tensor(2).ref();
-    const ChipTensor &ext_X = orch_args.tensor(3).ref();
-    const ChipTensor &ext_Y = orch_args.tensor(4).ref();
-    const ChipTensor &ext_Z = orch_args.tensor(5).ref();
+    // simpler::tmr::Tensor args
+    const simpler::tmr::Tensor &ext_A = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_B = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_C = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_X = orch_args.tensor(3).ref();
+    const simpler::tmr::Tensor &ext_Y = orch_args.tensor(4).ref();
+    const simpler::tmr::Tensor &ext_Z = orch_args.tensor(5).ref();
 
     // Scalar config args
     int batch = static_cast<int>(orch_args.scalar(0));
@@ -87,9 +87,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             uint32_t matmul_group_shapes[1] = {static_cast<uint32_t>(group_size)};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(offset)};
 
-            ChipTensor A_view = ext_A.view(matmul_group_shapes, view_offsets);
-            ChipTensor B_view = ext_B.view(matmul_group_shapes, view_offsets);
-            ChipTensor C_view = ext_C.view(matmul_group_shapes, view_offsets);
+            simpler::tmr::Tensor A_view = ext_A.view(matmul_group_shapes, view_offsets);
+            simpler::tmr::Tensor B_view = ext_B.view(matmul_group_shapes, view_offsets);
+            simpler::tmr::Tensor C_view = ext_C.view(matmul_group_shapes, view_offsets);
 
             CoreTaskArgs params_matmul;
             params_matmul.add_input(A_view);
@@ -107,9 +107,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             uint32_t add_group_shapes[1] = {static_cast<uint32_t>(group_size)};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(offset)};
 
-            ChipTensor X_view = ext_X.view(add_group_shapes, view_offsets);
-            ChipTensor Y_view = ext_Y.view(add_group_shapes, view_offsets);
-            ChipTensor Z_view = ext_Z.view(add_group_shapes, view_offsets);
+            simpler::tmr::Tensor X_view = ext_X.view(add_group_shapes, view_offsets);
+            simpler::tmr::Tensor Y_view = ext_Y.view(add_group_shapes, view_offsets);
+            simpler::tmr::Tensor Z_view = ext_Z.view(add_group_shapes, view_offsets);
 
             CoreTaskArgs params_add;
             params_add.add_input(X_view);

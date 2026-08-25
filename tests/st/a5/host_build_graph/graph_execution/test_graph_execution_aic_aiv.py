@@ -29,13 +29,13 @@ class TestGraphExecutionAicAivHostBuildGraphA5(SceneTestCase):
         "incores": [
             {
                 "func_id": 0,
-                "source": "../../tensormap_and_ringbuffer/alternating_matmul_add/kernels/aic/kernel_matmul.cpp",
+                "source": "kernels/aic/kernel_matmul.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
-                "source": "../../tensormap_and_ringbuffer/alternating_matmul_add/kernels/aiv/kernel_add.cpp",
+                "source": "kernels/aiv/kernel_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },

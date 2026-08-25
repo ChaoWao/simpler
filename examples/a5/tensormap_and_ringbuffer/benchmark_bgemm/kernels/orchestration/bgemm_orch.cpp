@@ -35,9 +35,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_A = orch_args.tensor(0).ref();
-    const ChipTensor &ext_B = orch_args.tensor(1).ref();
-    const ChipTensor &ext_C = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &ext_A = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_B = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &ext_C = orch_args.tensor(2).ref();
 
     int tile_size = static_cast<int>(orch_args.scalar(0));
     int grid_k = static_cast<int>(orch_args.scalar(1));
@@ -62,16 +62,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
         uint32_t c_view_offsets[1] = {c_elem_offset};
-        ChipTensor C_view = ext_C.view(group_shapes, c_view_offsets);
+        simpler::tmr::Tensor C_view = ext_C.view(group_shapes, c_view_offsets);
 
         for (int k_idx = 0; k_idx < grid_k; k_idx++) {
             uint64_t ab_offset =
                 (static_cast<uint64_t>(group_idx) * grid_k + static_cast<uint64_t>(k_idx)) * group_tile_elems;
 
             uint32_t a_view_offsets[1] = {static_cast<uint32_t>(ab_offset)};
-            ChipTensor A_view = ext_A.view(group_shapes, a_view_offsets);
+            simpler::tmr::Tensor A_view = ext_A.view(group_shapes, a_view_offsets);
             uint32_t b_view_offsets[1] = {static_cast<uint32_t>(ab_offset)};
-            ChipTensor B_view = ext_B.view(group_shapes, b_view_offsets);
+            simpler::tmr::Tensor B_view = ext_B.view(group_shapes, b_view_offsets);
 
             CoreTaskArgs params_gemm;
             params_gemm.add_input(A_view);

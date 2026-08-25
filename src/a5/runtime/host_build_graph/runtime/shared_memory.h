@@ -356,7 +356,7 @@ inline ChipRingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) no
     o.fanin_pool = off;
     off += CHIP_ALIGN_UP(e.fanin_elems * sizeof(int32_t), CHIP_ALIGN_SIZE);
     o.tensor_pool = off;
-    off += CHIP_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), CHIP_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.tensor_elems * sizeof(simpler::hbg::Tensor), CHIP_ALIGN_SIZE);
     o.scalar_pool = off;
     off += CHIP_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), CHIP_ALIGN_SIZE);
     o.end = off;
@@ -368,7 +368,7 @@ inline ChipRingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) no
 }
 
 // Every per-task region starts on a cache line, which TaskPayload::init's
-// round-up scalar memcpy relies on. ChipTensor is 2 cache lines, so a tensor region
+// round-up scalar memcpy relies on. simpler::hbg::Tensor is 2 cache lines, so a tensor region
 // is aligned for any count; the fanin and scalar strides need it stated.
 static_assert(
     (CHIP_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
@@ -493,7 +493,9 @@ inline uint64_t compact_live_image(
     std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(ChipTaskSlotState));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
-    std::memcpy(out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(ChipTensor));
+    std::memcpy(
+        out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(simpler::hbg::Tensor)
+    );
     std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
     auto *out_slots = reinterpret_cast<ChipTaskSlotState *>(out_base + to.slot_states);
@@ -501,10 +503,10 @@ inline uint64_t compact_live_image(
     auto *out_payloads = reinterpret_cast<TaskPayload *>(out_base + to.payloads);
     const auto *mirror_payloads = reinterpret_cast<const TaskPayload *>(mirror_base + from.payloads);
     auto *out_fanin = reinterpret_cast<int32_t *>(out_base + to.fanin_pool);
-    auto *out_tensors = reinterpret_cast<ChipTensor *>(out_base + to.tensor_pool);
+    auto *out_tensors = reinterpret_cast<simpler::hbg::Tensor *>(out_base + to.tensor_pool);
     auto *out_scalars = reinterpret_cast<uint64_t *>(out_base + to.scalar_pool);
     const auto *mirror_fanin = reinterpret_cast<const int32_t *>(mirror_base + from.fanin_pool);
-    const auto *mirror_tensors = reinterpret_cast<const ChipTensor *>(mirror_base + from.tensor_pool);
+    const auto *mirror_tensors = reinterpret_cast<const simpler::hbg::Tensor *>(mirror_base + from.tensor_pool);
     const auto *mirror_scalars = reinterpret_cast<const uint64_t *>(mirror_base + from.scalar_pool);
     // An unbound region stays unbound: a Graph node's payload never gets a fanin
     // region, and its count is 0, so no consumer resolves it. A bound one is inside
@@ -514,7 +516,7 @@ inline uint64_t compact_live_image(
     for (uint64_t i = 0; i < nt; ++i) {
         out_slots[i].bind_buffers(&out_payloads[i], &out_descriptors[i]);
         const TaskPayload &src = mirror_payloads[i];
-        const ChipTensor *src_tensors = src.tensor_data();
+        const simpler::hbg::Tensor *src_tensors = src.tensor_data();
         const uint64_t *src_scalars = src.scalar_data();
         const int32_t *src_fanin = src.fanin_data();
         debug_assert(
@@ -536,8 +538,8 @@ inline uint64_t compact_live_image(
         // The tensor pool holds two element types, so each task's own region is walked
         // with the type that task wrote: an outer GRAPH task's boundaries are
         // GraphTensors packed at their own stride, merely occupying the number of
-        // ChipTensor slots graph_boundary_tensor_pool_slots reserves for them. Walking
-        // the pool itself as one ChipTensor array would reach only the first boundary
+        // simpler::hbg::Tensor slots graph_boundary_tensor_pool_slots reserves for them. Walking
+        // the pool itself as one simpler::hbg::Tensor array would reach only the first boundary
         // of each Graph and rewrite bytes in the middle of the rest.
         if (out_slots[i].task_kind == TaskKind::GRAPH) {
             auto *boundaries = reinterpret_cast<GraphTensor *>(out_payloads[i].tensor_data());
@@ -545,7 +547,7 @@ inline uint64_t compact_live_image(
                 boundaries[j].buffer_addr = rebased_heap_addr(boundaries[j].buffer_addr, rebase);
             }
         } else {
-            ChipTensor *tensors = out_payloads[i].tensor_data();
+            simpler::hbg::Tensor *tensors = out_payloads[i].tensor_data();
             for (int32_t j = 0; j < out_payloads[i].tensor_count; ++j) {
                 tensors[j].buffer.addr = rebased_heap_addr(tensors[j].buffer.addr, rebase);
             }

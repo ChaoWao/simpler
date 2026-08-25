@@ -53,7 +53,7 @@ static constexpr int32_t BLOCKER_STATUS_CAPACITY = 72;
 // for the scheduler to pop the consumer before the producer completes.
 static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
 
-static bool wait_for_blockers_started(const ChipTensor &out, int32_t blocker_count) {
+static bool wait_for_blockers_started(const simpler::tmr::Tensor &out, int32_t blocker_count) {
     volatile float *data = out.data_as<float>() + out.start_offset;
     volatile float *statuses = data + BLOCKER_STATUS_BASE_CL * FLOATS_PER_CACHE_LINE;
     while (!rt_is_fatal()) {
@@ -89,13 +89,13 @@ static bool wait_for_scheduler_loop_fence() {
     // D2 cannot be popped in the batch that completes D1. Observing D2's
     // output therefore proves that one complete scheduler loop elapsed after
     // this fence was submitted.
-    const ChipTensor &fence = outputs.get_ref(0);
+    const simpler::tmr::Tensor &fence = outputs.get_ref(0);
     uint32_t index[1] = {0};
     (void)get_tensor_data<int32_t>(fence, 1, index);
     return !rt_is_fatal();
 }
 
-static TaskId submit_producer(const ChipTensor &out) {
+static TaskId submit_producer(const simpler::tmr::Tensor &out) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(0);  // base cache line
@@ -105,7 +105,7 @@ static TaskId submit_producer(const ChipTensor &out) {
     return rt_submit_aic_task(FUNC_SLOW_PRODUCER_AIC, args).task_id();
 }
 
-static TaskId submit_aiv_blocker(const ChipTensor &out, int32_t blocker_count) {
+static TaskId submit_aiv_blocker(const simpler::tmr::Tensor &out, int32_t blocker_count) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(BLOCKER_STATUS_BASE_CL);
@@ -115,7 +115,7 @@ static TaskId submit_aiv_blocker(const ChipTensor &out, int32_t blocker_count) {
     return rt_submit_aiv_task(FUNC_SPIN_BLOCKER_AIV, args).task_id();
 }
 
-static void submit_consumer(const ChipTensor &out, TaskId producer, int16_t consumer_blocks) {
+static void submit_consumer(const simpler::tmr::Tensor &out, TaskId producer, int16_t consumer_blocks) {
     CoreTaskArgsWithDeps<1> args;
     args.add_inout(out);
     args.add_scalar(PRODUCER_BLOCKS);  // base cache line
@@ -126,7 +126,7 @@ static void submit_consumer(const ChipTensor &out, TaskId producer, int16_t cons
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &output = orch_args.tensor(0).ref();
     const bool use_pending = orch_args.scalar(0) != 0;
     const int16_t consumer_blocks = static_cast<int16_t>(orch_args.scalar(1));
     const int32_t blocker_count = static_cast<int32_t>(rt_available_aiv_count());

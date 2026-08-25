@@ -95,7 +95,7 @@ compute_task_fanin(const DepInputs &inputs, ChipTensorMap &tensor_map, bool in_m
             continue;
         }
 
-        const ChipTensor *tensor = &inputs.tensors[i].ref();
+        const simpler::tmr::Tensor *tensor = &inputs.tensors[i].ref();
 
         // Step A: creator retention — reading a tensor retains its allocator, so
         // the creator edge carries both ordering and lifetime.
@@ -158,7 +158,7 @@ register_task_outputs(const DepInputs &inputs, TaskId task_id, ChipTensorMap &te
     for (int32_t i = 0; i < inputs.tensor_count; i++) {
         TensorArgType ptype = inputs.arg_types[i];
         if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
-            const ChipTensor *tensor = &inputs.tensors[i].ref();
+            const simpler::tmr::Tensor *tensor = &inputs.tensors[i].ref();
             if (!tensor->manual_dep) {
                 tensor_map.insert(*tensor, task_id);
             }

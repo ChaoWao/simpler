@@ -39,7 +39,7 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
     };
 }
 
-static void submit_spmd_aiv(int32_t kernel_id, const ChipTensor &out, int16_t block_num, int64_t base_cl) {
+static void submit_spmd_aiv(int32_t kernel_id, const simpler::tmr::Tensor &out, int16_t block_num, int64_t base_cl) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -48,7 +48,7 @@ static void submit_spmd_aiv(int32_t kernel_id, const ChipTensor &out, int16_t bl
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &ext_output = orch_args.tensor(0).ref();
 
     // T0: 4 blocks — basic multi-block
     submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 4, 0);

@@ -29,9 +29,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
-    const ChipTensor &a = args.tensor(0).ref();
-    const ChipTensor &b = args.tensor(1).ref();
-    const ChipTensor &out = args.tensor(2).ref();
+    const simpler::hbg::Tensor &a = args.tensor(0).ref();
+    const simpler::hbg::Tensor &b = args.tensor(1).ref();
+    const simpler::hbg::Tensor &out = args.tensor(2).ref();
     uint32_t shape[1] = {a.shapes[0]};
     TensorCreateInfo temporary(shape, 1, DataType::FLOAT32);
 
@@ -40,7 +40,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     add_args.add_input(b);
     add_args.add_output(temporary);
     TaskOutputTensors add_outputs = rt_submit_aiv_task(kAdd, add_args);
-    ChipTensor current = add_outputs.get_ref(0);
+    simpler::hbg::Tensor current = add_outputs.get_ref(0);
 
     union {
         float f32;

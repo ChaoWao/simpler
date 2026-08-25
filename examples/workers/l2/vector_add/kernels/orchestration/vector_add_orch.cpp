@@ -33,9 +33,9 @@ vector_add_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void vector_add_orchestration(const ChipTaskArgs &orch_args) {
-    const ChipTensor &a = orch_args.tensor(0).ref();
-    const ChipTensor &b = orch_args.tensor(1).ref();
-    const ChipTensor &out = orch_args.tensor(2).ref();
+    const simpler::tmr::Tensor &a = orch_args.tensor(0).ref();
+    const simpler::tmr::Tensor &b = orch_args.tensor(1).ref();
+    const simpler::tmr::Tensor &out = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(a);

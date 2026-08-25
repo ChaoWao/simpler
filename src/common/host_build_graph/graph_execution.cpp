@@ -37,7 +37,7 @@ GraphExecution *acquire_execution_storage(
     execution->remaining_nodes.store(node_count, std::memory_order_relaxed);
     auto *base = reinterpret_cast<uint8_t *>(execution);
     execution->node_storage = reinterpret_cast<GraphNodeStorage *>(base + layout.nodes_offset);
-    execution->node_tensor_pool = reinterpret_cast<ChipTensor *>(base + layout.tensors_offset);
+    execution->node_tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(base + layout.tensors_offset);
     execution->node_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
     return execution;
 }
@@ -257,7 +257,7 @@ bool graph_rebind_tensor(
 // Turn a Definition predicate plus its rebound operand tensor into the address
 // the scheduler reads at the dispatch point. start_offset and elem_offset are
 // element counts, so the byte offset is their sum scaled by the element width —
-// the same arithmetic the ordinary submit path runs on ChipTensor.
+// the same arithmetic the ordinary submit path runs on simpler::hbg::Tensor.
 // The Definition crossed the host boundary, so every field it contributes is
 // range-checked here: pass() memcpys elem_size bytes into an int64_t, and the
 // address must land inside the operand's own buffer.
@@ -479,7 +479,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
             execution.node_tensor_pool + source.tensor_offset, execution.node_scalar_pool + source.scalar_offset,
             nullptr
         );
-        ChipTensor *node_tensors = payload.tensor_data();
+        simpler::hbg::Tensor *node_tensors = payload.tensor_data();
         for (int32_t j = 0; j < source.tensor_count; ++j) {
             const uint32_t tensor_index = source.tensor_offset + static_cast<uint32_t>(j);
             GraphTensor rebound;

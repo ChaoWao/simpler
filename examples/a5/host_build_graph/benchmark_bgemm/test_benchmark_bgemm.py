@@ -16,8 +16,6 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
-KERNEL_CASE = "../../tensormap_and_ringbuffer/benchmark_bgemm"
-
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
@@ -26,7 +24,7 @@ class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": f"{KERNEL_CASE}/kernels/orchestration/bgemm_orch.cpp",
+            "source": "kernels/orchestration/bgemm_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.INOUT],
         },
@@ -34,14 +32,14 @@ class TestBenchmarkBgemmHostBuildGraph(SceneTestCase):
             {
                 "func_id": 0,
                 "name": "GEMM",
-                "source": f"{KERNEL_CASE}/kernels/aic/kernel_gemm_tile.cpp",
+                "source": "kernels/aic/kernel_gemm_tile.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
                 "name": "ADD",
-                "source": f"{KERNEL_CASE}/kernels/aiv/kernel_tile_add.cpp",
+                "source": "kernels/aiv/kernel_tile_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.IN],
             },
