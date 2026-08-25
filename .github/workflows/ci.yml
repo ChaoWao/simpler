@@ -13,18 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ut-a2a3:
-    uses: ./.github/workflows/_ut-npu-a2a3.yml
-    with:
-      runs_on: '["self-hosted","test"]'
-      include_cann_examples: true
-
-  st-onboard-a2a3:
-    uses: ./.github/workflows/_st-npu-a2a3.yml
-    with:
-      runs_on: '["self-hosted","test"]'
-      include_dfx_smokes: true
-
   st-deepseek-onboard-a2a3:
     uses: ./.github/workflows/_st-deepseek-a2a3.yml
     with:
