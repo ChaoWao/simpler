@@ -1057,26 +1057,20 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
     # ----- Phase 2: L2 per-runtime subprocess -----
     l2_runtimes = _collect_st_runtimes(session.items, level=2)
     l2_failed = False
-    # When we have more than one device, enable pytest-xdist so the L2 phase
-    # spreads classes across devices. Each xdist worker slices --device 0-7
-    # down to one id in its own pytest_configure (above) and the st_worker
-    # fixture is session-scoped inside the worker — one ChipWorker per (runtime,
-    # device), reused across every class assigned to that worker.
-    xdist_available = False
-    if max_parallel > 1:
-        try:
-            import xdist  # noqa: F401,PLC0415
-
-            xdist_available = True
-        except ImportError:
-            print(
-                "\n[warning] -j > 1 but pytest-xdist not installed; "
-                "falling back to serial L2 phase. pip install pytest-xdist to enable.\n",
-                flush=True,
-            )
+    # An active pytest-xdist plugin spreads L2 classes across devices. Each
+    # worker slices --device 0-7 down to one id in pytest_configure (above),
+    # and the session-scoped st_worker fixture reuses one ChipWorker per
+    # (runtime, device).
+    xdist_active = max_parallel > 1 and cfg.pluginmanager.hasplugin("xdist")
+    if max_parallel > 1 and not xdist_active and not cfg.pluginmanager.is_blocked("xdist"):
+        print(
+            "\n[warning] --max-parallel > 1 but the pytest-xdist plugin is not active; "
+            "falling back to serial L2 phase. Install or enable pytest-xdist to use L2 parallelism.\n",
+            flush=True,
+        )
     for rt in l2_runtimes:
         cmd = base_args + ["--runtime", rt, "--level", "2"]
-        if xdist_available:
+        if xdist_active:
             cmd += ["-n", str(max_parallel), "--dist", "loadfile"]
         # Per-runtime sink for the in-process poison guards (issue #1110). Each
         # xdist worker appends the classes it poison-skips; we re-run them in a
@@ -1091,7 +1085,7 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
         # need to buffer their stdout — we can stream it directly through
         # the group markers. ``::group::`` on its own line before the run
         # opens the fold; ``::endgroup::`` after closes it.
-        label = f"L2 {rt}" + (f" [-n {max_parallel}]" if xdist_available else "")
+        label = f"L2 {rt}" + (f" [-n {max_parallel}]" if xdist_active else "")
         start = time.monotonic()
         print(f"::group::{label}", flush=True)
         result = subprocess.run(cmd, check=False, cwd=cwd, env=run_env)

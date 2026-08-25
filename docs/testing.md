@@ -852,6 +852,11 @@ pytest --runtime <rt> --level 2 --device 8-11 -n 4 --dist loadfile
 
 `pytest-xdist` starts 4 workers (`gw0`..`gw3`). Each worker's `pytest_configure` slices `--device 8-11` down to a single id (`gw0` → `8`, `gw1` → `9`, ...), and `st_worker` is session-scoped, so the worker initializes exactly one `ChipWorker(device=N)` and reuses it for every L2 class routed to it. `--dist loadfile` keeps all cases from one test file on the same worker, amortizing any file-level setup cost.
 
+An explicit `-p no:xdist` is authoritative for the L2 children inherited from
+the top-level invocation. The dispatcher omits `-n` and `--dist`, so each L2
+runtime subprocess executes serially. Resource-phase subprocess concurrency
+continues to follow `--max-parallel` because it does not use pytest-xdist.
+
 ### L2 phase — standalone fanout
 
 Standalone (`python test_*.py -d 8-11`) uses the same scheduler module: classes are round-robin assigned to `len(device_ids)` chunks, one subprocess per chunk launched with a single device and explicit `--case ClassName::` selectors.
