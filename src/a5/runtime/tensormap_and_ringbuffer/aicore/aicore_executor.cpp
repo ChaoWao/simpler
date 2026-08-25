@@ -28,13 +28,13 @@
 typedef void (*UnifiedKernelFunc)(__gm__ int64_t *);
 
 /**
- * Execute task from PTO2DispatchPayload.
+ * Execute task from DispatchPayload.
  *
  * Reads function_bin_addr and args from the dispatch payload.
  *
- * @param payload Pointer to PTO2DispatchPayload in global memory
+ * @param payload Pointer to DispatchPayload in global memory
  */
-__aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2DispatchPayload *payload) {
+__aicore__ __attribute__((always_inline)) static void execute_task(__gm__ DispatchPayload *payload) {
     if (payload == nullptr || payload->function_bin_addr == 0) {
         return;
     }
@@ -50,7 +50,7 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * Implements the AICPU-AICore register-based dispatch protocol:
  * 1. Report physical core ID and core type, signal aicore_done (no AICPU wait)
  * 2. Wait for the AICPU to open our register window (DATA_MAIN_BASE != 0)
- * 3. Cache per-core PTO2DispatchPayload pointer from my_hank->task
+ * 3. Cache per-core DispatchPayload pointer from my_hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
  * AICore reports on launch; the AICPU writes &s_payload_per_core[i] to
@@ -98,7 +98,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // above cannot clobber it) and before opening the window; dcci to read its
     // fresh value here.
     dcci(my_hank, SINGLE_CACHE_LINE);
-    __gm__ PTO2DispatchPayload *payload = reinterpret_cast<__gm__ PTO2DispatchPayload *>(my_hank->task);
+    __gm__ DispatchPayload *payload = reinterpret_cast<__gm__ DispatchPayload *>(my_hank->task);
 
     // Cache profiling state once after Phase 2. The L2 / PMU rings and the
     // PMU MMIO base are all stable for the entire run (host-resolved at
@@ -156,7 +156,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             }
 
             // Select dual-buffer slot: same bit as AICPU used when writing payload
-            __gm__ PTO2DispatchPayload *exec_payload = payload + (task_id & 1u);
+            __gm__ DispatchPayload *exec_payload = payload + (task_id & 1u);
 
             // Invalidate payload buffer (AICPU updates its content each dispatch)
             dcci(exec_payload, ENTIRE_DATA_CACHE);
@@ -167,18 +167,16 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // deferred until AFTER the gate so the scheduler keeps the core
             // off-limits (pending_occupied stays set) while the task is gated.
             // src_payload == 0 (ready path) skips this; a non-zero src_payload is
-            // both the gate flag and the source PTO2TaskPayload.
+            // both the gate flag and the source TaskPayload.
             if (exec_payload->src_payload != 0) {
                 __gm__ char *src = reinterpret_cast<__gm__ char *>(exec_payload->src_payload);
-                int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
-                int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);
-                __gm__ uint64_t *src_scalars =
-                    reinterpret_cast<__gm__ uint64_t *>(src + PTO2_TASKPAYLOAD_SCALARS_OFFSET);
+                int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_TENSOR_COUNT_OFFSET);
+                int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_SCALAR_COUNT_OFFSET);
+                __gm__ uint64_t *src_scalars = reinterpret_cast<__gm__ uint64_t *>(src + TASKPAYLOAD_SCALARS_OFFSET);
                 int n = 0;
                 for (int32_t i = 0; i < tensor_count; i++) {
-                    exec_payload->args[n++] = reinterpret_cast<uint64_t>(
-                        src + PTO2_TASKPAYLOAD_TENSORS_OFFSET + i * PTO2_TASKPAYLOAD_TENSOR_STRIDE
-                    );
+                    exec_payload->args[n++] =
+                        reinterpret_cast<uint64_t>(src + TASKPAYLOAD_TENSORS_OFFSET + i * TASKPAYLOAD_TENSOR_STRIDE);
                 }
                 for (int32_t i = 0; i < scalar_count; i++) {
                     exec_payload->args[n++] = src_scalars[i];
@@ -241,7 +239,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             }
 
             // Performance profiling: record task execution. task_token_raw is
-            // the PTO2 identity (already in AICore cache from the dispatch
+            // the task identity (already in AICore cache from the dispatch
             // payload); reg_task_id is the per-core dispatch token AICore just
             // read. Host uses reg_task_id as join key vs the AICPU stream.
             if (chip_swimlane_enabled) {

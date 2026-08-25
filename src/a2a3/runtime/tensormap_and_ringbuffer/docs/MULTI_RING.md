@@ -1,6 +1,6 @@
 # Multi-Ring Buffer Architecture
 
-> Extension to the PTO2 runtime. For the base architecture, see [RUNTIME_LOGIC.md](RUNTIME_LOGIC.md).
+> Extension to `tensormap_and_ringbuffer`. For the base architecture, see [RUNTIME_LOGIC.md](RUNTIME_LOGIC.md).
 
 ## 1. Problem
 
@@ -40,52 +40,52 @@ Type changes:
 
 | Field | Before | After |
 | ----- | ------ | ----- |
-| `PTO2TaskDescriptor.task_id` | `int32_t` | `TaskId` |
-| `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
+| `TaskDescriptor.task_id` | `int32_t` | `TaskId` |
+| `ChipTensorMapEntry.producer_task_id` | `int32_t` | `TaskId` |
 | `ChipTaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures
 
-### 4.1 PTO2RingSet (new)
+### 4.1 ChipRingSet (new)
 
 Bundles the three per-ring resources into a single aggregate (`ring_buffer.h`):
 
 ```cpp
-struct PTO2RingSet {
-    PTO2HeapRing   heap_ring;
-    PTO2TaskRing   task_ring;
-    PTO2FaninPool fanin_pool;
+struct ChipRingSet {
+    ChipHeapRing   heap_ring;
+    ChipTaskRing   task_ring;
+    FaninPool fanin_pool;
 };
 ```
 
-### 4.2 PTO2OrchestratorState (modified)
+### 4.2 OrchestratorState (modified)
 
 ```cpp
 // Before: single ring
-PTO2HeapRing heap_ring;
-PTO2TaskRing task_ring;
-PTO2DepListPool dep_pool;
+ChipHeapRing heap_ring;
+ChipTaskRing task_ring;
+DepListPool dep_pool;
 
 // After: per-ring array (dep_pool moved to scheduler, see §4.5)
-PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
+ChipRingSet rings[CHIP_MAX_RING_DEPTH];
 ```
 
 Ring selection: `current_ring_id() = min(scope_stack_top, CHIP_MAX_RING_DEPTH - 1)`.
 
-### 4.3 PTO2SharedMemoryHeader (modified)
+### 4.3 SharedMemoryHeader (modified)
 
 Per-ring flow control and per-ring layout info are grouped together:
 
 ```cpp
-struct PTO2RingFlowControl {
+struct ChipRingFlowControl {
     std::atomic<int32_t> current_task_index;  // task ring head
     std::atomic<int32_t> last_task_alive;     // task ring tail
     std::atomic<uint64_t> heap_top;           // heap alloc pointer
     std::atomic<uint64_t> heap_tail;          // heap reclaim pointer
 };
 
-struct alignas(64) PTO2SharedMemoryRingHeader {
-    PTO2RingFlowControl fc;
+struct alignas(64) SharedMemoryRingHeader {
+    ChipRingFlowControl fc;
 
     // Layout metadata (set once at init)
     uint64_t task_window_size;
@@ -94,49 +94,49 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     uint64_t task_descriptors_offset;
 
     // Per-ring data pointers (host-side, set by setup_pointers)
-    PTO2TaskDescriptor *task_descriptors;
-    PTO2TaskPayload *task_payloads;
+    TaskDescriptor *task_descriptors;
+    TaskPayload *task_payloads;
     ChipTaskSlotState *slot_states;
 
     // Accessors (slot = local_id & task_window_mask)
-    PTO2TaskDescriptor &get_task_by_slot(int32_t slot);
-    PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id);
-    PTO2TaskPayload &get_payload_by_slot(int32_t slot);
-    PTO2TaskPayload &get_payload_by_task_id(int32_t local_id);
+    TaskDescriptor &get_task_by_slot(int32_t slot);
+    TaskDescriptor &get_task_by_task_id(int32_t local_id);
+    TaskPayload &get_payload_by_slot(int32_t slot);
+    TaskPayload &get_payload_by_task_id(int32_t local_id);
     ChipTaskSlotState &get_slot_state_by_slot(int32_t slot);
     ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id);
 };
 
 // In header:
-PTO2SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
+SharedMemoryRingHeader rings[CHIP_MAX_RING_DEPTH];
 ```
 
-Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `PTO2SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
+Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving watermark writes within the same ring. `FaninPool`/`DepListPool` `reclaim`/`ensure_space` take `SharedMemoryRingHeader&` directly (no `ring_id` or `fc` parameters).
 
-### 4.4 PTO2SharedMemoryHandle (lifecycle-only)
+### 4.4 SharedMemoryHandle (lifecycle-only)
 
-Slimmed to lifecycle management only. Per-ring data pointers now live in `PTO2SharedMemoryRingHeader` (§4.3). Runtime components (orchestrator, scheduler) store `PTO2SharedMemoryHeader*` directly, eliminating one indirection on every per-ring access.
+Slimmed to lifecycle management only. Per-ring data pointers now live in `SharedMemoryRingHeader` (§4.3). Runtime components (orchestrator, scheduler) store `SharedMemoryHeader*` directly, eliminating one indirection on every per-ring access.
 
 ```cpp
-struct PTO2SharedMemoryHandle {
+struct SharedMemoryHandle {
     void *sm_base;
     uint64_t sm_size;
-    PTO2SharedMemoryHeader *header;
+    SharedMemoryHeader *header;
     bool is_owner;
 };
 ```
 
-### 4.5 PTO2SchedulerState (modified)
+### 4.5 SchedulerState (modified)
 
 ```cpp
 struct RingSchedState {
     // Cache Line 0: ring pointer (read-only) + hot path (read-write)
-    PTO2SharedMemoryRingHeader *ring;  // direct pointer, no indirection
+    SharedMemoryRingHeader *ring;  // direct pointer, no indirection
     int32_t last_task_alive;
     std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
     // Cache Line 1+: Orch-side wiring dep_pool, cache-isolated
-    alignas(64) PTO2DepListPool dep_pool;
+    alignas(64) DepListPool dep_pool;
 };
 
 RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
@@ -144,17 +144,17 @@ RingSchedState ring_sched_states[CHIP_MAX_RING_DEPTH];
 
 `slot_states`, `task_window_size`, and `task_window_mask` are no longer duplicated — callers access them via `ring->get_slot_state_by_*()` and other ring header accessors. The ring pointer shares cache line 0 with `last_task_alive` and `advance_lock`.
 
-### 4.6 PTO2TensorMap (modified)
+### 4.6 ChipTensorMap (modified)
 
 ```cpp
-PTO2TensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
+ChipTensorMapEntry** task_entry_heads[CHIP_MAX_RING_DEPTH];
 int64_t last_task_alives[CHIP_MAX_RING_DEPTH];
 ```
 
 Entry validity checks and `cleanup_retired` operate per-ring:
 
 ```cpp
-bool entry_valid(const PTO2TensorMapEntry& e) {
+bool entry_valid(const ChipTensorMapEntry& e) {
     int32_t ring = e.producer_task_id.ring();
     int32_t local = e.producer_task_id.local();
     return local >= last_task_alives[ring];
@@ -165,10 +165,10 @@ bool entry_valid(const PTO2TensorMapEntry& e) {
 
 | Structure | Reason |
 | --------- | ------ |
-| `PTO2DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
-| `PTO2TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
-| `PTO2ReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
-| `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
+| `DepListEntry` | Stores `ChipTaskSlotState*` pointer — naturally crosses ring boundaries |
+| `TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
+| `ChipReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
+| `DispatchPayload` | Built per-dispatch, no ring state needed |
 
 ## 5. Reclamation
 
@@ -232,9 +232,9 @@ AICore uses `last_reg_val` to detect new dispatches — identical values cause s
 
 | Constant | Default | Total (×4 rings) |
 | -------- | ------- | ---------------- |
-| `PTO2_TASK_WINDOW_SIZE` | 16384 | 65536 |
-| `PTO2_HEAP_SIZE` | 256 MB | 1 GB |
-| `PTO2_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
+| `CHIP_TASK_WINDOW_SIZE` | 16384 | 65536 |
+| `CHIP_HEAP_SIZE` | 256 MB | 1 GB |
+| `CHIP_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
 
 ### 7.2 Runtime Overrides
 
@@ -245,8 +245,6 @@ independently for each resource and ring:
 
 ```text
 per-ring CallConfig entry (a scalar is broadcast to every entry)
-  > per-ring PTO2_RING_* env value
-  > scalar PTO2_RING_* env value
   > compile-time default
 ```
 
@@ -302,21 +300,13 @@ per-case `config` dict — each value is a scalar or a four-entry list:
 }
 ```
 
-Process-wide env fallback accepts either one scalar value or exactly four
-comma-separated per-ring values. Invalid env values are logged and ignored, then
-fall through to defaults. `PTO2_RING_HEAP` values are integer bytes:
-
-```bash
-# Uniform, old behavior:
-PTO2_RING_TASK_WINDOW=1024
-PTO2_RING_HEAP=1048576
-PTO2_RING_DEP_POOL=1024
-
-# Per-ring, indexed by ring_id 0..3:
-PTO2_RING_TASK_WINDOW=8192,16384,131072,524288
-PTO2_RING_HEAP=134217728,268435456,402653184,536870912
-PTO2_RING_DEP_POOL=4096,8192,16384,32768
-```
+There is no process-wide fallback. `PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` /
+`PTO2_RING_DEP_POOL` used to size every ring in the process; they are not read any
+more, and the runtime logs a warning if one is still exported, because otherwise
+the requested sizing would vanish into the compile-time default. Size the rings
+per task instead — that is what the `CallConfig` block above does, and it is
+strictly more expressive: two tasks in one process can hold different ring sizes,
+which the env never allowed.
 
 Use `--enable-scope-stats` to confirm the effective values for a real run. The
 first line of `scope_stats/scope_stats.jsonl` includes `task_window_max`,

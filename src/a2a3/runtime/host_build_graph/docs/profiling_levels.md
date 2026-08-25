@@ -59,7 +59,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 **What's compiled:**
 
 - Debug/diagnostic logs (always present)
-- Progress tracking (`PTO2 progress: completed=...`)
+- Progress tracking (`progress: completed=...`)
 - Stall detection and dump (triggered after the `SCHEDULER_TIMEOUT_MS` wall-clock no-progress budget)
 - Deadlock/livelock detection (`diagnose_stuck_state`, called on stall)
 
@@ -74,8 +74,8 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 - No `sched_start/sched_end/sched_cost` timestamps
 - No `orch_start/orch_end/orch_cost` timestamps
 - No `Scheduler summary: total_time=...`
-- No `PTO2 total submitted tasks` log
-- `PTO2 progress: completed=... total=...` may appear (thread 0 only, at task completion milestones)
+- No `total submitted tasks` log
+- `progress: completed=... total=...` may appear (thread 0 only, at task completion milestones)
 
 ---
 
@@ -83,7 +83,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 host_build_graph boots **scheduler-only** — the orchestrator runs on the host,
 so the device log carries no `orch_start`/`orch_end`/`orch_cost` lines and no
-`PTO2 total submitted tasks` line (see the note at the top of this file). Every
+`total submitted tasks` line (see the note at the top of this file). Every
 AICPU thread schedules its own core slice, so `N_sched == aicpu_thread_num`.
 
 **What's compiled:**
@@ -393,7 +393,7 @@ header just like on onboard.
 | 3 | + Scheduler phases (`SCHED_*`) |
 | 4 | + Orchestrator phases (full) |
 
-At level 1 the AICore record carries the full PTO2 `task_token_raw`
+At level 1 the AICore record carries the full `task_token_raw`
 (`(ring_id << 32) | local_id`), read straight from
 `LocalContext.async_ctx.task_token.raw` inside the AICore helper —
 already in cache from the dispatch payload, so no extra GM load.

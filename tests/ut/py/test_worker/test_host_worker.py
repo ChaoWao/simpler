@@ -7330,7 +7330,7 @@ class TestScope:
         hw.init()
 
         def orch(o, args, cfg):
-            # Raw calls — match L2's pto2_scope_begin / pto2_scope_end.
+            # Raw calls — match the chip runtime's rt_scope_begin / rt_scope_end.
             o.scope_begin()
             o.scope_end()
             # Context-manager form.

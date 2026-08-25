@@ -42,19 +42,19 @@ GraphExecution *acquire_execution_storage(
     return execution;
 }
 
-void reset_graph_payload(PTO2TaskPayload &payload) {
+void reset_graph_payload(TaskPayload &payload) {
     payload.fanin_count = 0;
     payload.predicate = DispatchPredicate{};
-    payload.early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
-    for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; ++w) {
+    payload.early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+    for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; ++w) {
         payload.staged_core_mask[w].store(0, std::memory_order_relaxed);
     }
     payload.dispatch_fanin.store(0, std::memory_order_relaxed);
     payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
-    payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);
-    payload.early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+    payload.early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
 }
 
 bool bind_graph_topology(GraphExecution &execution) {
@@ -96,7 +96,7 @@ bool bind_graph_topology(GraphExecution &execution) {
     }
 
     uint64_t required_heap = 0;
-    constexpr uint8_t VALID_ACTIVE_MASK = (1U << PTO2_SUBTASK_SLOT_COUNT) - 1U;
+    constexpr uint8_t VALID_ACTIVE_MASK = (1U << SUBTASK_SLOT_COUNT) - 1U;
     for (uint32_t i = 0; i < definition.task_count; ++i) {
         const GraphNodeDefinition &node = nodes[i];
         if (node_offsets[i] != required_heap || node.total_output_size < 0 || node.tensor_count < 0 ||
@@ -109,11 +109,11 @@ bool bind_graph_topology(GraphExecution &execution) {
             node.total_required_subtasks < 0) {
             return false;
         }
-        for (int32_t slot = 0; slot < PTO2_SUBTASK_SLOT_COUNT; ++slot) {
+        for (int32_t slot = 0; slot < SUBTASK_SLOT_COUNT; ++slot) {
             const bool active = (node.active_mask & (1U << slot)) != 0;
             if (active != (node.kernel_id[slot] != INVALID_KERNEL_ID)) return false;
         }
-        const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(node.total_output_size), PTO2_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(node.total_output_size), CHIP_ALIGN_SIZE);
         if (output_bytes > definition.required_heap - required_heap) return false;
         required_heap += output_bytes;
     }
@@ -236,7 +236,7 @@ bool graph_rebind_tensor(
             (!own_output && producer_index == node_index)) {
             return false;
         }
-        PTO2TaskDescriptor &producer = execution.node_at(producer_index).task;
+        TaskDescriptor &producer = execution.node_at(producer_index).task;
         const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
         const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
         if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
@@ -313,7 +313,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(definition_addr - sizeof(GraphDefinitionHeader));
     const GraphDefinition *definition = graph_definition_object_verified(*definition_header);
-    PTO2TaskPayload &payload = *outer_slot.payload;
+    TaskPayload &payload = *outer_slot.payload;
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
         definition->task_count > GRAPH_MAX_NODES ||
         payload.tensor_count != static_cast<int32_t>(definition->boundary_count) ||
@@ -434,8 +434,8 @@ GraphMaterializeResult graph_execution_materialize_slice(
             storage = new (storage) GraphNodeStorage;
             execution.constructed_nodes++;
         }
-        PTO2TaskDescriptor &task = storage->task;
-        PTO2TaskPayload &payload = storage->payload;
+        TaskDescriptor &task = storage->task;
+        TaskPayload &payload = storage->payload;
         ChipTaskSlotState &slot = storage->slot;
 
         const uint32_t synthetic_local =
@@ -443,14 +443,14 @@ GraphMaterializeResult graph_execution_materialize_slice(
         task.task_id = TaskId::make(1, synthetic_local);
         const GraphNodeDefinition &source = nodes[i];
         const uint64_t node_offset = node_offsets[i];
-        const uint64_t output_bytes = PTO2_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), PTO2_ALIGN_SIZE);
-        for (int k = 0; k < PTO2_SUBTASK_SLOT_COUNT; ++k)
+        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), CHIP_ALIGN_SIZE);
+        for (int k = 0; k < SUBTASK_SLOT_COUNT; ++k)
             task.kernel_id[k] = source.kernel_id[k];
         task.packed_buffer_base = reinterpret_cast<void *>(outer_base + node_offset);
         task.packed_buffer_end = reinterpret_cast<void *>(outer_base + node_offset + output_bytes);
 
         slot.reset_for_reuse();
-        slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+        slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
         slot.bind_buffers(&payload, &task);
         slot.active_mask = ActiveMask(source.active_mask);
         slot.task_attrs = TaskAttrs(source.task_attrs);

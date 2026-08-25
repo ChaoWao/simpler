@@ -9,14 +9,14 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2TaskAllocator from ring_buffer.h
+ * Unit tests for TaskAllocator from ring_buffer.h
  *
  * Tests ring buffer allocation, heap bump logic, wrap-around, alignment,
  * task window flow control, and heap_available semantics.
  *
  * The allocator is single-threaded (orchestrator thread), so no concurrency
- * tests are needed. The unified PTO2TaskAllocator replaces the previous
- * separate PTO2HeapRing + PTO2TaskRing.
+ * tests are needed. The unified TaskAllocator replaces the previous
+ * separate ChipHeapRing + ChipTaskRing.
  *
  * Design contracts (try_bump_heap):
  *
@@ -56,8 +56,8 @@
 // =============================================================================
 
 static void consume_up_to(
-    std::vector<PTO2TaskDescriptor> &descriptors, std::atomic<int32_t> &last_alive, void *heap_base,
-    int32_t window_size, int32_t new_last_alive, uint64_t heap_tail_offset
+    std::vector<TaskDescriptor> &descriptors, std::atomic<int32_t> &last_alive, void *heap_base, int32_t window_size,
+    int32_t new_last_alive, uint64_t heap_tail_offset
 ) {
     int32_t last_consumed = new_last_alive - 1;
     descriptors[last_consumed & (window_size - 1)].packed_buffer_end =
@@ -74,15 +74,15 @@ protected:
     static constexpr int32_t WINDOW_SIZE = 16;
     static constexpr uint64_t HEAP_SIZE = 4096;
 
-    std::vector<PTO2TaskDescriptor> descriptors;
+    std::vector<TaskDescriptor> descriptors;
     alignas(64) uint8_t heap_buf[HEAP_SIZE]{};
     std::atomic<int32_t> current_index{0};
     std::atomic<int32_t> last_alive{0};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2TaskAllocator allocator{};
+    TaskAllocator allocator{};
 
     void SetUp() override {
-        descriptors.assign(WINDOW_SIZE, PTO2TaskDescriptor{});
+        descriptors.assign(WINDOW_SIZE, TaskDescriptor{});
         std::memset(heap_buf, 0, sizeof(heap_buf));
         current_index.store(0);
         last_alive.store(0);
@@ -109,8 +109,8 @@ TEST_F(TaskAllocatorTest, AllocNonZeroSize) {
     EXPECT_EQ(result.task_id, 0);
     EXPECT_EQ(result.slot, 0);
     EXPECT_NE(result.packed_base, nullptr);
-    // 100 bytes aligned up to PTO2_ALIGN_SIZE (64) = 128
-    uint64_t expected_aligned = PTO2_ALIGN_UP(100u, PTO2_ALIGN_SIZE);
+    // 100 bytes aligned up to CHIP_ALIGN_SIZE (64) = 128
+    uint64_t expected_aligned = CHIP_ALIGN_UP(100u, CHIP_ALIGN_SIZE);
     EXPECT_EQ(expected_aligned, 128u);
     EXPECT_EQ(allocator.heap_top(), expected_aligned);
     EXPECT_EQ(

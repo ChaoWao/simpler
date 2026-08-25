@@ -77,7 +77,7 @@ enum class ArgsDumpKind : uint8_t {
 };
 
 // Max kernel ids a record carries: one per active subtask of a task (its mix
-// membership). Must equal the runtime's PTO2_SUBTASK_SLOT_COUNT (1C2V => 3);
+// membership). Must equal the runtime's SUBTASK_SLOT_COUNT (1C2V => 3);
 // can't reference it here (platform layer doesn't include the tmap+ring runtime
 // header), so a static_assert in dump_args_for_task ties the two together.
 constexpr uint8_t ARGS_DUMP_MAX_FUNC_IDS = 3;
@@ -94,7 +94,7 @@ constexpr uint8_t ARGS_DUMP_MAX_FUNC_IDS = 3;
  */
 struct alignas(64) ArgsDumpRecord {
     // === Cache line 1 (64B) ===
-    uint64_t task_id;                           // PTO2 encoding or plain task index
+    uint64_t task_id;                           // TaskId encoding or plain task index
     uint8_t role;                               // ArgsDumpRole (formal callable signature)
     uint8_t stage;                              // ArgsDumpStage (before/after execution)
     uint8_t ndims;                              // Number of dimensions
@@ -263,7 +263,7 @@ struct DumpDataHeader {
 
 /**
  * Caller fills this struct from runtime-specific tensor types.
- * Platform layer is agnostic to runtime-specific types (ChipTensor, PTO2TaskPayload, etc.).
+ * Platform layer is agnostic to runtime-specific types (ChipTensor, TaskPayload, etc.).
  */
 struct ArgsDumpInfo {
     uint64_t task_id;

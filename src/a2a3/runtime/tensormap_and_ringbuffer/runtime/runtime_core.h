@@ -52,9 +52,9 @@
  * Runtime execution mode
  */
 enum RuntimeMode {
-    PTO2_MODE_EXECUTE = 0,    // Execute tasks on workers
-    PTO2_MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
-    PTO2_MODE_GRAPH_ONLY = 2  // Build graph only, no execution
+    MODE_EXECUTE = 0,    // Execute tasks on workers
+    MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
+    MODE_GRAPH_ONLY = 2  // Build graph only, no execution
 };
 
 /**
@@ -122,8 +122,8 @@ struct ArenaSizingKey {
  */
 struct ArenaOffsets {
     size_t off_sm_handle{0};
-    PTO2OrchestratorLayout orch;
-    PTO2SchedulerLayout sched;
+    OrchestratorLayout orch;
+    SchedulerLayout sched;
     size_t off_runtime{0};
     size_t off_mailbox{0};
 
@@ -153,12 +153,12 @@ struct RuntimeArenaLayout {
 struct RuntimeContext {
     // Ops table (first field — used by orchestration .so via function pointers)
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode;
+    ScopeMode pending_scope_mode;
 
     // Components
-    PTO2SharedMemoryHandle *sm_handle;
-    PTO2OrchestratorState orchestrator;
-    PTO2SchedulerState scheduler;
+    SharedMemoryHandle *sm_handle;
+    OrchestratorState orchestrator;
+    SchedulerState scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
 
     // GM Heap for output buffers
@@ -195,7 +195,7 @@ struct RuntimeContext {
  * Phase 2/3.
  */
 RuntimeArenaLayout runtime_reserve_layout(
-    DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+    DeviceArena &arena, uint64_t task_window_size, int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE
 );
 RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH],
@@ -310,8 +310,8 @@ void set_tensor_data(
  * Slim config struct exported by orchestration .so via aicpu_orchestration_config().
  * Shared definition with orchestration_api.h (same layout, guarded).
  */
-#ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
-#define PTO2_ORCHESTRATION_CONFIG_DEFINED
+#ifndef ORCHESTRATION_CONFIG_DEFINED
+#define ORCHESTRATION_CONFIG_DEFINED
 struct OrchestrationConfig {
     int expected_arg_count;
 };

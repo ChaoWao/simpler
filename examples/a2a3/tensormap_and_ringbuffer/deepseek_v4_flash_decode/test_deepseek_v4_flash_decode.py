@@ -615,8 +615,8 @@ class TestDeepseekV4FlashDecode(SceneTestCase):
                 "device_count": N_RANKS,
                 "num_sub_workers": 0,
                 # Ring sizing for the 43-layer graph. The task window and dep
-                # pool match pypto-lib's daily CI env for this network
-                # (PTO2_RING_* 16384 / 16384). The heap is twice that env's
+                # pool match pypto-lib's daily CI sizing for this network
+                # (16384 / 16384). The heap is twice the compile-time default's
                 # 1 GiB: the MoE per-expert tile grid is static, so tile scratch
                 # is allocated for all 32 experts of every MoE layer whatever the
                 # routing turns out to be.

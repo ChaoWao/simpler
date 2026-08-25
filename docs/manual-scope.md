@@ -13,7 +13,7 @@ Keep manual scope small and explicit:
 
 The v0 design keeps these rules:
 
-1. `SIMPLER_SCOPE(PTO2ScopeMode::MANUAL)` opts a scope into manual mode.
+1. `SIMPLER_SCOPE(ScopeMode::MANUAL)` opts a scope into manual mode.
 2. `MANUAL` nested inside active `MANUAL` is allowed.
 3. `AUTO` nested inside active `MANUAL` is rejected.
 4. Manual deps are attached before submit through `CoreTaskArgs.set_dependencies(...)`.
@@ -26,7 +26,7 @@ The v0 design keeps these rules:
 ### Scope
 
 ```cpp
-SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+SIMPLER_SCOPE(ScopeMode::MANUAL) {
     ...
 }
 ```
@@ -93,7 +93,7 @@ Manual scope v0 is:
 
 `manual_begin_depth` is the only manual-scope-specific state, and it decides whether
 the current submit is in manual mode. It is explicitly initialized in
-`PTO2OrchestratorState::init()` and reset in `mark_done()` so a reused orchestrator
+`OrchestratorState::init()` and reset in `mark_done()` so a reused orchestrator
 starts cleanly on the next run.
 
 Whether a scope keeps a task list at all is runtime-specific, and manual mode does
@@ -132,7 +132,7 @@ For a submitted task:
 ## Example Pattern
 
 ```cpp
-SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+SIMPLER_SCOPE(ScopeMode::MANUAL) {
     auto alloc = alloc_tensors(tmp_ci);
 
     CoreTaskArgs qk;

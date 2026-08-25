@@ -16,7 +16,7 @@
 #   the image to device (vs tensormap, where AICPU thread N-1 orchestrates on
 #   device concurrently with the scheduler threads)
 # - AICPU threads 0..N-1 all run schedulers (no on-device orchestrator thread)
-# - AICore executes tasks via an aligned PTO2DispatchPayload + pre-built dispatch_args
+# - AICore executes tasks via an aligned DispatchPayload + pre-built dispatch_args
 #
 # The "orchestration" directory contains source files compiled into both
 # runtime targets AND the orchestration .so (e.g., tensor methods needed

@@ -49,7 +49,7 @@ The host builds the complete task graph before launching device execution. The o
 
 The primary production runtime. Uses ring buffers for task slots and output memory, with a TensorMap for automatic dependency tracking.
 
-- **Task storage**: `PTO2TaskDescriptor[]` in shared memory ring buffer
+- **Task storage**: `TaskDescriptor[]` in shared memory ring buffer
 - **Memory**: GM Heap ring for output buffer allocation
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
 - **Thread model**: 3 scheduler threads + 1 orchestrator thread on AICPU
@@ -145,11 +145,11 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 
 ```text
 ┌─────────────────────────────┐  offset 0
-│  PTO2SharedMemoryHeader     │  (per-ring flow control + layout, global flags)
+│  SharedMemoryHeader     │  (per-ring flow control + layout, global flags)
 ├─────────────────────────────┤  aligned
 │  Per-ring regions ×4:       │
-│    PTO2TaskDescriptor[N]    │  N = task_window_size per ring
-│    PTO2TaskPayload[N]       │
+│    TaskDescriptor[N]    │  N = task_window_size per ring
+│    TaskPayload[N]       │
 │    ChipTaskSlotState[N]     │
 └─────────────────────────────┘
 ```
@@ -163,8 +163,8 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 | `heap_top` | Orchestrator | Scheduler | Heap ring allocation pointer |
 | `heap_tail` | Scheduler | Orchestrator | Heap ring reclamation pointer |
 | `orchestrator_done` | Orchestrator | Scheduler | Signals orchestration completion |
-| `task_window_size` | Init | Both | Number of task slots (per-ring, in `PTO2SharedMemoryRingHeader`) |
-| `heap_size` | Init | Both | Heap total size (per-ring, in `PTO2SharedMemoryRingHeader`) |
+| `task_window_size` | Init | Both | Number of task slots (per-ring, in `SharedMemoryRingHeader`) |
+| `heap_size` | Init | Both | Heap total size (per-ring, in `SharedMemoryRingHeader`) |
 | `task_descriptors_offset` | Init | Both | Offset to TaskDescriptor array in SM (per-ring) |
 | `total_size` | Init | Both | Total shared memory size |
 
@@ -174,10 +174,10 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 total = ALIGN(Header)
       + Σ_ring [ ALIGN(window_size * sizeof(TaskDescriptor))
                + ALIGN(window_size * sizeof(TaskPayload))
-               + ALIGN(window_size * sizeof(TaskSlotState)) ]
+               + ALIGN(window_size * sizeof(ChipTaskSlotState)) ]
 ```
 
-Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).
+Alignment is 64 bytes (`CHIP_ALIGN_SIZE`).
 
 ---
 
@@ -189,7 +189,7 @@ Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).
 
 The task ring manages task slot allocation with back-pressure flow control.
 
-**Structure** (`PTO2TaskRing`):
+**Structure** (`ChipTaskRing`):
 
 - `descriptors`: pointer to `TaskDescriptor[]` in shared memory
 - `window_size`: number of slots (power of 2)
@@ -198,7 +198,7 @@ The task ring manages task slot allocation with back-pressure flow control.
 
 **Slot mapping**: `slot = task_id & (window_size - 1)`
 
-**Allocation** (`PTO2TaskAllocator::alloc`):
+**Allocation** (`TaskAllocator::alloc`):
 
 ```text
 active_count = current_index - *last_alive_ptr
@@ -210,13 +210,13 @@ else:
 
 **Reclamation**: Scheduler threads advance `last_task_alive` via lock-free CAS when the oldest task reaches state CONSUMED (4). This frees slots for reuse.
 
-**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With `PTO2_RING_TASK_WINDOW=16` and 208 tasks, slots are recycled ~13 times each.
+**Flow control**: When the ring is full, the orchestrator blocks until the scheduler advances `last_task_alive`. With a 16-slot `runtime_env.ring_task_window` and 208 tasks, slots are recycled ~13 times each.
 
 ### 4.2 Heap Ring
 
 The heap ring manages output buffer allocation from a circular GM heap.
 
-**Structure** (`PTO2HeapRing`):
+**Structure** (`ChipHeapRing`):
 
 - `base`: GM heap base address
 - `size`: total heap size (default 1 GB)
@@ -234,7 +234,7 @@ allocation retires.
 
 ### 4.3 Dependency List Pool
 
-A simple bump allocator for `PTO2DepListEntry` nodes used in fanin/fanout linked lists.
+A simple bump allocator for `DepListEntry` nodes used in fanin/fanout linked lists.
 
 - **Entry 0**: NULL sentinel (`task_id=-1, next_offset=0`)
 - **Allocation**: `pool->top++`, wraps around when full
@@ -244,13 +244,13 @@ A simple bump allocator for `PTO2DepListEntry` nodes used in fanin/fanout linked
 
 The ring buffer mechanism provides **flow control** between the orchestrator (producer) and the scheduler (consumer). When a ring is exhausted, the orchestrator **blocks** — it cannot submit new tasks or allocate more output memory until the scheduler reclaims slots/space by advancing the watermarks.
 
-**Task Ring back-pressure**: When `active_count = current_index - last_task_alive >= window_size - 1`, `PTO2TaskAllocator::alloc` spin-waits until the scheduler completes tasks and advances `last_task_alive`.
+**Task Ring back-pressure**: When `active_count = current_index - last_task_alive >= window_size - 1`, `TaskAllocator::alloc` spin-waits until the scheduler completes tasks and advances `last_task_alive`.
 
-**Heap Ring back-pressure**: When the heap has insufficient contiguous space, `PTO2TaskAllocator::alloc` spin-waits until the scheduler advances `heap_tail` past completed tasks' output buffers.
+**Heap Ring back-pressure**: When the heap has insufficient contiguous space, `TaskAllocator::alloc` spin-waits until the scheduler advances `heap_tail` past completed tasks' output buffers.
 
 **TensorMap pool back-pressure**: Before STEP 4 registers a task's outputs, the orchestrator's `ensure_tensormap_capacity` reserves pool space for the inserts. When the shared entry pool is exhausted, it reclaims retired entries across all rings and spin-waits until reclaim actually frees entries, with a 500 ms wall-clock deadlock backstop (see Section 5.4).
 
-This back-pressure is essential for correctness with small ring sizes — for example, with `PTO2_RING_TASK_WINDOW=16` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
+This back-pressure is essential for correctness with small ring sizes — for example, with a 16-slot `runtime_env.ring_task_window` and 208 tasks, the orchestrator blocks ~192 times, each time waiting for the scheduler to drain completed tasks before continuing.
 
 ### 4.5 Deadlock Detection
 
@@ -316,7 +316,7 @@ Unlike the Task Ring and Heap Ring, TensorMap entries are **not** managed by a r
 2. **Bump allocation**: if free list is empty, `entry_pool[next_entry_idx++]` allocates from the end of the pool.
 3. **Blocking reclaim**: if the pool is short of the inserts a task needs, the orchestrator's `ensure_tensormap_capacity` reads the latest `last_task_alive` for every ring and calls `reclaim_retired_all` (`cleanup_retired` per ring) to batch-free entries belonging to retired tasks, returning them to the free list, before the inserts proceed.
 
-This design avoids the complexity of ring-based wrapping while still being bounded by `PTO2_TENSORMAP_POOL_SIZE` (default 65536 entries).
+This design avoids the complexity of ring-based wrapping while still being bounded by `CHIP_TENSORMAP_POOL_SIZE` (default 65536 entries).
 
 ### 5.4 Stale Entry Cleanup: Three-Layer Defense
 
@@ -329,13 +329,13 @@ Three complementary mechanisms achieve this:
 
 **Layer 1 — Chain Truncation during Lookup** (lazy, per-bucket):
 
-Since `insert` always prepends to the bucket head, entries in each bucket chain are in **descending task_id order**. When `PTO2TensorMap::lookup` encounters the first stale entry (`producer_task_id < last_task_alive`), all subsequent entries in the chain are guaranteed stale too. The entire tail is truncated in one operation using `prev_in_bucket` pointers for O(1) unlinking.
+Since `insert` always prepends to the bucket head, entries in each bucket chain are in **descending task_id order**. When `ChipTensorMap::lookup` encounters the first stale entry (`producer_task_id < last_task_alive`), all subsequent entries in the chain are guaranteed stale too. The entire tail is truncated in one operation using `prev_in_bucket` pointers for O(1) unlinking.
 
 This guarantees lookup only traverses valid entries — O(valid_entries_in_bucket), not O(total_entries).
 
 **Layer 2 — Periodic Batch Cleanup** (`cleanup_retired`, per-task):
 
-Every time the orchestrator submits a task (Step 0 of `PTO2OrchestratorState::submit_task`), it calls `PTO2TensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `PTO2_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `PTO2TensorMap::cleanup_retired` runs:
+Every time the orchestrator submits a task (Step 0 of `OrchestratorState::submit_task`), it calls `ChipTensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `CHIP_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `ChipTensorMap::cleanup_retired` runs:
 
 This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each task's entries are doubly-linked together at insert time via `next_in_task`/`prev_in_task`. A slot's chain can hold more than one task's entries: a task at `local_id + N * window` reuses the slot and prepends to the chain already there, and cleanup can lag that reuse. Cleanup therefore walks the chain and frees only the entries whose `producer_task_id` matches the retiring task, unlinking each and leaving the rest linked — O(entries_in_slot), with no scan of the entire pool or all buckets. Freed entries are returned to `free_entry_list` for immediate reuse.
 
@@ -357,18 +357,18 @@ In steady state, the number of valid TensorMap entries ≈ `active_tasks × avg_
 
 ### 5.5 Dependency Discovery Flow
 
-When `PTO2OrchestratorState::submit_task` processes parameters:
+When `OrchestratorState::submit_task` processes parameters:
 
-1. **INPUT/INOUT**: `PTO2TensorMap::lookup` searches for overlapping producers (with chain truncation)
+1. **INPUT/INOUT**: `ChipTensorMap::lookup` searches for overlapping producers (with chain truncation)
 2. For each producer found: `append_fanin_or_fail` adds the dependency
-3. **OUTPUT/INOUT**: `PTO2TensorMap::insert` registers the current task as the new producer at bucket head
+3. **OUTPUT/INOUT**: `ChipTensorMap::insert` registers the current task as the new producer at bucket head
 4. Stale entries are pruned lazily during lookup (Layer 1) and periodically by cleanup (Layer 2)
 
 ---
 
 ## 6. Task Descriptor and States
 
-### 6.1 PTO2TaskDescriptor (Hot Path)
+### 6.1 TaskDescriptor (Hot Path)
 
 | Field | Description |
 | ----- | ----------- |
@@ -383,7 +383,7 @@ When `PTO2OrchestratorState::submit_task` processes parameters:
 | `packed_buffer_base` | Start of packed buffer in GM Heap |
 | `packed_buffer_end` | End of packed buffer (for heap reclamation) |
 
-### 6.1b PTO2TaskPayload (Cold Path)
+### 6.1b TaskPayload (Cold Path)
 
 | Field | Description |
 | ----- | ----------- |
@@ -403,7 +403,7 @@ When `PTO2OrchestratorState::submit_task` processes parameters:
       └──────────────────── slot recycled ◄───────────────────────────┘
 ```
 
-In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
+In the scheduler's `task_state[]` array (`std::atomic<ChipTaskState>`):
 
 - **0 (PENDING)**: slot is allocated and remains PENDING through "waiting on
   producers", "queued in ready queue", and "dispatched to a worker"; ready vs
@@ -415,26 +415,26 @@ In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
 
 ## 7. Orchestrator
 
-### 7.1 PTO2OrchestratorState
+### 7.1 OrchestratorState
 
 The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the user-provided orchestration function.
 
 Key members:
 
-- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
+- `rings[CHIP_MAX_RING_DEPTH]`: per-ring `ChipRingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
 - `tensor_map`, `tensor_pool`: dependency tracking
 - `scope_tasks[]`, `scope_begins[]`, `scope_stack_top`: scope nesting stack (flat buffer partitioned by level)
 - `scheduler`: pointer to scheduler state (for Orch-side wiring helpers and ready queue access)
 - `gm_heap_base`, `gm_heap_size`: GM heap for output buffers
 
-### 7.2 Task Submission Flow (`PTO2OrchestratorState::submit_task`)
+### 7.2 Task Submission Flow (`OrchestratorState::submit_task`)
 
 | Step | Operation |
 | ---- | --------- |
-| 0 | `PTO2TensorMap::sync_tensormap` — prune stale TensorMap entries |
-| 1 | `PTO2TaskAllocator::alloc` — allocate task slot (may block on flow control) |
+| 0 | `ChipTensorMap::sync_tensormap` — prune stale TensorMap entries |
+| 1 | `TaskAllocator::alloc` — allocate task slot (may block on flow control) |
 | 2 | Initialize task descriptor + slot state, copy parameters |
-| 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `PTO2FaninBuilder` |
+| 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `FaninBuilder` |
 | 4 | **Insert**: register OUTPUT/INOUT args in TensorMap |
 | 5 | **Record fanin metadata**: store producer edges (slot pointer + `DepFlags` packed in the low bits) in `payload->fanin_inline_edges[]` (+ spill pool if >64); claim each live producer by incrementing `fanout_count` under that producer's `fanout_lock`. Creator edges are `DEP_WAIT\|DEP_RETAIN`, tensormap-modifier edges `DEP_WAIT`. This step runs **before** `payload.init()`. |
 | 6 | **Orch-side wiring / ready publish**: the orchestrator wires live fanout edges into the per-ring dep_pool; zero-fanin and already-completed fanin tasks publish directly to ready queues. Only `DEP_WAIT` edges gate readiness — they count toward `fanin_count` and are linked onto the producer's `fanout_head` for completion notification. A `DEP_WAIT`-only edge releases its submit→wire retention pin **at wiring** (and on the already-completed fast path), so its producer can be CONSUMED without waiting for this consumer; a `DEP_RETAIN` edge keeps the pin until this consumer's `on_task_release`. A hypothetical `RETAIN`-only edge (none exist yet) would neither gate readiness nor link a fanout node — it only holds the lifetime pin. |
@@ -483,7 +483,7 @@ SIMPLER_SCOPE(rt) {
 
 **Output tensor lifetime — single-scope only.** `submit_task` returns a
 `TaskOutputTensors`, and `get_ref(i)` hands back a `const Tensor&`. Both are
-backed by pointers into the submitting task's `PTO2TaskPayload::tensors[]`,
+backed by pointers into the submitting task's `TaskPayload::tensors[]`,
 which lives in a ring-buffer slot. After `scope_end` the slot becomes
 eligible for reuse; once `advance_ring_pointers` reaches it,
 `reset_for_reuse()` runs and the next `submit_task` overwrites the same
@@ -557,7 +557,7 @@ Each scheduler thread runs a tight loop with two main phases:
 - Service each source (normal ready ▸ speculative early) in occupancy order — `sync_start`
   Tier-0 ▸ MIX ▸ AIC/AIV, idle ▸ pending — popping from the matching shape-based ready queue
   (lock-free MPMC Vyukov queue, one per resource shape)
-- Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
+- Build `DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
 - Write task pointer to `Handshake.task`, signal AICore via register `DATA_MAIN_BASE`
 
 After these phases, the scheduler updates profiling headers and checks for termination (all tasks completed and orchestrator done).
@@ -566,7 +566,7 @@ After these phases, the scheduler updates profiling headers and checks for termi
 
 Ready queues use a lock-free bounded MPMC (Vyukov) design:
 
-- One `PTO2ReadyQueue` per resource shape — 3 shapes (`PTO2_NUM_RESOURCE_SHAPES`): `MIX`
+- One `ChipReadyQueue` per resource shape — 3 shapes (`NUM_RESOURCE_SHAPES`): `MIX`
   (AIC+AIV cluster), `AIC`, `AIV`. Alongside `ready_queues[]` there is a per-shape
   `ready_sync_queues[]` (sync_start Tier-0) and the speculative `early_dispatch_queues[]` /
   `early_sync_start_queue` — see §8.6 for the full source × tier model.
@@ -725,7 +725,7 @@ Each AICore worker has a `Handshake` struct in shared memory:
 
 | Field | Direction | Purpose |
 | ----- | --------- | ------- |
-| `task` | AICPU→AICore | Pointer to `PTO2DispatchPayload` |
+| `task` | AICPU→AICore | Pointer to `DispatchPayload` |
 | `control` | AICPU→AICore | 0=normal, 1=shutdown |
 | `perf_records_addr` | AICPU→AICore | Performance buffer address |
 
@@ -748,9 +748,9 @@ Instead of polling a shared-memory status flag, the production protocol uses har
 4. Execute kernel function via `func_id_to_addr` lookup
 5. Write FIN to `COND`
 
-### 9.3 PTO2DispatchPayload
+### 9.3 DispatchPayload
 
-Built by the scheduler from `PTO2TaskDescriptor`:
+Built by the scheduler from `TaskDescriptor`:
 
 | Field | Description |
 | ----- | ----------- |
@@ -778,7 +778,7 @@ Built by the scheduler from `PTO2TaskDescriptor`:
    and stores it in `Runtime.dev.func_id_to_addr_[child_func_id(i)]`.
 4. When dispatching, the scheduler reads `func_id_to_addr_[fid]`, casts to
    `const CoreCallable*`, reads `resolved_addr_`, and copies that into
-   `PTO2DispatchPayload.function_bin_addr`.
+   `DispatchPayload.function_bin_addr`.
 
 ### 10.2 Orchestration SO Loading
 
@@ -818,7 +818,7 @@ capacity because no task execution/reclaim happens during graph build.
 
 ---
 
-## 11. PTO2 Orchestration API
+## 11. Orchestration API
 
 The orchestration API is defined in `orchestration_api.h`. Orchestration code depends only on this header.
 

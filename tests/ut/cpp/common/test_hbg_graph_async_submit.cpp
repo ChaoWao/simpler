@@ -35,7 +35,7 @@ extern "C" void framework_bind_runtime(RuntimeContext *rt) { g_bound_runtime = r
 
 struct FakeRuntime {
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode{PTO2ScopeMode::AUTO};
+    ScopeMode pending_scope_mode{ScopeMode::AUTO};
     std::mutex mutex;
     std::condition_variable cv;
     bool record_entered{false};

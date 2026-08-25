@@ -88,7 +88,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // the device on purpose; it carries no sync_start, so no cap applies.
     const int32_t sync_blocks = rt_available_cluster_count();
 
-    rt_scope_begin(PTO2ScopeMode::MANUAL);
+    rt_scope_begin(ScopeMode::MANUAL);
     TaskId prod = submit_producer(ext_output, PRODUCER_BLOCKS, 0);
     submit_sync_consumer(ext_output, static_cast<int16_t>(sync_blocks), PRODUCER_BLOCKS, prod);
     rt_scope_end();

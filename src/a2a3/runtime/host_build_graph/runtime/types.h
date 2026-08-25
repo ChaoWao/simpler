@@ -67,7 +67,7 @@ enum class CompletionType : int32_t {
 // Task Output ChipTensors (return value from submit)
 // =============================================================================
 
-enum class PTO2ScopeMode : uint8_t {
+enum class ScopeMode : uint8_t {
     AUTO = 0,
     MANUAL = 1,
 };
@@ -86,7 +86,7 @@ enum class PTO2ScopeMode : uint8_t {
  *
  * LIFETIME — single-pass only:
  *   Internally this class stores pointers into the submitting task's tensor
- *   storage: the region named by PTO2TaskPayload::tensors for a plain submit, the
+ *   storage: the region named by TaskPayload::tensors for a plain submit, the
  *   GraphRecording node's tensors for a submit inside a Graph body. Both belong to
  *   one orchestration pass, which the next bind rebuilds over the same bytes.
  *   Therefore the TaskOutputTensors instance, the const ChipTensor& returned by
@@ -247,7 +247,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
 
     bool has_error{false};
     const char *error_msg{nullptr};
-    PTO2LaunchSpec launch_spec;  // SPMD launch parameters (block_num, etc.)
+    LaunchSpec launch_spec;  // SPMD launch parameters (block_num, etc.)
 
     // Speculative early-dispatch hint (codegen-author set, off by default). When
     // true, the scheduler may stage this task on an idle core before its producer
@@ -692,7 +692,7 @@ inline constexpr uint32_t GRAPH_MAX_SCALAR_ARGS = 64;
 // outer GRAPH payload carries the whole boundary, while materialize stages only
 // one node's arguments at a time. The compact boundary values live in that
 // payload's argument-pool regions, so widening these caps costs pool bytes only
-// for Graphs that use them; PTO2TaskPayload itself stays fixed-size.
+// for Graphs that use them; TaskPayload itself stays fixed-size.
 using GraphTaskArgs = Arg<GRAPH_MAX_TENSOR_ARGS, GRAPH_MAX_SCALAR_ARGS>;
 
 // ChipTaskArgs — chip-level entry-arg holding the orchestration entry's

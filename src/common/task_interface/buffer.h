@@ -490,7 +490,7 @@ inline TensorFootprint tensor_footprint(const Tensor &r) {
 /**
  * Do two views of the same backing touch a common byte, and does `probe` swallow `entry` whole?
  *
- * Three stages, mirroring the L2 `PTO2TensorMap::check_overlap` this is the host-side counterpart
+ * Three stages, mirroring the L2 `ChipTensorMap::check_overlap` this is the host-side counterpart
  * of (`src/{arch}/runtime/tensormap_and_ringbuffer/runtime/tensormap.h`):
  *
  *   1. Bounding-range intersection. O(1), and the only stage a whole-backing footprint reaches.

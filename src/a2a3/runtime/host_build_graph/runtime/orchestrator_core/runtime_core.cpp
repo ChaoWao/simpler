@@ -55,7 +55,7 @@ host_tensor_write(HostTensorAccessor *, uint64_t dev_addr, const void *src, uint
 // device register unavailable on the host, so return a monotonic wall-clock
 // scaled to that counter's cycle units (PLATFORM_PROF_SYS_CNT_FREQ). The
 // cycle-denominated timeouts that run during host orchestration
-// (PTO2_TENSOR_DATA_TIMEOUT_CYCLES in wait_for_tensor_ready, the fanin spill
+// (TENSOR_DATA_TIMEOUT_CYCLES in wait_for_tensor_ready, the fanin spill
 // pool's backstop) then fire at their intended wall-clock; a constant 0 would
 // make them no-ops and spin forever. The AICPU build links the strong device
 // counter from device_time.cpp; hidden visibility keeps this off the global
@@ -74,8 +74,7 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
 // that define PLATFORM_PROF_SYS_CNT_FREQ locally, so pulling the platform header into
 // it caused a redefinition conflict (#1189). Scaling MS by the counter frequency (like
 // SCHEDULER_TIMEOUT_CYCLES) keeps the data-wait wall-clock identical across arches.
-static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
-    (PTO2_TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
+static constexpr uint64_t TENSOR_DATA_TIMEOUT_CYCLES = (TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
 
 // =============================================================================
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
@@ -124,8 +123,8 @@ static void graph_commit_impl(RuntimeContext *rt) {
 }
 
 void rt_scope_begin(RuntimeContext *rt) {
-    PTO2ScopeMode mode = rt->pending_scope_mode;
-    rt->pending_scope_mode = PTO2ScopeMode::AUTO;
+    ScopeMode mode = rt->pending_scope_mode;
+    rt->pending_scope_mode = ScopeMode::AUTO;
     rt->orchestrator->begin_scope(mode);
 }
 
@@ -168,7 +167,7 @@ MAYBE_UNINITIALIZED_BEGIN
 static bool
 wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_for_consumers, const char *caller) {
     TaskId owner = tensor.owner_task_id;
-    PTO2OrchestratorState &orch = *rt->orchestrator;
+    OrchestratorState &orch = *rt->orchestrator;
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
     // spinning on each. When the segment fills, we wait for the accumulated
@@ -216,7 +215,7 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
         int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
-        while (slot.task_state.load(std::memory_order_acquire) < PTO2_TASK_COMPLETED) {
+        while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
                 // A fatal latched elsewhere (e.g. the scheduler-side wiring
@@ -225,11 +224,11 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > PTO2_TENSOR_DATA_TIMEOUT_CYCLES) {
+                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
                         "Timeout (%llu cycles): producer (ring=%d, local=%d) not completed",
-                        (unsigned long long)PTO2_TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
                     );
                     failed = true;
                     return;
@@ -247,7 +246,7 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
         // completed_watermark reaches the producer's highest consumer id (set at
         // submit in append_fanin_or_fail). Replaces the fanout_refcount ==
         // fanout_count wiring check, which polling removes.
-        PTO2SharedMemoryRingHeader &cons_ring = orch.sm_header->ring;
+        SharedMemoryRingHeader &cons_ring = orch.sm_header->ring;
         while (cons_ring.completed_watermark.load(std::memory_order_acquire) < slot.last_consumer_local_id) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
@@ -257,11 +256,11 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > PTO2_TENSOR_DATA_TIMEOUT_CYCLES) {
+                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
                         "Timeout (%llu cycles): consumers of producer (ring=%d, local=%d) not done",
-                        (unsigned long long)PTO2_TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
                     );
                     failed = true;
                     return;
@@ -301,7 +300,7 @@ wait_for_tensor_ready(RuntimeContext *rt, const ChipTensor &tensor, bool wait_fo
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
-        orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
+        orch.tensor_map.lookup(tensor, [&](ChipTensorMapEntry &entry, OverlapStatus) -> bool {
             TaskId pid = entry.producer_task_id;
             const auto *slot = resolve_producer(pid);
             if (slot == nullptr) return false;

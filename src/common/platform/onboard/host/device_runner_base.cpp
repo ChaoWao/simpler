@@ -107,7 +107,7 @@ HostRuntimeTimeoutConfig resolve_onboard_timeout_config() {
                                      0;
     if (host_timeout_env_set && order_status != RuntimeTimeoutOrderStatus::OK) {
         LOG_WARN(
-            "Ignoring PTO2 timeout env overrides: %s (scheduler=%d ms, op_execute=%llu us, stream_sync=%d ms)",
+            "Ignoring timeout env overrides: %s (scheduler=%d ms, op_execute=%llu us, stream_sync=%d ms)",
             runtime_timeout_order_status_name(order_status), cfg.scheduler_timeout_ms,
             (unsigned long long)cfg.op_execute_timeout_us, cfg.stream_sync_timeout_ms
         );
@@ -323,7 +323,7 @@ int DeviceRunnerBase::setup_static_arena(
         LOG_ERROR("arena bank %u is outside [0, %zu)", arena_bank, arena_banks_.size());
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
+    // Three independent device_malloc'd buffers: GM heap, shared memory, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
     // block. Each arena commits exactly one region, so its base() is the
@@ -1431,7 +1431,7 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     aicpu_seen_callable_ids_.clear();
     aicpu_dlopen_total_ = 0;
 
-    // Release the three per-Worker pooled arenas (GM heap, PTO2 SM, optional
+    // Release the three per-Worker pooled arenas (GM heap, shared memory, optional
     // trb prebuilt runtime arena — each its own device_malloc). Must precede
     // mem_alloc_.finalize() so the arenas free through the still-live
     // allocator, not after it.

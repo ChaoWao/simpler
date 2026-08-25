@@ -34,7 +34,6 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -118,99 +117,17 @@ static std::string format_ring_array(const T (&values)[CHIP_MAX_RING_DEPTH]) {
     return out;
 }
 
-static std::string trim_copy(const std::string &input) {
-    size_t begin = 0;
-    while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
-    }
-    size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
-}
-
-static bool parse_uint_token(
-    const char *name, const std::string &raw, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out
-) {
-    std::string token = trim_copy(raw);
-    if (token.empty()) {
-        LOG_WARN("%s has an empty value in '%s', ignored", name, raw.c_str());
-        return false;
-    }
-
-    if (token[0] == '-') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long parsed = std::strtoull(token.c_str(), &endptr, 10);
-    if (errno == ERANGE || endptr == token.c_str() || *endptr != '\0') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    uint64_t val = static_cast<uint64_t>(parsed);
-
-    if (val < min_val || val > max_val) {
-        LOG_WARN(
-            "%s=%s invalid (must be in [%" PRIu64 ", %" PRIu64 "]), ignored", name, token.c_str(), min_val, max_val
-        );
-        return false;
-    }
-    if (require_power_of_2 && !is_power_of_2_u64(val)) {
-        LOG_WARN("%s=%s invalid (must be a power of 2), ignored", name, token.c_str());
-        return false;
-    }
-    *out = val;
-    return true;
-}
-
-static void apply_env_ring_values(
-    const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t out[CHIP_MAX_RING_DEPTH]
-) {
-    const char *env = std::getenv(name);
-    if (!env) return;
-
-    std::string text(env);
-    if (text.find(',') == std::string::npos) {
-        uint64_t value = 0;
-        if (!parse_uint_token(name, text, min_val, max_val, require_power_of_2, &value)) {
-            return;
+// The ring sizes were once settable process-wide through PTO2_RING_TASK_WINDOW /
+// PTO2_RING_HEAP / PTO2_RING_DEP_POOL. They are per task now, through
+// CallConfig.runtime_env, and nothing reads those names. Exporting one is
+// therefore a silent misconfiguration -- the run takes the compile-time default
+// and the requested sizing appears nowhere -- so it is reported once per bind.
+static void warn_on_retired_ring_env() {
+    static constexpr const char *kRetired[] = {"PTO2_RING_TASK_WINDOW", "PTO2_RING_HEAP", "PTO2_RING_DEP_POOL"};
+    for (const char *name : kRetired) {
+        if (std::getenv(name) != nullptr) {
+            LOG_WARN("%s is no longer read; size the rings per task via CallConfig.runtime_env", name);
         }
-        for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-            out[r] = value;
-        }
-        return;
-    }
-
-    uint64_t parsed[CHIP_MAX_RING_DEPTH]{};
-    size_t pos = 0;
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        size_t comma = text.find(',', pos);
-        std::string token = text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        if (!parse_uint_token(name, token, min_val, max_val, require_power_of_2, &parsed[r])) {
-            return;
-        }
-        if (comma == std::string::npos) {
-            if (r != CHIP_MAX_RING_DEPTH - 1) {
-                LOG_WARN(
-                    "%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env,
-                    CHIP_MAX_RING_DEPTH
-                );
-                return;
-            }
-            pos = text.size();
-        } else {
-            pos = comma + 1;
-        }
-    }
-    if (pos < text.size() || (!text.empty() && text.back() == ',')) {
-        LOG_WARN("%s=%s invalid (expected exactly %d comma-separated values), ignored", name, env, CHIP_MAX_RING_DEPTH);
-        return;
-    }
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        out[r] = parsed[r];
     }
 }
 
@@ -230,9 +147,10 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // Each of ring_task_window / ring_heap / ring_dep_pool is a per-ring array of
-// CHIP_MAX_RING_DEPTH entries (0 = unset). Precedence per ring: per-task entry >
-// PTO2_RING_* env value > compile-time default. A "size all rings the same"
-// request arrives already broadcast to every entry by the caller.
+// CHIP_MAX_RING_DEPTH entries (0 = unset). A per-ring entry wins over the
+// compile-time default, and there is nothing between them: sizing is per task.
+// A "size all rings the same" request arrives already broadcast to every entry
+// by the caller.
 static bool resolve_ring_config(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
     uint64_t eff_task_window_sizes[CHIP_MAX_RING_DEPTH], uint64_t eff_heap_sizes[CHIP_MAX_RING_DEPTH],
@@ -240,14 +158,12 @@ static bool resolve_ring_config(
 ) {
     uint64_t dep_pool_values[CHIP_MAX_RING_DEPTH];
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        eff_task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
-        eff_heap_sizes[r] = PTO2_HEAP_SIZE;
-        dep_pool_values[r] = PTO2_DEP_LIST_POOL_SIZE;
+        eff_task_window_sizes[r] = CHIP_TASK_WINDOW_SIZE;
+        eff_heap_sizes[r] = CHIP_HEAP_SIZE;
+        dep_pool_values[r] = CHIP_DEP_LIST_POOL_SIZE;
     }
 
-    apply_env_ring_values("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_sizes);
-    apply_env_ring_values("PTO2_RING_HEAP", 1024, std::numeric_limits<uint64_t>::max(), false, eff_heap_sizes);
-    apply_env_ring_values("PTO2_RING_DEP_POOL", 4, static_cast<uint64_t>(INT32_MAX), false, dep_pool_values);
+    warn_on_retired_ring_env();
 
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         const uint64_t task_window_override = read_ring_override(ring_task_window, r);
@@ -284,19 +200,19 @@ static bool resolve_ring_config(
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PTO2SharedMemoryHeader *host_header) {
+static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || host_header == nullptr) {
         return 0;
     }
 
-    void *pto2_sm = runtime->get_gm_sm_ptr();
-    if (pto2_sm == nullptr) {
+    void *device_sm = runtime->get_gm_sm_ptr();
+    if (device_sm == nullptr) {
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(PTO2SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, device_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
-        LOG_WARN("Failed to copy PTO2 header from device");
+        LOG_WARN("Failed to copy the shared-memory header from device");
         return 0;
     }
 
@@ -539,7 +455,7 @@ extern "C" int prepared_run_config_compatible_impl(
 }
 
 // per-(cid,config): resolve the cache-key sizing knobs. Pure host parsing over
-// per-task overrides, PTO2_RING_* env, and compile-time defaults. Derived
+// per-task overrides and compile-time defaults. Derived
 // allocation sizes are computed only on cache miss.
 static bool resolve_arena_sizing(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool, ArenaSizingConfig *out
@@ -570,7 +486,7 @@ static bool derive_arena_static_sizes(const ArenaSizingConfig &sizing, ArenaStat
         }
         out->total_heap += sizing.heap_sizes[r];
     }
-    out->sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(sizing.task_window_sizes);
+    out->sm_size = SharedMemoryHandle::calculate_size_per_ring(sizing.task_window_sizes);
     return true;
 }
 
@@ -673,7 +589,7 @@ static void apply_orch_sched_env_flags(Runtime *runtime) {
     );
 }
 
-// per-(cid,config): reserve and acquire the static device pools. GM heap, PTO2
+// per-(cid,config): reserve and acquire the static device pools. GM heap, shared memory
 // shared memory, and the prebuilt runtime arena all live in one backing
 // allocation; setup_static_arena reserves the three regions and commits in one
 // shot. The runtime-arena size is recovered by replaying the (pure, cheap)
@@ -705,7 +621,7 @@ static bool ensure_static_arenas(
     out->gm_sm = api->acquire_pooled_gm_sm();
     int64_t t_sm_end = _now_ms();
     if (out->gm_sm == nullptr) {
-        LOG_ERROR("Failed to acquire pooled PTO2 shared memory");
+        LOG_ERROR("Failed to acquire pooled shared memory");
         return false;
     }
 
@@ -748,7 +664,7 @@ static bool build_runtime_image(
     }
 
     RuntimeContext *rt = runtime_init_data_from_layout(
-        *host_arena, layout, PTO2_MODE_EXECUTE, ptrs.gm_sm, sizes.sm_size, ptrs.gm_heap, sizing.heap_sizes
+        *host_arena, layout, MODE_EXECUTE, ptrs.gm_sm, sizes.sm_size, ptrs.gm_heap, sizing.heap_sizes
     );
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
@@ -844,7 +760,7 @@ static bool build_and_cache_prebuilt_arena(
 
 /**
  * Per-run binding: build device-side argument storage (tensor copy-out, GM
- * heap, PTO2 shared memory) and publish it to the runtime. Assumes the
+ * heap, shared memory) and publish it to the runtime. Assumes the
  * callable-side state (kernel binaries, orch SO bytes, func/config names)
  * is already populated by register_callable_impl.
  *
@@ -1017,11 +933,11 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
-    PTO2SharedMemoryHeader host_header;
+    SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {
-        runtime_status = pto2_read_runtime_status(runtime, api, &host_header);
+        runtime_status = read_runtime_status(runtime, api, &host_header);
     }
     if (runtime_status != 0) {
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);
@@ -1033,7 +949,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         if (sched_error_code == SIMPLER_ERROR_SCHEDULER_TIMEOUT) {
             int32_t detail = host_header.sched_stall_detail.load(std::memory_order_acquire);
             LOG_ERROR(
-                "PTO2 scheduler timeout sub_class=%s (detail=%d) completed=%d/%d running=%d ready=%d waiting=%d "
+                "scheduler timeout sub_class=%s (detail=%d) completed=%d/%d running=%d ready=%d waiting=%d "
                 "orch_done=%d stuck_task_id=%" PRId64 " stuck_core=%d",
                 stall_detail_name(detail), detail, host_header.sched_stall_completed.load(std::memory_order_relaxed),
                 host_header.sched_stall_total.load(std::memory_order_relaxed),

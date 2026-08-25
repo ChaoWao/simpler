@@ -23,29 +23,29 @@ class OrchestratorFaninTest : public ::testing::Test {
 protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
-    PTO2OrchestratorState orch{};
-    PTO2SchedulerState sched{};
-    PTO2OrchestratorLayout orch_layout{};
-    PTO2SchedulerLayout sched_layout{};
+    SharedMemoryHandle *sm_handle = nullptr;
+    OrchestratorState orch{};
+    SchedulerState sched{};
+    OrchestratorLayout orch_layout{};
+    SchedulerLayout sched_layout{};
     std::vector<char> gm_heap;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(4096 * CHIP_MAX_RING_DEPTH);
 
         int32_t task_window_sizes[CHIP_MAX_RING_DEPTH];
         for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-            task_window_sizes[r] = static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE);
+            task_window_sizes[r] = static_cast<int32_t>(CHIP_TASK_WINDOW_SIZE);
         }
 
-        orch_layout = PTO2OrchestratorState::reserve_layout(runtime_arena, task_window_sizes);
-        sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
+        orch_layout = OrchestratorState::reserve_layout(runtime_arena, task_window_sizes);
+        sched_layout = SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
         ASSERT_TRUE(orch.init_data_from_layout(
-            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE
+            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, CHIP_TASK_WINDOW_SIZE
         ));
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
@@ -90,10 +90,10 @@ TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].slot_state(), &producer_slot);
     // A plain set_dependencies() dep is conservative RETAIN: DEP_WAIT|DEP_RETAIN.
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
-    // fanout_count is bit-packed: bit31 (PTO2_FANOUT_SCOPE_BIT) is the owning-scope
+    // fanout_count is bit-packed: bit31 (FANOUT_SCOPE_BIT) is the owning-scope
     // ref, low bits the consumer count. The duplicate explicit dep is deduped to a
     // single consumer, so this is scope + 1.
-    EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+    EXPECT_EQ(producer_slot.fanout_count, FANOUT_SCOPE_BIT + 1);
 }
 
 // An explicit ordering-only dep (the primitive add_dep_wait() lowers to) yields a
@@ -142,7 +142,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
     ASSERT_NE(consumer_slot.payload, nullptr);
     ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
-    EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+    EXPECT_EQ(producer_slot.fanout_count, FANOUT_SCOPE_BIT + 1);
 }
 
 // The duplicate lands in the spill region (>64 fanin), exercising
@@ -151,7 +151,7 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
 TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     orch.begin_scope();
 
-    constexpr int kProducers = PTO2_FANIN_INLINE_CAP + 1;  // 65: the last one spills
+    constexpr int kProducers = CHIP_FANIN_INLINE_CAP + 1;  // 65: the last one spills
     std::vector<TaskOutputTensors> producers;
     producers.reserve(kProducers);
     for (int i = 0; i < kProducers; i++) {
@@ -179,18 +179,18 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     auto &consumer_slot =
         sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
     ASSERT_NE(consumer_slot.payload, nullptr);
-    PTO2TaskPayload *payload = consumer_slot.payload;
+    TaskPayload *payload = consumer_slot.payload;
     EXPECT_EQ(payload->fanin_actual_count, kProducers);  // duplicate folded, not 66
 
     TaskId dup = producers.back().task_id();
     auto &dup_slot = sm_handle->header->rings[dup.ring()].get_slot_state_by_task_id(dup.local());
-    EXPECT_EQ(dup_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);  // one pin, not two
+    EXPECT_EQ(dup_slot.fanout_count, FANOUT_SCOPE_BIT + 1);  // one pin, not two
 
     // The first spilled edge is the duplicated producer; its flags OR-folded to
     // WAIT|RETAIN across the two discovery kinds.
     ASSERT_NE(payload->fanin_spill_pool, nullptr);
-    PTO2FaninPool &spill_pool = *payload->fanin_spill_pool;
-    PTO2FaninSpillEntry &spill_edge = spill_pool.base[payload->fanin_spill_start % spill_pool.capacity];
+    FaninPool &spill_pool = *payload->fanin_spill_pool;
+    FaninSpillEntry &spill_edge = spill_pool.base[payload->fanin_spill_start % spill_pool.capacity];
     EXPECT_EQ(spill_edge.slot_state(), &dup_slot);
     EXPECT_EQ(spill_edge.flags(), DEP_WAIT | DEP_RETAIN);
 }
@@ -207,7 +207,7 @@ TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
         sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local());
     // COMPLETED but not consumed (the open scope still pins it): the consumer takes
     // the all-completed fast path.
-    producer_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    producer_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     int32_t rc_before = producer_slot.fanout_refcount.load();
 
     TaskId deps[] = {producer.task_id()};
@@ -237,7 +237,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     auto &ring = sm_handle->header->rings[1];
     auto &first_slot = ring.get_slot_state_by_task_id(static_cast<int32_t>(first.task_id().local()));
     orch.end_scope();
-    first_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    first_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     sched.check_and_handle_consumed(first_slot);
     ASSERT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1);
 
@@ -270,7 +270,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     EXPECT_NE(log.find("Heap ring 1:"), std::string::npos);
     EXPECT_NE(log.find("used=3072"), std::string::npos);
     EXPECT_NE(log.find("available=1024"), std::string::npos);
-    EXPECT_EQ(log.find("PTO2_RING_HEAP=<pow2>"), std::string::npos);
+    EXPECT_EQ(log.find("runtime_env.ring_heap=<bytes>"), std::string::npos);
 }
 
 TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopesShareRing) {
@@ -339,12 +339,12 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
 }
 
 // Regression for issue #1188: scope_tasks_cap must equal the real in-flight budget
-// (sum of the runtime per-ring windows), not the compile-time PTO2_SCOPE_TASKS_CAP.
+// (sum of the runtime per-ring windows), not the compile-time CHIP_SCOPE_TASKS_CAP.
 // reserve_layout only computes offsets, so no commit()/backing is needed here.
 TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
     auto cap_for = [](const int32_t windows[CHIP_MAX_RING_DEPTH]) {
         DeviceArena arena;
-        int32_t cap = PTO2OrchestratorState::reserve_layout(arena, windows).scope_tasks_cap;
+        int32_t cap = OrchestratorState::reserve_layout(arena, windows).scope_tasks_cap;
         arena.release();
         return cap;
     };
@@ -353,9 +353,9 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
 
     // Default window: cap == the old compile-time value (no behavior change).
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
-        windows[r] = PTO2_TASK_WINDOW_SIZE;
-    EXPECT_EQ(cap_for(windows), PTO2_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
-    EXPECT_EQ(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
+        windows[r] = CHIP_TASK_WINDOW_SIZE;
+    EXPECT_EQ(cap_for(windows), CHIP_TASK_WINDOW_SIZE * CHIP_MAX_RING_DEPTH);
+    EXPECT_EQ(cap_for(windows), CHIP_SCOPE_TASKS_CAP);
 
     // Shrunk window: cap shrinks to the real budget (no over-allocation).
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
@@ -364,9 +364,9 @@ TEST(OrchestratorLayoutScopeTasksCap, FollowsRuntimeWindowSum) {
 
     // Enlarged window past the compile default: cap grows to match the rings, so a
     // large scope no longer hits a premature SCOPE_TASKS_OVERFLOW (the bug fixed).
-    const int32_t big = PTO2_TASK_WINDOW_SIZE * 2;
+    const int32_t big = CHIP_TASK_WINDOW_SIZE * 2;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++)
         windows[r] = big;
     EXPECT_EQ(cap_for(windows), big * CHIP_MAX_RING_DEPTH);
-    EXPECT_GT(cap_for(windows), PTO2_SCOPE_TASKS_CAP);
+    EXPECT_GT(cap_for(windows), CHIP_SCOPE_TASKS_CAP);
 }

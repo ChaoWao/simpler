@@ -2,7 +2,7 @@
 
 ## 1. Goal
 
-Define a single, main-branch-aligned specification for PTO2 cluster submission that combines:
+Define a single, main-branch-aligned specification for cluster submission that combines:
 
 1. Product requirements (what must be true).
 2. Runtime design (how it is implemented on current main baseline).
@@ -37,7 +37,7 @@ Legacy per-task submit (`kernel_id + worker_type`) cannot express atomic co-disp
 Design must preserve the current main runtime architecture:
 
 1. Executor threading split (orchestrator thread vs scheduler threads); the orchestrator thread exits after the task graph is built while scheduler threads dispatch to completion.
-2. Shared-memory hot/cold split (`PTO2TaskDescriptor` hot + `PTO2TaskPayload` cold).
+2. Shared-memory hot/cold split (`TaskDescriptor` hot + `TaskPayload` cold).
 
 ## 5. Terminology
 
@@ -82,11 +82,11 @@ Rules:
 4. `aiv0_kernel_id` and `aiv1_kernel_id` are semantically equivalent.
 5. Wrappers are orchestration sugar only (inline in orchestration API); no dedicated runtime ops entries.
 6. Submit-contract types are defined once in a shared header-only submit-types surface consumed by orchestration and runtime headers.
-7. Invalid submits follow existing PTO2 behavior (`always_assert`), not a new recoverable return-code API.
+7. Invalid submits follow existing behavior (`always_assert`), not a new recoverable return-code API.
 
 ## 7. Data Model (Requirements + Design)
 
-`PTO2TaskDescriptor` (hot path) carries mixed-task identity/state:
+`TaskDescriptor` (hot path) carries mixed-task identity/state:
 
 1. `task_id`
 2. `active_mask`
@@ -94,7 +94,7 @@ Rules:
 4. `kernel_id[3]` for `(AIC, AIV0, AIV1)`
 5. dependency heads/counters and packed-buffer metadata
 
-`PTO2TaskPayload` (cold path) carries:
+`TaskPayload` (cold path) carries:
 
 1. shared args/tensors/scalars copied once per mixed submit
 2. fanin mixed-task IDs

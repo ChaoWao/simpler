@@ -18,7 +18,7 @@ One case, `ringbuffer_stress`, sized to hurt:
 
 | `runtime_env` key | Value here | Note |
 | ----------------- | ---------- | ---- |
-| `ring_task_window` | 64 | Default is 16384 (`PTO2_TASK_WINDOW_SIZE`, `src/a5/runtime/tensormap_and_ringbuffer/runtime/runtime_types.h`) — **256× smaller** |
+| `ring_task_window` | 64 | Default is 16384 (`CHIP_TASK_WINDOW_SIZE`, `src/a5/runtime/tensormap_and_ringbuffer/runtime/runtime_types.h`) — **256× smaller** |
 | `ring_heap` | 4 MiB | bytes per ring |
 | `ring_dep_pool` | 256 | |
 
@@ -30,7 +30,7 @@ referenced, the golden check fails or the orchestrator wedges.
 Two things this example is the reference for:
 
 - **Per-case ring sizing through `config.runtime_env`**, not the process-global
-  `PTO2_RING_*` environment variables. The rings are sized per task, so one
+  now-retired `PTO2_RING_*` environment variables. The rings are sized per task, so one
   suite can mix a stress case with normally-sized ones.
 - **Non-power-of-2 sizes are accepted.** 4 MiB is chosen to keep the stress
   intent compact, not because the runtime requires a round number.

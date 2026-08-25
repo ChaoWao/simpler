@@ -287,7 +287,7 @@ class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
         _assert_annotations(deps)
 
         # A tensormap edge is the only one that carries the producer's slice, and
-        # it is read off the live PTO2TensorMapEntry before an INOUT+COVERED
+        # it is read off the live ChipTensorMapEntry before an INOUT+COVERED
         # lookup removes it — an empty producer block means that ordering broke.
         for e in deps["edges"]:
             if e["source"] != "tensormap":

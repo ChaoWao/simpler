@@ -25,12 +25,12 @@ inline constexpr int32_t INVALID_KERNEL_ID = -1;
 /**
  * Subtask slot count: AIC, AIV0, AIV1
  */
-inline constexpr int32_t PTO2_SUBTASK_SLOT_COUNT = 3;
+inline constexpr int32_t SUBTASK_SLOT_COUNT = 3;
 
 /**
  * Subtask slot indices
  */
-enum class PTO2SubtaskSlot : uint8_t {
+enum class SubtaskSlot : uint8_t {
     AIC = 0,
     AIV0 = 1,
     AIV1 = 2,
@@ -39,9 +39,9 @@ enum class PTO2SubtaskSlot : uint8_t {
 /**
  * Subtask mask bits (for ActiveMask)
  */
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIC = (1u << 0);   // 0x1
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIV0 = (1u << 1);  // 0x2
-inline constexpr uint8_t PTO2_SUBTASK_MASK_AIV1 = (1u << 2);  // 0x4
+inline constexpr uint8_t SUBTASK_MASK_AIC = (1u << 0);   // 0x1
+inline constexpr uint8_t SUBTASK_MASK_AIV0 = (1u << 1);  // 0x2
+inline constexpr uint8_t SUBTASK_MASK_AIV1 = (1u << 2);  // 0x4
 
 // Dispatch-predicate comparison operator. The scheduler evaluates the predicate
 // at the dispatch point — the task is ready (fanin satisfied), so the predicate
@@ -105,7 +105,7 @@ struct DispatchPredicate {
  * with an empty core_mask route to a dedicated DUMMY ready queue and are
  * completed inline by the scheduler dispatch loop, bypassing core allocation.
  */
-enum class PTO2ResourceShape : uint8_t {
+enum class ResourceShape : uint8_t {
     AIC = 0,    // Single AIC
     AIV = 1,    // Single AIV
     MIX = 2,    // Full cluster (dispatch uses active_mask)
@@ -114,8 +114,8 @@ enum class PTO2ResourceShape : uint8_t {
 
 // Number of *dispatchable* resource shapes (AIC, AIV, MIX). DUMMY does not
 // allocate a per-shape ready_queue entry / local buffer — it lives in a
-// dedicated queue inside PTO2SchedulerState.
-inline constexpr int32_t PTO2_NUM_RESOURCE_SHAPES = 3;
+// dedicated queue inside SchedulerState.
+inline constexpr int32_t NUM_RESOURCE_SHAPES = 3;
 
 /**
  * Bitmask of active subtask slots (AIC/AIV0/AIV1), sizeof == 1.
@@ -132,17 +132,17 @@ public:
 
     uint8_t raw() const { return raw_; }
 
-    bool subtask_active(PTO2SubtaskSlot slot) const { return (raw_ & (1u << static_cast<uint8_t>(slot))) != 0; }
+    bool subtask_active(SubtaskSlot slot) const { return (raw_ & (1u << static_cast<uint8_t>(slot))) != 0; }
 
     uint8_t core_mask() const { return raw_ & 0x07u; }
 
-    PTO2ResourceShape to_shape() const {
+    ResourceShape to_shape() const {
         uint8_t cmask = core_mask();
-        if (cmask == 0) return PTO2ResourceShape::DUMMY;
+        if (cmask == 0) return ResourceShape::DUMMY;
         int bit_count = __builtin_popcount(cmask);
-        if (bit_count >= 2) return PTO2ResourceShape::MIX;
-        if (cmask & PTO2_SUBTASK_MASK_AIC) return PTO2ResourceShape::AIC;
-        return PTO2ResourceShape::AIV;
+        if (bit_count >= 2) return ResourceShape::MIX;
+        if (cmask & SUBTASK_MASK_AIC) return ResourceShape::AIC;
+        return ResourceShape::AIV;
     }
 
     bool operator==(ActiveMask other) const { return raw_ == other.raw_; }
@@ -240,9 +240,9 @@ struct MixedKernels {
 
     ActiveMask to_active_mask() const {
         uint8_t mask = 0;
-        if (aic_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIC;
-        if (aiv0_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIV0;
-        if (aiv1_kernel_id != INVALID_KERNEL_ID) mask |= PTO2_SUBTASK_MASK_AIV1;
+        if (aic_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIC;
+        if (aiv0_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIV0;
+        if (aiv1_kernel_id != INVALID_KERNEL_ID) mask |= SUBTASK_MASK_AIV1;
         return ActiveMask(mask);
     }
 };
@@ -254,9 +254,9 @@ struct MixedKernels {
  * is expanded into at dispatch time.  Each block receives a unique
  * block_idx in [0, block_num) via the per-dispatch LocalContext.
  */
-class PTO2LaunchSpec {
+class LaunchSpec {
 public:
-    constexpr PTO2LaunchSpec() = default;
+    constexpr LaunchSpec() = default;
 
     int16_t block_num() const { return block_num_; }
     void set_block_num(int16_t n) { block_num_ = n; }

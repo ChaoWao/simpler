@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for ChipTaskSlotState lifecycle through PTO2SchedulerState API.
+ * Unit tests for ChipTaskSlotState lifecycle through SchedulerState API.
  *
  * These tests drive state transitions via src methods (release_fanin,
  * on_subtask_complete, check_and_handle_consumed) rather than manually
@@ -33,8 +33,8 @@
 
 class TaskStateTest : public ::testing::Test {
 protected:
-    PTO2SchedulerState sched;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    SchedulerState sched;
+    SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
 
@@ -42,13 +42,13 @@ protected:
     // mirroring orch::prepare_task's bind_buffers: every production slot has a
     // payload, and the scheduler's release/propagate paths dereference it.
     static constexpr int kSlotPayloadPoolSize = 16;
-    PTO2TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
+    TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
     int slot_payload_pool_idx_ = 0;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
+        auto layout = SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(layout, sched_arena, sm_handle->header));
         sched.wire_arena_pointers(layout, sched_arena);
@@ -60,7 +60,7 @@ protected:
         sm_arena.release();
     }
 
-    void init_slot(ChipTaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count) {
+    void init_slot(ChipTaskSlotState &slot, ChipTaskState state, int32_t fanin_count, int32_t fanout_count) {
         memset(&slot, 0, sizeof(slot));
         slot.task_state.store(state);
         slot.fanin_count = fanin_count;
@@ -70,11 +70,11 @@ protected:
         slot.fanout_lock.store(0);
         slot.fanout_head = nullptr;
         slot.ring_id = 0;
-        slot.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+        slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         slot.completed_subtasks.store(0);
         slot.total_required_subtasks = 1;
         slot.logical_block_num = 1;
-        PTO2TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
+        TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
         memset(&slot_pl, 0, sizeof(slot_pl));
         slot.payload = &slot_pl;
     }
@@ -86,7 +86,7 @@ protected:
 // =============================================================================
 TEST_F(TaskStateTest, FullLifecycleThroughAPI) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 1;
     slot.completed_subtasks.store(0);
 
@@ -99,11 +99,11 @@ TEST_F(TaskStateTest, FullLifecycleThroughAPI) {
     EXPECT_TRUE(done);
 
     // Manually transition to COMPLETED (normally done by scheduler dispatch loop)
-    slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
 
     // Fanout released -> CONSUMED
     sched.release_producer(slot);
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 // =============================================================================
@@ -115,13 +115,13 @@ TEST_F(TaskStateTest, FullLifecycleThroughAPI) {
 // =============================================================================
 TEST_F(TaskStateTest, ReadyPathStaysPending) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
 
     bool ready = sched.release_fanin_and_check_ready(slot);
     ASSERT_TRUE(ready) << "Task should be detected as ready via refcount";
 
     // task_state remains PENDING -- there is no intermediate ready/running state.
-    EXPECT_EQ(slot.task_state.load(), PTO2_TASK_PENDING) << "release_fanin_and_check_ready must not write task_state";
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_PENDING) << "release_fanin_and_check_ready must not write task_state";
 }
 
 // =============================================================================
@@ -129,7 +129,7 @@ TEST_F(TaskStateTest, ReadyPathStaysPending) {
 // =============================================================================
 TEST_F(TaskStateTest, MultiFaninPartialNotReady) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 3, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 3, 1);
 
     EXPECT_FALSE(sched.release_fanin_and_check_ready(slot));
     EXPECT_FALSE(sched.release_fanin_and_check_ready(slot));
@@ -144,7 +144,7 @@ TEST_F(TaskStateTest, ConcurrentFaninExactlyOneReady) {
 
     for (int round = 0; round < ROUNDS; round++) {
         alignas(64) ChipTaskSlotState slot;
-        init_slot(slot, PTO2_TASK_PENDING, 3, 1);
+        init_slot(slot, CHIP_TASK_PENDING, 3, 1);
         std::atomic<int> ready_count{0};
 
         auto release = [&]() {
@@ -170,7 +170,7 @@ TEST_F(TaskStateTest, ConcurrentSubtaskCompletion) {
 
     for (int round = 0; round < ROUNDS; round++) {
         alignas(64) ChipTaskSlotState slot;
-        init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+        init_slot(slot, CHIP_TASK_PENDING, 1, 1);
         slot.total_required_subtasks = 3;
         slot.completed_subtasks.store(0);
         std::atomic<int> done_count{0};
@@ -199,7 +199,7 @@ TEST_F(TaskStateTest, ConcurrentSubtaskCompletion) {
 // =============================================================================
 TEST_F(TaskStateTest, DoubleSubtaskCompletionCounterWeakness) {
     alignas(64) ChipTaskSlotState slot;
-    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
     slot.total_required_subtasks = 2;
     slot.completed_subtasks.store(0);
 

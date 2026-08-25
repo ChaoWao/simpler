@@ -19,7 +19,7 @@
  *   +---------------------------+
  *   | TaskDescriptor[]          |
  *   | TaskPayload[]             |
- *   | TaskSlotState[]           |
+ *   | ChipTaskSlotState[]       |
  *   +---------------------------+
  *
  * Design principles:
@@ -44,30 +44,30 @@
 // Shared Memory Header
 // =============================================================================
 
-struct PTO2SharedMemoryHandle;
+struct SharedMemoryHandle;
 
 /**
  * Per-ring flow control state in shared memory.
  * Written/read by Orchestrator and Scheduler for synchronization.
  */
-struct alignas(64) PTO2RingFlowControl {
+struct alignas(64) ChipRingFlowControl {
     // Written by Orchestrator, read by Scheduler. There is no reverse channel:
     // the ring is whole-graph-resident, so the scheduler never reclaims task
     // slots and has nothing to publish back.
     alignas(64) std::atomic<int32_t> current_task_index;  // Task ring head (next to allocate)
 
-    // Per-boot SM reset. PTO2TaskAllocator::init() seeds its private
+    // Per-boot SM reset. TaskAllocator::init() seeds its private
     // local_task_id_ to 0 *without* dereferencing current_task_index — it
     // relies on this reset running on every AICPU boot so 0 stays in sync. If
     // you ever change the initial fc value or the boot ordering, update
-    // PTO2TaskAllocator::init (ring_buffer.h) in the same change, or
+    // TaskAllocator::init (ring_buffer.h) in the same change, or
     // submit IDs will be off by the divergence.
     void init() { current_task_index.store(0, std::memory_order_relaxed); }
 
-    bool validate(PTO2SharedMemoryHandle *handle) const;
+    bool validate(SharedMemoryHandle *handle) const;
 };
 
-static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be exactly one cache line (64B)");
+static_assert(sizeof(ChipRingFlowControl) == 64, "ChipRingFlowControl must be exactly one cache line (64B)");
 
 /**
  * Per-ring shared memory header section.
@@ -75,8 +75,8 @@ static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be ex
  * Groups flow-control, layout info, and per-ring data pointers for a single ring.
  * Pointers are host-side only (set by setup_pointers, invalid on device).
  */
-struct alignas(64) PTO2SharedMemoryRingHeader {
-    PTO2RingFlowControl fc;
+struct alignas(64) SharedMemoryRingHeader {
+    ChipRingFlowControl fc;
 
     // Highest task_id such that every task with id in [0, completed_watermark]
     // has its completion_flags byte set. Advanced over the full contiguous
@@ -92,8 +92,8 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
 
     // Per-ring data pointers (host-side, set by setup_pointers)
-    PTO2TaskDescriptor *task_descriptors;
-    PTO2TaskPayload *task_payloads;
+    TaskDescriptor *task_descriptors;
+    TaskPayload *task_payloads;
     ChipTaskSlotState *slot_states;
 
     // Polling-completion state (device-addressed array, one byte per slot).
@@ -139,11 +139,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
     int32_t get_slot_by_task_id(int32_t local_task_id) { return local_task_id & task_window_mask; }
 
-    PTO2TaskDescriptor &get_task_by_slot(int32_t slot) { return task_descriptors[slot]; }
+    TaskDescriptor &get_task_by_slot(int32_t slot) { return task_descriptors[slot]; }
 
-    PTO2TaskDescriptor &get_task_by_task_id(int32_t local_id) {
-        return task_descriptors[get_slot_by_task_id(local_id)];
-    }
+    TaskDescriptor &get_task_by_task_id(int32_t local_id) { return task_descriptors[get_slot_by_task_id(local_id)]; }
 
     // No get_payload_by_slot / get_payload_by_task_id here: a payload is reached
     // through its slot state's `payload` delta, which the image's restack rebinds to
@@ -156,10 +154,10 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     }
 };
 
-static_assert(sizeof(PTO2SharedMemoryRingHeader) == 192, "PTO2SharedMemoryRingHeader layout drift");
+static_assert(sizeof(SharedMemoryRingHeader) == 192, "SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 144,
-    "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
+    offsetof(SharedMemoryRingHeader, task_descriptors_offset) == 144,
+    "SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 
 /**
@@ -167,9 +165,9 @@ static_assert(
  *
  * Contains per-ring flow control and global layout information.
  */
-struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
+struct alignas(CHIP_ALIGN_SIZE) SharedMemoryHeader {
     // === RING FLOW CONTROL + LAYOUT INFO (single ring, set once at init) ===
-    PTO2SharedMemoryRingHeader ring;
+    SharedMemoryRingHeader ring;
 
     // === GLOBAL FIELDS ===
     std::atomic<int32_t> orchestrator_done;  // Flag: orchestration complete
@@ -190,11 +188,9 @@ struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
     std::atomic<int32_t> sched_error_thread;   // Thread index of last error writer
 };
 
-static_assert(sizeof(PTO2SharedMemoryHeader) == 256, "PTO2SharedMemoryHeader layout drift");
-static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 200, "PTO2SharedMemoryHeader total_size layout drift");
-static_assert(
-    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 208, "PTO2SharedMemoryHeader orch_error_code layout drift"
-);
+static_assert(sizeof(SharedMemoryHeader) == 256, "SharedMemoryHeader layout drift");
+static_assert(offsetof(SharedMemoryHeader, total_size) == 200, "SharedMemoryHeader total_size layout drift");
+static_assert(offsetof(SharedMemoryHeader, orch_error_code) == 208, "SharedMemoryHeader orch_error_code layout drift");
 
 // =============================================================================
 // Shared Memory Handle
@@ -202,13 +198,13 @@ static_assert(
 
 /**
  * Handle for shared memory lifecycle management (create/destroy).
- * Runtime components (orchestrator, scheduler) use PTO2SharedMemoryHeader* directly.
+ * Runtime components (orchestrator, scheduler) use SharedMemoryHeader* directly.
  */
-struct PTO2SharedMemoryHandle {
+struct SharedMemoryHandle {
     void *sm_base;     // Base address of shared memory
     uint64_t sm_size;  // Total size of shared memory
 
-    PTO2SharedMemoryHeader *header;
+    SharedMemoryHeader *header;
 
     // Ownership flag
     bool is_owner;  // True if this handle allocated the memory
@@ -218,10 +214,10 @@ struct PTO2SharedMemoryHandle {
     static uint64_t calculate_size(uint64_t task_window_size);
 
     // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init using
-    // default PTO2_TASK_WINDOW_SIZE. Only valid when the arena is otherwise empty
+    // default CHIP_TASK_WINDOW_SIZE. Only valid when the arena is otherwise empty
     // (the call performs the single commit). All memory is owned by the arena —
     // caller must not call destroy().
-    static PTO2SharedMemoryHandle *create_and_init_default(DeviceArena &arena);
+    static SharedMemoryHandle *create_and_init_default(DeviceArena &arena);
 
     // === Instance methods ===
 
@@ -278,39 +274,39 @@ private:
 //
 // These helpers compute those addresses by offset arithmetic on the SM
 // device base. Pure pointer math, no loads/stores; safe to call from host.
-// The same arithmetic happens on AICPU too (via PTO2SharedMemoryHandle's
+// The same arithmetic happens on AICPU too (via SharedMemoryHandle's
 // own setup_pointers), so values are guaranteed consistent across sides.
-namespace pto2_sm_layout {
+namespace sm_layout {
 
 inline std::atomic<int32_t> *orch_error_code_addr(void *sm_dev_base) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
-        static_cast<char *>(sm_dev_base) + offsetof(PTO2SharedMemoryHeader, orch_error_code)
+        static_cast<char *>(sm_dev_base) + offsetof(SharedMemoryHeader, orch_error_code)
     );
 }
 
-inline PTO2SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base) noexcept {
-    return reinterpret_cast<PTO2SharedMemoryRingHeader *>(
-        static_cast<char *>(sm_dev_base) + offsetof(PTO2SharedMemoryHeader, ring)
+inline SharedMemoryRingHeader *ring_header_addr(void *sm_dev_base) noexcept {
+    return reinterpret_cast<SharedMemoryRingHeader *>(
+        static_cast<char *>(sm_dev_base) + offsetof(SharedMemoryHeader, ring)
     );
 }
 
 inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noexcept {
     return reinterpret_cast<std::atomic<int32_t> *>(
-        reinterpret_cast<char *>(ring_header_addr(sm_dev_base)) + offsetof(PTO2SharedMemoryRingHeader, fc) +
-        offsetof(PTO2RingFlowControl, current_task_index)
+        reinterpret_cast<char *>(ring_header_addr(sm_dev_base)) + offsetof(SharedMemoryRingHeader, fc) +
+        offsetof(ChipRingFlowControl, current_task_index)
     );
 }
 
 // Byte offsets (from the SM base) of the ring's segments. The layout is: header, then
 // descriptors -> payloads -> slot_states -> completion_flags -> the three argument
-// pools, every segment PTO2_ALIGN_UP-padded. RingImageExtents dimensions them: the
+// pools, every segment CHIP_ALIGN_UP-padded. RingImageExtents dimensions them: the
 // mirror for the worst case the API allows, the image for what this bind holds, which
 // is what makes the live prefixes contiguous and the upload one copy.
 //
 // The pools sit last because nothing on the device resolves a segment past
 // completion_flags: a payload names its argument regions by delta, so the four
 // slot-pitched offsets are all the attach path computes.
-struct PTO2RingSegmentOffsets {
+struct ChipRingSegmentOffsets {
     uint64_t descriptors;
     uint64_t payloads;
     uint64_t slot_states;
@@ -335,7 +331,7 @@ struct RingImageExtents {
 inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
     return RingImageExtents{
         task_window_size,
-        task_window_size * PTO2_MAX_FANIN,
+        task_window_size * CHIP_MAX_FANIN,
         task_window_size * MAX_TENSOR_ARGS,
         task_window_size * MAX_SCALAR_ARGS,
     };
@@ -346,36 +342,36 @@ inline RingImageExtents mirror_extents(uint64_t task_window_size) noexcept {
 // `sm_base`) and the device-address helpers below (which add `sm_dev_base`). Adding
 // or reordering a segment is a one-line edit here; every consumer follows
 // automatically, so the layout walk can never silently disagree across call sites.
-inline PTO2RingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
-    uint64_t off = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
-    PTO2RingSegmentOffsets o{};
+inline ChipRingSegmentOffsets ring_segment_offsets(const RingImageExtents &e) noexcept {
+    uint64_t off = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
+    ChipRingSegmentOffsets o{};
     o.descriptors = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
     o.payloads = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
     o.slot_states = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
     o.completion_flags = off;
-    off += PTO2_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), CHIP_ALIGN_SIZE);
     o.fanin_pool = off;
-    off += PTO2_ALIGN_UP(e.fanin_elems * sizeof(int32_t), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.fanin_elems * sizeof(int32_t), CHIP_ALIGN_SIZE);
     o.tensor_pool = off;
-    off += PTO2_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.tensor_elems * sizeof(ChipTensor), CHIP_ALIGN_SIZE);
     o.scalar_pool = off;
-    off += PTO2_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), PTO2_ALIGN_SIZE);
+    off += CHIP_ALIGN_UP(e.scalar_elems * sizeof(uint64_t), CHIP_ALIGN_SIZE);
     o.end = off;
     return o;
 }
 
-inline PTO2RingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) noexcept {
+inline ChipRingSegmentOffsets ring_segment_offsets(uint64_t task_window_size) noexcept {
     return ring_segment_offsets(mirror_extents(task_window_size));
 }
 
-// Every per-task region starts on a cache line, which PTO2TaskPayload::init's
+// Every per-task region starts on a cache line, which TaskPayload::init's
 // round-up scalar memcpy relies on. ChipTensor is 2 cache lines, so a tensor region
 // is aligned for any count; the fanin and scalar strides need it stated.
 static_assert(
-    (PTO2_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
+    (CHIP_MAX_FANIN * sizeof(int32_t)) % ARG_POOL_ALIGN == 0,
     "the fanin region's cap must be a whole number of cache lines"
 );
 static_assert(
@@ -440,7 +436,7 @@ inline uint64_t rebased_heap_addr(uint64_t addr, const HeapRebase &rebase) noexc
 // orchestrator wrote into an image dimensioned for what this bind holds, where the
 // prefixes are contiguous and can travel as one copy.
 //
-// `out_base` must be PTO2_ALIGN_SIZE-aligned and hold
+// `out_base` must be CHIP_ALIGN_SIZE-aligned and hold
 // `ring_segment_offsets(image_extents(used)).end` bytes. Returns that byte count.
 //
 // Three things the restack has to fix up, all because the image is not the mirror:
@@ -477,23 +473,23 @@ inline uint64_t compact_live_image(
     always_assert(used.fanin_elems <= mirror.fanin_elems);
     always_assert(used.tensor_elems <= mirror.tensor_elems);
     always_assert(used.scalar_elems <= mirror.scalar_elems);
-    const PTO2RingSegmentOffsets from = ring_segment_offsets(mirror);
-    const PTO2RingSegmentOffsets to = ring_segment_offsets(image_extents(used));
+    const ChipRingSegmentOffsets from = ring_segment_offsets(mirror);
+    const ChipRingSegmentOffsets to = ring_segment_offsets(image_extents(used));
 
     // The header and the descriptors offset are pitch-independent, so the header
     // lands where it already was.
     std::memcpy(out_base, mirror_base, to.descriptors);
-    auto &out_ring = reinterpret_cast<PTO2SharedMemoryHeader *>(out_base)->ring;
+    auto &out_ring = reinterpret_cast<SharedMemoryHeader *>(out_base)->ring;
     out_ring.task_descriptors = nullptr;
     out_ring.task_payloads = nullptr;
     out_ring.slot_states = nullptr;
     out_ring.completion_flags = nullptr;
 
     const uint64_t nt = used.submitted_tasks;
-    std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(PTO2TaskDescriptor));
-    // One copy, not one per payload: PTO2TaskPayload is fixed-size, so the mirror and
+    std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(TaskDescriptor));
+    // One copy, not one per payload: TaskPayload is fixed-size, so the mirror and
     // the image share a stride. Each pool is likewise one copy of its own prefix.
-    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(PTO2TaskPayload));
+    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(TaskPayload));
     std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(ChipTaskSlotState));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
@@ -501,9 +497,9 @@ inline uint64_t compact_live_image(
     std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
     auto *out_slots = reinterpret_cast<ChipTaskSlotState *>(out_base + to.slot_states);
-    auto *out_descriptors = reinterpret_cast<PTO2TaskDescriptor *>(out_base + to.descriptors);
-    auto *out_payloads = reinterpret_cast<PTO2TaskPayload *>(out_base + to.payloads);
-    const auto *mirror_payloads = reinterpret_cast<const PTO2TaskPayload *>(mirror_base + from.payloads);
+    auto *out_descriptors = reinterpret_cast<TaskDescriptor *>(out_base + to.descriptors);
+    auto *out_payloads = reinterpret_cast<TaskPayload *>(out_base + to.payloads);
+    const auto *mirror_payloads = reinterpret_cast<const TaskPayload *>(mirror_base + from.payloads);
     auto *out_fanin = reinterpret_cast<int32_t *>(out_base + to.fanin_pool);
     auto *out_tensors = reinterpret_cast<ChipTensor *>(out_base + to.tensor_pool);
     auto *out_scalars = reinterpret_cast<uint64_t *>(out_base + to.scalar_pool);
@@ -517,7 +513,7 @@ inline uint64_t compact_live_image(
     // re-derived.
     for (uint64_t i = 0; i < nt; ++i) {
         out_slots[i].bind_buffers(&out_payloads[i], &out_descriptors[i]);
-        const PTO2TaskPayload &src = mirror_payloads[i];
+        const TaskPayload &src = mirror_payloads[i];
         const ChipTensor *src_tensors = src.tensor_data();
         const uint64_t *src_scalars = src.scalar_data();
         const int32_t *src_fanin = src.fanin_data();
@@ -554,7 +550,7 @@ inline uint64_t compact_live_image(
                 tensors[j].buffer.addr = rebased_heap_addr(tensors[j].buffer.addr, rebase);
             }
         }
-        PTO2TaskDescriptor &out_task = out_descriptors[i];
+        TaskDescriptor &out_task = out_descriptors[i];
         out_task.packed_buffer_base = reinterpret_cast<void *>(
             rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_base), rebase)
         );
@@ -565,4 +561,4 @@ inline uint64_t compact_live_image(
     return to.end;
 }
 
-}  // namespace pto2_sm_layout
+}  // namespace sm_layout

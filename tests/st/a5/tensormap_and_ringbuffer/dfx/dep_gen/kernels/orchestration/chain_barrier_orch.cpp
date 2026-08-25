@@ -37,7 +37,7 @@
 #define FUNC_COPY_FIRST 1
 
 // Stack room for producer_ids[]. 500 covers everything we expect to test;
-// PTO2_DEP_LIST_POOL_SIZE (16384) is the real ceiling on a per-ring basis.
+// CHIP_DEP_LIST_POOL_SIZE (16384) is the real ceiling on a per-ring basis.
 static constexpr int32_t MAX_PRODUCERS = 500;
 
 extern "C" {

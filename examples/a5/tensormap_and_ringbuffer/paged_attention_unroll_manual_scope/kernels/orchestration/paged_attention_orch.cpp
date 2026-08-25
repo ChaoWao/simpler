@@ -154,7 +154,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
             CYCLE_COUNT_LAP(prof_scope_and_loop);
-            SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+            SIMPLER_SCOPE(ScopeMode::MANUAL) {
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 
                 uint32_t qi_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};

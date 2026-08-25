@@ -113,7 +113,7 @@ struct TensorKeyHash {
 // Constants
 // =============================================================================
 
-// User-visible scope-nesting cap. Matches L2 PTO2_MAX_SCOPE_DEPTH.
+// User-visible scope-nesting cap. Matches L2 CHIP_MAX_SCOPE_DEPTH.
 static constexpr int32_t MAX_SCOPE_DEPTH = 64;
 
 // Number of independent HeapRing layers inside Ring. Scope depth maps

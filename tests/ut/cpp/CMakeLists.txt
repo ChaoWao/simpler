@@ -842,7 +842,7 @@ add_a2a3_test(test_a2a3_fatal a2a3/test_a2a3_fatal.cpp)
 add_a2a3_test(test_task_timing_slots a2a3/test_task_timing_slots.cpp)
 add_a2a3_test(test_acl_hal_device common/test_acl_hal_device.cpp)
 
-# PTO2 runtime-linked tests
+# runtime-linked tests
 add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_runtime_test(test_scope_deadlock_detection common/test_scope_deadlock_detection.cpp)
 set(HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime)
@@ -1004,7 +1004,7 @@ add_a5_hbg_runtime_test(test_a5_graph_cache common/test_hbg_graph_cache.cpp)
 target_sources(test_a5_graph_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/graph_execution.cpp
 )
-# Incremental-activation tests init a real PTO2SchedulerState (ready queues), so
+# Incremental-activation tests init a real SchedulerState (ready queues), so
 # they link the scheduler + shared runtime out-of-line members.
 add_a2a3_hbg_runtime_test(test_graph_activation a2a3/test_graph_activation.cpp)
 target_sources(test_graph_activation PRIVATE
@@ -1020,7 +1020,7 @@ target_sources(test_a5_graph_activation PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime_init.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime.cpp
 )
-# PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
+# ChipTensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/tensormap.cpp

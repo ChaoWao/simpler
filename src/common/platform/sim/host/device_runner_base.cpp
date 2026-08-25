@@ -128,7 +128,7 @@ int SimDeviceRunnerBase::setup_static_arena(
 ) {
     if (arena_bank >= arena_banks_.size()) return PTO_RUNTIME_ERR_INTERNAL;
     ArenaBank &bank = this->arena_bank(arena_bank);
-    // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
+    // Three independent device_malloc'd buffers: GM heap, shared memory, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
     // block. Each arena commits exactly one region, so its base() is the

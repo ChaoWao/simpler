@@ -43,7 +43,7 @@
  * progress loop satisfies this by being single-threaded; emit returns -3 if the
  * invariant is ever broken.
  *
- * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
+ * Per-task producer dedup mirrors FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is
  * whole-graph-resident and never reuses a task slot at build time (see
  * append_fanin_or_fail in orchestrator.cpp). A runtime that recycles slots
@@ -104,7 +104,7 @@ void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx,
 
 /** STEP 3 Step B: a tensormap producer whose written slice this task reads. */
 void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
+    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry,
     OverlapStatus overlap
 );
 

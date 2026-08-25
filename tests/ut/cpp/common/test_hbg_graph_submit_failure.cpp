@@ -33,10 +33,10 @@ class HbgGraphSubmitFailureTest : public ::testing::Test {
 protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
-    PTO2OrchestratorState orch{};
-    PTO2SchedulerState sched{};
-    PTO2SchedulerLayout sched_layout{};
+    SharedMemoryHandle *sm_handle = nullptr;
+    OrchestratorState orch{};
+    SchedulerState sched{};
+    SchedulerLayout sched_layout{};
     GraphHostStatePtr graph_state;
     std::vector<char> gm_heap;
     // The Definition objects are built in here, as a bind's retained staging.
@@ -62,16 +62,16 @@ protected:
     }
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
         gm_heap.resize(HEAP_BYTES);
 
-        sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
+        sched_layout = SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_TASK_WINDOW_SIZE, &sched));
 
         definition_staging.assign(STAGING_BYTES, std::byte{0});
         arena.base = definition_staging.data();
@@ -141,7 +141,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     ASSERT_EQ(definitions.entries[0].full_key, first_upload->full_key);
     const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
-        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+        CHIP_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, CHIP_ALIGN_SIZE);
     EXPECT_EQ(static_cast<uint64_t>(first_end - first_base), expected_extent);
     EXPECT_EQ(static_cast<uint64_t>(second_end - second_base), expected_extent);
     EXPECT_TRUE(first_end <= second_base || second_end <= first_base) << "two shells must not share heap bytes";
@@ -250,7 +250,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     ASSERT_EQ(definitions.entries.size(), 1u);
     const GraphDefinition *definition = definition_image(definitions.entries[0]);
     const uint64_t expected_extent =
-        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+        CHIP_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, CHIP_ALIGN_SIZE);
 
     std::vector<std::pair<const char *, const char *>> ranges;
     for (size_t i = 0; i < 3; ++i) {
@@ -319,8 +319,8 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    orch.begin_scope(PTO2ScopeMode::MANUAL);
-    orch.begin_scope(PTO2ScopeMode::AUTO);
+    orch.begin_scope(ScopeMode::MANUAL);
+    orch.begin_scope(ScopeMode::AUTO);
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
@@ -392,7 +392,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
 
     CoreTaskArgs producer_args;
     producer_args.add_output(boundary);
-    for (int32_t i = 0; i < PTO2_MAX_FANIN + 1; ++i) {
+    for (int32_t i = 0; i < CHIP_MAX_FANIN + 1; ++i) {
         ASSERT_TRUE(orch.submit_dummy_task(producer_args).task_id().is_valid());
     }
 
@@ -426,7 +426,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
-    PTO2TaskAllocator &allocator = orch.task_allocator;
+    TaskAllocator &allocator = orch.task_allocator;
     while (allocator.active_count() < allocator.window_size() - 1) {
         ASSERT_FALSE(allocator.alloc(0).failed());
     }
@@ -741,9 +741,9 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     EXPECT_FALSE(orch.fatal);
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
-    PTO2SharedMemoryRingHeader &ring = sm_handle->header->ring;
+    SharedMemoryRingHeader &ring = sm_handle->header->ring;
     const int32_t shell_slot = ring.get_slot_by_task_id(static_cast<int32_t>(graph.task_id.local()));
-    const PTO2TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
+    const TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
     EXPECT_GE(
@@ -863,14 +863,14 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
     EXPECT_LT(reinterpret_cast<uint64_t>(heap_resident) + nbytes, GRAPH_RECORD_VIRTUAL_BASE);
 }
 
-// A hidden-alloc task's payload passes through PTO2TaskPayload::init() and nothing
+// A hidden-alloc task's payload passes through TaskPayload::init() and nothing
 // else — unlike an ordinary ring task, no dispatch-predicate assignment follows it,
 // and unlike an outer GRAPH task, no graph_reset_outer_payload precedes it. So
 // init() is where its predicate has to acquire a defined value: the ring's payload
 // storage is reused raw memory that no constructor runs over, and compact_live_image
 // translates every submitted slot's predicate.addr as a graph-heap address.
 TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefined) {
-    PTO2TaskPayload *payloads = sm_handle->header->ring.task_payloads;
+    TaskPayload *payloads = sm_handle->header->ring.task_payloads;
     ASSERT_NE(payloads, nullptr);
     // 0x4A repeated has 01 as its top two bits, so read as an address it lands
     // inside [HEAP_VIRTUAL_BASE, GRAPH_RECORD_VIRTUAL_BASE) — the quarter of the
@@ -893,7 +893,7 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     ASSERT_TRUE(outputs.task_id().is_valid());
     ASSERT_FALSE(orch.fatal);
 
-    const uint64_t slot = outputs.task_id().local() & (PTO2_TASK_WINDOW_SIZE - 1);
+    const uint64_t slot = outputs.task_id().local() & (CHIP_TASK_WINDOW_SIZE - 1);
     ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
     EXPECT_EQ(payloads[slot].predicate.op, PredicateOp::NONE);
     EXPECT_EQ(payloads[slot].predicate.addr, 0u);

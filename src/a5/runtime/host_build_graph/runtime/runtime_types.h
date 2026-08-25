@@ -39,9 +39,9 @@
 // dispatch_payload.h include is intentionally dropped here. This header is
 // pulled in by the platform's args_dump.h via a hardcoded
 // "host_build_graph/runtime/runtime_types.h" path, and dispatch_payload.h
-// uses #pragma once (path-keyed), so leaving it in double-defines PTO2DispatchPayload
+// uses #pragma once (path-keyed), so leaving it in double-defines DispatchPayload
 // against tensormap_and_ringbuffer's copy inside the shared host-dispatcher TU.
-// runtime_types.h never references PTO2DispatchPayload itself; consumers that
+// runtime_types.h never references DispatchPayload itself; consumers that
 // need it include it via runtime.h directly.
 #include "aicore_completion_mailbox.h"
 #include "common/args_dump_task_metadata.h"
@@ -71,8 +71,8 @@
 
 // Task management
 // Actual window size is passed at runtime to runtime_create_from_sm().
-// Use pto2_task_slot(sched, task_id) for slot calculation.
-#define PTO2_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
+// The slot is local_id masked by the window size, which is why the window is a power of two.
+#define CHIP_TASK_WINDOW_SIZE 16384  // Default task window size (power of 2)
 
 // host_build_graph has one ring, and carries no per-ring dimension anywhere:
 // host-orch builds the whole graph on the host, it fits that ring, and the
@@ -85,8 +85,8 @@
 // bind_callable_to_runtime_impl).
 
 // Memory pools (total = value, single ring)
-#define PTO2_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
-#define PTO2_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
+#define CHIP_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
+#define CHIP_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
 // Three address classes coexist during orchestration, in windows the two constants
 // below keep disjoint: real device addresses stay below HEAP_VIRTUAL_BASE, since
@@ -106,7 +106,7 @@ inline constexpr uint64_t HEAP_VIRTUAL_BASE = 1ULL << 62;
 // graph_classify_tensor can tell an internal producer's output from a boundary
 // tensor by address-range containment alone, and the Definition stores them as
 // offsets. That classification is only sound while the range is disjoint from
-// every graph-heap address, which PTO2TaskAllocator::init() asserts, and from
+// every graph-heap address, which TaskAllocator::init() asserts, and from
 // every real device address, which the two asserts in the host's bind path
 // (the acquired heap base, and each caller tensor as it enters device_args)
 // keep below HEAP_VIRTUAL_BASE.
@@ -118,7 +118,7 @@ inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
 inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HEAP_VIRTUAL_BASE;
 
 // Scope management
-#define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
+#define CHIP_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
 
 // Per-shape ready-queue capacity (power of two). This is a ring buffer that
 // bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task
@@ -126,22 +126,22 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 // simultaneously ready in any one queue. Overflow on the ready/sync/dummy queues
 // latches SIMPLER_ERROR_READY_QUEUE_OVERFLOW (safe-fail), so it must exceed the
 // worst-case ready burst with margin.
-#define PTO2_READY_QUEUE_SIZE 8192
+#define CHIP_READY_QUEUE_SIZE 8192
 
 // Cross-thread early-dispatch work queue (power of two)
-#define PTO2_EARLY_DISPATCH_QUEUE_SIZE 64
+#define CHIP_EARLY_DISPATCH_QUEUE_SIZE 64
 
 // Fanin storage
-#define PTO2_FANIN_INLINE_CAP 64
+#define CHIP_FANIN_INLINE_CAP 64
 
 // Polling-scheduler fanin cap. The polling model stores producer dependencies as
 // flat position-independent local-id integers in the fanin pool (no dep-pool
 // spill), so a task's fanin degree is hard-capped here. Must cover the worst-case
 // fanin of any workload (paged_attention is the densest).
-#define PTO2_MAX_FANIN 128
+#define CHIP_MAX_FANIN 128
 
 // Alignment of every per-task region inside an argument pool. Each region starts
-// and ends on a cache line so PTO2TaskPayload::init's round-up scalar memcpy stays
+// and ends on a cache line so TaskPayload::init's round-up scalar memcpy stays
 // inside the task's own region — see its comment. ChipTensor is already 2 cache
 // lines, so only the fanin and scalar regions need the round-up.
 inline constexpr int32_t ARG_POOL_ALIGN = 64;
@@ -149,17 +149,17 @@ inline constexpr int32_t ARG_POOL_ALIGN = 64;
 // Dependency-degree diagnostic: warn once when a task's fanin or a producer's
 // fanout first exceeds this degree, so dense dependency graphs surface without
 // flooding the AICPU hot-path device log.
-#define PTO2_DEP_DEGREE_WARN_THRESHOLD 16
+#define CHIP_DEP_DEGREE_WARN_THRESHOLD 16
 
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
-// count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
+// count (TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
 // — its only user — by scaling with the platform counter frequency, like
 // SCHEDULER_TIMEOUT_CYCLES, so it reaps at the same wall-clock on every arch (a
 // fixed raw cycle count would be 15 s on a5 at 1 GHz but 300 s on a2a3 at 50 MHz).
 // PLATFORM_PROF_SYS_CNT_FREQ is deliberately NOT pulled into this header: it is
 // included by orchestrations that define that constant locally, so doing so caused
 // a redefinition conflict. See issue #1189.
-constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
+constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
 
 // =============================================================================
 // Task States
@@ -184,15 +184,15 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * completed_watermark instead.
  */
 typedef enum {
-    PTO2_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
-    PTO2_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
-    PTO2_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
-} PTO2TaskState;
+    CHIP_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
+    CHIP_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
+    CHIP_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
+} ChipTaskState;
 
 /**
  * Result of a unified task allocation.
  */
-struct PTO2TaskAllocResult {
+struct TaskAllocResult {
     int32_t task_id;    // Absolute task ID (not wrapped)
     int32_t slot;       // task_id & (window_size - 1)
     void *packed_base;  // Heap allocation result (nullptr if failure)
@@ -208,7 +208,7 @@ enum class TaskKind : uint8_t {
     GRAPH_NODE = 3,
 };
 
-struct PTO2OutputLayout {
+struct OutputLayout {
     uint64_t offsets[MAX_TENSOR_ARGS] = {};
     uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
     int32_t total_output_size = 0;
@@ -233,12 +233,12 @@ struct ChipTaskSlotState;  // Forward declaration (defined below)
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
-struct PTO2TaskDescriptor {
+struct TaskDescriptor {
     // Mixed-task identification (encodes ring_id in upper 32 bits)
     TaskId task_id;  // raw: (ring_id << 32) | local_id
 
     // Per-slot kernel IDs (INVALID_KERNEL_ID = inactive)
-    int32_t kernel_id[PTO2_SUBTASK_SLOT_COUNT];
+    int32_t kernel_id[SUBTASK_SLOT_COUNT];
 
     // Packed output buffer (all outputs packed into single contiguous buffer)
     void *packed_buffer_base;  // Start of packed buffer in GM Heap
@@ -247,8 +247,8 @@ struct PTO2TaskDescriptor {
 
 // A 4-byte alignment pad follows kernel_id[3]; the scheduler and shared-memory
 // ABI depend on the descriptor size and packed_buffer_base offset staying fixed.
-static_assert(sizeof(PTO2TaskDescriptor) == 40, "PTO2TaskDescriptor size is part of the shared-memory ABI");
-static_assert(offsetof(PTO2TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
+static_assert(sizeof(TaskDescriptor) == 40, "TaskDescriptor size is part of the shared-memory ABI");
+static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
 
 // =============================================================================
 // Per-Slot Scheduling State
@@ -261,26 +261,26 @@ static_assert(offsetof(PTO2TaskDescriptor, packed_buffer_base) == 24, "packed_bu
  * by bulk tensor and scalar data. Small fanins stay fully inline; larger
  * fanins spill into a per-ring ring buffer slice.
  */
-// Early-dispatch claim states for PTO2TaskPayload::early_dispatch_state.
-enum PTO2EarlyDispatchState : uint8_t {
-    PTO2_EARLY_DISPATCH_NONE = 0,       // not pre-staged
-    PTO2_EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
-    PTO2_EARLY_DISPATCH_STAGED = 2,     // reserved
-    PTO2_EARLY_DISPATCH_DISPATCHED = 3  // producers released; staged blocks may still be gated
+// Early-dispatch claim states for TaskPayload::early_dispatch_state.
+enum EarlyDispatchState : uint8_t {
+    EARLY_DISPATCH_NONE = 0,       // not pre-staged
+    EARLY_DISPATCH_STAGING = 1,    // Hook 1 claimed it; staging in progress
+    EARLY_DISPATCH_STAGED = 2,     // reserved
+    EARLY_DISPATCH_DISPATCHED = 3  // producers released; staged blocks may still be gated
 };
 
-enum PTO2EarlyDispatchLaunchState : uint8_t {
-    PTO2_EARLY_DISPATCH_LAUNCH_NONE = 0,
-    PTO2_EARLY_DISPATCH_LAUNCH_RINGING = 1,
-    PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE = 2,
+enum EarlyDispatchLaunchState : uint8_t {
+    EARLY_DISPATCH_LAUNCH_NONE = 0,
+    EARLY_DISPATCH_LAUNCH_RINGING = 1,
+    EARLY_DISPATCH_LAUNCH_COMPLETE = 2,
 };
 
-enum PTO2EarlySyncDrainState : uint8_t {
-    PTO2_EARLY_SYNC_DRAIN_NONE = 0,
-    PTO2_EARLY_SYNC_DRAIN_OWNER = 1 << 0,
-    PTO2_EARLY_SYNC_DRAIN_ARMED = 1 << 1,
-    PTO2_EARLY_SYNC_DRAIN_READY = 1 << 2,
-    PTO2_EARLY_SYNC_DRAIN_COMPLETE = 1 << 3,
+enum EarlySyncDrainState : uint8_t {
+    EARLY_SYNC_DRAIN_NONE = 0,
+    EARLY_SYNC_DRAIN_OWNER = 1 << 0,
+    EARLY_SYNC_DRAIN_ARMED = 1 << 1,
+    EARLY_SYNC_DRAIN_READY = 1 << 2,
+    EARLY_SYNC_DRAIN_COMPLETE = 1 << 3,
 };
 
 // A pre-staged consumer occupies one core per gated subtask block. WHICH cores
@@ -290,11 +290,11 @@ enum PTO2EarlySyncDrainState : uint8_t {
 // chip's core count (RUNTIME_MAX_WORKER = 72; no two-level pre-dispatch means
 // gated cores in flight <= core count), NOT by block_num — so a wide SPMD
 // consumer can pre-stage all its idle cores. 2 words = 128 bits >= 72.
-inline constexpr int PTO2_EARLY_DISPATCH_CORE_MASK_WORDS = 2;
+inline constexpr int EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
-struct PTO2TaskPayload {
+struct TaskPayload {
     // === Cache line 0 (64B) — the dispatch path's own line ===
-    // sizeof is independent of PTO2_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
+    // sizeof is independent of CHIP_MAX_FANIN / MAX_TENSOR_ARGS / MAX_SCALAR_ARGS:
     // widening a cap costs pool bytes for the tasks that need them, not a control
     // block on every task.
     int32_t tensor_count{0};
@@ -310,7 +310,7 @@ struct PTO2TaskPayload {
     // fanin holds flat position-independent producer local task ids. Single-ring
     // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned by
     // classify_fanin_state against the ring completion_flags. Hard-capped at
-    // PTO2_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
+    // CHIP_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<ChipTensor> tensors;
     simpler::hbg::SelfRelativePtr<uint64_t> scalars;
@@ -328,7 +328,7 @@ struct PTO2TaskPayload {
     // splits them between release and late-stager owners; a sync_start cohort keeps
     // the completed mask stable for its single launch owner, whether staging is local
     // or uses the global drain fallback.
-    alignas(64) std::atomic<uint64_t> staged_core_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS]{};
+    alignas(64) std::atomic<uint64_t> staged_core_mask[EARLY_DISPATCH_CORE_MASK_WORDS]{};
     // Early-dispatch CANDIDATE detection (event-driven, dual of fanin_refcount):
     // seeded at wiring with producers already complete, then a flagged producer
     // bumps each consumer after all of its logical blocks are published.
@@ -353,7 +353,7 @@ struct PTO2TaskPayload {
     std::atomic<uint8_t> dispatch_propagated{0};  // PRODUCER side: once-guard for fanout propagation
     // The launch owner publishes COMPLETE only after all owned doorbells are
     // visible, keeping fanout private until every gated block has launched.
-    std::atomic<uint8_t> early_dispatch_launch_state{PTO2_EARLY_DISPATCH_LAUNCH_NONE};
+    std::atomic<uint8_t> early_dispatch_launch_state{EARLY_DISPATCH_LAUNCH_NONE};
     // sync_start early-dispatch rendezvous: count of this task's gated CORES currently
     // occupying a RUNNING slot (staged directly to an idle core, or promoted from a
     // gated pending slot). Counted per-core (not per-block) so it is shape-agnostic: a
@@ -365,7 +365,7 @@ struct PTO2TaskPayload {
     // A successful OWNER persists through ARMED and COMPLETE until payload
     // reinitialization. READY records that producer release observed OWNER;
     // only cancellation clears OWNER during the current task lifetime.
-    std::atomic<uint8_t> early_sync_drain_state{PTO2_EARLY_SYNC_DRAIN_NONE};
+    std::atomic<uint8_t> early_sync_drain_state{EARLY_SYNC_DRAIN_NONE};
     // === Cache line 2 — dispatch predicate + dump metadata (AICPU-only) ===
     // AICore never reads either — args are materialized from line 0's counts and
     // region deltas. Resolved at submit; evaluated by the scheduler at dispatch.
@@ -429,9 +429,8 @@ struct PTO2TaskPayload {
      * @param args                Task arguments (tensors + scalars)
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
-    void init(
-        const CoreTaskArgs &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout
-    ) {
+    void
+    init(const CoreTaskArgs &args, TaskOutputTensors &result, TaskAllocResult &alloc_result, OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 
@@ -459,7 +458,7 @@ struct PTO2TaskPayload {
         // cache lines (ARG_POOL_ALIGN), so the rounded copy stays inside this
         // task's own region. Eliminates branches; extra bytes within the same CL have
         // zero additional cost.
-        memcpy(scalar_data(), args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
+        memcpy(scalar_data(), args.scalars(), CHIP_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
         // The ring's payload storage is reused raw memory that no constructor runs
         // over, so an unset predicate reads back as whatever the slot last held —
@@ -488,46 +487,44 @@ struct PTO2TaskPayload {
         // consumer's own hint). So they MUST be zeroed here unconditionally.
         // Publication, propagation, and launch fields share this same
         // per-submit lifetime and are reset here too.
-        early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
+        early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_core_mask[w].store(0, std::memory_order_relaxed);
         dispatch_fanin.store(0, std::memory_order_relaxed);
         dispatch_propagated.store(0, std::memory_order_relaxed);
         published_block_count.store(0, std::memory_order_relaxed);
-        early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+        early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
         running_slot_count.store(0, std::memory_order_relaxed);
-        early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+        early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
     }
 };
 
-// PTO2TaskPayload layout verification (offsetof requires complete type). The counts
+// TaskPayload layout verification (offsetof requires complete type). The counts
 // and region deltas share the first cache line, the early-dispatch atomics own the
 // second, and the AICPU-only predicate + dump metadata own the third.
-static_assert(offsetof(PTO2TaskPayload, tensors) == 12, "region deltas must follow the three counts");
+static_assert(offsetof(TaskPayload, tensors) == 12, "region deltas must follow the three counts");
 static_assert(
-    offsetof(PTO2TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
+    offsetof(TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
     "counts + region deltas must fit the first cache line"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, staged_core_mask) == 64,
+    offsetof(TaskPayload, staged_core_mask) == 64,
     "the early-dispatch atomics own cache line 1: they are written during staging while "
     "line 0's counts and deltas are read at dispatch, so sharing a line would false-share"
 );
-static_assert(offsetof(PTO2TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
+static_assert(offsetof(TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
 static_assert(
-    offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
+    offsetof(TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
     "dump metadata must fit the predicate's cache line"
 );
-static_assert(
-    sizeof(PTO2TaskPayload) == 192, "PTO2TaskPayload is three cache lines and independent of every argument cap"
-);
+static_assert(sizeof(TaskPayload) == 192, "TaskPayload is three cache lines and independent of every argument cap");
 // compact_live_image restacks the payload segment with one memcpy and the device
 // copy moves the whole image, so the payload has to be a POD wire struct. Deleting
 // SelfRelativePtr's copy operations does not cost it that — a deleted special member
 // is trivial — but only an assertion keeps a future member from doing so silently.
 static_assert(
-    std::is_trivially_copyable_v<PTO2TaskPayload> && std::is_standard_layout_v<PTO2TaskPayload>,
-    "PTO2TaskPayload crosses to the device by memcpy"
+    std::is_trivially_copyable_v<TaskPayload> && std::is_standard_layout_v<TaskPayload>,
+    "TaskPayload crosses to the device by memcpy"
 );
 static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
 
@@ -556,13 +553,13 @@ struct alignas(64) ChipTaskSlotState {
     // Host-visible completion mirror. PENDING at submit; COMPLETED at
     // on_mixed_task_complete. Read by the host completion-wait / deadlock
     // detector / cold-path dump; the device readiness path uses completion_flags.
-    std::atomic<PTO2TaskState> task_state;
+    std::atomic<ChipTaskState> task_state;
 
     // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
     // Self-relative, so the SM image needs no pointer fix-up on its way to the
     // device: both targets sit in the same block as this field.
-    simpler::hbg::SelfRelativePtr<PTO2TaskPayload> payload;
-    simpler::hbg::SelfRelativePtr<PTO2TaskDescriptor> task;
+    simpler::hbg::SelfRelativePtr<TaskPayload> payload;
+    simpler::hbg::SelfRelativePtr<TaskDescriptor> task;
 
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
     // A pending consumer whose fanin scan finds an unmet producer registers on
@@ -617,7 +614,7 @@ struct alignas(64) ChipTaskSlotState {
         return 0;
     }
 
-    void bind_buffers(PTO2TaskPayload *p, PTO2TaskDescriptor *t) {
+    void bind_buffers(TaskPayload *p, TaskDescriptor *t) {
         payload.set(p);
         task.set(t);
     }
@@ -626,7 +623,7 @@ struct alignas(64) ChipTaskSlotState {
     // (completion_flags[slot]) is published by the scheduler's
     // on_mixed_task_complete; this store makes the same fact visible to the
     // host completion-wait / deadlock detector.
-    void mark_completed() { task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release); }
+    void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
 
     void mark_any_subtask_deferred() { any_subtask_deferred.store(true, std::memory_order_release); }
 
@@ -653,7 +650,7 @@ struct alignas(64) ChipTaskSlotState {
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // last_consumer_local_id is seeded in prepare_task once the id is known.
         // Payload early-dispatch/fanin fields are (re)initialized in
-        // PTO2TaskPayload::init on every submit, before the slot is visible.
+        // TaskPayload::init on every submit, before the slot is visible.
     }
 };
 

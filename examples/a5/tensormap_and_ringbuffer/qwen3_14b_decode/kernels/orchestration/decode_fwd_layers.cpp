@@ -111,7 +111,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskId prev_normed_tid[1];
         for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
             prev_normed_tid[__init_i] = TaskId::invalid();
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             TaskId _submit_deps_buf[1];
             for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                 _submit_deps_buf[__init_i] = TaskId::invalid();
@@ -228,7 +228,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 const ChipTensor &mlp_norm_in_inline71 = alloc_2.get_ref(5);
                 const ChipTensor &inv_rms_tile_inline126 = alloc_2.get_ref(6);
                 const ChipTensor &mlp_tile_inline149 = alloc_2.get_ref(7);
-                SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+                SIMPLER_SCOPE(ScopeMode::MANUAL) {
                     // Phase-fence barrier 1: dependency-only dummy task
                     CoreTaskArgs params_phase_fence_barrier_1;
                     TaskOutputTensors phase_fence_barrier_1_outs = rt_submit_dummy_task(params_phase_fence_barrier_1);

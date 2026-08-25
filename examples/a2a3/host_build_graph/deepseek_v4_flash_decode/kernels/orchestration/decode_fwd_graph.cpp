@@ -1093,7 +1093,7 @@ void csa_attn_block(const GraphTaskArgs &args) {
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline2079_inline10609[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline2162_inline10271 = 0; g_inline2162_inline10271 < 8; g_inline2162_inline10271 += 1) {
                 int64_t row_base_o_inline2078_inline10745 = (g_inline2162_inline10271 * 8);
                 int64_t out_col_g_inline2181_inline10439 = (g_inline2162_inline10271 * 1024);
@@ -2804,7 +2804,7 @@ void hca_attn_block(const GraphTaskArgs &args) {
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline1519_inline11335[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline1480_inline11801 = 0; g_inline1480_inline11801 < 8; g_inline1480_inline11801 += 1) {
                 int64_t row_base_o_inline1525_inline11698 = (g_inline1480_inline11801 * 8);
                 int64_t out_col_g_inline1609_inline11551 = (g_inline1480_inline11801 * 1024);
@@ -4315,7 +4315,7 @@ void swa_attn_block(const GraphTaskArgs &args) {
         TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
         TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
         ChipTensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline8746 = 0; g_inline978_inline8746 < 8; g_inline978_inline8746 += 1) {
                 int64_t row_base_o_inline1126_inline8745 = (g_inline978_inline8746 * 8);
                 int64_t out_col_g_inline1092_inline8900 = (g_inline978_inline8746 * 1024);

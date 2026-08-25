@@ -1575,7 +1575,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
         TaskId merge_tid_inline1108_inline8902 = task_25_outs.task_id();
         ChipTensor o_r_pad_inline974_inline8862__rv_v2 = o_r_pad_inline974_inline8862;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline8746 = 0; g_inline978_inline8746 < 8; g_inline978_inline8746 += 1) {
                 int64_t row_base_o_inline1126_inline8745 = (g_inline978_inline8746 * 8);
                 int64_t out_col_g_inline1092_inline8900 = (g_inline978_inline8746 * 1024);
@@ -2995,7 +2995,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskOutputTensors task_82_outs = rt_submit_aiv_task(85, params_t82);
         TaskId merge_tid_inline1108_inline9664 = task_82_outs.task_id();
         ChipTensor o_r_pad_inline974_inline9624__rv_v2 = o_r_pad_inline974_inline9624;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline978_inline9508 = 0; g_inline978_inline9508 < 8; g_inline978_inline9508 += 1) {
                 int64_t row_base_o_inline1126_inline9507 = (g_inline978_inline9508 * 8);
                 int64_t out_col_g_inline1092_inline9662 = (g_inline978_inline9508 * 1024);
@@ -5590,7 +5590,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
                 proj_b_tids_inline2079_inline10609[__init_i] = TaskId::invalid();
             ChipTensor o_r_pad_inline2225_inline10832__rv_v2 = o_r_pad_inline2225_inline10832;
-            SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+            SIMPLER_SCOPE(ScopeMode::MANUAL) {
                 for (int64_t g_inline2162_inline10271 = 0; g_inline2162_inline10271 < 8;
                      g_inline2162_inline10271 += 1) {
                     int64_t row_base_o_inline2078_inline10745 = (g_inline2162_inline10271 * 8);
@@ -7732,7 +7732,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
                 proj_b_tids_inline1519_inline11335[__init_i] = TaskId::invalid();
             ChipTensor o_r_pad_inline1536_inline11403__rv_v2 = o_r_pad_inline1536_inline11403;
-            SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+            SIMPLER_SCOPE(ScopeMode::MANUAL) {
                 for (int64_t g_inline1480_inline11801 = 0; g_inline1480_inline11801 < 8;
                      g_inline1480_inline11801 += 1) {
                     int64_t row_base_o_inline1525_inline11698 = (g_inline1480_inline11801 * 8);
@@ -10306,7 +10306,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         for (int64_t __init_i = 0; __init_i < 8; ++__init_i)
             proj_b_tids_inline2079_inline12533[__init_i] = TaskId::invalid();
         ChipTensor o_r_pad_inline2225_inline12756__rv_v2 = o_r_pad_inline2225_inline12756;
-        SIMPLER_SCOPE(PTO2ScopeMode::MANUAL) {
+        SIMPLER_SCOPE(ScopeMode::MANUAL) {
             for (int64_t g_inline2162_inline12195 = 0; g_inline2162_inline12195 < 8; g_inline2162_inline12195 += 1) {
                 int64_t row_base_o_inline2078_inline12669 = (g_inline2162_inline12195 * 8);
                 int64_t out_col_g_inline2181_inline12363 = (g_inline2162_inline12195 * 1024);

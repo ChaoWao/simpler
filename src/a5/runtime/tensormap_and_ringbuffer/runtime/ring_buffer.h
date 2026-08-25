@@ -52,15 +52,15 @@
 #endif
 
 // Block notification interval (in spin counts)
-#define PTO2_BLOCK_NOTIFY_INTERVAL 10000
+#define CHIP_BLOCK_NOTIFY_INTERVAL 10000
 // Productive-loop publication is a liveness escape, not the normal pressure
 // path. Require sustained no-progress before bypassing K-batched publication.
-#define PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 100)  // 10 ms
+#define CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 100)  // 10 ms
 // Heap/task deadlock is detected structurally when the reclaim head is the
 // oldest task owned by an open scope on the blocked ring. This wall-clock value
 // is the backstop for all other cases; it is an ABSOLUTE TIME (not a spin
 // count), so it is stable across chips/contention.
-#define PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
+#define ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
 
 constexpr uint32_t ring_mask_bit(int32_t ring_id) {
     static_assert(CHIP_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
@@ -117,7 +117,7 @@ private:
  * The alloc() method checks both resources BEFORE committing to either,
  * eliminating the need for rollback on partial failure.
  */
-class PTO2TaskAllocator {
+class TaskAllocator {
 public:
     /**
      * Initialize the allocator with task ring and heap ring resources.
@@ -128,13 +128,13 @@ public:
      *
      * Production callers leave `initial_local_task_id` at 0: the SM ring
      * flow-control counters that current_index_ptr / last_alive_ptr point at
-     * start at zero (PTO2RingFlowControl::init() runs on the AICPU during SM
+     * start at zero (ChipRingFlowControl::init() runs on the AICPU during SM
      * reset), so we keep local_task_id_ aligned with that without reading the
      * SM. Tests that drive SM state directly may pass a non-zero seed to
      * exercise corner cases like task IDs near INT32_MAX.
      */
     void init(
-        PTO2TaskDescriptor *descriptors, int32_t window_size, std::atomic<int32_t> *current_index_ptr,
+        TaskDescriptor *descriptors, int32_t window_size, std::atomic<int32_t> *current_index_ptr,
         std::atomic<int32_t> *last_alive_ptr, void *heap_base, uint64_t heap_size, std::atomic<int32_t> *error_code_ptr,
         ChipTaskSlotState *slot_states = nullptr, int32_t initial_local_task_id = 0, uint8_t ring_id = 0
     ) {
@@ -179,9 +179,9 @@ public:
      * @param oldest_open_task Oldest task owned by any open scope on this ring
      * @return Allocation result; check failed() for errors
      */
-    PTO2TaskAllocResult alloc(int32_t output_size, ChipTaskSlotState *oldest_open_task = nullptr) {
+    TaskAllocResult alloc(int32_t output_size, ChipTaskSlotState *oldest_open_task = nullptr) {
         uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+            output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
 
         int spin_count = 0;
         int32_t prev_last_alive = last_alive_ptr_->load(std::memory_order_acquire);
@@ -254,7 +254,7 @@ public:
                 if (!block_timing) {
                     block_cycle0 = now;
                     block_timing = true;
-                } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+                } else if (!watermark_synchronized && now - block_cycle0 >= CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                     publication_request.request();
                 }
                 // (1) Structural, after publication acknowledgment: no open
@@ -267,11 +267,11 @@ public:
                 // (2) Wall-clock backstop for the residual case the local head
                 // test can't prove (e.g. a closed sibling whose consumer is
                 // deferred). Absolute time, not a spin count.
-                if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+                if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                     report_deadlock(output_size, blocked_on_heap, /*scope_gated=*/false);
                     return {-1, -1, nullptr, nullptr};
                 }
-                if (spin_count % PTO2_BLOCK_NOTIFY_INTERVAL == 0) {
+                if (spin_count % CHIP_BLOCK_NOTIFY_INTERVAL == 0) {
                     LOG_WARN(
                         "[TaskAllocator ring=%u] BLOCKED: tasks=%d/%d, heap_used=%" PRIu64 "/%" PRIu64
                         ", heap_available=%" PRIu64 ", heap_cursor=%" PRIu64 ", on=%s, spins=%d",
@@ -326,7 +326,7 @@ public:
 
 private:
     // --- Task Ring ---
-    PTO2TaskDescriptor *descriptors_ = nullptr;
+    TaskDescriptor *descriptors_ = nullptr;
     // Parallel to descriptors_, indexed by task_id & window_mask_. Read-only here,
     // used by the deadlock detector to identify the head task's slot.
     ChipTaskSlotState *slot_states_ = nullptr;
@@ -384,7 +384,7 @@ private:
         }
         heap_rebase_anchor_task_id_ = -1;
 
-        PTO2TaskDescriptor &desc = descriptors_[(last_alive - 1) & window_mask_];
+        TaskDescriptor &desc = descriptors_[(last_alive - 1) & window_mask_];
         uint64_t old_tail = heap_tail_;
         heap_tail_ =
             static_cast<uint64_t>(static_cast<char *>(desc.packed_buffer_end) - static_cast<char *>(heap_base_));
@@ -508,7 +508,7 @@ private:
         } else {
             LOG_ERROR(
                 "No reclaim progress for ~500 ms (%" PRIu64 " cycles wall clock).",
-                (uint64_t)PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES
+                (uint64_t)ALLOC_DEADLOCK_TIMEOUT_CYCLES
             );
         }
         LOG_ERROR(
@@ -529,8 +529,8 @@ private:
             uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
             LOG_ERROR(
                 "  Head task %d: state=%d, consumers=%u/%u, scope_released=%d", last_alive,
-                static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~PTO2_FANOUT_SCOPE_BIT,
-                fc & ~PTO2_FANOUT_SCOPE_BIT, (rc & PTO2_FANOUT_SCOPE_BIT) ? 1 : 0
+                static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~FANOUT_SCOPE_BIT,
+                fc & ~FANOUT_SCOPE_BIT, (rc & FANOUT_SCOPE_BIT) ? 1 : 0
             );
         }
         LOG_ERROR("Solution:");
@@ -540,16 +540,16 @@ private:
             LOG_ERROR("  2. Size the ring for the peak live-set retained behind the oldest open-scope task.");
         } else if (heap_blocked) {
             LOG_ERROR(
-                "  Increase heap (current: %" PRIu64 "); env PTO2_RING_HEAP=<bytes> (e.g. %" PRIu64 ")", heap_size_,
-                heap_size_ * 2
+                "  Increase heap (current: %" PRIu64 "); CallConfig.runtime_env.ring_heap=<bytes> (e.g. %" PRIu64 ")",
+                heap_size_, heap_size_ * 2
             );
             LOG_ERROR(
                 "  If one increase completes, it was under-provisioned; otherwise debug the stuck head consumer."
             );
         } else {
             LOG_ERROR(
-                "  Increase task window (current: %d); env PTO2_RING_TASK_WINDOW=<pow2> (e.g. %d)", window_size_,
-                active_tasks * 2
+                "  Increase task window (current: %d); CallConfig.runtime_env.ring_task_window=<pow2> (e.g. %d)",
+                window_size_, active_tasks * 2
             );
             LOG_ERROR(
                 "  If one increase completes, it was under-provisioned; otherwise debug the stuck head consumer."
@@ -576,8 +576,8 @@ private:
  * Linear counters (top, tail) grow monotonically; the physical index
  * is obtained via modulo: base[linear_index % capacity].
  */
-struct PTO2FaninPool {
-    PTO2FaninSpillEntry *base;       // Pool base address
+struct FaninPool {
+    FaninSpillEntry *base;           // Pool base address
     int32_t capacity;                // Total number of entries
     int32_t top;                     // Linear next-allocation counter (starts from 1)
     int32_t tail;                    // Linear first-alive counter (entries before this are dead)
@@ -589,7 +589,7 @@ struct PTO2FaninPool {
     std::atomic<uint32_t> *reclaim_ack_mask = nullptr;
     uint8_t ring_id = 0;
 
-    void init(PTO2FaninSpillEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
+    void init(FaninSpillEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
         base = in_base;
         capacity = in_capacity;
         top = 1;
@@ -626,11 +626,11 @@ struct PTO2FaninPool {
         error_code_ptr = in_error_code_ptr;
     }
 
-    void reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
+    void reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
 
-    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed);
+    bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed);
 
-    PTO2FaninSpillEntry *alloc() {
+    FaninSpillEntry *alloc() {
         int32_t used = top - tail;
         if (used >= capacity) {
             LOG_ERROR("========================================");
@@ -642,8 +642,8 @@ struct PTO2FaninPool {
             LOG_ERROR("  - High water:    %d", high_water);
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase fanin spill pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
-            LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
-            LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
+            LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
+            LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
                 error_code_ptr->store(SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED, std::memory_order_release);
@@ -669,25 +669,25 @@ struct PTO2FaninPool {
 };
 
 template <typename Fn>
-using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, ChipTaskSlotState *, DepFlags>;
+using FaninCallbackResult = std::invoke_result_t<Fn &, ChipTaskSlotState *, DepFlags>;
 
 template <typename Fn>
-using PTO2FaninForEachReturn = std::conditional_t<std::is_same_v<PTO2FaninCallbackResult<Fn>, void>, void, bool>;
+using FaninForEachReturn = std::conditional_t<std::is_same_v<FaninCallbackResult<Fn>, void>, void, bool>;
 
 // Visit each fanin edge as (producer slot, DepFlags). Inline and spill entries
-// share the packed PTO2FaninSpillEntry layout, so both are unpacked the same way.
+// share the packed FaninSpillEntry layout, so both are unpacked the same way.
 template <typename InlineSlots, typename Fn>
-inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
-    InlineSlots &&inline_edges, int32_t fanin_count, int32_t spill_start, PTO2FaninPool &spill_pool, Fn &&fn
+inline FaninForEachReturn<Fn> for_each_fanin_storage(
+    InlineSlots &&inline_edges, int32_t fanin_count, int32_t spill_start, FaninPool &spill_pool, Fn &&fn
 ) {
-    using FaninCallbackResult = PTO2FaninCallbackResult<Fn>;
+    using FaninCallbackResult = FaninCallbackResult<Fn>;
     static_assert(
         std::is_same_v<FaninCallbackResult, void> || std::is_same_v<FaninCallbackResult, bool>,
         "fanin callback must return void or bool"
     );
 
     if constexpr (std::is_void_v<FaninCallbackResult>) {
-        int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(fanin_count, CHIP_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
             fn(inline_edges[i].slot_state(), inline_edges[i].flags());
         }
@@ -699,7 +699,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 
         int32_t start_idx = spill_start % spill_pool.capacity;
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
-        PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
+        FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
             fn(first[i].slot_state(), first[i].flags());
         }
@@ -710,7 +710,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
         }
         return;
     } else {
-        int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(fanin_count, CHIP_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
             if (!fn(inline_edges[i].slot_state(), inline_edges[i].flags())) {
                 return false;
@@ -724,7 +724,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 
         int32_t start_idx = spill_start % spill_pool.capacity;
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
-        PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
+        FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
             if (!fn(first[i].slot_state(), first[i].flags())) {
                 return false;
@@ -742,7 +742,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 }
 
 template <typename Fn>
-inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const PTO2TaskPayload &payload, Fn &&fn) {
+inline FaninForEachReturn<Fn> for_each_fanin_slot_state(const TaskPayload &payload, Fn &&fn) {
     return for_each_fanin_storage(
         payload.fanin_inline_edges, payload.fanin_actual_count, payload.fanin_spill_start, *payload.fanin_spill_pool,
         static_cast<Fn &&>(fn)
@@ -763,8 +763,8 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const PTO2TaskPayloa
  * Linear counters (top, tail) grow monotonically; the physical index
  * is obtained via modulo: base[linear_index % capacity].
  */
-struct PTO2DepListPool {
-    PTO2DepListEntry *base;     // Pool base address
+struct DepListPool {
+    DepListEntry *base;         // Pool base address
     int32_t capacity;           // Total number of entries
     int32_t top;                // Linear next-allocation counter (starts from 1)
     int32_t tail;               // Linear first-alive counter (entries before this are dead)
@@ -783,7 +783,7 @@ struct PTO2DepListPool {
      * @param base      Pool base address from shared memory
      * @param capacity  Total number of entries
      */
-    void init(PTO2DepListEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
+    void init(DepListEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
         base = in_base;
         capacity = in_capacity;
         top = 1;   // Start from 1, 0 means NULL/empty
@@ -832,31 +832,31 @@ struct PTO2DepListPool {
      * @param ring             Ring header (for reading slot dep_pool_mark)
      * @param sm_last_task_alive Current last_task_alive from shared memory
      */
-    void reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
+    void reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive);
 
     /**
      * Ensure dep pool for a specific ring has at least `needed` entries available.
      * Spin-waits for reclamation under pressure. The dep pool shares
      * last_task_alive with the heap and task rings, so it detects a wedged
-     * reclaim watermark the same way PTO2TaskAllocator::alloc does: request an
+     * reclaim watermark the same way TaskAllocator::alloc does: request an
      * exact publication, then use a structural head-of-line check plus a
      * wall-clock backstop, each emitting report_deadlock.
      */
-    bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
+    bool ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task = nullptr);
 
     /**
-     * Structured dep-pool deadlock report, mirroring PTO2TaskAllocator::report_deadlock.
+     * Structured dep-pool deadlock report, mirroring TaskAllocator::report_deadlock.
      * scope_gated marks the provable head-of-line case where the head is pinned
      * by an open scope on this ring, as opposed to the wall-clock backstop.
      */
-    void report_deadlock(PTO2SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated);
+    void report_deadlock(SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated);
 
     /**
      * Allocate a single entry from the pool (single-thread per pool instance)
      *
      * @return Pointer to allocated entry, or nullptr on fatal error
      */
-    PTO2DepListEntry *alloc() {
+    DepListEntry *alloc() {
         int32_t used = top - tail;
         if (used >= capacity) {
             LOG_ERROR("========================================");
@@ -868,8 +868,8 @@ struct PTO2DepListPool {
             LOG_ERROR("  - High water:    %d", high_water);
             LOG_ERROR("Solution:");
             LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d).", capacity, capacity * 2);
-            LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
-            LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", capacity * 2);
+            LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
+            LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", capacity * 2);
             LOG_ERROR("========================================");
             if (error_code_ptr) {
                 error_code_ptr->store(SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED, std::memory_order_release);
@@ -902,8 +902,8 @@ struct PTO2DepListPool {
      * @param task_slot     Task slot to prepend
      * @return New head offset
      */
-    PTO2DepListEntry *prepend(PTO2DepListEntry *cur, ChipTaskSlotState *slot_state) {
-        PTO2DepListEntry *new_entry = alloc();
+    DepListEntry *prepend(DepListEntry *cur, ChipTaskSlotState *slot_state) {
+        DepListEntry *new_entry = alloc();
         if (!new_entry) return nullptr;
         new_entry->slot_state = slot_state;
         new_entry->next = cur;
@@ -923,9 +923,9 @@ struct PTO2DepListPool {
  * Groups a TaskAllocator and DepPool into one per-depth unit.
  * CHIP_MAX_RING_DEPTH instances provide independent reclamation per scope depth.
  */
-struct PTO2RingSet {
-    PTO2TaskAllocator task_allocator;
-    PTO2FaninPool fanin_pool;
+struct ChipRingSet {
+    TaskAllocator task_allocator;
+    FaninPool fanin_pool;
 };
 
 #endif  // PTO_RING_BUFFER_H

@@ -48,8 +48,8 @@ uint64_t g_sched_self_atomic_count[PLATFORM_MAX_AICPU_THREADS] = {};
 uint64_t g_sched_pop_atomic_count[PLATFORM_MAX_AICPU_THREADS] = {};
 uint64_t g_sched_complete_count[PLATFORM_MAX_AICPU_THREADS] = {};
 
-PTO2SchedProfilingData scheduler_get_profiling(int thread_idx) {
-    PTO2SchedProfilingData d;
+SchedProfilingData scheduler_get_profiling(int thread_idx) {
+    SchedProfilingData d;
     d.lock_cycle = std::exchange(g_sched_lock_cycle[thread_idx], 0);
     d.fanout_cycle = std::exchange(g_sched_fanout_cycle[thread_idx], 0);
     d.fanin_cycle = std::exchange(g_sched_fanin_cycle[thread_idx], 0);
@@ -71,8 +71,8 @@ PTO2SchedProfilingData scheduler_get_profiling(int thread_idx) {
 // Debug Utilities
 // =============================================================================
 
-void PTO2SchedulerState::print_stats() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::print_stats() {
+    SchedulerState *sched = this;
     LOG_DEBUG("=== Scheduler Statistics ===");
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         if (sched->ring_sched_states[r].last_task_alive > 0) {
@@ -94,13 +94,13 @@ void PTO2SchedulerState::print_stats() {
     LOG_DEBUG("============================");
 }
 
-void PTO2SchedulerState::print_queues() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::print_queues() {
+    SchedulerState *sched = this;
     LOG_DEBUG("=== Ready Queues ===");
 
     const char *shape_names[] = {"AIC", "AIV", "MIX"};
 
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         LOG_DEBUG("  %s: count=%" PRIu64, shape_names[i], sched->ready_queues[i].size());
     }
     LOG_DEBUG("  DUMMY: count=%" PRIu64, sched->dummy_ready_queue.size());

@@ -9,11 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2FaninPool and for_each_fanin_storage/slot_state
+ * Unit tests for FaninPool and for_each_fanin_storage/slot_state
  * from ring_buffer.h / ring_buffer.cpp
  *
  * Tests:
- * 1. PTO2FaninPool — ring buffer allocation, overflow, tail advance,
+ * 1. FaninPool — ring buffer allocation, overflow, tail advance,
  *    high-water tracking
  * 2. for_each_fanin_storage — inline-only, spill without wrap,
  *    spill with wrap, callback early return
@@ -36,12 +36,12 @@ class FaninPoolTest : public ::testing::Test {
 protected:
     static constexpr int32_t POOL_CAP = 32;
 
-    std::vector<PTO2FaninSpillEntry> entries;
+    std::vector<FaninSpillEntry> entries;
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2FaninPool pool{};
+    FaninPool pool{};
 
     void SetUp() override {
-        entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
+        entries.assign(POOL_CAP, FaninSpillEntry{});
         error_code.store(SIMPLER_ERROR_NONE);
         pool.init(entries.data(), POOL_CAP, &error_code);
     }
@@ -91,7 +91,7 @@ TEST_F(FaninPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
-    PTO2SharedMemoryRingHeader ring{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.fc.current_task_index.store(POOL_CAP + 1, std::memory_order_release);
     ring.fc.last_task_alive.store(0, std::memory_order_release);
@@ -158,14 +158,14 @@ class ForEachFaninTest : public ::testing::Test {
 protected:
     static constexpr int32_t POOL_CAP = 32;
 
-    std::vector<PTO2FaninSpillEntry> spill_entries;
+    std::vector<FaninSpillEntry> spill_entries;
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2FaninPool spill_pool{};
+    FaninPool spill_pool{};
 
     alignas(64) ChipTaskSlotState slots[64];
 
     void SetUp() override {
-        spill_entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
+        spill_entries.assign(POOL_CAP, FaninSpillEntry{});
         error_code.store(SIMPLER_ERROR_NONE);
         spill_pool.init(spill_entries.data(), POOL_CAP, &error_code);
         memset(slots, 0, sizeof(slots));
@@ -173,7 +173,7 @@ protected:
 };
 
 TEST_F(ForEachFaninTest, InlineOnlyVoid) {
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 5; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
@@ -190,7 +190,7 @@ TEST_F(ForEachFaninTest, InlineOnlyVoid) {
 }
 
 TEST_F(ForEachFaninTest, InlineOnlyBoolEarlyReturn) {
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 5; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
@@ -206,7 +206,7 @@ TEST_F(ForEachFaninTest, InlineOnlyBoolEarlyReturn) {
 }
 
 TEST_F(ForEachFaninTest, InlineOnlyBoolAllTrue) {
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 3; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
@@ -219,7 +219,7 @@ TEST_F(ForEachFaninTest, InlineOnlyBoolAllTrue) {
 }
 
 TEST_F(ForEachFaninTest, ZeroFanin) {
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
     int count = 0;
     for_each_fanin_storage(inline_slots, 0, 0, spill_pool, [&](ChipTaskSlotState *, DepFlags) {
         count++;
@@ -233,8 +233,8 @@ TEST_F(ForEachFaninTest, ZeroFanin) {
 
 TEST_F(ForEachFaninTest, SpillNoWrap) {
     // 18 fanins = 16 inline + 2 spill
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
-    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
+    for (int i = 0; i < CHIP_FANIN_INLINE_CAP; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
@@ -268,8 +268,8 @@ TEST_F(ForEachFaninTest, SpillWithWrap) {
     spill_pool.top = POOL_CAP - 2;
     spill_pool.tail = POOL_CAP - 2;
 
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
-    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
+    for (int i = 0; i < CHIP_FANIN_INLINE_CAP; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
@@ -302,8 +302,8 @@ TEST_F(ForEachFaninTest, SpillWithWrap) {
 // =============================================================================
 
 TEST_F(ForEachFaninTest, SpillBoolEarlyReturnInSpillRegion) {
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
-    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
+    for (int i = 0; i < CHIP_FANIN_INLINE_CAP; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
@@ -325,16 +325,16 @@ TEST_F(ForEachFaninTest, SpillBoolEarlyReturnInSpillRegion) {
 }
 
 // =============================================================================
-// PTO2FaninSpillEntry: DepFlags packing round-trips across inline and spill
+// FaninSpillEntry: DepFlags packing round-trips across inline and spill
 // =============================================================================
 
 TEST_F(ForEachFaninTest, DepFlagsRoundTripInlineAndSpill) {
     // Fill all 64 inline edges; slots 0..2 carry distinct flag combinations.
-    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    FaninSpillEntry inline_slots[CHIP_FANIN_INLINE_CAP] = {};
     inline_slots[0].set(&slots[0], DEP_WAIT);
     inline_slots[1].set(&slots[1], DEP_RETAIN);
     inline_slots[2].set(&slots[2], DEP_WAIT | DEP_RETAIN);
-    for (int i = 3; i < PTO2_FANIN_INLINE_CAP; i++) {
+    for (int i = 3; i < CHIP_FANIN_INLINE_CAP; i++) {
         inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
@@ -345,7 +345,7 @@ TEST_F(ForEachFaninTest, DepFlagsRoundTripInlineAndSpill) {
     auto *s1 = spill_pool.alloc();
     s1->set(&slots[1], DEP_WAIT | DEP_RETAIN);
 
-    const int32_t total = PTO2_FANIN_INLINE_CAP + 2;  // 64 inline + 2 spill
+    const int32_t total = CHIP_FANIN_INLINE_CAP + 2;  // 64 inline + 2 spill
     std::vector<DepFlags> flags;
     for_each_fanin_storage(inline_slots, total, spill_start, spill_pool, [&](ChipTaskSlotState *, DepFlags f) {
         flags.push_back(f);
@@ -357,6 +357,6 @@ TEST_F(ForEachFaninTest, DepFlagsRoundTripInlineAndSpill) {
     EXPECT_EQ(flags[1], DEP_RETAIN);
     EXPECT_EQ(flags[2], DEP_WAIT | DEP_RETAIN);
     // Spill flags survive.
-    EXPECT_EQ(flags[PTO2_FANIN_INLINE_CAP + 0], DEP_RETAIN);
-    EXPECT_EQ(flags[PTO2_FANIN_INLINE_CAP + 1], DEP_WAIT | DEP_RETAIN);
+    EXPECT_EQ(flags[CHIP_FANIN_INLINE_CAP + 0], DEP_RETAIN);
+    EXPECT_EQ(flags[CHIP_FANIN_INLINE_CAP + 1], DEP_WAIT | DEP_RETAIN);
 }

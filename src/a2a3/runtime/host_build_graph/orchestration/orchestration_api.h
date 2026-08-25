@@ -132,7 +132,7 @@ typedef struct RuntimeOps {
  */
 struct RuntimeContext {
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode;
+    ScopeMode pending_scope_mode;
 };
 
 class GraphOwnedArgs {
@@ -536,7 +536,7 @@ static inline void rt_graph_commit() {
     if (!rt->ops->is_fatal(rt) && rt->ops->graph_commit != nullptr) rt->ops->graph_commit(rt);
 }
 
-static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
+static inline void rt_scope_begin(ScopeMode mode = ScopeMode::AUTO) {
     RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
@@ -683,7 +683,7 @@ static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, con
  */
 class ScopeGuard {
 public:
-    explicit ScopeGuard(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) :
+    explicit ScopeGuard(ScopeMode mode = ScopeMode::AUTO) :
         rt_(current_runtime()) {
         if (!rt_->ops->is_fatal(rt_)) {
             rt_->pending_scope_mode = mode;
@@ -870,8 +870,8 @@ rt_submit_graph(GraphFunctionWithConfig<Config...> function, const GraphTaskArgs
  * This struct is defined identically in runtime_core.h (with an include
  * guard) so the executor can use the same type without including this header.
  */
-#ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
-#define PTO2_ORCHESTRATION_CONFIG_DEFINED
+#ifndef ORCHESTRATION_CONFIG_DEFINED
+#define ORCHESTRATION_CONFIG_DEFINED
 struct OrchestrationConfig {
     int expected_arg_count;
 };

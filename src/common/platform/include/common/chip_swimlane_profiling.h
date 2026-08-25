@@ -138,7 +138,7 @@ static_assert(sizeof(ChipSwimlaneAicpuTaskRecord) == 32, "ChipSwimlaneAicpuTaskR
  *
  * Two identity fields with different roles:
  *
- * - `task_token_raw` — the PTO2 task identity `(ring_id << 32) | local_id`.
+ * - `task_token_raw` — the task identity `(ring_id << 32) | local_id`.
  *   Per-task unique. AICore reads it from
  *   `LocalContext.async_ctx.task_token.raw` (already in the dispatch
  *   payload's cache line). The host pulls it from here as the canonical
@@ -522,7 +522,7 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
                   // early-dispatch hits. tasks_processed = # consumers visited.
     // Separate-lane (Worker View pid=4 AICPU_N)
     DummyTask = 7,      // Per-dummy identity marker (zero-width). phase_data.dummy_task
-                        // carries the local/ring components of the full PTO2 identity.
+                        // carries the local/ring components of the full task identity.
     Drain = 8,          // handle_drain_mode outer: the sync_start stop-the-world drain
                         // (ack barrier + availability + parallel stage + finalize).
                         // One bar per dispatch-loop iteration that enters the drain,
@@ -547,7 +547,7 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.
- *  Must match PTO2ResourceShape's first three values (see submit_types.h).
+ *  Must match ResourceShape's first three values (see submit_types.h).
  *  Hardcoded here rather than included to keep this header runtime-independent. */
 constexpr int CHIP_SWIMLANE_NUM_QUEUE_SHAPES = 3;
 
@@ -608,7 +608,7 @@ static_assert(sizeof(ChipSwimlaneAicpuSchedPhaseRecord) == 64, "ChipSwimlaneAicp
 struct ChipSwimlaneAicpuOrchPhaseRecord {
     uint64_t start_time;  // Submit start timestamp
     uint64_t end_time;    // Submit end timestamp
-    uint64_t task_id;     // Full PTO2 encoding (ring_id << 32) | local_id
+    uint64_t task_id;     // Full TaskId encoding (ring_id << 32) | local_id
     uint32_t submit_idx;  // Monotonic submit counter
     uint32_t _pad;        // 32B alignment padding
 };

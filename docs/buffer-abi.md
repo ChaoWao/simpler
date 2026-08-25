@@ -56,8 +56,8 @@ That is self-consistent, but it charges the device for host-side fields:
 
 - **Device cost.** `sizeof(ChipTensor)` is pinned at **128 B** by
   `static_assert(… == 128, "ChipTensor must be exactly 2 cache lines (128 bytes)")` and by
-  `PTO2_TASKPAYLOAD_TENSOR_STRIDE`, which the AICPU scheduler strides the payload
-  with. A merged struct is ~192–216 B, taking `PTO2TaskPayload` from 4864 B to
+  `TASKPAYLOAD_TENSOR_STRIDE`, which the AICPU scheduler strides the payload
+  with. A merged struct is ~192–216 B, taking `TaskPayload` from 4864 B to
   6912–7680 B — **+42% to +58% per task slot** — because the payload embeds
   `ChipTensor tensors[MAX_TENSOR_ARGS]` **by value** in the device task ring.
 - **Zero return for that cost.** Most of what a merge would add has no reader on

@@ -104,7 +104,7 @@ enum DepGenRecordFlags : uint32_t {
  * blob covers exactly two cache lines instead of straddling three.
  */
 struct DepGenRecord {
-    uint64_t task_id;                                   // PTO2 encoding (ring_id << 32) | local_id
+    uint64_t task_id;                                   // TaskId encoding (ring_id << 32) | local_id
     uint32_t flags;                                     // DepGenRecordFlags bitmask
     uint16_t tensor_count;                              // number of valid ChipTensor slots
     uint16_t explicit_dep_count;                        // number of valid explicit_dep slots

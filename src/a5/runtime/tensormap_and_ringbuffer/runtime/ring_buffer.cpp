@@ -34,17 +34,17 @@ static void latch_pool_error(std::atomic<int32_t> *error_code_ptr, int32_t error
 // =============================================================================
 // Fanin Spill Pool Implementation
 // =============================================================================
-void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+void FaninPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
     if (sm_last_task_alive <= reclaim_task_cursor) return;
 
     int32_t scan_end = sm_last_task_alive;
     for (int32_t task_id = reclaim_task_cursor; task_id < scan_end; ++task_id) {
-        PTO2TaskPayload &payload = ring.get_payload_by_task_id(task_id);
+        TaskPayload &payload = ring.get_payload_by_task_id(task_id);
         if (payload.fanin_spill_pool != this) {
             continue;
         }
 
-        int32_t inline_count = std::min(payload.fanin_actual_count, PTO2_FANIN_INLINE_CAP);
+        int32_t inline_count = std::min(payload.fanin_actual_count, CHIP_FANIN_INLINE_CAP);
         int32_t spill_edge_count = payload.fanin_actual_count - inline_count;
         if (spill_edge_count > 0) {
             advance_tail(payload.fanin_spill_start + spill_edge_count);
@@ -53,7 +53,7 @@ void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_ta
     reclaim_task_cursor = scan_end;
 }
 
-bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed) {
+bool FaninPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed) {
     if (available() >= needed) return true;
 
     int spin_count = 0;
@@ -94,10 +94,10 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+            } else if (!watermark_synchronized && now - block_cycle0 >= CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                 publication_request.request();
             }
-            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
                 LOG_ERROR("========================================");
                 LOG_ERROR("FATAL: Fanin Spill Pool Deadlock Detected!");
@@ -121,8 +121,8 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
                 LOG_ERROR(
                     "  Increase fanin spill pool capacity (current: %d, recommended: %d)", capacity, high_water * 2
                 );
-                LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
-                LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+                LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
+                LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", high_water * 2);
                 LOG_ERROR("========================================");
                 latch_pool_error(error_code_ptr, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
                 return false;
@@ -137,8 +137,8 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
 // =============================================================================
 // Dependency List Pool Implementation
 // =============================================================================
-void PTO2DepListPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
-    if (sm_last_task_alive >= last_reclaimed + PTO2_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
+void DepListPool::reclaim(SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+    if (sm_last_task_alive >= last_reclaimed + CHIP_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
         int32_t mark = ring.get_slot_state_by_task_id(sm_last_task_alive - 1).dep_pool_mark;
         if (mark > 0) {
             advance_tail(mark);
@@ -147,9 +147,7 @@ void PTO2DepListPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_
     }
 }
 
-void PTO2DepListPool::report_deadlock(
-    PTO2SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated
-) {
+void DepListPool::report_deadlock(SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated) {
     int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
     LOG_ERROR("========================================");
     LOG_ERROR("FATAL: Dependency Pool Deadlock Detected!");
@@ -178,20 +176,18 @@ void PTO2DepListPool::report_deadlock(
         uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
         LOG_ERROR(
             "  Head task %d: state=%d, consumers=%u/%u, scope_released=%d", last_alive,
-            static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~PTO2_FANOUT_SCOPE_BIT,
-            fc & ~PTO2_FANOUT_SCOPE_BIT, (rc & PTO2_FANOUT_SCOPE_BIT) ? 1 : 0
+            static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~FANOUT_SCOPE_BIT,
+            fc & ~FANOUT_SCOPE_BIT, (rc & FANOUT_SCOPE_BIT) ? 1 : 0
         );
     }
     LOG_ERROR("Solution:");
     LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d)", capacity, high_water * 2);
-    LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in runtime_types.h");
-    LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+    LOG_ERROR("  Compile-time: CHIP_DEP_LIST_POOL_SIZE in runtime_types.h");
+    LOG_ERROR("  Per task:     CallConfig.runtime_env.ring_dep_pool=%d", high_water * 2);
     LOG_ERROR("========================================");
 }
 
-bool PTO2DepListPool::ensure_space(
-    PTO2SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task
-) {
+bool DepListPool::ensure_space(SharedMemoryRingHeader &ring, int32_t needed, ChipTaskSlotState *oldest_open_task) {
     if (available() >= needed) return true;
 
     int spin_count = 0;
@@ -233,7 +229,7 @@ bool PTO2DepListPool::ensure_space(
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+            } else if (!watermark_synchronized && now - block_cycle0 >= CHIP_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
                 publication_request.request();
             }
             bool head_is_oldest_open_task = ring.slot_states != nullptr &&
@@ -246,7 +242,7 @@ bool PTO2DepListPool::ensure_space(
             // (2) Wall-clock backstop for the residual case the head test cannot
             // prove. Absolute time (get_sys_cnt_aicpu is an MMIO read), sampled
             // once per 1024 spins.
-            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            if (now - block_cycle0 >= ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/false);
                 latch_pool_error(error_code_ptr, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
                 return false;

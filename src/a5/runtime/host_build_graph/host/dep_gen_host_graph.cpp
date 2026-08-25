@@ -19,7 +19,7 @@
  *   tensormap — a producer whose written slice overlaps what this task reads
  *               (STEP 3 Step B); carries both slices' geometry.
  *
- * Per-task producer dedup mirrors PTO2FaninBuilder::append_fanin_or_fail, which
+ * Per-task producer dedup mirrors FaninBuilder::append_fanin_or_fail, which
  * collapses all three sources into one fanin list: the first edge to name a
  * producer is kept. tensormap edges are exempt — a second producer slice for the
  * same task is a distinct fact about the data flow, and viewers rely on seeing
@@ -183,9 +183,9 @@ void fill_consumer(EdgeAnnot &e, const ChipTensor &t) {
     }
 }
 
-// Copy a PTO2TensorMapEntry's slice description into an EdgeAnnot's producer_*
+// Copy a ChipTensorMapEntry's slice description into an EdgeAnnot's producer_*
 // fields. Only called from the TENSORMAP path.
-void fill_producer(EdgeAnnot &e, const PTO2TensorMapEntry &entry) {
+void fill_producer(EdgeAnnot &e, const ChipTensorMapEntry &entry) {
     e.producer_ndims = entry.ndims;
     e.producer_start_offset = entry.start_offset;
     for (uint32_t i = 0; i < entry.ndims && i < MAX_TENSOR_DIMS; i++) {
@@ -465,7 +465,7 @@ void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx,
 }
 
 void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
+    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry,
     OverlapStatus overlap
 ) {
     HostGraphState &s = state();

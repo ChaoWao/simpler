@@ -93,7 +93,7 @@ struct GraphPredicate {
 };
 
 struct GraphNodeDefinition {
-    int32_t kernel_id[PTO2_SUBTASK_SLOT_COUNT];
+    int32_t kernel_id[SUBTASK_SLOT_COUNT];
     uint8_t active_mask;
     uint8_t task_attrs;
     int16_t logical_block_num;
@@ -409,13 +409,13 @@ enum class GraphMaterializeResult : uint8_t {
 };
 
 struct alignas(64) GraphNodeStorage {
-    PTO2TaskDescriptor task;
+    TaskDescriptor task;
     ChipTaskSlotState slot;
     // The payload carries its argument regions as deltas into pools past the node
     // array, so its size is the same for every node and the slot names it by a delta
     // from the slot's own address. Field order here therefore constrains nothing, and
     // node_at strides the storage by this type.
-    PTO2TaskPayload payload;
+    TaskPayload payload;
 };
 
 inline constexpr uint8_t GRAPH_EXECUTION_STATE_MASK = 0x7;

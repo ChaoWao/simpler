@@ -81,7 +81,7 @@ struct DepGraphAnnotate {
         dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
     }
     void tensormap(
-        int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+        int32_t arg_idx, const ChipTensor &consumer, const ChipTensorMapEntry &entry, OverlapStatus overlap
     ) const {
         dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
     }
@@ -90,7 +90,7 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit
 __attribute__((weak, visibility("hidden"))) void
 dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
+    uint64_t, int32_t, const ChipTensor &, const ChipTensorMapEntry &, OverlapStatus
 ) {}
 
 // AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
@@ -233,7 +233,7 @@ __attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { retur
     } while (0)
 #endif
 
-static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) {
+static int32_t orch_mark_fatal(OrchestratorState *orch, int32_t error_code) {
     always_assert(orch != nullptr);
     orch->fatal = true;
     if (error_code == SIMPLER_ERROR_NONE || orch->sm_header == nullptr) {
@@ -249,7 +249,7 @@ static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) 
 }
 
 static void
-orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
+orch_report_fatal_v(OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
     int32_t latched_code = orch_mark_fatal(orch, error_code);
 
     if (fmt == nullptr || fmt[0] == '\0') {
@@ -270,7 +270,7 @@ orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char 
     unified_log_error(func, "FATAL(code=%d): %s", error_code, message.data());
 }
 
-void PTO2OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
+void OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
     auto *orch = this;
     va_list args;
     va_start(args, fmt);
@@ -315,7 +315,7 @@ struct GraphRecordedPredicate {
 };
 
 struct GraphRecordedNode {
-    std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids{};
+    std::array<int32_t, SUBTASK_SLOT_COUNT> kernel_ids{};
     ActiveMask active_mask{};
     TaskAttrs task_attrs{};
     int16_t logical_block_num{1};
@@ -442,14 +442,14 @@ struct GraphRecording {
     // (the shape every generated orchestration uses) would therefore record a
     // node with no edge to its actual producer, and the Definition would replay
     // a DAG the same body never had when submitted task by task.
-    PTO2TensorMap tensor_map{};
+    ChipTensorMap tensor_map{};
     bool tensor_map_ready{false};
     // Scope depth as the body sees it. begin_scope/end_scope leave the real
     // orchestrator stack untouched while recording (a Graph replays flat), but
     // the manual-scope flag still has to follow the body: a manual scope
     // suppresses inference on the ring, so it must suppress it here too.
     int32_t scope_stack_top{-1};
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
 
@@ -558,7 +558,7 @@ struct GraphHostState {
 
 namespace {
 
-GraphHostState *graph_state_from(PTO2OrchestratorState *orch) {
+GraphHostState *graph_state_from(OrchestratorState *orch) {
     return orch == nullptr ? nullptr : static_cast<GraphHostState *>(orch->graph_host_state);
 }
 
@@ -571,7 +571,7 @@ thread_local GraphRecording *g_active_graph_recording = nullptr;
 // part of the thread-local identity rather than implied by it.
 thread_local GraphHostState *g_active_graph_owner = nullptr;
 
-GraphRecording *active_graph_recording(PTO2OrchestratorState *orch) {
+GraphRecording *active_graph_recording(OrchestratorState *orch) {
     GraphHostState *state = graph_state_from(orch);
     if (state == nullptr || state != g_active_graph_owner) return nullptr;
     return g_active_graph_recording;
@@ -649,7 +649,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // Entry capacity for one recorded body's hazard map. A Definition is capped at
 // GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
 // args, so this bounds the worst realistic body while staying a small fraction of
-// the ring path's whole-orchestration pool (PTO2_TENSORMAP_POOL_SIZE). Exhausting
+// the ring path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
 // it marks the recording unsupported, which graph_commit reports as
 // SIMPLER_ERROR_INVALID_ARGS -- the outer shell is already submitted by then, so there
 // is no ordinary-path fallback left to take.
@@ -659,7 +659,7 @@ constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 // reported to the caller, which abandons the recording rather than producing a
 // Definition with inferred edges missing.
 bool graph_recording_init_tensor_map(GraphRecording &recording) {
-    if (!recording.tensor_map.init(PTO2_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
+    if (!recording.tensor_map.init(CHIP_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES)) {
         return false;
     }
     recording.tensor_map_ready = true;
@@ -718,7 +718,7 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     recording.next_virtual_offset = 0;
     recording.unsupported = false;
     recording.scope_stack_top = -1;
-    recording.manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    recording.manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     // clear() keeps each array's capacity, which is the point: after the first recording
     // on this thread the arrays are already as large as this workload's bodies need.
     // nodes is deliberately not cleared: see GraphRecording::node_count.
@@ -971,7 +971,7 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
             return false;
         }
         node_offsets[i] = required_heap;
-        const uint64_t output_bytes = PTO2_ALIGN_UP(source.total_output_size, PTO2_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(source.total_output_size, CHIP_ALIGN_SIZE);
         if (required_heap > UINT64_MAX - output_bytes) return false;
         required_heap += output_bytes;
 
@@ -1121,7 +1121,7 @@ GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
     return list;
 }
 
-static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
+static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
         memset(
@@ -1137,11 +1137,11 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
 // Polling: fanin is a flat array of position-independent producer local ids on
 // the payload (no dep-pool spill, no producer pointers). The builder writes them
 // directly into the payload's fanin region as producers are appended, deduping by
-// slot and hard-capping at PTO2_MAX_FANIN. self_local is this task's own local id
+// slot and hard-capping at CHIP_MAX_FANIN. self_local is this task's own local id
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
-struct PTO2FaninBuilder {
-    PTO2FaninBuilder(PTO2OrchestratorState *orch, PTO2TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
+struct FaninBuilder {
+    FaninBuilder(OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
         count(0),
         orch(orch),
         seen_epoch(seen_epoch),
@@ -1149,10 +1149,10 @@ struct PTO2FaninBuilder {
         payload(payload),
         slots(payload->fanin_data()) {}
     int32_t count{0};
-    PTO2OrchestratorState *orch{nullptr};
+    OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
     int32_t self_local{0};
-    PTO2TaskPayload *payload{nullptr};
+    TaskPayload *payload{nullptr};
     // The payload's fanin region, resolved once: the appends below would otherwise
     // re-resolve the delta per producer. Requires the regions bound before construction.
     int32_t *slots{nullptr};
@@ -1178,8 +1178,8 @@ struct PTO2FaninBuilder {
 };
 
 static bool append_fanin_or_fail(
-    PTO2OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
-    TaskId producer_task_id, PTO2FaninBuilder *fanin_builder
+    OrchestratorState *orch, uint8_t prod_ring, int32_t prod_slot, ChipTaskSlotState *prod_state,
+    TaskId producer_task_id, FaninBuilder *fanin_builder
 ) {
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
     // to this producer (defensive — whole-graph-resident hbg does not reuse slots
@@ -1192,16 +1192,16 @@ static bool append_fanin_or_fail(
     if (fanin_builder->mark_seen(prod_ring, prod_slot)) {
         return true;
     }
-    if (fanin_builder->count >= PTO2_MAX_FANIN) {
+    if (fanin_builder->count >= CHIP_MAX_FANIN) {
         LOG_ERROR("========================================");
         LOG_ERROR("FATAL: Fanin Capacity Exhausted!");
         LOG_ERROR("========================================");
         LOG_ERROR("HBG stores every producer dependency in the consumer task's fanin region.");
-        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, PTO2_MAX_FANIN);
+        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, CHIP_MAX_FANIN);
         LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
         LOG_ERROR("Solution:");
-        LOG_ERROR("  Reduce the task fanin to at most PTO2_MAX_FANIN=%d.", PTO2_MAX_FANIN);
-        LOG_ERROR("  HBG has no dependency spill pool; PTO2_RING_DEP_POOL does not apply.");
+        LOG_ERROR("  Reduce the task fanin to at most CHIP_MAX_FANIN=%d.", CHIP_MAX_FANIN);
+        LOG_ERROR("  HBG has no dependency spill pool; runtime_env.ring_dep_pool does not apply.");
         LOG_ERROR("========================================");
         orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;
@@ -1216,31 +1216,30 @@ static bool append_fanin_or_fail(
     return true;
 }
 
-struct PTO2PreparedTask {
+struct PreparedTask {
     TaskId task_id = TaskId::invalid();
-    PTO2TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
-    PTO2TaskDescriptor *task = nullptr;
-    PTO2TaskPayload *payload = nullptr;
+    TaskAllocResult alloc_result = {-1, 0, nullptr, nullptr};
+    TaskDescriptor *task = nullptr;
+    TaskPayload *payload = nullptr;
     ChipTaskSlotState *slot_state = nullptr;
 };
 
-static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
-    PTO2OutputLayout layout;
+static OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
+    OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) != TensorArgType::OUTPUT) {
             continue;
         }
         layout.offsets[i] = layout.total_output_size;
-        layout.buffer_sizes[i] =
-            PTO2_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
+        layout.buffer_sizes[i] = CHIP_ALIGN_UP(args.tensor(i).create_info().buffer_size_bytes(), PACKED_OUTPUT_ALIGN);
         layout.total_output_size += layout.buffer_sizes[i];
     }
     return layout;
 }
 
 static bool prepare_task(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
-    TaskAttrs task_attrs, PTO2PreparedTask *out
+    OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
+    TaskAttrs task_attrs, PreparedTask *out
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
     uint8_t ring_id = 0;
@@ -1276,10 +1275,10 @@ static bool prepare_task(
     // ChipTensor being two cache lines. The fanin cursor advances at publish, not
     // here — see the comment where it does.
     const uint64_t window = orch->sm_header->ring.task_window_size;
-    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
     debug_assert(static_cast<uint64_t>(orch->tensor_pool_cursor) + args.tensor_count() <= window * MAX_TENSOR_ARGS);
     debug_assert(static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span <= window * MAX_SCALAR_ARGS);
-    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + PTO2_MAX_FANIN <= window * PTO2_MAX_FANIN);
+    debug_assert(static_cast<uint64_t>(orch->fanin_pool_cursor) + CHIP_MAX_FANIN <= window * CHIP_MAX_FANIN);
     out->payload->bind_regions(
         orch->tensor_pool + orch->tensor_pool_cursor, orch->scalar_pool + orch->scalar_pool_cursor,
         orch->fanin_pool + orch->fanin_pool_cursor
@@ -1308,7 +1307,7 @@ static bool prepare_task(
     out->slot_state->bind_buffers(out->payload, out->task);
 
     // prepare_task does NO payload writes: all payload content (tensors/scalars +
-    // early-dispatch fields) is initialized in PTO2TaskPayload::init, the
+    // early-dispatch fields) is initialized in TaskPayload::init, the
     // single payload-init point, which runs before Orch-side wiring publish.
 
     // Fields already zeroed by the reset_for_reuse() above:
@@ -1319,7 +1318,7 @@ static bool prepare_task(
     // task_state is set to PENDING here as the orchestrator populates the slot
     // (host_build_graph does not recycle slots at runtime, so there is no
     // post-CONSUMED reset path).
-    out->slot_state->task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+    out->slot_state->task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     out->slot_state->total_required_subtasks = static_cast<int16_t>(total_required_subtasks);
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
@@ -1339,7 +1338,7 @@ static bool prepare_task(
 // Scope Management
 // =============================================================================
 
-void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
+void OrchestratorState::begin_scope(ScopeMode mode) {
     auto *orch = this;
     if (orch->fatal) {
         return;
@@ -1357,20 +1356,20 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         // body that ordinary submission refuses. The push still happens so
         // end_scope stays balanced -- the recording is doomed either way, since
         // graph_commit turns an unsupported recording into SIMPLER_ERROR_INVALID_ARGS.
-        if (recording->scope_stack_top >= PTO2_MAX_SCOPE_DEPTH - 1 ||
-            (mode == PTO2ScopeMode::AUTO && recording->in_manual_scope())) {
+        if (recording->scope_stack_top >= CHIP_MAX_SCOPE_DEPTH - 1 ||
+            (mode == ScopeMode::AUTO && recording->in_manual_scope())) {
             recording->unsupported = true;
         }
-        if (recording->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1) {
+        if (recording->scope_stack_top < CHIP_MAX_SCOPE_DEPTH - 1) {
             ++recording->scope_stack_top;
-            if (mode == PTO2ScopeMode::MANUAL && !recording->in_manual_scope()) {
+            if (mode == ScopeMode::MANUAL && !recording->in_manual_scope()) {
                 recording->manual_begin_depth = recording->scope_stack_top;
             }
         }
         return;
     }
-    assert(orch->scope_stack_top < PTO2_MAX_SCOPE_DEPTH - 1 && "Scope stack overflow");
-    if (mode == PTO2ScopeMode::AUTO && orch->in_manual_scope()) {
+    assert(orch->scope_stack_top < CHIP_MAX_SCOPE_DEPTH - 1 && "Scope stack overflow");
+    if (mode == ScopeMode::AUTO && orch->in_manual_scope()) {
         report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported"
         );
@@ -1379,12 +1378,12 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
 
     bool already_in_manual_scope = orch->in_manual_scope();
     ++orch->scope_stack_top;
-    if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
+    if (mode == ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
 }
 
-void PTO2OrchestratorState::end_scope() {
+void OrchestratorState::end_scope() {
     auto *orch = this;
     if (orch->fatal) {
         return;
@@ -1394,7 +1393,7 @@ void PTO2OrchestratorState::end_scope() {
     if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
         if (recording->scope_stack_top >= 0) {
             if (recording->manual_begin_depth == recording->scope_stack_top) {
-                recording->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+                recording->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
             }
             --recording->scope_stack_top;
         }
@@ -1403,7 +1402,7 @@ void PTO2OrchestratorState::end_scope() {
     assert(orch->scope_stack_top >= 0 && "Scope stack underflow");
 
     if (orch->scope_stack_top == orch->manual_begin_depth) {
-        orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+        orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     }
     --orch->scope_stack_top;
 }
@@ -1420,8 +1419,8 @@ void PTO2OrchestratorState::end_scope() {
 // SIMPLER_ERROR_TENSORMAP_OVERFLOW and bail rather than letting new_entry()'s hard
 // assert fire mid-registration. Returns false when the pool is exhausted or a
 // fatal is already latched by another party.
-static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t needed) {
-    PTO2TensorMap &tm = orch->tensor_map;
+static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
+    ChipTensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
     }
@@ -1437,7 +1436,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
     LOG_ERROR("  - Free:        %d entries", tm.free_entries());
     LOG_ERROR("  - Needed:      %d entries", needed);
     LOG_ERROR("Solution:");
-    LOG_ERROR("  Increase PTO2_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
+    LOG_ERROR("  Increase CHIP_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
     LOG_ERROR("========================================");
     orch_mark_fatal(orch, SIMPLER_ERROR_TENSORMAP_OVERFLOW);
     return false;
@@ -1449,21 +1448,21 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // computation (explicit_deps + auto), output registration, slot init, and
 // Orch-side wiring/ready publication.
 static TaskOutputTensors submit_task_common(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     CYCLE_COUNT_START();
     ORCH_PHASE_START();
     TaskOutputTensors result;
-    PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    OutputLayout layout = calculate_output_layout(args);
+    PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
-    PTO2SchedulerState *sched = orch->scheduler;
+    SchedulerState *sched = orch->scheduler;
     TaskId task_id = prepared.task_id;
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
 
     // dep_gen capture point: open this task's graph entry before its dependency
@@ -1473,7 +1472,7 @@ static TaskOutputTensors submit_task_common(
     // fanout now that the swimlane hot path no longer records it.
     const bool capture_dep_graph = dep_gen_host_graph_enabled();
     if (capture_dep_graph) {
-        const std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids_capture{
+        const std::array<int32_t, SUBTASK_SLOT_COUNT> kernel_ids_capture{
             aic_kernel_id,
             aiv0_kernel_id,
             aiv1_kernel_id,
@@ -1484,7 +1483,7 @@ static TaskOutputTensors submit_task_common(
         );
     }
 
-    PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
+    FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -1507,7 +1506,7 @@ static TaskOutputTensors submit_task_common(
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
         uint8_t dep_ring_id = dep_task_id.ring();
-        PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
         int32_t dep_slot = dep_ring.get_slot_by_task_id(dep_local_task_id);
         ChipTaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
@@ -1524,7 +1523,7 @@ static TaskOutputTensors submit_task_common(
 
     auto runtime_emit = [&](TaskId producer_task_id) -> bool {
         uint8_t prod_ring = producer_task_id.ring();
-        PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
         int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
         ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
         return append_fanin_or_fail(orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder);
@@ -1566,9 +1565,9 @@ static TaskOutputTensors submit_task_common(
     // evicted by TensorMap lookup/insert cache pressure.
     __builtin_prefetch(&task, 1, 1);
     task.task_id = task_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = aic_kernel_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = aiv0_kernel_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = aiv1_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIC)] = aic_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
     task.packed_buffer_base = prepared.alloc_result.packed_base;
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
@@ -1614,7 +1613,7 @@ static TaskOutputTensors submit_task_common(
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     (void)sched;
 
@@ -1734,24 +1733,24 @@ bool graph_boundary_matches(const GraphBoundary &boundary, const GraphTaskArgs &
     return true;
 }
 
-void graph_reset_outer_payload(PTO2TaskPayload &payload) {
+void graph_reset_outer_payload(TaskPayload &payload) {
     payload.tensor_count = 0;
     payload.scalar_count = 0;
     payload.fanin_count = 0;
     payload.predicate = DispatchPredicate{};
-    payload.early_dispatch_state.store(PTO2_EARLY_DISPATCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
     for (auto &word : payload.staged_core_mask)
         word.store(0, std::memory_order_relaxed);
     payload.dispatch_fanin.store(0, std::memory_order_relaxed);
     payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
-    payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+    payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);
-    payload.early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
+    payload.early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
 }
 
 bool graph_submit_outer(
-    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
+    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
     bool defer_heap, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
@@ -1773,7 +1772,7 @@ bool graph_submit_outer(
     const uint64_t task_window = orch->sm_header->ring.task_window_size;
     const int32_t tensor_slots =
         static_cast<int32_t>(graph_boundary_tensor_pool_slots(static_cast<uint32_t>(args.tensor_count())));
-    const int32_t scalar_span = PTO2_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
+    const int32_t scalar_span = CHIP_ALIGN_UP(args.scalar_count(), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t));
     if (static_cast<uint64_t>(orch->tensor_pool_cursor) + tensor_slots > task_window * MAX_TENSOR_ARGS ||
         static_cast<uint64_t>(orch->scalar_pool_cursor) + scalar_span > task_window * MAX_SCALAR_ARGS) {
         LOG_WARN("%s", "[GraphExecution] boundary exceeds the argument pools; using ordinary path");
@@ -1790,15 +1789,15 @@ bool graph_submit_outer(
     };
     const int32_t tensormap_needed = count_registrable_outputs(boundary_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) return false;
-    const PTO2TaskAllocResult allocation = allocator.alloc(defer_heap ? 0 : owned_heap);
+    const TaskAllocResult allocation = allocator.alloc(defer_heap ? 0 : owned_heap);
     if (allocation.failed()) {
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
     const TaskId task_id = TaskId::make(0, static_cast<uint32_t>(allocation.task_id));
-    PTO2SharedMemoryRingHeader &ring = orch->sm_header->ring;
-    PTO2TaskDescriptor &task = ring.task_descriptors[allocation.slot];
-    PTO2TaskPayload &payload = ring.task_payloads[allocation.slot];
+    SharedMemoryRingHeader &ring = orch->sm_header->ring;
+    TaskDescriptor &task = ring.task_descriptors[allocation.slot];
+    TaskPayload &payload = ring.task_payloads[allocation.slot];
     ChipTaskSlotState &slot = ring.get_slot_state_by_slot(allocation.slot);
 
     // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
@@ -1820,7 +1819,7 @@ bool graph_submit_outer(
     );
     orch->tensor_pool_cursor += tensor_slots;
     orch->scalar_pool_cursor += scalar_span;
-    slot.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+    slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     slot.last_consumer_local_id = static_cast<int32_t>(task_id.local());
     slot.active_mask = ActiveMask{};
     slot.task_attrs = TaskAttrs{};
@@ -1841,11 +1840,11 @@ bool graph_submit_outer(
     if (args.scalar_count() != 0) {
         std::memcpy(
             payload.scalar_data(), args.scalar_data(),
-            PTO2_ALIGN_UP(static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t), ARG_POOL_ALIGN)
+            CHIP_ALIGN_UP(static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t), ARG_POOL_ALIGN)
         );
     }
 
-    PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
+    FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
     auto emit = [&](TaskId producer_id) -> bool {
         const int32_t producer_local = static_cast<int32_t>(producer_id.local());
         const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);
@@ -1860,7 +1859,7 @@ bool graph_submit_outer(
     // the args it consumes and the edges those produce.
     const bool capture_dep_graph = dep_gen_host_graph_enabled();
     if (capture_dep_graph) {
-        const std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids_capture{
+        const std::array<int32_t, SUBTASK_SLOT_COUNT> kernel_ids_capture{
             INVALID_KERNEL_ID,
             INVALID_KERNEL_ID,
             INVALID_KERNEL_ID,
@@ -1884,7 +1883,7 @@ bool graph_submit_outer(
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += PTO2_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(pending);
@@ -1896,7 +1895,7 @@ bool graph_submit_outer(
 }
 
 bool graph_submit_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, const GraphDefinition *definition, const GraphTaskArgs &args,
+    OrchestratorState *orch, GraphHostState *state, const GraphDefinition *definition, const GraphTaskArgs &args,
     TaskId *submitted_id
 ) {
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
@@ -1913,13 +1912,12 @@ bool graph_submit_definition(
 }
 
 bool graph_submit_pending_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args,
-    TaskId *submitted_id
+    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
 }
 
-bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
+bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
     for (GraphPendingUpload &pending : state->pending_uploads) {
         if (!pending.deferred_heap) continue;
         auto definition_it = state->definitions.find(pending.full_key);
@@ -1963,7 +1961,7 @@ bool graph_finalize_pending_submissions(PTO2OrchestratorState *orch, GraphHostSt
 // recording.nodes keeps those addresses valid because the inner buffer is
 // transferred, not copied.
 TaskOutputTensors graph_record_submit_node(
-    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     ORCH_PHASE_START();
@@ -1982,9 +1980,9 @@ TaskOutputTensors graph_record_submit_node(
         recording.unsupported = true;
     }
 
-    const PTO2OutputLayout layout = calculate_output_layout(args);
+    const OutputLayout layout = calculate_output_layout(args);
     const uint64_t aligned_output =
-        layout.total_output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), PTO2_ALIGN_SIZE) :
+        layout.total_output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), CHIP_ALIGN_SIZE) :
                                        0;
     if (recording.next_virtual_offset > GRAPH_RECORD_VIRTUAL_BASE - aligned_output) {
         recording.unsupported = true;
@@ -2002,9 +2000,9 @@ TaskOutputTensors graph_record_submit_node(
     if (node_index >= recording.nodes.size()) recording.nodes.emplace_back();
     GraphRecordedNode &node = recording.nodes[node_index];
     node.reset();
-    node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIC)] = aic_kernel_id;
-    node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIV0)] = aiv0_kernel_id;
-    node.kernel_ids[static_cast<int>(PTO2SubtaskSlot::AIV1)] = aiv1_kernel_id;
+    node.kernel_ids[static_cast<int>(SubtaskSlot::AIC)] = aic_kernel_id;
+    node.kernel_ids[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
+    node.kernel_ids[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
     node.active_mask = active_mask;
     node.task_attrs = task_attrs;
     node.task_attrs.set_early_resolve(false);
@@ -2025,7 +2023,7 @@ TaskOutputTensors graph_record_submit_node(
     node.record_packed_base = packed_base_addr;
     node.total_output_size = aligned_output;
 
-    // Build the tensor list exactly as PTO2TaskPayload::init: inputs/inouts copy
+    // Build the tensor list exactly as TaskPayload::init: inputs/inouts copy
     // the caller's ChipTensor; outputs materialize from the create-info onto the
     // scratch buffer and carry this node's owner id.
     const int32_t tensor_count = args.tensor_count();
@@ -2222,8 +2220,7 @@ TaskOutputTensors graph_record_submit_node(
 
 }  // namespace
 
-GraphScopeResult
-PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+GraphScopeResult OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     ORCH_PHASE_START_SPANNING();
     const GraphScopeResult result = graph_begin_inner(graph_key, args, callable_hash);
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphBegin, graph_key);
@@ -2231,7 +2228,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args
 }
 
 GraphScopeResult
-PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -2348,7 +2345,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
     return result;
 }
 
-bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
+bool OrchestratorState::graph_prepare(void *recording_handle, const GraphTaskArgs &args) {
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || recording_handle == nullptr || g_active_graph_recording != nullptr) return false;
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
@@ -2389,7 +2386,7 @@ bool PTO2OrchestratorState::graph_prepare(void *recording_handle, const GraphTas
     return true;
 }
 
-void PTO2OrchestratorState::graph_abort(void *recording_handle) {
+void OrchestratorState::graph_abort(void *recording_handle) {
     GraphHostState *state = graph_state_from(this);
     auto *entry = static_cast<GraphInflightRecording *>(recording_handle);
     if (state == nullptr || entry == nullptr) return;
@@ -2411,7 +2408,7 @@ void PTO2OrchestratorState::graph_abort(void *recording_handle) {
 
 // Finish the background recording and publish the Definition. The main
 // thread finalizes the already-submitted outer Graph tasks in graph_commit.
-bool PTO2OrchestratorState::graph_end() {
+bool OrchestratorState::graph_end() {
     GraphHostState *state = graph_state_from(this);
     GraphRecording *recording = active_graph_recording(this);
     GraphInflightRecording *entry = g_active_graph_entry;
@@ -2471,13 +2468,13 @@ bool PTO2OrchestratorState::graph_end() {
 
 // Join every recording in flight and back-patch all deferred shells in submit
 // order. Orchestration completion is the only normal-path barrier.
-void PTO2OrchestratorState::graph_commit() {
+void OrchestratorState::graph_commit() {
     ORCH_PHASE_START_SPANNING();
     graph_commit_inner();
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphCommit, 0);
 }
 
-void PTO2OrchestratorState::graph_commit_inner() {
+void OrchestratorState::graph_commit_inner() {
     if (active_graph_recording(this) != nullptr) return;
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || state->inflight_count.load(std::memory_order_acquire) == 0) return;
@@ -2517,7 +2514,7 @@ void PTO2OrchestratorState::graph_commit_inner() {
     }
 }
 
-TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     auto *orch = this;
 
     // Orchestration API should short-circuit after fatal, but keep this entry
@@ -2553,13 +2550,13 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 
     // Normalize single-AIV tasks: if only aiv1 is set (no aic, no aiv0), move
     // it to the aiv0 slot.  This guarantees the dispatch path can always use
-    // PTO2SubtaskSlot::AIV0 for single-AIV shapes without inspecting active_mask.
+    // SubtaskSlot::AIV0 for single-AIV shapes without inspecting active_mask.
     // Mixed tasks (AIC+AIV) keep their original AIV identity so the correct
     // hardware channel (AIV0→AIC vs AIV1→AIC) is used at dispatch time.
     MixedKernels normalized = mixed_kernels;
-    bool has_aic = active_mask.has_mask(PTO2_SUBTASK_MASK_AIC);
-    bool has_aiv0 = active_mask.has_mask(PTO2_SUBTASK_MASK_AIV0);
-    bool has_aiv1 = active_mask.has_mask(PTO2_SUBTASK_MASK_AIV1);
+    bool has_aic = active_mask.has_mask(SUBTASK_MASK_AIC);
+    bool has_aiv0 = active_mask.has_mask(SUBTASK_MASK_AIV0);
+    bool has_aiv1 = active_mask.has_mask(SUBTASK_MASK_AIV1);
     if (!has_aic && has_aiv1 && !has_aiv0) {
         normalized.aiv0_kernel_id = normalized.aiv1_kernel_id;
         normalized.aiv1_kernel_id = INVALID_KERNEL_ID;
@@ -2575,8 +2572,8 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
         // Deadlock check: block_num >= total available slots of the required type.
         // For MIX/AIC: limit is total_cluster_count (one AIC per cluster).
         // For AIV:     limit is total_aiv_count.
-        PTO2ResourceShape shape = active_mask.to_shape();
-        int32_t limit = (shape == PTO2ResourceShape::AIV) ? orch->total_aiv_count : orch->total_cluster_count;
+        ResourceShape shape = active_mask.to_shape();
+        int32_t limit = (shape == ResourceShape::AIV) ? orch->total_aiv_count : orch->total_cluster_count;
         if (limit > 0 && block_num > limit) {
             report_fatal(
                 SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID, __FUNCTION__,
@@ -2609,7 +2606,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 // AICore dispatch. Empty active_mask routes the slot to the DUMMY ready
 // bucket; dispatch loop short-circuits to completion. Accepts the same Arg
 // shape as submit_task; scalars are permitted but never consumed.
-TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
     auto *orch = this;
 
     if (orch->fatal) {
@@ -2645,7 +2642,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &a
     );
 }
 
-TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
+TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     auto *orch = this;
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.
@@ -2693,16 +2690,16 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         );
     }
 
-    PTO2OutputLayout layout = calculate_output_layout(args);
-    PTO2PreparedTask prepared;
+    OutputLayout layout = calculate_output_layout(args);
+    PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time attributes. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).
     if (!prepare_task(orch, args, layout.total_output_size, ActiveMask{}, TaskAttrs{}, &prepared)) {
         return TaskOutputTensors{};
     }
 
-    PTO2TaskDescriptor &task = *prepared.task;
-    PTO2TaskPayload &payload = *prepared.payload;
+    TaskDescriptor &task = *prepared.task;
+    TaskPayload &payload = *prepared.payload;
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -2714,9 +2711,9 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
 #endif
 
     task.task_id = prepared.task_id;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
-    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
     task.packed_buffer_base = prepared.alloc_result.packed_base;
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
@@ -2751,7 +2748,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         // every consumer register_wakes on a producer that never runs on device and
         // the run hangs. (The device watermark walk transparently steps past this
         // pre-set flag when a later on-device task completes.)
-        PTO2SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
+        SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
         int32_t done_local = static_cast<int32_t>(prepared.task_id.local());
         done_ring.set_completion_flag(done_local);
     }
@@ -2775,7 +2772,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
 // Flow Control
 // =============================================================================
 
-void PTO2OrchestratorState::mark_done() {
+void OrchestratorState::mark_done() {
     auto *orch = this;
     int32_t total_tasks = orch->task_allocator.active_count();
     if (total_tasks > 0) {
@@ -2783,15 +2780,15 @@ void PTO2OrchestratorState::mark_done() {
     }
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_stack_top = -1;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX
     g_orch_submit_idx = 0;
 #endif
 }
 
 #if SIMPLER_ORCH_PROFILING
-PTO2OrchProfilingData orchestrator_get_profiling() {
-    PTO2OrchProfilingData d;
+OrchProfilingData orchestrator_get_profiling() {
+    OrchProfilingData d;
     d.alloc_cycle = g_orch_alloc_cycle;
     d.args_cycle = g_orch_args_cycle;
     d.lookup_cycle = g_orch_lookup_cycle;

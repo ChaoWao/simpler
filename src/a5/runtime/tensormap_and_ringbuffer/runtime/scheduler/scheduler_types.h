@@ -100,8 +100,8 @@ struct alignas(64) CoreExecState {
     int32_t running_reg_task_id;            // offset 24: register task ID (AICPU_TASK_INVALID = idle)
     int32_t pending_reg_task_id;            // offset 28: pending register task ID (AICPU_TASK_INVALID = none)
     uint32_t dispatch_seq;                  // offset 32: monotonic dispatch counter
-    PTO2SubtaskSlot running_subslot;        // offset 36: which subtask slot is running
-    PTO2SubtaskSlot pending_subslot;        // offset 37: which subtask slot is pending
+    SubtaskSlot running_subslot;            // offset 36: which subtask slot is running
+    SubtaskSlot pending_subslot;            // offset 37: which subtask slot is pending
     uint8_t pad0_[2];                       // offset 38: alignment padding
     // Precomputed COND register pointer; resolved once in handshake so the
     // hot completion poll does a single volatile load instead of recomputing
@@ -264,15 +264,15 @@ public:
 
     // --- Cluster matching ---
 
-    BitStates get_valid_cluster_offset_states(PTO2ResourceShape shape) const {
+    BitStates get_valid_cluster_offset_states(ResourceShape shape) const {
         switch (shape) {
-        case PTO2ResourceShape::AIC:
+        case ResourceShape::AIC:
             return core_states_ & aic_mask_;
-        case PTO2ResourceShape::AIV:
+        case ResourceShape::AIV:
             return ((core_states_ >> 1) | (core_states_ >> 2)) & aic_mask_;
-        case PTO2ResourceShape::MIX:
+        case ResourceShape::MIX:
             return (core_states_ >> 1) & (core_states_ >> 2) & core_states_ & aic_mask_;
-        case PTO2ResourceShape::DUMMY:
+        case ResourceShape::DUMMY:
             // DUMMY tasks never reach the core-tracker dispatch path; they are
             // completed inline by resolve_and_dispatch via dummy_ready_queue.
             return {};
@@ -321,11 +321,11 @@ public:
     // always have pending_occupied=0, so AIV/MIX need no extra filtering.
     // Skipping the AIC-centric filter also fixes a latent bug where a running+pending AIC core
     // would incorrectly block AIV idle dispatch on the same cluster.
-    BitStates get_idle_core_offset_states(PTO2ResourceShape shape) const {
-        if (shape == PTO2ResourceShape::AIC) {
+    BitStates get_idle_core_offset_states(ResourceShape shape) const {
+        if (shape == ResourceShape::AIC) {
             return get_valid_cluster_offset_states(shape) & ~(pending_occupied_ & aic_mask_);
         }
-        if (shape == PTO2ResourceShape::AIV) {
+        if (shape == ResourceShape::AIV) {
             return core_states_ & aiv_mask_;
         }
         return get_valid_cluster_offset_states(shape);  // MIX: cluster-level
@@ -346,13 +346,13 @@ public:
     // slot) or the mask is empty.
     MixPlacement classify_mix_cluster(int32_t cluster_offset, uint8_t core_mask) const {
         BitStates used;
-        if (core_mask & PTO2_SUBTASK_MASK_AIC) {
+        if (core_mask & SUBTASK_MASK_AIC) {
             used |= BitStates::bit(cluster_offset);
         }
-        if (core_mask & PTO2_SUBTASK_MASK_AIV0) {
+        if (core_mask & SUBTASK_MASK_AIV0) {
             used |= BitStates::bit(cluster_offset + 1);
         }
-        if (core_mask & PTO2_SUBTASK_MASK_AIV1) {
+        if (core_mask & SUBTASK_MASK_AIV1) {
             used |= BitStates::bit(cluster_offset + 2);
         }
         if (!used.has_value() || (pending_occupied_ & used).has_value()) {
@@ -392,9 +392,9 @@ public:
     // Cores of `cluster_offset` named by core_mask.
     BitStates mix_used_cores(int32_t cluster_offset, uint8_t core_mask) const {
         BitStates used;
-        if (core_mask & PTO2_SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
-        if (core_mask & PTO2_SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
-        if (core_mask & PTO2_SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
+        if (core_mask & SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
+        if (core_mask & SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
+        if (core_mask & SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
         return used;
     }
 
@@ -429,8 +429,8 @@ public:
         return get_mix_split_cluster_offset_states(core_mask).count();
     }
 
-    BitStates get_pending_core_offset_states(PTO2ResourceShape shape) const {
-        if (shape == PTO2ResourceShape::MIX) {
+    BitStates get_pending_core_offset_states(ResourceShape shape) const {
+        if (shape == ResourceShape::MIX) {
             // Shape-level query kept conservative for legacy callers/tests.
             // The real MIX dispatch path applies active_mask in classify_mix_cluster().
             // Any core without a pending payload can accept a dispatch (idle or running).
@@ -444,7 +444,7 @@ public:
                 (running & aic_mask_) & ((running >> 1) & aic_mask_) & ((running >> 2) & aic_mask_);
             return mix_available & cluster_all_running;
         }
-        if (shape == PTO2ResourceShape::AIC) {
+        if (shape == ResourceShape::AIC) {
             return (~core_states_) & aic_mask_ & ~(pending_occupied_ & aic_mask_);
         }
         // AIV
@@ -455,11 +455,11 @@ public:
     // one core per block; MIX uses one active-mask-compatible cluster per block.
     // Gated early staging may use both idle running slots and free pending slots,
     // while a ready cohort is restricted to idle running slots.
-    int32_t count_available_blocks(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) const {
-        if (shape == PTO2ResourceShape::MIX) {
+    int32_t count_available_blocks(ResourceShape shape, uint8_t core_mask, bool include_pending) const {
+        if (shape == ResourceShape::MIX) {
             return include_pending ? count_mix_split_clusters(core_mask) : count_mix_running_clusters(core_mask);
         }
-        if (shape != PTO2ResourceShape::AIC && shape != PTO2ResourceShape::AIV) return 0;
+        if (shape != ResourceShape::AIC && shape != ResourceShape::AIV) return 0;
 
         int32_t available = get_idle_core_offset_states(shape).count();
         if (include_pending) available += get_pending_core_offset_states(shape).count();
@@ -470,7 +470,7 @@ public:
 
     enum class DispatchPhase : uint8_t { IDLE, PENDING };
 
-    BitStates get_dispatchable_cores(PTO2ResourceShape shape, DispatchPhase phase) const {
+    BitStates get_dispatchable_cores(ResourceShape shape, DispatchPhase phase) const {
         return (phase == DispatchPhase::IDLE) ? get_idle_core_offset_states(shape) :
                                                 get_pending_core_offset_states(shape);
     }

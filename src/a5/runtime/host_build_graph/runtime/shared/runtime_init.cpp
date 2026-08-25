@@ -36,13 +36,13 @@
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     // Align the slots[] base to a full cache line so MPMC CAS traffic on the
     // first slot cannot false-share with whatever region sits in front of us.
-    return arena.reserve(capacity * sizeof(PTO2ReadyQueueSlot), PTO2_ALIGN_SIZE);
+    return arena.reserve(capacity * sizeof(ChipReadyQueueSlot), CHIP_ALIGN_SIZE);
 }
 
 // Initialize the queue header only. slots[] carries the sequence ramp push
 // compares against, but it lives past the uploaded range and is seeded on the
-// device by PTO2SchedulerState::seed_queue_slots(), so nothing writes it here.
-void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity) {
+// device by SchedulerState::seed_queue_slots(), so nothing writes it here.
+void ready_queue_init_data_from_layout(ChipReadyQueue *queue, uint64_t capacity) {
     queue->capacity = capacity;
     queue->mask = capacity - 1;
     queue->enqueue_pos.store(0, std::memory_order_relaxed);
@@ -50,11 +50,11 @@ void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity)
     queue->max_occupancy.store(0, std::memory_order_relaxed);
 }
 
-void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
-    queue->slots = static_cast<PTO2ReadyQueueSlot *>(arena.region_ptr(slots_off));
+void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
+    queue->slots = static_cast<ChipReadyQueueSlot *>(arena.region_ptr(slots_off));
 }
 
-void ready_queue_destroy(PTO2ReadyQueue *queue) {
+void ready_queue_destroy(ChipReadyQueue *queue) {
     // Arena owns the slots[] buffer; just forget the pointer.
     queue->slots = nullptr;
 }
@@ -63,10 +63,10 @@ void ready_queue_destroy(PTO2ReadyQueue *queue) {
 // Scheduler
 // =============================================================================
 
-bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
+bool SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base) {
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
-    ring = pto2_sm_layout::ring_header_addr(sm_dev_base);
+    ring = sm_layout::ring_header_addr(sm_dev_base);
     advance_lock.store(0, std::memory_order_relaxed);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
@@ -76,38 +76,36 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     return true;
 }
 
-void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
+void SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
-PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
-    PTO2SchedulerLayout layout{};
-    layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
+SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
+    SchedulerLayout layout{};
+    layout.ready_queue_capacity = CHIP_READY_QUEUE_SIZE;
 
-    // Fixed-capacity early-dispatch queues first, then the PTO2_READY_QUEUE_SIZE
+    // Fixed-capacity early-dispatch queues first, then the CHIP_READY_QUEUE_SIZE
     // ones. The big nine are the arena's last reservations so that the bytes bind
     // uploads stay one contiguous range no matter how much of them is in use.
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     }
-    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
     // the payload and readiness is via completion_flags.
     return layout;
 }
 
-bool PTO2SchedulerState::init_data_from_layout(
-    const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base
-) {
-    PTO2SchedulerState *sched = this;
-    sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base) {
+    SchedulerState *sched = this;
+    sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -117,19 +115,19 @@ bool PTO2SchedulerState::init_data_from_layout(
         return false;
     }
 
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->ready_queues[i], layout.ready_queue_capacity);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->ready_sync_queues[i], layout.ready_queue_capacity);
     }
     ready_queue_init_data_from_layout(&sched->dummy_ready_queue, layout.ready_queue_capacity);
     ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.ready_queue_capacity);
     ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.ready_queue_capacity);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+        ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    ready_queue_init_data_from_layout(&sched->early_sync_start_queue, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    ready_queue_init_data_from_layout(&sched->early_sync_start_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
 
     // Polling: no dep_pool arena region to initialize.
     (void)arena;
@@ -141,35 +139,35 @@ bool PTO2SchedulerState::init_data_from_layout(
 // wire_arena_pointers / destroy — a queue whose slots[] is never seeded accepts
 // one push and then reports full, since push claims a slot only when its
 // sequence already equals the position being claimed.
-void PTO2SchedulerState::seed_queue_slots() {
-    PTO2SchedulerState *sched = this;
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+void SchedulerState::seed_queue_slots() {
+    SchedulerState *sched = this;
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_queues[i].seed_slots();
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_sync_queues[i].seed_slots();
     }
     sched->dummy_ready_queue.seed_slots();
     sched->graph_ready_queue.seed_slots();
     sched->graph_prepare_queue.seed_slots();
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->early_dispatch_queues[i].seed_slots();
     }
     sched->early_sync_start_queue.seed_slots();
 }
 
-void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
-    PTO2SchedulerState *sched = this;
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena) {
+    SchedulerState *sched = this;
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
     }
     ready_queue_wire_arena_pointers(&sched->dummy_ready_queue, arena, layout.off_dummy_ready_queue_slots);
     ready_queue_wire_arena_pointers(&sched->graph_ready_queue, arena, layout.off_graph_ready_queue_slots);
     ready_queue_wire_arena_pointers(&sched->graph_prepare_queue, arena, layout.off_graph_prepare_queue_slots);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(
             &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i]
         );
@@ -177,19 +175,19 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
 }
 
-void PTO2SchedulerState::destroy() {
-    PTO2SchedulerState *sched = this;
+void SchedulerState::destroy() {
+    SchedulerState *sched = this;
     sched->ring_sched_state.destroy();
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
     }
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
     }
     ready_queue_destroy(&sched->dummy_ready_queue);
     ready_queue_destroy(&sched->graph_ready_queue);
     ready_queue_destroy(&sched->graph_prepare_queue);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
     }
     ready_queue_destroy(&sched->early_sync_start_queue);
@@ -199,21 +197,21 @@ void PTO2SchedulerState::destroy() {
 // Orchestrator
 // =============================================================================
 
-bool PTO2OrchestratorState::init(
-    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler_arg
+bool OrchestratorState::init(
+    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler_arg
 ) {
     auto *orch = this;
-    *orch = PTO2OrchestratorState{};
+    *orch = OrchestratorState{};
 
-    // A power-of-two window lets pto2_task_slot() mask instead of dividing.
+    // A power-of-two window lets the slot index mask instead of dividing.
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
 
-    orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_base);
+    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
     orch->fatal = false;
     orch->scheduler = scheduler_arg;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_base);
-    auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_base);
+    auto *cur_idx_dev = sm_layout::ring_current_task_index_addr(sm_base);
 
     orch->task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
@@ -221,7 +219,7 @@ bool PTO2OrchestratorState::init(
     // so it holds for whichever SM this orchestrator was pointed at. The cursors
     // reset with the rest of the state above.
     auto *sm_bytes = static_cast<char *>(sm_base);
-    const auto pools = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::mirror_extents(task_window_size));
+    const auto pools = sm_layout::ring_segment_offsets(sm_layout::mirror_extents(task_window_size));
     orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
     orch->tensor_pool = reinterpret_cast<ChipTensor *>(sm_bytes + pools.tensor_pool);
     orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
@@ -240,12 +238,12 @@ bool PTO2OrchestratorState::init(
     }
 
     orch->scope_stack_top = -1;
-    orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 
     return true;
 }
 
-void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this->scheduler = scheduler; }
+void OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena
@@ -263,15 +261,15 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
     //
     // The copied zone comes last of the two so the device's shared-memory tail can
     // begin where it ends, making the two adjacent and the upload one copy.
-    layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    layout.off_sm_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
-    layout.off_scheduler = arena.reserve(sizeof(PTO2SchedulerState), alignof(PTO2SchedulerState));
-    layout.sched = PTO2SchedulerState::reserve_layout(arena);
+    layout.off_scheduler = arena.reserve(sizeof(SchedulerState), alignof(SchedulerState));
+    layout.sched = SchedulerState::reserve_layout(arena);
 
     layout.off_copied_begin = arena.total_size();
-    // Padded to a PTO2_ALIGN_SIZE boundary: the shared-memory image starts at
+    // Padded to a CHIP_ALIGN_SIZE boundary: the shared-memory image starts at
     // off_copied_end on the device and its segment offsets are aligned from there.
-    layout.off_runtime = arena.reserve(PTO2_ALIGN_UP(sizeof(RuntimeContext), PTO2_ALIGN_SIZE), PTO2_ALIGN_SIZE);
+    layout.off_runtime = arena.reserve(CHIP_ALIGN_UP(sizeof(RuntimeContext), CHIP_ALIGN_SIZE), CHIP_ALIGN_SIZE);
     layout.off_copied_end = arena.total_size();
 
     layout.arena_size = arena.total_size();
@@ -317,9 +315,9 @@ RuntimeContext *runtime_init_data_from_layout(
 }
 
 void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt) {
-    rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
+    rt->sm_handle = static_cast<SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
-    rt->scheduler = static_cast<PTO2SchedulerState *>(arena.region_ptr(layout.off_scheduler));
+    rt->scheduler = static_cast<SchedulerState *>(arena.region_ptr(layout.off_scheduler));
     rt->scheduler->wire_arena_pointers(layout.sched, arena);
 }
 

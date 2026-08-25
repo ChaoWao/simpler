@@ -458,7 +458,7 @@ def _shm_name(token: str, suffix: str):
 # Startup readiness bound. A child that neither reports INIT_READY/INIT_FAILED
 # nor exits within this window is treated as hung and startup is aborted.
 # Generous by default so a legitimately slow device/runtime init (large
-# PTO2_RING_HEAP, cold arena build) is never falsely reaped; override per Worker
+# runtime_env.ring_heap, cold arena build) is never falsely reaped; override per Worker
 # via the `startup_timeout_s` config kwarg. The point is to bound *hangs*, not
 # to police slow-but-progressing init.
 _STARTUP_TIMEOUT_S = 300.0
@@ -7838,7 +7838,7 @@ class Worker:
                         self._startup_group_leader_pids.add(pid)
 
             # Cross-chip init barrier.  ChipWorker.init can have a long right tail
-            # (e.g. PTO2_RING_HEAP=4 GiB pushes per-rank device_malloc beyond the
+            # (e.g. a 4 GiB runtime_env.ring_heap pushes per-rank device_malloc beyond the
             # host stream sync budget); without this barrier a fast-init chip
             # starts its aclrtSyncStream window N seconds before a slow peer
             # reaches the same point, and any cross-rank wait inside the op (HCCL

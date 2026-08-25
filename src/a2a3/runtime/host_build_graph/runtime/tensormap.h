@@ -111,10 +111,10 @@ extern uint64_t g_insert_count;
  *
  * Entry size: 128B (2 cache lines), matches ChipTensor.
  */
-struct alignas(64) PTO2TensorMapEntry {
+struct alignas(64) ChipTensorMapEntry {
     // === Cache line 1 (64B) — lookup hot path; mirrors ChipTensor line 1 from byte 16 ===
     uint64_t buffer_addr;  // 8B [0, 8):   tensor base address (hash key, mirrors ChipTensor::buffer.addr)
-    PTO2TensorMapEntry
+    ChipTensorMapEntry
         *next_in_bucket;      // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
     TaskId producer_task_id;  // 8B [16,24):  mirrors ChipTensor::owner_task_id slot
     uint64_t start_offset;    // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
@@ -127,9 +127,9 @@ struct alignas(64) PTO2TensorMapEntry {
     uint32_t shapes[MAX_TENSOR_DIMS];  // 20B [44,64): mirrors ChipTensor::shapes
 
     // === Cache line 2 (64B) — chain manipulation + non-contiguous overlap data ===
-    PTO2TensorMapEntry *prev_in_bucket;  // 8B [64, 72)
-    PTO2TensorMapEntry *next_in_task;    // 8B [72, 80)
-    PTO2TensorMapEntry *prev_in_task;    // 8B [80, 88)
+    ChipTensorMapEntry *prev_in_bucket;  // 8B [64, 72)
+    ChipTensorMapEntry *next_in_task;    // 8B [72, 80)
+    ChipTensorMapEntry *prev_in_task;    // 8B [80, 88)
     int32_t bucket_index;                // 4B [88, 92): -1 when unlinked
     uint32_t __padding2__;               // 4B [92, 96)
     uint64_t extent_elem_cache;          // 8B [96,104): non-contiguous extent (mirrors ChipTensor)
@@ -323,18 +323,18 @@ struct alignas(64) PTO2TensorMapEntry {
     }
 };
 
-static_assert(sizeof(PTO2TensorMapEntry) == 128, "TensorMapEntry must be exactly 2 cache lines (128 bytes)");
-static_assert(offsetof(PTO2TensorMapEntry, buffer_addr) == offsetof(ChipTensor, buffer.addr));
-static_assert(offsetof(PTO2TensorMapEntry, producer_task_id) == offsetof(ChipTensor, owner_task_id));
-static_assert(offsetof(PTO2TensorMapEntry, start_offset) == offsetof(ChipTensor, start_offset));
-static_assert(offsetof(PTO2TensorMapEntry, version) == offsetof(ChipTensor, version));
-static_assert(offsetof(PTO2TensorMapEntry, ndims) == offsetof(ChipTensor, ndims));
-static_assert(offsetof(PTO2TensorMapEntry, dtype) == offsetof(ChipTensor, dtype));
-static_assert(offsetof(PTO2TensorMapEntry, manual_dep) == offsetof(ChipTensor, manual_dep));
-static_assert(offsetof(PTO2TensorMapEntry, is_contiguous) == offsetof(ChipTensor, is_contiguous));
-static_assert(offsetof(PTO2TensorMapEntry, shapes) == offsetof(ChipTensor, shapes));
+static_assert(sizeof(ChipTensorMapEntry) == 128, "TensorMapEntry must be exactly 2 cache lines (128 bytes)");
+static_assert(offsetof(ChipTensorMapEntry, buffer_addr) == offsetof(ChipTensor, buffer.addr));
+static_assert(offsetof(ChipTensorMapEntry, producer_task_id) == offsetof(ChipTensor, owner_task_id));
+static_assert(offsetof(ChipTensorMapEntry, start_offset) == offsetof(ChipTensor, start_offset));
+static_assert(offsetof(ChipTensorMapEntry, version) == offsetof(ChipTensor, version));
+static_assert(offsetof(ChipTensorMapEntry, ndims) == offsetof(ChipTensor, ndims));
+static_assert(offsetof(ChipTensorMapEntry, dtype) == offsetof(ChipTensor, dtype));
+static_assert(offsetof(ChipTensorMapEntry, manual_dep) == offsetof(ChipTensor, manual_dep));
+static_assert(offsetof(ChipTensorMapEntry, is_contiguous) == offsetof(ChipTensor, is_contiguous));
+static_assert(offsetof(ChipTensorMapEntry, shapes) == offsetof(ChipTensor, shapes));
 static_assert(
-    offsetof(PTO2TensorMapEntry, prev_in_bucket) == 64, "TensorMapEntry must be exactly 2 cache lines (128 bytes)"
+    offsetof(ChipTensorMapEntry, prev_in_bucket) == 64, "TensorMapEntry must be exactly 2 cache lines (128 bytes)"
 );
 
 // =============================================================================
@@ -347,23 +347,23 @@ static_assert(
  * Hash table with a fixed-capacity entry pool and no watermark invalidation.
  * Owns its four arrays; init() sizes them and leaves the map empty.
  */
-struct PTO2TensorMap {
+struct ChipTensorMap {
     // Hash table buckets (fixed size, power of 2). An empty bucket is nullptr.
-    std::unique_ptr<PTO2TensorMapEntry *[]> buckets;
+    std::unique_ptr<ChipTensorMapEntry *[]> buckets;
     int32_t num_buckets{0};  // Must be power of 2 for fast modulo
 
     // Entry pool: bump allocation plus reuse of explicitly removed entries. A
     // linked entry is reached by pointer, so the pool is allocated once at
     // pool_size and never resized.
-    std::unique_ptr<PTO2TensorMapEntry[]> entry_pool;
-    std::unique_ptr<PTO2TensorMapEntry *[]> free_entry_list;
+    std::unique_ptr<ChipTensorMapEntry[]> entry_pool;
+    std::unique_ptr<ChipTensorMapEntry *[]> free_entry_list;
     int32_t pool_size{0};       // Total pool capacity
     int32_t next_entry_idx{0};  // id when next entry insert
     int32_t free_num{0};        // free entry number in entry pool
 
     // Per-task entry tracking for O(1) unlinking of covered producers.
     // Indexed by [local_id & (task_window_size - 1)]
-    std::unique_ptr<PTO2TensorMapEntry *[]> task_entry_heads;
+    std::unique_ptr<ChipTensorMapEntry *[]> task_entry_heads;
     int32_t task_window_size{0};  // Task window size (for slot masking)
 
     uint32_t get_task_local_id_slot(uint32_t task_local_id) const { return task_local_id & (task_window_size - 1); }
@@ -377,14 +377,14 @@ struct PTO2TensorMap {
     // new_entry allocates a slot and initializes only its linkage (bucket_index
     // and the four link pointers) to the clean unlinked state; insert() assigns
     // the tensor attributes and producer_task_id.
-    PTO2TensorMapEntry *new_entry() {
+    ChipTensorMapEntry *new_entry() {
         if (free_num > 0) {
-            PTO2TensorMapEntry *res = free_entry_list[--free_num];
+            ChipTensorMapEntry *res = free_entry_list[--free_num];
             debug_assert(res->bucket_index == -1);
             return res;
         }
         always_assert(next_entry_idx < pool_size);
-        PTO2TensorMapEntry *res = &entry_pool[next_entry_idx++];
+        ChipTensorMapEntry *res = &entry_pool[next_entry_idx++];
         // Init-on-write: the pool is not pre-zeroed (init() skips
         // the O(pool_size) memset), so put this fresh slot into the same clean
         // unlinked state free_entry() leaves recycled slots in. The insert path
@@ -398,7 +398,7 @@ struct PTO2TensorMap {
         return res;
     }
 
-    void free_entry(PTO2TensorMapEntry &entry) {
+    void free_entry(ChipTensorMapEntry &entry) {
         always_assert(entry.bucket_index != -1);  // must still be in a bucket
 
         // Update predecessor's next pointer (O(1) via prev_in_bucket)
@@ -459,8 +459,8 @@ struct PTO2TensorMap {
     void reset();
 
     /**
-     * Same as init() with default sizes (PTO2_TENSORMAP_NUM_BUCKETS,
-     * PTO2_TENSORMAP_POOL_SIZE).
+     * Same as init() with default sizes (CHIP_TENSORMAP_NUM_BUCKETS,
+     * CHIP_TENSORMAP_POOL_SIZE).
      */
     bool init_default(int32_t new_task_window_size);
 
@@ -470,7 +470,7 @@ struct PTO2TensorMap {
      * Searches the hash table for matching regions and invokes the callback
      * for each overlapping entry.
      *
-     * The callback receives (PTO2TensorMapEntry &, OverlapStatus) and should
+     * The callback receives (ChipTensorMapEntry &, OverlapStatus) and should
      * return true to continue iteration, false to stop early. It is safe for
      * the callback to call remove_entry() on the current entry: next_in_bucket
      * is latched before invocation.
@@ -481,7 +481,7 @@ struct PTO2TensorMap {
     template <typename Fn>
     void lookup(const ChipTensor &tensor, Fn &&on_match) {
         uint32_t bucket_index = hash(tensor.buffer.addr);
-        PTO2TensorMapEntry *cur_entry = buckets[bucket_index];
+        ChipTensorMapEntry *cur_entry = buckets[bucket_index];
 
 #if SIMPLER_TENSORMAP_PROFILING
         g_lookup_count++;
@@ -489,7 +489,7 @@ struct PTO2TensorMap {
 #endif
 
         while (cur_entry != nullptr) {
-            PTO2TensorMapEntry *next_entry = cur_entry->next_in_bucket;
+            ChipTensorMapEntry *next_entry = cur_entry->next_in_bucket;
 
 #if SIMPLER_TENSORMAP_PROFILING
             chain_len++;
@@ -536,7 +536,7 @@ struct PTO2TensorMap {
      * @param producer_task_id  Task ID of producer
      */
     void insert(const ChipTensor &tensor, TaskId producer_task_id) {
-        PTO2TensorMapEntry *entry = new_entry();
+        ChipTensorMapEntry *entry = new_entry();
         entry->copy_from_tensor(tensor);
         link_entry(entry, tensor.buffer.addr, producer_task_id);
     }
@@ -561,7 +561,7 @@ struct PTO2TensorMap {
     /**
      * Link an initialized entry into bucket and task chains.
      */
-    void link_entry(PTO2TensorMapEntry *entry, uint64_t addr, TaskId producer_task_id) {
+    void link_entry(ChipTensorMapEntry *entry, uint64_t addr, TaskId producer_task_id) {
 #if SIMPLER_TENSORMAP_PROFILING
         g_insert_count++;
 #endif
@@ -589,7 +589,7 @@ struct PTO2TensorMap {
         task_entry_heads[task_slot] = entry;
     }
 
-    void remove_entry(PTO2TensorMapEntry &entry) {
+    void remove_entry(ChipTensorMapEntry &entry) {
         remove_from_task(entry);
         free_entry(entry);
     }
@@ -599,7 +599,7 @@ struct PTO2TensorMap {
      * computation calls this before freeing a producer made redundant by a
      * covering input.
      */
-    void remove_from_task(PTO2TensorMapEntry &entry) {
+    void remove_from_task(ChipTensorMapEntry &entry) {
         always_assert(entry.bucket_index != -1);  // must still be in a bucket
         // Update predecessor's next pointer (O(1) via prev_in_task)
         if (entry.prev_in_task == nullptr) {
@@ -636,7 +636,7 @@ struct PTO2TensorMap {
 };
 
 #if SIMPLER_TENSORMAP_PROFILING
-struct PTO2TensorMapProfilingData {
+struct ChipTensorMapProfilingData {
     uint64_t lookup_chain_total;
     uint64_t lookup_count;
     int32_t lookup_chain_max;
@@ -645,5 +645,5 @@ struct PTO2TensorMapProfilingData {
     uint64_t insert_count;
 };
 
-PTO2TensorMapProfilingData pto2_tensormap_get_profiling();
+ChipTensorMapProfilingData chip_tensormap_get_profiling();
 #endif

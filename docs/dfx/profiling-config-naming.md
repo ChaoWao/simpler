@@ -63,10 +63,19 @@ runtime-specific ones) unambiguous about ownership.
 
 ### 4. Everything carries the `SIMPLER_` project prefix
 
-`PTO2_` is the device runtime's internal namespace (89 identifiers:
-`CHIP_MAX_RING_DEPTH`, `SIMPLER_ERROR_*`, `RuntimeContext`, …). Configuration
-surface exposed to users / CI / external consumers is unified under
-`SIMPLER_`, regardless of which internal namespace implements it.
+The device runtime's internal names carry no project prefix at all — they are
+plain domain names (`RuntimeContext`, `SchedulerState`, `TaskDescriptor`), taking
+a `Chip` / `CHIP_` prefix in two cases: where the host orchestrator owns the bare
+name (`ChipTensorMap`, `ChipReadyQueue`, `CHIP_MAX_SCOPE_DEPTH`), and for
+object-like macros, which capture their identifier textually in every including
+translation unit (`CHIP_HEAP_SIZE`, `CHIP_ALIGN_UP`). Configuration surface exposed
+to users / CI / external consumers is unified under `SIMPLER_`, and status codes
+under `SIMPLER_ERROR_*`.
+
+There is no `PTO2_` configuration surface left. `PTO2_RING_TASK_WINDOW` /
+`PTO2_RING_HEAP` / `PTO2_RING_DEP_POOL` were the last of it; ring sizing is per
+task now, on `CallConfig.runtime_env`, and the runtime warns if one of those names
+is still exported so a stale export cannot quietly become the compile-time default.
 
 ## Compile-time gates vs runtime emission
 

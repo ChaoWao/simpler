@@ -37,7 +37,7 @@
  * The Annotate callback contract (dep_gen graph capture):
  *   void annotate.creator(int32_t arg_idx, const ChipTensor &consumer, TaskId producer);
  *   void annotate.tensormap(int32_t arg_idx, const ChipTensor &consumer,
- *                           const PTO2TensorMapEntry &entry, OverlapStatus overlap);
+ *                           const ChipTensorMapEntry &entry, OverlapStatus overlap);
  * Both fire for exactly the producers `emit` saw, with the tensor-side context an
  * edge needs. `tensormap` runs before the INOUT/COVERED remove_entry(), so `entry`
  * is still live when it is read. NoDepAnnotate is the empty default and compiles
@@ -79,7 +79,7 @@ struct DepInputs {
  */
 struct NoDepAnnotate {
     void creator(int32_t, const ChipTensor &, TaskId) const {}
-    void tensormap(int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
+    void tensormap(int32_t, const ChipTensor &, const ChipTensorMapEntry &, OverlapStatus) const {}
 };
 
 /**
@@ -96,7 +96,7 @@ struct NoDepAnnotate {
  */
 template <typename Emit, typename Annotate = NoDepAnnotate>
 [[nodiscard]] inline bool compute_task_fanin(
-    const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, Emit emit, Annotate annotate = Annotate{}
+    const DepInputs &inputs, ChipTensorMap &tensor_map, bool in_manual_scope, Emit emit, Annotate annotate = Annotate{}
 ) {
     if (in_manual_scope) {
         return true;
@@ -130,7 +130,7 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
         }
 
         bool fatal = false;
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
+        tensor_map.lookup(*tensor, [&](ChipTensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
             if (!emit(entry.producer_task_id)) {
                 fatal = true;
                 return false;  // stop iteration
@@ -157,7 +157,7 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, TaskId task_id, ChipTensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }

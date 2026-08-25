@@ -38,16 +38,16 @@
 #include "types.h"
 
 /**
- * Layout descriptor produced by PTO2OrchestratorState::reserve_layout(). Holds
+ * Layout descriptor produced by OrchestratorState::reserve_layout(). Holds
  * arena offsets for every sub-region the orchestrator owns (per-ring fanin
- * pools, scope arrays, plus the nested PTO2TensorMap layout).
+ * pools, scope arrays, plus the nested ChipTensorMap layout).
  */
-struct PTO2OrchestratorLayout {
+struct OrchestratorLayout {
     size_t off_fanin_pool[CHIP_MAX_RING_DEPTH];
     size_t off_fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     size_t off_scope_tasks;
     size_t off_scope_begins;
-    PTO2TensorMapLayout tensor_map;
+    ChipTensorMapLayout tensor_map;
     int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH];
     int32_t scope_tasks_cap;
     uint64_t scope_stack_capacity;
@@ -62,17 +62,17 @@ struct PTO2OrchestratorLayout {
  *
  * Contains all state needed for task graph construction and buffer management.
  */
-struct PTO2OrchestratorState {
+struct OrchestratorState {
     // === SHARED MEMORY ACCESS ===
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // === PER-RING RESOURCES ===
-    PTO2RingSet rings[CHIP_MAX_RING_DEPTH];
+    ChipRingSet rings[CHIP_MAX_RING_DEPTH];
     uint32_t *fanin_seen_epoch[CHIP_MAX_RING_DEPTH];
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
-    PTO2TensorMap tensor_map;  // Producer lookup
+    ChipTensorMap tensor_map;  // Producer lookup
 
     // === SCOPE STACK (Private) ===
     // Single contiguous buffer of task IDs, partitioned by scope level.
@@ -83,13 +83,13 @@ struct PTO2OrchestratorState {
     int32_t scope_tasks_capacity;     // Allocated capacity of scope_tasks
     int32_t *scope_begins;            // scope_begins[i] = start index of scope i in scope_tasks
     int32_t scope_stack_top;          // Current top of stack (-1 = no scope open)
-    uint64_t scope_stack_capacity;    // Max nesting depth (PTO2_MAX_SCOPE_DEPTH)
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    uint64_t scope_stack_capacity;    // Max nesting depth (CHIP_MAX_SCOPE_DEPTH)
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     // === SCHEDULER STATE ACCESS ===
     // Same runtime-arena scheduler object; Orch-side wiring mutates dep_pool
     // and publishes ready tasks through it before scheduler workers dispatch.
-    PTO2SchedulerState *scheduler;
+    SchedulerState *scheduler;
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -139,11 +139,11 @@ struct PTO2OrchestratorState {
     // tensor_map sub-layout) on the supplied arena. task_window_sizes feeds
     // the nested tensor_map layout. Returned layout is consumed by
     // init_data_from_layout.
-    static PTO2OrchestratorLayout reserve_layout(
+    static OrchestratorLayout reserve_layout(
         DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
-        int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+        int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE
     );
-    static PTO2OrchestratorLayout reserve_layout(
+    static OrchestratorLayout reserve_layout(
         DeviceArena &arena, const int32_t task_window_sizes[CHIP_MAX_RING_DEPTH],
         const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]
     );
@@ -153,15 +153,15 @@ struct PTO2OrchestratorState {
     // task_window_size feeds the per-ring SM address arithmetic. Safe to call
     // on a host arena that holds the prebuilt image.
     bool init_data_from_layout(
-        const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
+        const OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap, uint64_t heap_size,
         uint64_t task_window_size
     );
     bool init_data_from_layout(
-        const PTO2OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap,
+        const OrchestratorLayout &layout, DeviceArena &arena, void *sm_dev_base, void *gm_heap,
         const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
     );
     bool reset_for_reuse(
-        const PTO2OrchestratorLayout &layout, void *sm_dev_base, void *gm_heap,
+        const OrchestratorLayout &layout, void *sm_dev_base, void *gm_heap,
         const uint64_t heap_sizes[CHIP_MAX_RING_DEPTH], const uint64_t task_window_sizes[CHIP_MAX_RING_DEPTH]
     );
 
@@ -169,15 +169,15 @@ struct PTO2OrchestratorState {
     // scope_begins, rings[].fanin_pool.base, tensor_map.{buckets,entry_pool,
     // free_entry_list,task_entry_heads}, scheduler reference).
     // Idempotent — host runs once on the image, AICPU runs once after attach.
-    void wire_arena_pointers(const PTO2OrchestratorLayout &layout, DeviceArena &arena, PTO2SchedulerState *scheduler);
+    void wire_arena_pointers(const OrchestratorLayout &layout, DeviceArena &arena, SchedulerState *scheduler);
 
     // Forget pointers; arena owns the backing buffers.
     void destroy();
-    void set_scheduler(PTO2SchedulerState *scheduler);
+    void set_scheduler(SchedulerState *scheduler);
     void mark_dep_pool_position(ChipTaskSlotState &slot_state);
     void wire_fanin_task(ChipTaskSlotState &slot_state, int32_t wfanin);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
-    void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
+    void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
@@ -190,7 +190,7 @@ struct PTO2OrchestratorState {
 // =============================================================================
 
 #if SIMPLER_ORCH_PROFILING
-struct PTO2OrchProfilingData {
+struct OrchProfilingData {
     uint64_t sync_cycle;
     uint64_t alloc_cycle;  // Combined task slot + heap allocation
     uint64_t args_cycle;
@@ -208,5 +208,5 @@ struct PTO2OrchProfilingData {
     uint64_t scope_end_atomic_count;
 };
 
-PTO2OrchProfilingData orchestrator_get_profiling();
+OrchProfilingData orchestrator_get_profiling();
 #endif

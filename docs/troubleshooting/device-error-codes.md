@@ -11,7 +11,7 @@ The `error hint:` line that sent you here is the second of a pair:
 ```text
 [ERROR] simpler runtime failed: orch_error_code=1 sched_error_code=0 runtime_status=-1
 [ERROR] error detail: orch_error_code=1 SCOPE_DEADLOCK - tasks submitted in one scope ...
-[ERROR] error hint: raise ring_task_window (PTO2_RING_TASK_WINDOW) or split the scope ...
+[ERROR] error hint: raise runtime_env.ring_task_window or split the scope ...
 ```
 
 `error detail:` gives the **name** and a full description of the mechanism.
@@ -116,7 +116,7 @@ Code 100 is a funnel. The runtime sub-classifies it on device and prints the
 verdict plus locators, so you rarely need the device log:
 
 ```text
-[ERROR] PTO2 scheduler timeout sub_class=S1:running-stalled (detail=1) completed=0/1 \
+[ERROR] scheduler timeout sub_class=S1:running-stalled (detail=1) completed=0/1 \
         running=1 ready=0 waiting=0 orch_done=1 stuck_task_id=42 stuck_core=5
 ```
 

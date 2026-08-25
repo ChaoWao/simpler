@@ -44,7 +44,7 @@ public:
     static constexpr size_t kMaxRegions = 128;
 
     // Default base alignment for the underlying allocation. 1024 bytes is a
-    // hardware requirement (HBM DMA granularity / PTO2_PACKED_OUTPUT_ALIGN),
+    // hardware requirement (HBM DMA granularity / PACKED_OUTPUT_ALIGN),
     // not a software-side optimization — do NOT lower it to the 64-byte cache
     // line that satisfies every sub-region alignment requirement. The cost is
     // a one-time forward-alignment pad of up to 1023 bytes per arena, which is

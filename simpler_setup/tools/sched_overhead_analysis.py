@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Scheduler overhead analysis for PTO2 — is the scheduler the bottleneck, or starved?
+"""Scheduler overhead analysis — is the scheduler the bottleneck, or starved?
 
 Inputs (BOTH required, captured in SEPARATE runs — do not co-run the flags, as
 dep_gen perturbs the swimlane timing):
@@ -1004,7 +1004,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scheduler overhead analysis for PTO2",
+        description="Scheduler overhead analysis",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

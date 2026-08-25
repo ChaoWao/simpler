@@ -161,7 +161,7 @@ TEST(A5AICoreCompletionMailbox, ConditionAttachesToExistingEntry) {
 }
 
 TEST(A5AICoreCompletionMailbox, SdmaPostDoneRecordUsesMonotonicPostId) {
-    alignas(PTO2_ALIGN_SIZE) uint64_t completed_post_id = (uint64_t{1} << 40) + 16;
+    alignas(CHIP_ALIGN_SIZE) uint64_t completed_post_id = (uint64_t{1} << 40) + 16;
     CompletionCondition cond{};
     cond.completion_type = COMPLETION_TYPE_SDMA_EVENT_RECORD;
     cond.addr = reinterpret_cast<uint64_t>(&completed_post_id);

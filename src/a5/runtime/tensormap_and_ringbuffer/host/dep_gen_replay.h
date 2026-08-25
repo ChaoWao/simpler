@@ -15,7 +15,7 @@
  *
  * Takes the records the host collector drained from the device ring buffer
  * (``DepGenCollector::records()``) and runs them back through a host-resident
- * PTO2TensorMap using the same ``compute_task_fanin`` / ``register_task_outputs``
+ * ChipTensorMap using the same ``compute_task_fanin`` / ``register_task_outputs``
  * primitives the device orchestrator uses, emitting the full
  * predecessor → successor edge list to deps.json.
  *
@@ -54,7 +54,7 @@
  *     are carried per-arg / per-edge alongside ``start_offset`` + ``strides``.
  *   - Distinct producers / arg indices / sources keep their own edges; per-record
  *     deduplication of producer ids mirrors the runtime
- *     ``PTO2FaninBuilder::append_fanin_or_fail`` semantics so the set of
+ *     ``FaninBuilder::append_fanin_or_fail`` semantics so the set of
  *     ``(pred, succ)`` pairs is identical to what the runtime would have
  *     recorded.
  *

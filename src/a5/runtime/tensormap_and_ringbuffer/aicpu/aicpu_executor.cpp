@@ -89,7 +89,7 @@ static int32_t read_runtime_status(Runtime *runtime) {
         return 0;
     }
 
-    auto *header = static_cast<PTO2SharedMemoryHeader *>(sm);
+    auto *header = static_cast<SharedMemoryHeader *>(sm);
     int32_t orch_error_code = header->orch_error_code.load(std::memory_order_acquire);
     int32_t sched_error_code = header->sched_error_code.load(std::memory_order_acquire);
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
@@ -615,7 +615,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // Wire every arena-internal pointer field (host wrote host-mirror
                 // addresses; we overwrite them with device addresses).
                 runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
-                sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.sizing.task_window_sizes);
+                sm_size = SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.sizing.task_window_sizes);
             }
 
             // Reset SM state. setup_pointers + init_header_per_ring restore
@@ -742,7 +742,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             // Print orchestrator profiling data
 #if SIMPLER_ORCH_PROFILING
-            PTO2OrchProfilingData p = orchestrator_get_profiling();
+            OrchProfilingData p = orchestrator_get_profiling();
             uint64_t total =
                 p.sync_cycle + p.alloc_cycle + p.args_cycle + p.lookup_cycle + p.insert_cycle + p.fanin_cycle;
             if (total == 0) total = 1;  // avoid div-by-zero
@@ -783,7 +783,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             );
 
 #if SIMPLER_TENSORMAP_PROFILING
-            PTO2TensorMapProfilingData tp = pto2_tensormap_get_profiling();
+            ChipTensorMapProfilingData tp = chip_tensormap_get_profiling();
             LOG_INFO("Thread %d: === TensorMap Lookup Stats ===", thread_idx);
             LOG_INFO(
                 "Thread %d:   lookups        : %" PRIu64 ", inserts: %" PRIu64 "", thread_idx,
@@ -803,7 +803,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 #endif
 #endif  // SIMPLER_ORCH_PROFILING
 
-            // Latch task count from PTO2 shared memory to hand off to the
+            // Latch task count from shared memory to hand off to the
             // scheduler. The orchestrator's run window (start_time / end_time /
             // submit_count) is no longer published to shared memory — the
             // device LOG_INFO "orch_start=… orch_end=… orch_cost=…" line
@@ -842,7 +842,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         );
         if (submitted_tasks >= 0) {
             LOG_INFO(
-                "PTO2 total submitted tasks = %d, already executed %d tasks", submitted_tasks,
+                "total submitted tasks = %d, already executed %d tasks", submitted_tasks,
                 sched_ctx_.completed_tasks_count()
             );
         }

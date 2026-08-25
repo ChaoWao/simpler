@@ -23,29 +23,29 @@ constexpr int32_t WINDOW_SIZE = 16;
 constexpr int32_t POOL_CAPACITY = 8;
 
 void make_head_match_old_structural_predicate(
-    ChipTaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
+    ChipTaskSlotState &head, TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
 ) {
     descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
-    head.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
-    head.fanout_count = PTO2_FANOUT_SCOPE_BIT;
+    head.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
+    head.fanout_count = FANOUT_SCOPE_BIT;
     head.fanout_refcount.store(0, std::memory_order_release);
 }
 
 }  // namespace
 
 TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
-    PTO2DepListEntry entries[POOL_CAPACITY]{};
+    DepListEntry entries[POOL_CAPACITY]{};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2DepListPool pool;
+    DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
-    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
-    PTO2SharedMemoryRingHeader ring{};
+    TaskDescriptor task_descriptors[WINDOW_SIZE]{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
     ring.task_window_mask = WINDOW_SIZE - 1;
@@ -67,17 +67,17 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
 }
 
 TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
-    PTO2DepListEntry entries[POOL_CAPACITY]{};
+    DepListEntry entries[POOL_CAPACITY]{};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2DepListPool pool;
+    DepListPool pool;
     pool.init(entries, POOL_CAPACITY, &error_code);
     for (int32_t i = 0; i < POOL_CAPACITY; ++i) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
     alignas(64) ChipTaskSlotState slot_states[WINDOW_SIZE]{};
-    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
-    PTO2SharedMemoryRingHeader ring{};
+    TaskDescriptor task_descriptors[WINDOW_SIZE]{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
     ring.task_window_mask = WINDOW_SIZE - 1;

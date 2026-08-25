@@ -33,14 +33,14 @@ class GraphActivationTest : public ::testing::Test {
 protected:
     DeviceArena sm_arena;
     DeviceArena runtime_arena;
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
-    PTO2SchedulerState sched{};
-    PTO2SchedulerLayout sched_layout{};
+    SharedMemoryHandle *sm_handle = nullptr;
+    SchedulerState sched{};
+    SchedulerLayout sched_layout{};
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
+        sched_layout = SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
@@ -58,11 +58,11 @@ protected:
     // One GraphExecution node whose slot is a routable single-block KERNEL/AIC
     // task in the given completion state, with its payload wired the way
     // materialization leaves it for the wake/route path.
-    static void init_graph_node(GraphNodeStorage &node, int32_t node_index, PTO2TaskState state) {
+    static void init_graph_node(GraphNodeStorage &node, int32_t node_index, ChipTaskState state) {
         memset(&node, 0, sizeof(GraphNodeStorage));
         node.slot.task_state.store(state);
         node.slot.graph_node_index = node_index;
-        node.slot.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+        node.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         node.slot.task_kind = TaskKind::KERNEL;
         node.slot.total_required_subtasks = 1;
         node.slot.logical_block_num = 1;
@@ -75,8 +75,8 @@ protected:
 // routes it — it is never lost on the closed wake list.
 TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegister) {
     auto nodes = std::make_unique<GraphNodeStorage[]>(2);
-    init_graph_node(nodes[0], 0, PTO2_TASK_COMPLETED);       // producer, already completed
-    init_graph_node(nodes[1], 1, PTO2_TASK_PENDING);         // consumer of node 0
+    init_graph_node(nodes[0], 0, CHIP_TASK_COMPLETED);       // producer, already completed
+    init_graph_node(nodes[1], 1, CHIP_TASK_PENDING);         // consumer of node 0
     nodes[0].slot.wake_list_head.store(WAKE_LIST_SENTINEL);  // its wake list already drained
 
     std::vector<uint32_t> fanin_offsets{0, 0, 1};  // node 0 is a root; node 1 <- {0}
@@ -89,7 +89,7 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
     sched.register_graph_wake(exec, &nodes[0].slot, &nodes[1].slot);
 
     ChipTaskSlotState *out[2];
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 2), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 2), 1)
         << "consumer must route to ready, not hang on the SENTINEL wake list";
     EXPECT_EQ(out[0], &nodes[1].slot);
 }
@@ -99,10 +99,10 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
 // routes exactly once that producer completes and drains its wake list.
 TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPending) {
     auto nodes = std::make_unique<GraphNodeStorage[]>(4);
-    init_graph_node(nodes[0], 0, PTO2_TASK_COMPLETED);  // root, completed
-    init_graph_node(nodes[1], 1, PTO2_TASK_PENDING);    // root, pending
-    init_graph_node(nodes[2], 2, PTO2_TASK_PENDING);    // consumer of node 0 (completed)
-    init_graph_node(nodes[3], 3, PTO2_TASK_PENDING);    // consumer of node 1 (pending)
+    init_graph_node(nodes[0], 0, CHIP_TASK_COMPLETED);  // root, completed
+    init_graph_node(nodes[1], 1, CHIP_TASK_PENDING);    // root, pending
+    init_graph_node(nodes[2], 2, CHIP_TASK_PENDING);    // consumer of node 0 (completed)
+    init_graph_node(nodes[3], 3, CHIP_TASK_PENDING);    // consumer of node 1 (pending)
 
     std::vector<uint32_t> fanin_offsets{0, 0, 0, 1, 2};  // node 2 <- {0}, node 3 <- {1}
     std::vector<uint16_t> fanin_indices{0, 1};
@@ -115,13 +115,13 @@ TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPe
     EXPECT_EQ(exec.published_nodes.load(), 4);
 
     ChipTaskSlotState *out[4];
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4), 1)
         << "only the consumer whose producers are all COMPLETED routes at publish time";
     EXPECT_EQ(out[0], &nodes[2].slot);
 
-    nodes[1].slot.task_state.store(PTO2_TASK_COMPLETED);
+    nodes[1].slot.task_state.store(CHIP_TASK_COMPLETED);
     sched.drain_graph_wake_list(exec, nodes[1].slot);
-    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4), 1)
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4), 1)
         << "the wake-chained consumer must route once its pending producer completes";
     EXPECT_EQ(out[0], &nodes[3].slot);
 }

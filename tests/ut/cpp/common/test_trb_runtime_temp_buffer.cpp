@@ -298,7 +298,7 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionCopiesRuntimeStatus) {
     ArgDirection signature[1] = {ArgDirection::OUT};
 
     ASSERT_EQ(bind_runtime(runtime, api_, args, signature, 1), 0);
-    auto *header = static_cast<PTO2SharedMemoryHeader *>(runtime.get_gm_sm_ptr());
+    auto *header = static_cast<SharedMemoryHeader *>(runtime.get_gm_sm_ptr());
     ASSERT_NE(header, nullptr);
     header->orch_error_code.store(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, std::memory_order_relaxed);
 
@@ -318,7 +318,7 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionWithoutDeviceStatusSkipsTensorCo
     ASSERT_EQ(runtime.tensor_leases_.size(), 1u);
     std::memset(runtime.tensor_leases_[0].dev_ptr, 0x2a, output.size());
 
-    // A stream/bind failure may happen before the device publishes a PTO2
+    // A stream/bind failure may happen before the device publishes a
     // status. The one D2H is the diagnostic header; tensor data stays untouched.
     EXPECT_EQ(validate_runtime_impl(&runtime, &api_, -1), 0);
     EXPECT_EQ(fake_.copy_from_count, 1);

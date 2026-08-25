@@ -134,17 +134,17 @@ static inline const char *error_hint(int32_t code) {
     case SIMPLER_ERROR_NONE:
         return "";
     case SIMPLER_ERROR_SCOPE_DEADLOCK:
-        return "raise ring_task_window (PTO2_RING_TASK_WINDOW) or split the scope so slots are "
+        return "raise runtime_env.ring_task_window or split the scope so slots are "
                "reclaimed sooner; enable CallConfig.enable_scope_stats to see which scope peaked";
     case SIMPLER_ERROR_HEAP_RING_DEADLOCK:
-        return "raise ring_heap (PTO2_RING_HEAP) or shrink per-task args / intermediate tensors; the "
+        return "raise runtime_env.ring_heap or shrink per-task args / intermediate tensors; the "
                "'Ring buffer sizes:' line above reports the configured capacities";
     case SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK:
-        return "raise ring_task_window (PTO2_RING_TASK_WINDOW) or shrink the graph; in a reclaiming "
+        return "raise runtime_env.ring_task_window or shrink the graph; in a reclaiming "
                "runtime also check for nested submission or a stalled consumer";
     case SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED:
         return "follow the preceding resource diagnostic: HBG has no spill pool, so reduce fanin to "
-               "PTO2_MAX_FANIN or less; for a reclaiming runtime raise PTO2_RING_DEP_POOL or cut fanin";
+               "CHIP_MAX_FANIN or less; for a reclaiming runtime raise runtime_env.ring_dep_pool or cut fanin";
     case SIMPLER_ERROR_INVALID_ARGS:
         return "an orchestration bug, not a capacity problem -- resizing the rings will not help; "
                "recheck the arguments of the orchestration API calls listed above";
@@ -153,7 +153,7 @@ static inline const char *error_hint(int32_t code) {
                "(total AIV count, or total cluster count for MIX/AIC), or drop the sync-start request";
     case SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT:
         return "find the producing kernel and check it for a hang (see SCHEDULER_TIMEOUT sub_class S1); "
-               "verify the consumer declares the dependency and exits; raise PTO2_TENSOR_DATA_TIMEOUT_MS "
+               "verify the consumer declares the dependency and exits; raise TENSOR_DATA_TIMEOUT_MS "
                "to tell a slow kernel apart from a stuck one";
     case SIMPLER_ERROR_EXPLICIT_ORCH_FATAL:
         return "self-inflicted -- follow the message passed to the rt_report_fatal() call site";
@@ -162,11 +162,11 @@ static inline const char *error_hint(int32_t code) {
         return "not expected in normal operation -- keep the device log and report it to the runtime "
                "maintainers; tuning the ring capacities will not help";
     case SIMPLER_ERROR_TENSORMAP_OVERFLOW:
-        return "follow the preceding resource diagnostic: in HBG increase PTO2_TENSORMAP_POOL_SIZE "
+        return "follow the preceding resource diagnostic: in HBG increase CHIP_TENSORMAP_POOL_SIZE "
                "or shrink the graph; in a reclaiming runtime also inspect entry-reclaim progress";
     case SIMPLER_ERROR_SCHEDULER_TIMEOUT:
         return "read the sub_class= line below first, then follow the S1-S5 table in the doc; raise "
-               "PTO2_SCHEDULER_TIMEOUT_MS to tell a true deadlock apart from a merely slow kernel";
+               "SIMPLER_SCHEDULER_TIMEOUT_MS to tell a true deadlock apart from a merely slow kernel";
     case SIMPLER_ERROR_ASYNC_COMPLETION_INVALID:
         return "recheck the register_completion_condition() arguments in the kernel, in particular the "
                "completion type and the counter address";
@@ -175,7 +175,8 @@ static inline const char *error_hint(int32_t code) {
                "actually polls and retires them";
 #ifdef SIMPLER_ERROR_READY_QUEUE_OVERFLOW
     case SIMPLER_ERROR_READY_QUEUE_OVERFLOW:
-        return "ensure PTO2_RING_TASK_WINDOW does not exceed the ready-queue capacity; otherwise keep the device "
+        return "ensure runtime_env.ring_task_window does not exceed the ready-queue capacity; otherwise keep the "
+               "device "
                "log and report the scheduler queue-accounting bug";
 #endif
     default:

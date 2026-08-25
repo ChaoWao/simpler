@@ -129,7 +129,7 @@ CASES = {
         kernel_core="aic",
         onboard_only=True,  # a while(true) kernel would hang the simulator
         # The data-wait timeout is 15 s on both arches now that it is frequency-
-        # scaled (PTO2_TENSOR_DATA_TIMEOUT_MS, #1189) -- before that it was 15 s on
+        # scaled (TENSOR_DATA_TIMEOUT_MS, #1189) -- before that it was 15 s on
         # a5 but 300 s on a2a3, so this case used to be a5-only. Raise every other
         # watchdog above 15 s so the tensor-data wait wins the race and latches
         # code 8 before they reap the hung core.
@@ -208,11 +208,11 @@ CASES = {
     #   reproducible scheduler-timeout e2e case (aicore_hang_orch.cpp).
     #
     # -- Reachable only by exhausting a fixed compile-time cap --
-    # * TENSORMAP_OVERFLOW (11): the tensormap entry pool (PTO2_TENSORMAP_POOL_SIZE
+    # * TENSORMAP_OVERFLOW (11): the tensormap entry pool (CHIP_TENSORMAP_POOL_SIZE
     #   == 65536) is compile-time and not shrinkable via runtime_env, so wedging it
     #   needs a 65536-entry flood plus a stalled producer holding entries. Its latch
     #   is also orchestrator-level (a reclaim deadlock), so even a device UT would be
-    #   a runtime-integration test, not a PTO2TensorMap unit test.
+    #   a runtime-integration test, not a ChipTensorMap unit test.
     #
     # TENSOR_WAIT_TIMEOUT (8) IS covered (onboard, both arches) — see the
     # tensor_wait_timeout case.

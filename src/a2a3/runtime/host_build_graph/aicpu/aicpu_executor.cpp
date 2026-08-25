@@ -60,7 +60,7 @@
 // here (cleared on teardown before runtime_destroy).
 extern "C" void framework_bind_runtime(RuntimeContext *rt);
 
-static int32_t read_pto2_runtime_status(Runtime *runtime) {
+static int32_t read_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
         return 0;
     }
@@ -70,7 +70,7 @@ static int32_t read_pto2_runtime_status(Runtime *runtime) {
         return 0;
     }
 
-    auto *header = static_cast<PTO2SharedMemoryHeader *>(sm);
+    auto *header = static_cast<SharedMemoryHeader *>(sm);
     int32_t orch_error_code = header->orch_error_code.load(std::memory_order_acquire);
     int32_t sched_error_code = header->sched_error_code.load(std::memory_order_acquire);
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
@@ -267,8 +267,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // not to the ring capacity, and the device region holds exactly that
             // image — so its size comes from the same pitch. attach_populated
             // rejects a pitch outside (0, capacity] and a region too small for it.
-            const uint64_t live_slots =
-                pto2_sm_layout::live_slot_pitch(static_cast<uint64_t>(runtime->host_total_tasks));
+            const uint64_t live_slots = sm_layout::live_slot_pitch(static_cast<uint64_t>(runtime->host_total_tasks));
             const uint64_t sm_size = runtime->sm_image_bytes;
             // sm_handle and the scheduler state are the device-only zone: their
             // bytes never travel, so they start as whatever the pooled arena last
@@ -481,7 +480,7 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
         LOG_ERROR("aicpu_execute: Thread execution failed with rc=%d", rc);
     }
 
-    int32_t runtime_rc = read_pto2_runtime_status(runtime);
+    int32_t runtime_rc = read_runtime_status(runtime);
 
     // The finalizer publishes cleanup eligibility only after runtime destruction.
     if (g_aicpu_executor.completion_gate_.claim_cleanup()) {

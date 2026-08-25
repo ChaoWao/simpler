@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Unit tests for PTO2DepListPool from ring_buffer.h
+ * Unit tests for DepListPool from ring_buffer.h
  *
  * Tests dependency list pool allocation, prepend chaining, overflow detection,
  * tail advancement, and high-water mark tracking.
@@ -39,9 +39,9 @@
 class DepListPoolTest : public ::testing::Test {
 protected:
     static constexpr int32_t POOL_CAP = 8;
-    PTO2DepListEntry entries[POOL_CAP]{};
+    DepListEntry entries[POOL_CAP]{};
     std::atomic<int32_t> error_code{SIMPLER_ERROR_NONE};
-    PTO2DepListPool pool{};
+    DepListPool pool{};
 
     void SetUp() override {
         std::memset(entries, 0, sizeof(entries));
@@ -60,7 +60,7 @@ TEST_F(DepListPoolTest, InitialState) {
 }
 
 TEST_F(DepListPoolTest, SingleAlloc) {
-    PTO2DepListEntry *entry = pool.alloc();
+    DepListEntry *entry = pool.alloc();
     ASSERT_NE(entry, nullptr);
     EXPECT_EQ(pool.used(), 1);
     EXPECT_EQ(pool.available(), POOL_CAP - 1);
@@ -68,13 +68,13 @@ TEST_F(DepListPoolTest, SingleAlloc) {
 
 TEST_F(DepListPoolTest, OverflowDetection) {
     for (int i = 0; i < POOL_CAP; i++) {
-        PTO2DepListEntry *e = pool.alloc();
+        DepListEntry *e = pool.alloc();
         ASSERT_NE(e, nullptr) << "Unexpected failure at alloc " << i;
     }
     EXPECT_EQ(pool.used(), POOL_CAP);
     EXPECT_EQ(pool.available(), 0);
 
-    PTO2DepListEntry *overflow = pool.alloc();
+    DepListEntry *overflow = pool.alloc();
     EXPECT_EQ(overflow, nullptr);
     EXPECT_EQ(error_code.load(), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
 }
@@ -84,7 +84,7 @@ TEST_F(DepListPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
 
-    PTO2SharedMemoryRingHeader ring{};
+    SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.fc.current_task_index.store(POOL_CAP + 1, std::memory_order_release);
     ring.fc.last_task_alive.store(0, std::memory_order_release);
@@ -96,7 +96,7 @@ TEST_F(DepListPoolTest, EnsureSpaceDeadlockReturnsFalseAndLatchesError) {
 // Prepend builds LIFO linked list: verify each slot_state pointer.
 TEST_F(DepListPoolTest, PrependChainCorrectness) {
     ChipTaskSlotState slots[5]{};
-    PTO2DepListEntry *head = nullptr;
+    DepListEntry *head = nullptr;
 
     for (int i = 0; i < 5; i++) {
         head = pool.prepend(head, &slots[i]);
@@ -104,7 +104,7 @@ TEST_F(DepListPoolTest, PrependChainCorrectness) {
     }
 
     // LIFO order: head -> slots[4] -> slots[3] -> ... -> slots[0] -> nullptr.
-    PTO2DepListEntry *cur = head;
+    DepListEntry *cur = head;
     for (int i = 4; i >= 0; i--) {
         ASSERT_NE(cur, nullptr);
         EXPECT_EQ(cur->slot_state, &slots[i]) << "Entry " << (4 - i) << " should point to slots[" << i << "]";
@@ -158,18 +158,18 @@ TEST_F(DepListPoolTest, HighWaterAccuracy) {
 // Prepend chain integrity under pool exhaustion: chain must be walkable.
 TEST_F(DepListPoolTest, PrependUnderExhaustion) {
     ChipTaskSlotState slots[POOL_CAP]{};
-    PTO2DepListEntry *head = nullptr;
+    DepListEntry *head = nullptr;
 
     int count = 0;
     while (count < POOL_CAP + 5) {
-        PTO2DepListEntry *new_head = pool.prepend(head, &slots[count % POOL_CAP]);
+        DepListEntry *new_head = pool.prepend(head, &slots[count % POOL_CAP]);
         if (!new_head) break;
         head = new_head;
         count++;
     }
 
     int walk = 0;
-    PTO2DepListEntry *cur = head;
+    DepListEntry *cur = head;
     while (cur) {
         walk++;
         cur = cur->next;

@@ -67,6 +67,15 @@ add_custom_target(build_package_sim
 if(SKBUILD_MODE)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/
             DESTINATION simpler_setup/_assets/src)
+    # The platform CMakeLists include these through SIMPLER_CMAKE_DIR, which
+    # runtime_compiler.py resolves to PROJECT_ROOT/cmake — the installed
+    # simpler_setup/_assets/cmake in a wheel. All four are reachable from a
+    # platform configure: host_log_sources.cmake and profiling_config.cmake are
+    # included unconditionally, profiling_config.cmake configures
+    # profiling_build_config.h.in, and sanitizers.cmake is included when a
+    # sanitizer build is requested.
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/cmake/
+            DESTINATION simpler_setup/_assets/cmake)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/build/lib/
             DESTINATION simpler_setup/_assets/build/lib
             OPTIONAL

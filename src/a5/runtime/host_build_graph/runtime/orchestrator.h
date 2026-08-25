@@ -56,18 +56,18 @@ struct GraphHostState;
  * holds it by pointer — a by-value member would put non-trivially-copyable state
  * inside the struct bind copies to the device.
  */
-struct PTO2OrchestratorState {
+struct OrchestratorState {
     // === SHARED MEMORY ACCESS ===
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // === TASK / HEAP ALLOCATION ===
     // hbg is single-ring, so one allocator covers the whole graph.
-    PTO2TaskAllocator task_allocator;
+    TaskAllocator task_allocator;
     std::unique_ptr<uint32_t[]> fanin_seen_epoch;
     uint32_t fanin_seen_current_epoch{1};
 
     // === TENSOR MAP (Private) ===
-    PTO2TensorMap tensor_map;  // Producer lookup
+    ChipTensorMap tensor_map;  // Producer lookup
 
     // === SCOPE STACK (Private) ===
     // Depth only. A scope decides whether a submit takes its fanin from TensorMap
@@ -75,12 +75,12 @@ struct PTO2OrchestratorState {
     // one to be open; it bounds no task or buffer lifetime, so there is no
     // per-scope task list to walk at scope end.
     int32_t scope_stack_top{-1};  // Current top of stack (-1 = no scope open)
-    int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
     // === SCHEDULER REFERENCE ===
     // Note: In simulated mode, orchestrator and scheduler share address space
     // In real mode, they communicate via shared memory only
-    PTO2SchedulerState *scheduler;  // For simulated mode only
+    SchedulerState *scheduler;  // For simulated mode only
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -109,7 +109,7 @@ struct PTO2OrchestratorState {
     // case (task_window tasks each at their full cap), so a bump cannot overflow.
     // The bases live here, not in the ring header: nothing on the device resolves one.
     //
-    // The fanin cursor does not advance at bind time. PTO2FaninBuilder appends and
+    // The fanin cursor does not advance at bind time. FaninBuilder appends and
     // dedups producers afterwards, so the region's length is known only when the count
     // is published, and it advances there.
     int32_t *fanin_pool{nullptr};
@@ -138,12 +138,11 @@ struct PTO2OrchestratorState {
     //
     // Returns false when an allocation fails; the caller then has no hazard map
     // and must not orchestrate.
-    bool
-    init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, PTO2SchedulerState *scheduler);
+    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler);
 
-    void set_scheduler(PTO2SchedulerState *scheduler);
+    void set_scheduler(SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
-    void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
+    void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
@@ -165,7 +164,7 @@ struct PTO2OrchestratorState {
 // =============================================================================
 
 #if SIMPLER_ORCH_PROFILING
-struct PTO2OrchProfilingData {
+struct OrchProfilingData {
     uint64_t alloc_cycle;  // Combined task slot + heap allocation
     uint64_t args_cycle;
     uint64_t lookup_cycle;
@@ -178,5 +177,5 @@ struct PTO2OrchProfilingData {
     uint64_t args_atomic_count;
 };
 
-PTO2OrchProfilingData orchestrator_get_profiling();
+OrchProfilingData orchestrator_get_profiling();
 #endif

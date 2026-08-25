@@ -41,8 +41,8 @@
 
 #include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
 #if SIMPLER_SCHED_PROFILING
-#define PTO2_SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
-#define PTO2_SCHED_CYCLE_LAP(acc)   \
+#define SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
+#define SCHED_CYCLE_LAP(acc)        \
     do {                            \
         _st1 = get_sys_cnt_aicpu(); \
         acc += (_st1 - _st0);       \
@@ -57,7 +57,7 @@
 /**
  * Per-slot entry: sequence counter for ABA safety + task payload
  */
-struct PTO2ReadyQueueSlot {
+struct ChipReadyQueueSlot {
     std::atomic<int64_t> sequence;
     ChipTaskSlotState *slot_state;
     uint64_t task_id_snapshot;
@@ -73,8 +73,8 @@ struct PTO2ReadyQueueSlot {
  * - CAS contention is split: producers only touch enqueue_pos,
  *   consumers only touch dequeue_pos
  */
-struct alignas(64) PTO2ReadyQueue {
-    PTO2ReadyQueueSlot *slots;
+struct alignas(64) ChipReadyQueue {
+    ChipReadyQueueSlot *slots;
     uint64_t capacity;
     uint64_t mask;        // capacity - 1
     char _pad0[64 - 24];  // Pad to own cache line
@@ -97,7 +97,7 @@ struct alignas(64) PTO2ReadyQueue {
 
     bool push_tagged(ChipTaskSlotState *slot_state, uint64_t task_id_snapshot) {
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         while (true) {
             pos = enqueue_pos.load(std::memory_order_relaxed);
             slot = &slots[pos & mask];
@@ -137,7 +137,7 @@ struct alignas(64) PTO2ReadyQueue {
             pos = enqueue_pos.load(std::memory_order_relaxed);
             bool ready = true;
             for (int i = 0; i < count; i++) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + i);
                 if (diff < 0) {
@@ -159,7 +159,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             slot->slot_state = items[i];
             slot->task_id_snapshot = task_id_snapshots == nullptr ? 0 : task_id_snapshots[i];
             slot->sequence.store(static_cast<int64_t>(pos + i + 1), std::memory_order_release);
@@ -170,7 +170,7 @@ struct alignas(64) PTO2ReadyQueue {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool push(ChipTaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
         bool contended = false;
         uint32_t atomic_ops = 0;
@@ -218,7 +218,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         while (true) {
             pos = dequeue_pos.load(std::memory_order_relaxed);
             slot = &slots[pos & mask];
@@ -251,7 +251,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         uint64_t pos;
-        PTO2ReadyQueueSlot *slot;
+        ChipReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
         bool contended = false;
         uint32_t atomic_ops = 0;
@@ -300,7 +300,7 @@ struct alignas(64) PTO2ReadyQueue {
             pos = dequeue_pos.load(std::memory_order_relaxed);
             count = 0;
             while (count < max_count) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + count) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + count) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + count + 1);
                 if (diff == 0) {
@@ -323,7 +323,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             out[i] = slot->slot_state;
             if (task_id_snapshots != nullptr) task_id_snapshots[i] = slot->task_id_snapshot;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
@@ -343,7 +343,7 @@ struct alignas(64) PTO2ReadyQueue {
             atomic_ops++;  // dequeue_pos.load
             count = 0;
             while (count < max_count) {
-                PTO2ReadyQueueSlot *slot = &slots[(pos + count) & mask];
+                ChipReadyQueueSlot *slot = &slots[(pos + count) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + count + 1);
                 atomic_ops++;  // sequence.load
@@ -376,7 +376,7 @@ struct alignas(64) PTO2ReadyQueue {
         }
 
         for (int i = 0; i < count; i++) {
-            PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
+            ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
             out[i] = slot->slot_state;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
             atomic_ops++;  // sequence.store
@@ -391,7 +391,7 @@ struct alignas(64) PTO2ReadyQueue {
 };
 
 // Cold-path ready queue operations (defined in scheduler.cpp). Declared
-// as non-member so PTO2ReadyQueue stays a POD-like struct with cache-line
+// as non-member so ChipReadyQueue stays a POD-like struct with cache-line
 // alignment. Storage is owned by the caller-supplied arena.
 //   reserve_layout: declare the slots[] region on the arena (must precede commit)
 //   init_data_from_layout: initialize sequence counters and queue metadata
@@ -403,10 +403,10 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity);
 // arena.region_ptr(slots_off) only to address the slot array for writes;
 // does NOT store the pointer in `queue->slots`. Call
 // `ready_queue_wire_arena_pointers` afterwards to set the field itself.
-bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
+bool ready_queue_init_data_from_layout(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
 // Stores queue->slots = arena.region_ptr(slots_off). Idempotent.
-void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off);
-void ready_queue_destroy(PTO2ReadyQueue *queue);
+void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off);
+void ready_queue_destroy(ChipReadyQueue *queue);
 
 /**
  * Statistics returned by mixed-task completion processing
@@ -419,15 +419,15 @@ struct CompletionStats {
 };
 
 /**
- * Layout descriptor produced by PTO2SchedulerState::reserve_layout(). Holds
+ * Layout descriptor produced by SchedulerState::reserve_layout(). Holds
  * the arena offsets of every sub-region the scheduler needs plus the
  * capacities used at layout time (init_data_from_layout reuses them).
  */
-struct PTO2SchedulerLayout {
-    size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
-    size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+struct SchedulerLayout {
+    size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
+    size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
-    size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_early_dispatch_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
     size_t off_dep_pool_entries[CHIP_MAX_RING_DEPTH];
     uint64_t ready_queue_capacity;
@@ -441,19 +441,19 @@ struct PTO2SchedulerLayout {
  * Separated from shared memory for cache efficiency.
  * Hot-path methods are defined inline (implicitly inline as member functions).
  */
-struct PTO2SchedulerState {
+struct SchedulerState {
     // Shared memory access
-    PTO2SharedMemoryHeader *sm_header;
+    SharedMemoryHeader *sm_header;
 
     // Per-ring state
     struct alignas(64) RingSchedState {
         // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
-        PTO2SharedMemoryRingHeader *ring;
+        SharedMemoryRingHeader *ring;
         int32_t last_task_alive;
         std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
         // --- Cache Line 1+: Orch-side wiring dep_pool ---
-        alignas(64) PTO2DepListPool dep_pool;
+        alignas(64) DepListPool dep_pool;
 #if SIMPLER_DFX
         // Published only for scope_stats; orchestrator must not read dep_pool's non-atomic counters directly.
         alignas(64) std::atomic<int32_t> dep_pool_snapshot_tail;
@@ -490,7 +490,7 @@ struct PTO2SchedulerState {
 
             while (last_task_alive < current_task_index) {
                 ChipTaskSlotState &slot_state = ring->get_slot_state_by_task_id(last_task_alive);
-                if (slot_state.task_state.load(std::memory_order_acquire) != PTO2_TASK_CONSUMED) {
+                if (slot_state.task_state.load(std::memory_order_acquire) != CHIP_TASK_CONSUMED) {
                     break;
                 }
                 last_task_alive++;
@@ -512,18 +512,18 @@ struct PTO2SchedulerState {
     alignas(64) std::atomic<uint32_t> advance_pending_mask;
 
     // Ready queues remain global (scheduling is ring-agnostic)
-    PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
+    ChipReadyQueue ready_queues[NUM_RESOURCE_SHAPES];
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
     // reusing the same per-shape dispatch_shape machinery (fits-local inline vs
     // stop-the-world drain, per-core MIX placement, head-start spacing).
-    PTO2ReadyQueue ready_sync_queues[PTO2_NUM_RESOURCE_SHAPES];
+    ChipReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
 
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
-    PTO2ReadyQueue dummy_ready_queue;
+    ChipReadyQueue dummy_ready_queue;
 
     alignas(64) AsyncWaitList async_wait_list;
 
@@ -542,8 +542,8 @@ struct PTO2SchedulerState {
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
     void push_ready_routed(ChipTaskSlotState *slot_state) {
-        PTO2ResourceShape shape = slot_state->active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state->active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
             dummy_ready_queue.push(slot_state);
         } else if (slot_state->task_attrs.requires_sync_start()) {
@@ -595,8 +595,8 @@ struct PTO2SchedulerState {
     bool try_claim_ready_once(ChipTaskSlotState &slot_state) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         for (;;) {
-            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
-            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
+            if ((flags & READY_CLAIMED) != 0) return false;
+            uint8_t desired_flags = flags | READY_CLAIMED;
             if (slot_state.lifecycle_flags.compare_exchange_weak(
                     flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
@@ -617,9 +617,9 @@ struct PTO2SchedulerState {
         bool became_consumed = false;
         slot_state.lock_fanout();
         if (slot_state.fanout_refcount.load(std::memory_order_acquire) == slot_state.fanout_count) {
-            PTO2TaskState expected = PTO2_TASK_COMPLETED;
+            ChipTaskState expected = CHIP_TASK_COMPLETED;
             became_consumed = slot_state.task_state.compare_exchange_strong(
-                expected, PTO2_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
+                expected, CHIP_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
             );
         }
         slot_state.unlock_fanout();
@@ -653,9 +653,9 @@ struct PTO2SchedulerState {
         uint32_t rc = slot_state.fanout_refcount.load(std::memory_order_acquire);
         atomic_count += 1;  // fanout_refcount.load (fanout_count is a plain read under lock)
         if (rc == fc) {
-            PTO2TaskState expected = PTO2_TASK_COMPLETED;
+            ChipTaskState expected = CHIP_TASK_COMPLETED;
             became_consumed = slot_state.task_state.compare_exchange_strong(
-                expected, PTO2_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
+                expected, CHIP_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
             );
             atomic_count += 1;  // CAS
         }
@@ -688,10 +688,10 @@ struct PTO2SchedulerState {
         check_and_handle_consumed(slot_state);
     }
 
-    // Scope-end release: sets bit31 (PTO2_FANOUT_SCOPE_BIT) instead of bumping a
+    // Scope-end release: sets bit31 (FANOUT_SCOPE_BIT) instead of bumping a
     // consumer ref. Called exactly once per task from on_scope_end.
     void release_producer_scope(ChipTaskSlotState &slot_state) {
-        slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
+        slot_state.fanout_refcount.fetch_add(FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         check_and_handle_consumed(slot_state);
     }
 
@@ -703,7 +703,7 @@ struct PTO2SchedulerState {
     }
 
     void release_producer_scope(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
-        slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
+        slot_state.fanout_refcount.fetch_add(FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
         check_and_handle_consumed(slot_state, atomic_count);
     }
@@ -732,9 +732,9 @@ struct PTO2SchedulerState {
         uint64_t addr{0};
         uint32_t token{0};
     };
-    EarlyDispatchDoorbell early_dispatch_doorbell_table[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
+    EarlyDispatchDoorbell early_dispatch_doorbell_table[EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
 
-    // Cross-thread early-dispatch work queues, one PTO2ReadyQueue MPMC instance per
+    // Cross-thread early-dispatch work queues, one ChipReadyQueue MPMC instance per
     // resource shape (AIC/AIV/MIX) — arena-backed, reserved/wired in pto_runtime2_init
     // alongside the per-shape ready queues, and indexed the same way. A candidate is
     // pushed to the queue for its own shape (active_mask.to_shape()) so the drain can
@@ -756,7 +756,7 @@ struct PTO2SchedulerState {
     // staged and sends the rest to ready_queues. An initial push that overflows also
     // rolls STAGING back to NONE, since nothing is staged yet and a task with no
     // claim should not read as speculatively claimed.
-    PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
+    ChipReadyQueue early_dispatch_queues[NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
     // they need an atomic all-or-nothing owner stage, not early_dispatch_shape's
@@ -770,7 +770,7 @@ struct PTO2SchedulerState {
     // src_payload gate; it stages directly when one owner tracker can hold the whole
     // cohort and falls back to the global drain otherwise. The shape-agnostic
     // rendezvous makes one queue sufficient.
-    PTO2ReadyQueue early_sync_start_queue;
+    ChipReadyQueue early_sync_start_queue;
 
     static inline void ring_one_doorbell(uint64_t reg_addr, uint32_t token) {
         volatile uint64_t *dmb = reinterpret_cast<volatile uint64_t *>(get_reg_ptr(reg_addr, RegId::DATA_MAIN_BASE));
@@ -797,7 +797,7 @@ struct PTO2SchedulerState {
     }
 
     static inline bool should_gate_early_dispatch(bool force_gate, uint8_t early_dispatch_state) {
-        return force_gate || early_dispatch_state == PTO2_EARLY_DISPATCH_STAGING;
+        return force_gate || early_dispatch_state == EARLY_DISPATCH_STAGING;
     }
 
     static inline bool
@@ -807,10 +807,10 @@ struct PTO2SchedulerState {
         return true;
     }
 
-    static inline bool try_claim_early_dispatch_launch(PTO2TaskPayload &payload) {
-        uint8_t expected = PTO2_EARLY_DISPATCH_LAUNCH_NONE;
+    static inline bool try_claim_early_dispatch_launch(TaskPayload &payload) {
+        uint8_t expected = EARLY_DISPATCH_LAUNCH_NONE;
         return payload.early_dispatch_launch_state.compare_exchange_strong(
-            expected, PTO2_EARLY_DISPATCH_LAUNCH_RINGING, std::memory_order_seq_cst, std::memory_order_seq_cst
+            expected, EARLY_DISPATCH_LAUNCH_RINGING, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
     }
 
@@ -823,7 +823,7 @@ struct PTO2SchedulerState {
     // the NONE->RINGING launch latch and invokes this exactly once after local or
     // global staging completes, while the corresponding per-core table entries are live.
     inline void ring_all_staged_doorbells(ChipTaskSlotState &slot_state) {
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             uint64_t bits = slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst);
             while (bits != 0) {
                 int core_id = w * 64 + __builtin_ctzll(bits);
@@ -835,44 +835,43 @@ struct PTO2SchedulerState {
         }
     }
 
-    static inline bool try_claim_early_sync_drain(PTO2TaskPayload &payload) {
-        uint8_t expected = PTO2_EARLY_SYNC_DRAIN_NONE;
+    static inline bool try_claim_early_sync_drain(TaskPayload &payload) {
+        uint8_t expected = EARLY_SYNC_DRAIN_NONE;
         return payload.early_sync_drain_state.compare_exchange_strong(
-            expected, PTO2_EARLY_SYNC_DRAIN_OWNER, std::memory_order_seq_cst, std::memory_order_seq_cst
+            expected, EARLY_SYNC_DRAIN_OWNER, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
     }
 
-    static inline bool owns_early_sync_drain(const PTO2TaskPayload &payload) {
-        return (payload.early_sync_drain_state.load(std::memory_order_acquire) & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
+    static inline bool owns_early_sync_drain(const TaskPayload &payload) {
+        return (payload.early_sync_drain_state.load(std::memory_order_acquire) & EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
-    static inline void mark_early_sync_drain_armed(PTO2TaskPayload &payload) {
-        payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_ARMED, std::memory_order_seq_cst);
+    static inline void mark_early_sync_drain_armed(TaskPayload &payload) {
+        payload.early_sync_drain_state.fetch_or(EARLY_SYNC_DRAIN_ARMED, std::memory_order_seq_cst);
     }
 
-    static inline bool publish_ready_to_early_sync_drain(PTO2TaskPayload &payload) {
-        uint8_t previous =
-            payload.early_sync_drain_state.fetch_or(PTO2_EARLY_SYNC_DRAIN_READY, std::memory_order_seq_cst);
-        return (previous & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0;
+    static inline bool publish_ready_to_early_sync_drain(TaskPayload &payload) {
+        uint8_t previous = payload.early_sync_drain_state.fetch_or(EARLY_SYNC_DRAIN_READY, std::memory_order_seq_cst);
+        return (previous & EARLY_SYNC_DRAIN_OWNER) != 0;
     }
 
     inline void cancel_early_sync_drain(ChipTaskSlotState &slot_state) {
         uint8_t previous =
-            slot_state.payload->early_sync_drain_state.exchange(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
-        if ((previous & PTO2_EARLY_SYNC_DRAIN_OWNER) == 0) return;
-        if ((previous & PTO2_EARLY_SYNC_DRAIN_READY) != 0) {
+            slot_state.payload->early_sync_drain_state.exchange(EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
+        if ((previous & EARLY_SYNC_DRAIN_OWNER) == 0) return;
+        if ((previous & EARLY_SYNC_DRAIN_READY) != 0) {
             push_ready_routed(&slot_state);
             return;
         }
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) == PTO2_EARLY_DISPATCH_STAGING) {
+        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_STAGING) {
             early_sync_start_queue.push_tagged(&slot_state, static_cast<uint64_t>(slot_state.task->task_id.raw));
         }
     }
 
-    static inline void finish_early_sync_drain(PTO2TaskPayload &payload) {
+    static inline void finish_early_sync_drain(TaskPayload &payload) {
         uint8_t state = payload.early_sync_drain_state.load(std::memory_order_seq_cst);
-        while ((state & PTO2_EARLY_SYNC_DRAIN_OWNER) != 0 && (state & PTO2_EARLY_SYNC_DRAIN_COMPLETE) == 0) {
-            uint8_t desired = state | PTO2_EARLY_SYNC_DRAIN_COMPLETE;
+        while ((state & EARLY_SYNC_DRAIN_OWNER) != 0 && (state & EARLY_SYNC_DRAIN_COMPLETE) == 0) {
+            uint8_t desired = state | EARLY_SYNC_DRAIN_COMPLETE;
             if (payload.early_sync_drain_state.compare_exchange_weak(
                     state, desired, std::memory_order_seq_cst, std::memory_order_seq_cst
                 )) {
@@ -896,18 +895,18 @@ struct PTO2SchedulerState {
         // mask when producer release races staging.
         int32_t running_cores = slot_state.payload->running_slot_count.load(std::memory_order_seq_cst);
         int32_t staged_cores = 0;
-        for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
+        for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_cores +=
                 __builtin_popcountll(slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst));
         if (staged_cores == 0) return false;
         if (running_cores != staged_cores) return false;
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_DISPATCHED)
+        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_DISPATCHED)
             return false;
         if (!try_claim_early_dispatch_launch(*slot_state.payload)) return false;
         ring_all_staged_doorbells(slot_state);
         wmb();
         slot_state.payload->early_dispatch_launch_state.store(
-            PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_release
+            EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_release
         );
         return true;
     }
@@ -924,14 +923,14 @@ struct PTO2SchedulerState {
         // Predicated tasks resolve at the ready point, never early-dispatch. The
         // wiring caller has no separate predicate filter, so the gate lives here.
         if (consumer.task_attrs.has_predicate()) return;
-        PTO2ResourceShape shape = consumer.active_mask.to_shape();
-        if (shape != PTO2ResourceShape::AIC && shape != PTO2ResourceShape::AIV && shape != PTO2ResourceShape::MIX) {
+        ResourceShape shape = consumer.active_mask.to_shape();
+        if (shape != ResourceShape::AIC && shape != ResourceShape::AIV && shape != ResourceShape::MIX) {
             return;
         }
 
-        uint8_t expected = PTO2_EARLY_DISPATCH_NONE;
+        uint8_t expected = EARLY_DISPATCH_NONE;
         if (!consumer.payload->early_dispatch_state.compare_exchange_strong(
-                expected, PTO2_EARLY_DISPATCH_STAGING, std::memory_order_seq_cst, std::memory_order_seq_cst
+                expected, EARLY_DISPATCH_STAGING, std::memory_order_seq_cst, std::memory_order_seq_cst
             )) {
             return;
         }
@@ -947,9 +946,9 @@ struct PTO2SchedulerState {
             // drop the speculative claim and let readiness take the ordinary
             // queue path. A concurrent producer release may already have moved
             // STAGING to DISPATCHED; that path then owns the transition.
-            expected = PTO2_EARLY_DISPATCH_STAGING;
+            expected = EARLY_DISPATCH_STAGING;
             consumer.payload->early_dispatch_state.compare_exchange_strong(
-                expected, PTO2_EARLY_DISPATCH_NONE, std::memory_order_seq_cst, std::memory_order_seq_cst
+                expected, EARLY_DISPATCH_NONE, std::memory_order_seq_cst, std::memory_order_seq_cst
             );
         }
     }
@@ -972,15 +971,15 @@ struct PTO2SchedulerState {
     void propagate_dispatch_fanin(ChipTaskSlotState &p) {
         if (!p.task_attrs.allow_early_resolve()) return;  // only codegen-flagged (direct) producers propagate
         if (p.payload->published_block_count.load(std::memory_order_seq_cst) < p.logical_block_num) return;
-        if (p.payload->early_dispatch_state.load(std::memory_order_acquire) == PTO2_EARLY_DISPATCH_STAGING) return;
+        if (p.payload->early_dispatch_state.load(std::memory_order_acquire) == EARLY_DISPATCH_STAGING) return;
         uint8_t launch_state = p.payload->early_dispatch_launch_state.load(std::memory_order_acquire);
-        if (launch_state == PTO2_EARLY_DISPATCH_LAUNCH_RINGING) return;
+        if (launch_state == EARLY_DISPATCH_LAUNCH_RINGING) return;
         if (p.task_attrs.requires_sync_start()) {
             bool was_pre_staged = false;
-            for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+            for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                 was_pre_staged |= p.payload->staged_core_mask[w].load(std::memory_order_acquire) != 0;
             }
-            if (was_pre_staged && launch_state != PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE) return;
+            if (was_pre_staged && launch_state != EARLY_DISPATCH_LAUNCH_COMPLETE) return;
         }
         // The once-claim and fanout snapshot share fanout_lock with wiring, so a
         // set marker tells wiring that its new edge is outside this snapshot.
@@ -993,7 +992,7 @@ struct PTO2SchedulerState {
         }
         // Nodes reachable from the captured head are immutable; wiring serializes
         // later prepends under fanout_lock and seeds them separately.
-        PTO2DepListEntry *edge = p.fanout_head;
+        DepListEntry *edge = p.fanout_head;
         p.unlock_fanout();
         for (; edge != nullptr; edge = edge->next) {
             ChipTaskSlotState *c = edge->slot_state;
@@ -1029,21 +1028,21 @@ struct PTO2SchedulerState {
         // A predicated task is evaluated at the ready point, never early-dispatched.
         if (slot_state.task_attrs.has_predicate()) return false;
         // Never staged => CAS NONE->DISPATCHED wins => dispatch normally.
-        uint8_t expect = PTO2_EARLY_DISPATCH_NONE;
+        uint8_t expect = EARLY_DISPATCH_NONE;
         if (slot_state.payload->early_dispatch_state.compare_exchange_strong(
-                expect, PTO2_EARLY_DISPATCH_DISPATCHED, std::memory_order_seq_cst, std::memory_order_seq_cst
+                expect, EARLY_DISPATCH_DISPATCHED, std::memory_order_seq_cst, std::memory_order_seq_cst
             )) {
             return false;
         }
         // route_ready_once admits one caller, but keep the helper defensive: a
         // duplicate that observes or loses an in-progress launch must never
         // route the same partial task a second time.
-        if (expect != PTO2_EARLY_DISPATCH_STAGING) return true;
+        if (expect != EARLY_DISPATCH_STAGING) return true;
         bool sync_start = slot_state.task_attrs.requires_sync_start();
         if (!sync_start && !try_claim_early_dispatch_launch(*slot_state.payload)) return true;
-        expect = PTO2_EARLY_DISPATCH_STAGING;
+        expect = EARLY_DISPATCH_STAGING;
         slot_state.payload->early_dispatch_state.compare_exchange_strong(
-            expect, PTO2_EARLY_DISPATCH_DISPATCHED, std::memory_order_seq_cst, std::memory_order_seq_cst
+            expect, EARLY_DISPATCH_DISPATCHED, std::memory_order_seq_cst, std::memory_order_seq_cst
         );
         // Producer released: ring the gated cores. A non-sync_start consumer launches
         // each block the instant its doorbell fires. A sync_start consumer instead holds
@@ -1058,13 +1057,13 @@ struct PTO2SchedulerState {
             // Destructively claim every published bit. A stager racing this pass
             // can claim only bits that land after the exchange, so each gated core
             // has exactly one doorbell writer.
-            for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
+            for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                 uint64_t owned = claim_all_staged_doorbell_bits(slot_state.payload->staged_core_mask[w]);
                 ring_staged_doorbell_bits(w, owned);
             }
             wmb();
             slot_state.payload->early_dispatch_launch_state.store(
-                PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_seq_cst
+                EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_seq_cst
             );
         }
         // This pre-staged consumer was just released by its doorbell — it starts
@@ -1098,8 +1097,8 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state.active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state);
         } else if (slot_state.task_attrs.requires_sync_start()) {
@@ -1118,8 +1117,8 @@ struct PTO2SchedulerState {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         atomic_count += 1;  // lifecycle_flags load
         for (;;) {
-            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
-            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
+            if ((flags & READY_CLAIMED) != 0) return false;
+            uint8_t desired_flags = flags | READY_CLAIMED;
             if (slot_state.lifecycle_flags.compare_exchange_weak(
                     flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
@@ -1139,8 +1138,8 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
-        if (shape == PTO2ResourceShape::DUMMY ||
+        ResourceShape shape = slot_state.active_mask.to_shape();
+        if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);
         } else if (slot_state.task_attrs.requires_sync_start()) {
@@ -1179,13 +1178,13 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    int get_ready_tasks_batch(PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        PTO2ReadyQueue *queues, PTO2ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
+        ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);
@@ -1256,7 +1255,7 @@ struct PTO2SchedulerState {
         extern uint64_t g_sched_lock_atomic_count[], g_sched_lock_wait_cycle[];
         extern uint64_t g_sched_fanout_atomic_count[], g_sched_push_wait_cycle[];
         uint64_t lock_atomics = 0, lock_wait = 0;
-        PTO2_SCHED_CYCLE_START();
+        SCHED_CYCLE_START();
 #endif
 
 #if SIMPLER_SCHED_PROFILING
@@ -1265,14 +1264,14 @@ struct PTO2SchedulerState {
         slot_state.lock_fanout();
 #endif
         slot_state.mark_completed();
-        PTO2DepListEntry *current = slot_state.fanout_head;  // Protected by fanout_lock
+        DepListEntry *current = slot_state.fanout_head;  // Protected by fanout_lock
         slot_state.unlock_fanout();
 
 #if SIMPLER_SCHED_PROFILING
         lock_atomics += 3;  // task_state.store + lifecycle_flags.fetch_or + unlock.store
         g_sched_lock_atomic_count[thread_idx] += lock_atomics;
         g_sched_lock_wait_cycle[thread_idx] += lock_wait;
-        PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
         // Fanout: notify consumers. A pre-staged consumer that becomes ready has
@@ -1315,7 +1314,7 @@ struct PTO2SchedulerState {
 #if SIMPLER_SCHED_PROFILING
         g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;
         g_sched_push_wait_cycle[thread_idx] += push_wait;
-        PTO2_SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
         return stats;
 #else
         return consumer_walk_count;
@@ -1330,7 +1329,7 @@ struct PTO2SchedulerState {
 
 #if SIMPLER_SCHED_PROFILING
     int32_t on_task_release(ChipTaskSlotState &slot_state, int32_t thread_idx) {
-        PTO2_SCHED_CYCLE_START();
+        SCHED_CYCLE_START();
         extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
         extern uint64_t g_sched_self_atomic_count[];
         extern uint64_t g_sched_self_consumed_cycle[];
@@ -1339,7 +1338,7 @@ struct PTO2SchedulerState {
 #else
     int32_t on_task_release(ChipTaskSlotState &slot_state) {
 #endif
-        PTO2TaskPayload *payload = slot_state.payload;
+        TaskPayload *payload = slot_state.payload;
         int32_t released = 0;
         // Only DEP_RETAIN edges still hold a fanout pin at completion: an
         // ordering-only edge released its submit->wire pin at wiring, so releasing
@@ -1358,7 +1357,7 @@ struct PTO2SchedulerState {
         });
 #if SIMPLER_SCHED_PROFILING
         g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
-        PTO2_SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
 #endif
 
         // Self consumed check
@@ -1366,7 +1365,7 @@ struct PTO2SchedulerState {
         uint64_t self_atomics = 0;
         check_and_handle_consumed(slot_state, self_atomics);
         g_sched_self_atomic_count[thread_idx] += self_atomics;
-        PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
+        SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
         g_sched_complete_count[thread_idx]++;
 #else
         check_and_handle_consumed(slot_state);
@@ -1380,9 +1379,8 @@ struct PTO2SchedulerState {
     // per-ring dep_pool entries) on the supplied arena.
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
-    static PTO2SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
-    static PTO2SchedulerLayout
-    reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
+    static SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = CHIP_DEP_LIST_POOL_SIZE);
+    static SchedulerLayout reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[CHIP_MAX_RING_DEPTH]);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never
@@ -1391,13 +1389,13 @@ struct PTO2SchedulerState {
     // task_window_size for ring task_descriptors address arithmetic; the
     // scheduler only needs the SM header / ring header base addresses,
     // both window-size-independent.)
-    bool init_data_from_layout(const PTO2SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
-    void reset_for_reuse(const PTO2SchedulerLayout &layout, void *sm_dev_base);
+    bool init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
+    void reset_for_reuse(const SchedulerLayout &layout, void *sm_dev_base);
 
     // Phase 3b: write the arena-internal pointer fields
     // (ready_queues[].slots, dummy_ready_queue.slots, dep_pool.base for each
     // ring). Called on both host and device sides.
-    void wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena);
+    void wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena);
 
     // Forget per-region pointers; arena owns the backing memory.
     void destroy();
@@ -1405,12 +1403,12 @@ struct PTO2SchedulerState {
     void print_queues();
 };
 
-// Scheduler cold-path API is declared as PTO2SchedulerState member functions.
+// Scheduler cold-path API is declared as SchedulerState member functions.
 // See init()/destroy()/print_stats()/print_queues() below the struct definition.
 
 // try_inline_complete_locked: short-circuit NotDeferred completions seen during
 // drain so they don't grow entries[]. Defined here (not in async_wait.h)
-// because PTO2SchedulerState's on_task_complete signature is only known
+// because SchedulerState's on_task_complete signature is only known
 // after its full definition above.
 //
 // When the deferred_release_slot_states[] buffer is full, drain it via
@@ -1444,8 +1442,8 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
-    AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
+    AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched, ChipTaskSlotState **deferred_release_slot_states,
+    int32_t &deferred_release_count, int32_t deferred_release_capacity
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1539,7 +1537,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 // =============================================================================
 
 #if SIMPLER_SCHED_PROFILING
-struct PTO2SchedProfilingData {
+struct SchedProfilingData {
     // Sub-phase cycle breakdown within on_task_complete
     uint64_t lock_cycle;           // lock_fanout + state store + unlock
     uint64_t fanout_cycle;         // fanout traversal
@@ -1565,5 +1563,5 @@ struct PTO2SchedProfilingData {
  * Get and reset scheduler profiling data for a specific thread.
  * Returns accumulated profiling data and resets counters.
  */
-PTO2SchedProfilingData scheduler_get_profiling(int thread_idx);
+SchedProfilingData scheduler_get_profiling(int thread_idx);
 #endif

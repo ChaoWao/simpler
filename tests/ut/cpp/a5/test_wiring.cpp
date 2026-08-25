@@ -39,9 +39,9 @@
 
 class WiringTest : public ::testing::Test {
 protected:
-    PTO2OrchestratorState orch{};
-    PTO2SchedulerState sched{};
-    PTO2SharedMemoryHandle *sm_handle = nullptr;
+    OrchestratorState orch{};
+    SchedulerState sched{};
+    SharedMemoryHandle *sm_handle = nullptr;
     DeviceArena sm_arena;
     DeviceArena sched_arena;
 
@@ -49,14 +49,14 @@ protected:
     // mirroring orch::prepare_task's bind_buffers: every production slot has a
     // payload, and the scheduler's release/propagate paths dereference it.
     static constexpr int kSlotPayloadPoolSize = 16;
-    PTO2TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
-    PTO2TaskDescriptor slot_task_pool_[kSlotPayloadPoolSize];
+    TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
+    TaskDescriptor slot_task_pool_[kSlotPayloadPoolSize];
     int slot_payload_pool_idx_ = 0;
 
     void SetUp() override {
-        sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
+        sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        auto layout = PTO2SchedulerState::reserve_layout(sched_arena);
+        auto layout = SchedulerState::reserve_layout(sched_arena);
         ASSERT_NE(sched_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(layout, sched_arena, sm_handle->header));
         sched.wire_arena_pointers(layout, sched_arena);
@@ -72,7 +72,7 @@ protected:
 
     // Initialize a slot for testing wiring/completion
     void init_slot(
-        ChipTaskSlotState &slot, PTO2TaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
+        ChipTaskSlotState &slot, ChipTaskState state, int32_t fanin_count, int32_t fanout_count, uint8_t ring_id = 0
     ) {
         memset(&slot, 0, sizeof(slot));
         slot.task_state.store(state);
@@ -83,15 +83,15 @@ protected:
         slot.fanout_lock.store(0);
         slot.fanout_head = nullptr;
         slot.ring_id = ring_id;
-        slot.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+        slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         slot.completed_subtasks.store(0);
         slot.total_required_subtasks = 1;
         slot.logical_block_num = 1;
         slot.dep_pool_mark = 0;
-        PTO2TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
+        TaskPayload &slot_pl = slot_payload_pool_[slot_payload_pool_idx_++ % kSlotPayloadPoolSize];
         memset(&slot_pl, 0, sizeof(slot_pl));
         slot.payload = &slot_pl;
-        PTO2TaskDescriptor &slot_task = slot_task_pool_[(slot_payload_pool_idx_ - 1) % kSlotPayloadPoolSize];
+        TaskDescriptor &slot_task = slot_task_pool_[(slot_payload_pool_idx_ - 1) % kSlotPayloadPoolSize];
         memset(&slot_task, 0, sizeof(slot_task));
         slot.task = &slot_task;
     }
@@ -121,7 +121,7 @@ protected:
 };
 
 TEST(ReclaimHeadMatchTest, ComparesExactRingAndLocalTaskId) {
-    PTO2TaskDescriptor descriptor{};
+    TaskDescriptor descriptor{};
     ChipTaskSlotState slot{};
     slot.task = &descriptor;
     descriptor.task_id = TaskId::make(0, 16);
@@ -139,11 +139,11 @@ TEST(ReclaimHeadMatchTest, ComparesExactRingAndLocalTaskId) {
 TEST_F(WiringTest, NoFaninTaskBecomesReady) {
     // A task with 0 actual fanins should immediately be pushed to ready queue
     alignas(64) ChipTaskSlotState task_slot;
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 0;
     task_slot.payload = &payload;
     task_slot.task = &desc;
@@ -156,7 +156,7 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
     EXPECT_EQ(task_slot.fanin_refcount.load(), 1);
 
     // Task should be in ready queue
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
@@ -168,17 +168,17 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
 TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
     alignas(64) ChipTaskSlotState task_slot;
     alignas(64) ChipTaskSlotState producer_slots[2];
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // Set up 2 producers that are already COMPLETED
     for (int i = 0; i < 2; i++) {
-        init_slot(producer_slots[i], PTO2_TASK_COMPLETED, 1, 2);
+        init_slot(producer_slots[i], CHIP_TASK_COMPLETED, 1, 2);
     }
 
     // Consumer task with 2 fanins
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
     payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
@@ -194,7 +194,7 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
     EXPECT_GE(task_slot.fanin_refcount.load(), task_slot.fanin_count);
 
     // Task should be in ready queue
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
@@ -206,16 +206,16 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
 TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
     alignas(64) ChipTaskSlotState task_slot;
     alignas(64) ChipTaskSlotState producer_slots[2];
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // Producers are PENDING (not yet completed)
     for (int i = 0; i < 2; i++) {
-        init_slot(producer_slots[i], PTO2_TASK_PENDING, 1, 2);
+        init_slot(producer_slots[i], CHIP_TASK_PENDING, 1, 2);
     }
 
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
     payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
@@ -231,7 +231,7 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
     EXPECT_LT(task_slot.fanin_refcount.load(), task_slot.fanin_count);
 
     // Ready queue should be empty
-    PTO2ResourceShape shape = task_slot.active_mask.to_shape();
+    ResourceShape shape = task_slot.active_mask.to_shape();
     auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, nullptr);
 
@@ -249,15 +249,15 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
 TEST_F(WiringTest, WireTaskMixedProducerStates) {
     alignas(64) ChipTaskSlotState task_slot;
     alignas(64) ChipTaskSlotState producers[3];
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
-    init_slot(producers[0], PTO2_TASK_COMPLETED, 1, 2);  // early finished
-    init_slot(producers[1], PTO2_TASK_PENDING, 1, 2);    // in flight (< COMPLETED)
-    init_slot(producers[2], PTO2_TASK_CONSUMED, 1, 2);   // early finished (>= COMPLETED)
+    init_slot(producers[0], CHIP_TASK_COMPLETED, 1, 2);  // early finished
+    init_slot(producers[1], CHIP_TASK_PENDING, 1, 2);    // in flight (< COMPLETED)
+    init_slot(producers[2], CHIP_TASK_CONSUMED, 1, 2);   // early finished (>= COMPLETED)
 
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 3;
     for (int i = 0; i < 3; i++) {
         payload.fanin_inline_edges[i].set(&producers[i], DEP_WAIT | DEP_RETAIN);
@@ -280,21 +280,21 @@ TEST_F(WiringTest, WireTaskMixedProducerStates) {
 }
 
 TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
-    PTO2TaskPayload payload{};
+    TaskPayload payload{};
 
     for (int iteration = 0; iteration < 1000; iteration++) {
-        payload.early_dispatch_launch_state.store(PTO2_EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
+        payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
         std::atomic<bool> start{false};
         bool first_won = false;
         bool second_won = false;
 
         std::thread first([&] {
             while (!start.load(std::memory_order_acquire)) {}
-            first_won = PTO2SchedulerState::try_claim_early_dispatch_launch(payload);
+            first_won = SchedulerState::try_claim_early_dispatch_launch(payload);
         });
         std::thread second([&] {
             while (!start.load(std::memory_order_acquire)) {}
-            second_won = PTO2SchedulerState::try_claim_early_dispatch_launch(payload);
+            second_won = SchedulerState::try_claim_early_dispatch_launch(payload);
         });
 
         start.store(true, std::memory_order_release);
@@ -302,18 +302,16 @@ TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
         second.join();
 
         EXPECT_NE(first_won, second_won);
-        EXPECT_EQ(
-            payload.early_dispatch_launch_state.load(std::memory_order_acquire), PTO2_EARLY_DISPATCH_LAUNCH_RINGING
-        );
+        EXPECT_EQ(payload.early_dispatch_launch_state.load(std::memory_order_acquire), EARLY_DISPATCH_LAUNCH_RINGING);
     }
 }
 
 TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     alignas(64) ChipTaskSlotState sync_consumer, downstream;
-    init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
-    init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
+    init_slot(sync_consumer, CHIP_TASK_PENDING, 1, 1);
+    init_slot(downstream, CHIP_TASK_PENDING, 1, 1);
 
-    sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
+    sync_consumer.active_mask = ActiveMask(SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
     sync_consumer.task_attrs.set_early_resolve(true);
     sync_consumer.logical_block_num = 2;
@@ -321,21 +319,21 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     sched.record_published_blocks(sync_consumer, sync_consumer.logical_block_num);
     sync_consumer.payload->staged_core_mask[0].store(0b11, std::memory_order_relaxed);
     sync_consumer.payload->running_slot_count.store(0, std::memory_order_relaxed);
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &downstream;
     sync_consumer.fanout_head = &dep;
 
     EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_NONE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_NONE);
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 0);
 
     sync_consumer.payload->running_slot_count.store(2, std::memory_order_seq_cst);
     EXPECT_TRUE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_COMPLETE);
     EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 
@@ -345,10 +343,10 @@ TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
 
 TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
     alignas(64) ChipTaskSlotState sync_consumer, downstream;
-    init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
-    init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
+    init_slot(sync_consumer, CHIP_TASK_PENDING, 1, 1);
+    init_slot(downstream, CHIP_TASK_PENDING, 1, 1);
 
-    sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
+    sync_consumer.active_mask = ActiveMask(SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
     sync_consumer.task_attrs.set_early_resolve(true);
     sync_consumer.logical_block_num = 2;
@@ -356,17 +354,17 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
     sched.record_published_blocks(sync_consumer, sync_consumer.logical_block_num);
     sync_consumer.payload->staged_core_mask[0].store(0b11, std::memory_order_relaxed);
     sync_consumer.payload->running_slot_count.store(2, std::memory_order_relaxed);
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
     downstream.payload->fanin_actual_count = 1;
-    PTO2DepListEntry dep{};
+    DepListEntry dep{};
     dep.slot_state = &downstream;
     sync_consumer.fanout_head = &dep;
 
     EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
     EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
-    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), EARLY_DISPATCH_LAUNCH_COMPLETE);
     EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 
@@ -376,24 +374,23 @@ TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
 
 TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState) {
     alignas(64) ChipTaskSlotState sync_consumer;
-    init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
-    sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
+    init_slot(sync_consumer, CHIP_TASK_PENDING, 1, 1);
+    sync_consumer.active_mask = ActiveMask(SUBTASK_MASK_AIV0);
     sync_consumer.task_attrs.set_sync_start();
     sync_consumer.logical_block_num = 2;
-    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
 
-    ASSERT_TRUE(PTO2SchedulerState::try_claim_early_sync_drain(*sync_consumer.payload));
-    PTO2SchedulerState::mark_early_sync_drain_armed(*sync_consumer.payload);
+    ASSERT_TRUE(SchedulerState::try_claim_early_sync_drain(*sync_consumer.payload));
+    SchedulerState::mark_early_sync_drain_armed(*sync_consumer.payload);
 
     EXPECT_FALSE(sched.try_early_dispatch_release(sync_consumer));
     sync_consumer.next_block_idx.store(sync_consumer.logical_block_num, std::memory_order_seq_cst);
-    PTO2SchedulerState::finish_early_sync_drain(*sync_consumer.payload);
+    SchedulerState::finish_early_sync_drain(*sync_consumer.payload);
 
-    EXPECT_TRUE(PTO2SchedulerState::publish_ready_to_early_sync_drain(*sync_consumer.payload));
+    EXPECT_TRUE(SchedulerState::publish_ready_to_early_sync_drain(*sync_consumer.payload));
     EXPECT_EQ(
         sync_consumer.payload->early_sync_drain_state.load(),
-        PTO2_EARLY_SYNC_DRAIN_OWNER | PTO2_EARLY_SYNC_DRAIN_ARMED | PTO2_EARLY_SYNC_DRAIN_READY |
-            PTO2_EARLY_SYNC_DRAIN_COMPLETE
+        EARLY_SYNC_DRAIN_OWNER | EARLY_SYNC_DRAIN_ARMED | EARLY_SYNC_DRAIN_READY | EARLY_SYNC_DRAIN_COMPLETE
     );
 }
 
@@ -404,27 +401,27 @@ TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState)
 TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
     alignas(64) ChipTaskSlotState producer;
     alignas(64) ChipTaskSlotState consumer1, consumer2;
-    alignas(64) PTO2TaskPayload prod_payload;
+    alignas(64) TaskPayload prod_payload;
     memset(&prod_payload, 0, sizeof(prod_payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // Producer in flight (PENDING, not yet COMPLETED) with 2 consumers in fanout chain
-    init_slot(producer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(producer, CHIP_TASK_PENDING, 1, 1);
     producer.payload = &prod_payload;
     producer.task = &desc;
 
     // Consumer1: needs 1 more fanin to become ready
-    init_slot(consumer1, PTO2_TASK_PENDING, 2, 1);
+    init_slot(consumer1, CHIP_TASK_PENDING, 2, 1);
     consumer1.fanin_refcount.store(1);  // 1 of 2 satisfied
-    consumer1.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+    consumer1.active_mask = ActiveMask(SUBTASK_MASK_AIC);
 
     // Consumer2: this release will make it ready
-    init_slot(consumer2, PTO2_TASK_PENDING, 2, 1);
+    init_slot(consumer2, CHIP_TASK_PENDING, 2, 1);
     consumer2.fanin_refcount.store(1);  // 1 of 2 satisfied
-    consumer2.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIC);
+    consumer2.active_mask = ActiveMask(SUBTASK_MASK_AIC);
 
     // Build fanout chain: producer -> consumer2 -> consumer1
-    PTO2DepListEntry dep_entries[2];
+    DepListEntry dep_entries[2];
     dep_entries[0].slot_state = &consumer1;
     dep_entries[0].next = nullptr;
     dep_entries[1].slot_state = &consumer2;
@@ -439,14 +436,14 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
 #endif
 
     // Producer should be COMPLETED
-    EXPECT_EQ(producer.task_state.load(), PTO2_TASK_COMPLETED);
+    EXPECT_EQ(producer.task_state.load(), CHIP_TASK_COMPLETED);
 
     // Both consumers should have fanin_refcount incremented
     EXPECT_EQ(consumer1.fanin_refcount.load(), 2);
     EXPECT_EQ(consumer2.fanin_refcount.load(), 2);
 
     // Both consumers should be ready (fanin_refcount == fanin_count)
-    PTO2ResourceShape shape = consumer1.active_mask.to_shape();
+    ResourceShape shape = consumer1.active_mask.to_shape();
     auto *r1 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     auto *r2 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
     EXPECT_TRUE((r1 == &consumer1 && r2 == &consumer2) || (r1 == &consumer2 && r2 == &consumer1));
@@ -459,22 +456,22 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
 TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     alignas(64) ChipTaskSlotState task_slot;
     alignas(64) ChipTaskSlotState producers[2];
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // 2 producers, each COMPLETED with fanout_count=1
     for (int i = 0; i < 2; i++) {
-        init_slot(producers[i], PTO2_TASK_COMPLETED, 1, 1);
+        init_slot(producers[i], CHIP_TASK_COMPLETED, 1, 1);
     }
 
-    init_slot(task_slot, PTO2_TASK_COMPLETED, 3, 1);
+    init_slot(task_slot, CHIP_TASK_COMPLETED, 3, 1);
     payload.fanin_actual_count = 2;
     payload.fanin_inline_edges[0].set(&producers[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producers[1], DEP_WAIT | DEP_RETAIN);
     // Need a valid fanin_spill_pool even though we don't spill
-    PTO2FaninPool dummy_pool{};
-    PTO2FaninSpillEntry dummy_entries[4];
+    FaninPool dummy_pool{};
+    FaninSpillEntry dummy_entries[4];
     std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
@@ -489,8 +486,8 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     EXPECT_EQ(producers[1].fanout_refcount.load(), 1);
 
     // Producers with fanout_refcount == fanout_count AND COMPLETED -> CONSUMED
-    EXPECT_EQ(producers[0].task_state.load(), PTO2_TASK_CONSUMED);
-    EXPECT_EQ(producers[1].task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(producers[0].task_state.load(), CHIP_TASK_CONSUMED);
+    EXPECT_EQ(producers[1].task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 // =============================================================================
@@ -503,20 +500,20 @@ TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
     alignas(64) ChipTaskSlotState task_slot;
     alignas(64) ChipTaskSlotState wait_producer;    // DEP_WAIT only (modifier)
     alignas(64) ChipTaskSlotState retain_producer;  // DEP_WAIT|DEP_RETAIN (creator)
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // Both live (PENDING) with a single submit pin (fanout_count = 1).
-    init_slot(wait_producer, PTO2_TASK_PENDING, 1, 1);
-    init_slot(retain_producer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(wait_producer, CHIP_TASK_PENDING, 1, 1);
+    init_slot(retain_producer, CHIP_TASK_PENDING, 1, 1);
 
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
     payload.fanin_inline_edges[0].set(&wait_producer, DEP_WAIT);
     payload.fanin_inline_edges[1].set(&retain_producer, DEP_WAIT | DEP_RETAIN);
-    PTO2FaninPool dummy_pool{};
-    PTO2FaninSpillEntry dummy_entries[4];
+    FaninPool dummy_pool{};
+    FaninSpillEntry dummy_entries[4];
     std::atomic<int32_t> dummy_error{SIMPLER_ERROR_NONE};
     dummy_pool.init(dummy_entries, 4, &dummy_error);
     payload.fanin_spill_pool = &dummy_pool;
@@ -545,27 +542,27 @@ TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
     alignas(64) ChipTaskSlotState filler;        // 64 inline DEP_WAIT-only edges
     alignas(64) ChipTaskSlotState spill_retain;  // 1 spilled DEP_RETAIN edge
     alignas(64) ChipTaskSlotState task_slot;
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
     // filler carries a large fanout_count so releasing it can never consume it.
-    init_slot(filler, PTO2_TASK_COMPLETED, 1, 100);
-    init_slot(spill_retain, PTO2_TASK_COMPLETED, 1, 1);
-    init_slot(task_slot, PTO2_TASK_COMPLETED, 0, 1);
+    init_slot(filler, CHIP_TASK_COMPLETED, 1, 100);
+    init_slot(spill_retain, CHIP_TASK_COMPLETED, 1, 1);
+    init_slot(task_slot, CHIP_TASK_COMPLETED, 0, 1);
 
-    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+    for (int i = 0; i < CHIP_FANIN_INLINE_CAP; i++) {
         payload.fanin_inline_edges[i].set(&filler, DEP_WAIT);
     }
-    PTO2FaninPool spill_pool{};
-    PTO2FaninSpillEntry spill_entries[4];
+    FaninPool spill_pool{};
+    FaninSpillEntry spill_entries[4];
     std::atomic<int32_t> err{SIMPLER_ERROR_NONE};
     spill_pool.init(spill_entries, 4, &err);
     auto *e = spill_pool.alloc();
     int32_t spill_start = spill_pool.top - 1;
     e->set(&spill_retain, DEP_WAIT | DEP_RETAIN);
 
-    payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+    payload.fanin_actual_count = CHIP_FANIN_INLINE_CAP + 1;
     payload.fanin_spill_start = spill_start;
     payload.fanin_spill_pool = &spill_pool;
     task_slot.payload = &payload;
@@ -577,7 +574,7 @@ TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
     EXPECT_EQ(filler.fanout_refcount.load(), 0);
     // The spilled retention edge is released (and consumed: rc == fc, COMPLETED).
     EXPECT_EQ(spill_retain.fanout_refcount.load(), 1);
-    EXPECT_EQ(spill_retain.task_state.load(), PTO2_TASK_CONSUMED);
+    EXPECT_EQ(spill_retain.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
 // =============================================================================
@@ -594,7 +591,7 @@ TEST_F(WiringTest, AdvanceRingPointersScansConsumed) {
     // Mark all 3 as CONSUMED
     for (int i = 0; i < 3; i++) {
         auto &slot = ring->get_slot_state_by_task_id(i);
-        slot.task_state.store(PTO2_TASK_CONSUMED, std::memory_order_release);
+        slot.task_state.store(CHIP_TASK_CONSUMED, std::memory_order_release);
     }
 
     EXPECT_EQ(rss.last_task_alive, 0);
@@ -611,7 +608,7 @@ TEST_F(WiringTest, AdvanceRingPointersBatchesSharedMemoryPublication) {
 
     ring->fc.current_task_index.store(18, std::memory_order_release);
     for (int i = 0; i < 17; i++) {
-        ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+        ring->get_slot_state_by_task_id(i).task_state.store(CHIP_TASK_CONSUMED);
     }
 
     rss.advance_ring_pointers();
@@ -623,9 +620,9 @@ TEST_F(WiringTest, AdvanceRingPointersBatchesSharedMemoryPublication) {
     rss.last_published_to_sm = 0;
     for (int advances : {1, 15, 16, 17}) {
         for (int i = 0; i < advances; i++) {
-            ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+            ring->get_slot_state_by_task_id(i).task_state.store(CHIP_TASK_CONSUMED);
         }
-        ring->get_slot_state_by_task_id(advances).task_state.store(PTO2_TASK_COMPLETED);
+        ring->get_slot_state_by_task_id(advances).task_state.store(CHIP_TASK_COMPLETED);
         rss.advance_ring_pointers();
         EXPECT_EQ(ring->fc.last_task_alive.load(), advances >= 16 ? advances : 0);
 
@@ -642,7 +639,7 @@ TEST_F(WiringTest, AdvanceRingPointersPublishesDrainedTail) {
     for (int advances : {1, 15, 16, 17}) {
         ring->fc.current_task_index.store(advances, std::memory_order_release);
         for (int i = 0; i < advances; i++) {
-            ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+            ring->get_slot_state_by_task_id(i).task_state.store(CHIP_TASK_CONSUMED);
         }
 
         rss.advance_ring_pointers();
@@ -710,7 +707,7 @@ TEST_F(WiringTest, DrainPublicationRequestsPublishesWithheldProgress) {
     auto *ring = rss.ring;
 
     ring->fc.current_task_index.store(129, std::memory_order_release);
-    ring->get_slot_state_by_task_id(128).task_state.store(PTO2_TASK_PENDING);
+    ring->get_slot_state_by_task_id(128).task_state.store(CHIP_TASK_PENDING);
     rss.last_task_alive = 128;
     rss.last_published_to_sm = 113;
     ring->fc.last_task_alive.store(113, std::memory_order_release);
@@ -742,15 +739,15 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     alignas(64) char heap[64] = {};
     ring->fc.current_task_index.store(3, std::memory_order_release);
     ring->get_task_by_task_id(0).packed_buffer_end = heap;
-    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
-    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    ring->get_slot_state_by_task_id(0).task_state.store(CHIP_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(CHIP_TASK_PENDING);
     rss.advance_ring_pointers();
 
     ASSERT_EQ(rss.last_task_alive, 1);
     ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
 
-    PTO2TaskAllocator allocator;
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    TaskAllocator allocator;
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 4, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 3, 0
@@ -767,7 +764,7 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
     request_and_drain_publication();
     ASSERT_EQ(allocator.task_tail(), 1);
 
-    PTO2TaskAllocResult result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
+    TaskAllocResult result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 3);
@@ -779,8 +776,8 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     auto *ring = rss.ring;
 
     alignas(64) char heap[64] = {};
-    PTO2TaskAllocator allocator;
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    TaskAllocator allocator;
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     allocator.init(
         ring->task_descriptors, 8, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 0, 0
@@ -794,8 +791,8 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     ASSERT_FALSE(live_tail.failed());
     ring->get_task_by_task_id(live_tail.task_id).packed_buffer_end = live_tail.packed_end;
 
-    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
-    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    ring->get_slot_state_by_task_id(0).task_state.store(CHIP_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(CHIP_TASK_PENDING);
     rss.advance_ring_pointers();
 
     ASSERT_EQ(rss.last_task_alive, 1);
@@ -809,7 +806,7 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
     request_and_drain_publication();
     ASSERT_EQ(allocator.task_tail(), 1);
 
-    PTO2TaskAllocResult result = allocator.alloc(8);
+    TaskAllocResult result = allocator.alloc(8);
 
     EXPECT_FALSE(result.failed());
     EXPECT_EQ(result.task_id, 2);
@@ -824,7 +821,7 @@ TEST_F(WiringTest, DependencyPoolReclaimsOnceWithheldProgressIsPublished) {
     ring->fc.current_task_index.store(129, std::memory_order_release);
     ring->fc.last_task_alive.store(113, std::memory_order_release);
     ring->get_slot_state_by_task_id(127).dep_pool_mark = 5;
-    ring->get_slot_state_by_task_id(128).task_state.store(PTO2_TASK_PENDING);
+    ring->get_slot_state_by_task_id(128).task_state.store(CHIP_TASK_PENDING);
     rss.last_task_alive = 128;
     rss.last_published_to_sm = 113;
     rss.dep_pool.capacity = 8;
@@ -851,15 +848,15 @@ TEST_F(WiringTest, FaninPoolReclaimsOnceWithheldProgressIsPublished) {
     auto *ring = rss.ring;
 
     ring->fc.current_task_index.store(2, std::memory_order_release);
-    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
-    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    ring->get_slot_state_by_task_id(0).task_state.store(CHIP_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(CHIP_TASK_PENDING);
     rss.advance_ring_pointers();
     ASSERT_EQ(rss.last_task_alive, 1);
     ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
 
-    PTO2FaninSpillEntry entries[4]{};
-    PTO2FaninPool pool{};
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    FaninSpillEntry entries[4]{};
+    FaninPool pool{};
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     pool.init(entries, 4, orch_err);
     pool.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask, 0);
     for (int i = 0; i < 4; i++) {
@@ -867,7 +864,7 @@ TEST_F(WiringTest, FaninPoolReclaimsOnceWithheldProgressIsPublished) {
     }
 
     auto &payload = ring->get_payload_by_task_id(0);
-    payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+    payload.fanin_actual_count = CHIP_FANIN_INLINE_CAP + 1;
     payload.fanin_spill_start = 1;
     payload.fanin_spill_pool = &pool;
 
@@ -889,13 +886,13 @@ TEST_F(WiringTest, RingReuseResetsPublicationShadow) {
     rss.last_task_alive = 17;
     rss.last_published_to_sm = 16;
 
-    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     rss.reset_for_reuse(sm_handle->sm_base, 0, orch_err);
 
     EXPECT_EQ(rss.last_task_alive, 0);
     EXPECT_EQ(rss.last_published_to_sm, 0);
     EXPECT_FALSE(rss.publication_batching_enabled);
-    EXPECT_EQ(rss.ring, pto2_sm_layout::ring_header_addr(sm_handle->sm_base, 0));
+    EXPECT_EQ(rss.ring, sm_layout::ring_header_addr(sm_handle->sm_base, 0));
 }
 
 TEST_F(WiringTest, AdvanceRingPointersStopsAtNonConsumed) {
@@ -905,9 +902,9 @@ TEST_F(WiringTest, AdvanceRingPointersStopsAtNonConsumed) {
     ring->fc.current_task_index.store(5, std::memory_order_release);
 
     // Tasks 0,1 CONSUMED; task 2 COMPLETED (not consumed)
-    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
-    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_CONSUMED);
-    ring->get_slot_state_by_task_id(2).task_state.store(PTO2_TASK_COMPLETED);
+    ring->get_slot_state_by_task_id(0).task_state.store(CHIP_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(CHIP_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(2).task_state.store(CHIP_TASK_COMPLETED);
 
     rss.advance_ring_pointers();
     EXPECT_EQ(rss.last_task_alive, 2) << "Should stop at first non-CONSUMED slot";
@@ -920,7 +917,7 @@ TEST_F(WiringTest, AdvanceRingPointersResetsSlots) {
     ring->fc.current_task_index.store(1, std::memory_order_release);
 
     auto &slot = ring->get_slot_state_by_task_id(0);
-    slot.task_state.store(PTO2_TASK_CONSUMED);
+    slot.task_state.store(CHIP_TASK_CONSUMED);
     slot.fanout_count = 5;
     slot.fanin_refcount.store(3);
     slot.fanout_refcount.store(2);
@@ -928,9 +925,9 @@ TEST_F(WiringTest, AdvanceRingPointersResetsSlots) {
 
     rss.advance_ring_pointers();
 
-    // After reset_for_reuse: fanout_count=PTO2_FANOUT_SCOPE_BIT (bit31 owning-scope
+    // After reset_for_reuse: fanout_count=FANOUT_SCOPE_BIT (bit31 owning-scope
     // ref, 0 consumers), fanin_refcount=0, etc.
-    EXPECT_EQ(slot.fanout_count, PTO2_FANOUT_SCOPE_BIT);
+    EXPECT_EQ(slot.fanout_count, FANOUT_SCOPE_BIT);
     EXPECT_EQ(slot.fanin_refcount.load(), 0);
     EXPECT_EQ(slot.fanout_refcount.load(), 0);
     EXPECT_EQ(slot.completed_subtasks.load(), 0);
@@ -939,11 +936,11 @@ TEST_F(WiringTest, AdvanceRingPointersResetsSlots) {
 
 TEST_F(WiringTest, NoEdgePublishRecordsDepPoolMark) {
     alignas(64) ChipTaskSlotState task_slot;
-    alignas(64) PTO2TaskPayload payload;
+    alignas(64) TaskPayload payload;
     memset(&payload, 0, sizeof(payload));
-    PTO2TaskDescriptor desc{};
+    TaskDescriptor desc{};
 
-    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    init_slot(task_slot, CHIP_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 0;
     task_slot.payload = &payload;
     task_slot.task = &desc;
@@ -956,7 +953,7 @@ TEST_F(WiringTest, NoEdgePublishRecordsDepPoolMark) {
 
 TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
     alignas(64) ChipTaskSlotState filler;
-    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(filler, CHIP_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
     for (uint64_t i = 0; i < queue.capacity; i++) {
         ASSERT_TRUE(queue.push_tagged(&filler, i));
@@ -975,7 +972,7 @@ TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
 
 TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
     alignas(64) ChipTaskSlotState filler;
-    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(filler, CHIP_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
     for (uint64_t i = 0; i < queue.capacity; i++) {
         ASSERT_TRUE(queue.push_tagged(&filler, i));
@@ -991,29 +988,29 @@ TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
 
 TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
     alignas(64) ChipTaskSlotState filler, consumer;
-    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
-    init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(filler, CHIP_TASK_PENDING, 0, 1);
+    init_slot(consumer, CHIP_TASK_PENDING, 1, 1);
 
-    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    ResourceShape shape = consumer.active_mask.to_shape();
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(shape)];
     for (uint64_t i = 0; i < queue.capacity; i++) {
         ASSERT_TRUE(queue.push_tagged(&filler, i));
     }
 
     sched.try_enqueue_early_dispatch_candidate(consumer);
-    ASSERT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    ASSERT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_NONE);
 
     // The overflowed candidate carries no early-dispatch claim, so the producer
     // release routes every block through the ordinary ready queue.
     EXPECT_TRUE(sched.route_ready_once(consumer));
-    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
     EXPECT_EQ(sched.ready_queues[static_cast<int32_t>(shape)].pop(), &consumer);
 }
 
 TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue) {
     alignas(64) ChipTaskSlotState filler, consumer;
-    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
-    init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(filler, CHIP_TASK_PENDING, 0, 1);
+    init_slot(consumer, CHIP_TASK_PENDING, 1, 1);
     consumer.task_attrs.set_sync_start();
     ASSERT_TRUE(consumer.task_attrs.requires_sync_start());
 
@@ -1023,12 +1020,12 @@ TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue)
     }
 
     sched.try_enqueue_early_dispatch_candidate(consumer);
-    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_NONE);
     EXPECT_EQ(queue.size(), queue.capacity);
 
     // A sync_start cohort that never reached its drain falls back to the
     // shape's sync ready queue, not the plain one.
-    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    ResourceShape shape = consumer.active_mask.to_shape();
     EXPECT_TRUE(sched.route_ready_once(consumer));
     EXPECT_EQ(sched.ready_sync_queues[static_cast<int32_t>(shape)].pop(), &consumer);
 }

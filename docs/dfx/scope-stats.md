@@ -43,12 +43,19 @@ schema.
 The metadata line is also the quickest way to verify per-ring runtime sizing.
 For example, after running with:
 
+```python
+# In the scene test's CASES entry -- ring sizing is per task, so it travels with
+# the case rather than with the process:
+"config": {
+    "runtime_env": {
+        "ring_task_window": [8192, 16384, 131072, 524288],
+        "ring_heap": [134217728, 268435456, 402653184, 536870912],
+        "ring_dep_pool": [4096, 8192, 16384, 32768],
+    }
+}
+```
+
 ```bash
-CASE=...
-NAME=...
-PTO2_RING_TASK_WINDOW=8192,16384,131072,524288 \
-PTO2_RING_HEAP=134217728,268435456,402653184,536870912 \
-PTO2_RING_DEP_POOL=4096,8192,16384,32768 \
 python "tests/st/${CASE}/test_${NAME}.py" -p a2a3 -d 0 --enable-scope-stats
 ```
 
@@ -295,7 +302,7 @@ the host to chase a device pointer into the orchestration `.so`'s string
 table. `on_fatal` sets `header.fatal_latched`, surfacing as
 `"fatal": true`; the host still emits whatever records made it.
 
-`ring_id` outside `[0, PTO2_SCOPE_STATS_MAX_RING_DEPTH)` is silently
+`ring_id` outside `[0, SCOPE_STATS_MAX_RING_DEPTH)` is silently
 dropped. Caps are copied verbatim into the buffer header so the host can
 render `used/cap` without a second device→host query.
 

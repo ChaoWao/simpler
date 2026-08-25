@@ -9,9 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Entry-lifetime tests for the host_build_graph copy of PTO2TensorMap.
+ * Entry-lifetime tests for the host_build_graph copy of ChipTensorMap.
  *
- * This is a distinct type from the tensormap_and_ringbuffer PTO2TensorMap
+ * This is a distinct type from the tensormap_and_ringbuffer ChipTensorMap
  * covered by a2a3/test_tensormap.cpp: single-ring, no entry epochs, and — the
  * subject of this file — no completion-watermark retirement. A registered
  * output stays visible until dependency computation explicitly removes it as
@@ -30,15 +30,15 @@ namespace {
 
 struct TestLookupResult {
     struct Entry {
-        PTO2TensorMapEntry *entry;
+        ChipTensorMapEntry *entry;
         OverlapStatus overlap_status;
     };
     std::vector<Entry> entries;
     int count = 0;
 };
 
-void run_lookup(PTO2TensorMap &tmap, const ChipTensor &tensor, TestLookupResult &out) {
-    tmap.lookup(tensor, [&](PTO2TensorMapEntry &e, OverlapStatus s) -> bool {
+void run_lookup(ChipTensorMap &tmap, const ChipTensor &tensor, TestLookupResult &out) {
+    tmap.lookup(tensor, [&](ChipTensorMapEntry &e, OverlapStatus s) -> bool {
         out.entries.push_back({&e, s});
         out.count++;
         return true;
@@ -56,7 +56,7 @@ protected:
     static constexpr int32_t POOL_SIZE = 64;
     static constexpr int32_t WINDOW_SIZE = 32;
 
-    PTO2TensorMap tmap{};
+    ChipTensorMap tmap{};
 
     void SetUp() override { ASSERT_TRUE(tmap.init(NUM_BUCKETS, POOL_SIZE, WINDOW_SIZE)); }
 };

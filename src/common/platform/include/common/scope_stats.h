@@ -50,8 +50,8 @@
 #include "common/dfx_backpressure_device.h"
 #include "common/platform_config.h"
 
-#define PTO2_SCOPE_STATS_MAX_RING_DEPTH 4
-#define PTO2_SCOPE_STATS_MAX_SCOPE_DEPTH 64
+#define SCOPE_STATS_MAX_RING_DEPTH 4
+#define SCOPE_STATS_MAX_SCOPE_DEPTH 64
 
 #ifdef __cplusplus
 extern "C" {
@@ -160,9 +160,9 @@ struct ScopeStatsDataHeader {
     // Per-ring static capacities — written once by AICPU at orchestrator init
     // (scope_stats_set_ring_capacity / scope_stats_set_tensormap_capacity).
     // Host needs them to render the "used/cap" ratio without a separate query.
-    int32_t task_window_cap[PTO2_SCOPE_STATS_MAX_RING_DEPTH];
-    int32_t dep_pool_cap[PTO2_SCOPE_STATS_MAX_RING_DEPTH];
-    uint64_t heap_cap[PTO2_SCOPE_STATS_MAX_RING_DEPTH];
+    int32_t task_window_cap[SCOPE_STATS_MAX_RING_DEPTH];
+    int32_t dep_pool_cap[SCOPE_STATS_MAX_RING_DEPTH];
+    uint64_t heap_cap[SCOPE_STATS_MAX_RING_DEPTH];
     int32_t tensormap_cap;
     volatile uint32_t fatal_latched;  // AICPU sets to 1 on first fatal.
 } __attribute__((aligned(64)));

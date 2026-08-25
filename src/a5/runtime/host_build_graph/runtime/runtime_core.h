@@ -55,9 +55,9 @@
  * Runtime execution mode
  */
 enum RuntimeMode {
-    PTO2_MODE_EXECUTE = 0,    // Execute tasks on workers
-    PTO2_MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
-    PTO2_MODE_GRAPH_ONLY = 2  // Build graph only, no execution
+    MODE_EXECUTE = 0,    // Execute tasks on workers
+    MODE_SIMULATE = 1,   // Simulate task execution with cycle counting
+    MODE_GRAPH_ONLY = 2  // Build graph only, no execution
 };
 
 /**
@@ -119,7 +119,7 @@ struct RuntimeOps {
  */
 struct RuntimeArenaLayout {
     size_t off_sm_handle{0};
-    PTO2SchedulerLayout sched;
+    SchedulerLayout sched;
     size_t off_scheduler{0};
     size_t off_runtime{0};
     size_t off_mailbox{0};
@@ -140,12 +140,12 @@ struct RuntimeArenaLayout {
     // therefore not known when this layout is built. bind grows the device region
     // to cover it once orchestration ends.
     //
-    // The copied zone is padded to a PTO2_ALIGN_SIZE boundary, so that tail begins
+    // The copied zone is padded to a CHIP_ALIGN_SIZE boundary, so that tail begins
     // exactly at off_copied_end: the copied zone and the shared-memory image are
     // adjacent on the device and travel as one copy.
     //
     // The orchestrator is NOT here. It runs on the host, owns its own scratch, and
-    // no device code reads any of it — see PTO2OrchestratorState.
+    // no device code reads any of it — see OrchestratorState.
     size_t off_copied_begin{0};
     size_t off_copied_end{0};
 
@@ -168,18 +168,18 @@ struct RuntimeArenaLayout {
 struct RuntimeContext {
     // Ops table (first field — used by orchestration .so via function pointers)
     const RuntimeOps *ops;
-    PTO2ScopeMode pending_scope_mode;
+    ScopeMode pending_scope_mode;
 
     // Components
-    PTO2SharedMemoryHandle *sm_handle;
+    SharedMemoryHandle *sm_handle;
     // Host-only, and by pointer so that this header stays trivially copyable:
     // the orchestrator runs on the host and owns non-trivial scratch. Null on the
     // device — bind drops it before the copied zone is uploaded, so no device code
     // may dereference it.
-    PTO2OrchestratorState *orchestrator;
+    OrchestratorState *orchestrator;
     // Device-only zone: the scheduler state holds no per-run content, so it is
     // addressed through the arena rather than carried inside this header.
-    PTO2SchedulerState *scheduler;
+    SchedulerState *scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
 
     // Mode
@@ -340,8 +340,8 @@ void set_tensor_data(
  * Slim config struct exported by orchestration .so via aicpu_orchestration_config().
  * Shared definition with orchestration_api.h (same layout, guarded).
  */
-#ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
-#define PTO2_ORCHESTRATION_CONFIG_DEFINED
+#ifndef ORCHESTRATION_CONFIG_DEFINED
+#define ORCHESTRATION_CONFIG_DEFINED
 struct OrchestrationConfig {
     int expected_arg_count;
 };

@@ -50,7 +50,7 @@
  * request that does not fit can never become satisfiable by waiting — alloc()
  * reports the exhausted resource and fails on the spot.
  */
-class PTO2TaskAllocator {
+class TaskAllocator {
 public:
     /**
      * Initialize the allocator with task ring and heap ring resources.
@@ -60,7 +60,7 @@ public:
      * from host code that constructs a prebuilt arena image.
      *
      * The ring starts at task id 0, matching the SM flow-control counter that
-     * current_index_ptr points at (PTO2RingFlowControl::init() runs on the AICPU
+     * current_index_ptr points at (ChipRingFlowControl::init() runs on the AICPU
      * during SM reset), so local_task_id_ stays in sync without reading the SM.
      * Because ids are never reclaimed, alloc() caps them at window_size — they
      * cannot run away toward INT32_MAX.
@@ -100,9 +100,9 @@ public:
      * @param output_size  Total packed output size in bytes (0 = no heap needed)
      * @return Allocation result; check failed() for errors
      */
-    PTO2TaskAllocResult alloc(int32_t output_size) {
+    TaskAllocResult alloc(int32_t output_size) {
         uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+            output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
 
         if (error_code_ptr_ != nullptr && error_code_ptr_->load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
             return {-1, -1, nullptr, nullptr};
@@ -128,7 +128,7 @@ public:
             return false;
         }
         const uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+            output_size > 0 ? CHIP_ALIGN_UP(static_cast<uint64_t>(output_size), CHIP_ALIGN_SIZE) : 0;
         void *base = try_bump_heap(aligned_size);
         if (base == nullptr) return false;
         *packed_base = base;
@@ -238,8 +238,8 @@ private:
             LOG_ERROR("  Shrink the graph's intermediate tensors; this heap has no configuration knob");
         } else {
             LOG_ERROR(
-                "  Increase task window (current: %d); env PTO2_RING_TASK_WINDOW=<pow2> (e.g. %d)", window_size_,
-                window_size_ * 2
+                "  Increase task window (current: %d); CallConfig.runtime_env.ring_task_window=<pow2> (e.g. %d)",
+                window_size_, window_size_ * 2
             );
         }
         LOG_ERROR("========================================");

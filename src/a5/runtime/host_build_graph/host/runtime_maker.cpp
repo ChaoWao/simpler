@@ -183,73 +183,18 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
     host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload);
 }
 
-static std::string trim_copy(const std::string &input) {
-    size_t begin = 0;
-    while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
+// The ring sizes were once settable process-wide through PTO2_RING_TASK_WINDOW /
+// PTO2_RING_HEAP. They are per task now, through CallConfig.runtime_env, and
+// nothing reads those names. Exporting one is therefore a silent
+// misconfiguration -- the run takes the compile-time default and the requested
+// sizing appears nowhere -- so it is reported once per bind.
+static void warn_on_retired_ring_env() {
+    static constexpr const char *kRetired[] = {"PTO2_RING_TASK_WINDOW", "PTO2_RING_HEAP"};
+    for (const char *name : kRetired) {
+        if (std::getenv(name) != nullptr) {
+            LOG_WARN("%s is no longer read; size the rings per task via CallConfig.runtime_env", name);
+        }
     }
-    size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
-}
-
-static bool parse_uint_token(
-    const char *name, const std::string &raw, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out
-) {
-    std::string token = trim_copy(raw);
-    if (token.empty()) {
-        LOG_WARN("%s has an empty value in '%s', ignored", name, raw.c_str());
-        return false;
-    }
-
-    if (token[0] == '-') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    char *endptr = nullptr;
-    errno = 0;
-    unsigned long long parsed = std::strtoull(token.c_str(), &endptr, 10);
-    if (errno == ERANGE || endptr == token.c_str() || *endptr != '\0') {
-        LOG_WARN("%s=%s invalid (must be a non-negative integer), ignored", name, token.c_str());
-        return false;
-    }
-    uint64_t val = static_cast<uint64_t>(parsed);
-
-    if (val < min_val || val > max_val) {
-        LOG_WARN(
-            "%s=%s invalid (must be in [%" PRIu64 ", %" PRIu64 "]), ignored", name, token.c_str(), min_val, max_val
-        );
-        return false;
-    }
-    if (require_power_of_2 && !is_power_of_2_u64(val)) {
-        LOG_WARN("%s=%s invalid (must be a power of 2), ignored", name, token.c_str());
-        return false;
-    }
-    *out = val;
-    return true;
-}
-
-// The PTO2_RING_* knobs are shared with tensormap_and_ringbuffer, where a value
-// may be a comma-separated list, one entry per ring. hbg has one ring, so it
-// accepts the single-value spelling and rejects a list — which is what the
-// multi-ring parser did here too, since it required exactly one entry.
-static void
-apply_env_ring_value(const char *name, uint64_t min_val, uint64_t max_val, bool require_power_of_2, uint64_t *out) {
-    const char *env = std::getenv(name);
-    if (!env) return;
-
-    std::string text(env);
-    if (text.find(',') != std::string::npos) {
-        LOG_WARN("%s=%s invalid (this runtime has one ring; expected a single value), ignored", name, env);
-        return;
-    }
-    uint64_t value = 0;
-    if (!parse_uint_token(name, text, min_val, max_val, require_power_of_2, &value)) {
-        return;
-    }
-    *out = value;
 }
 
 // ring_task_window points into the #pragma pack(1) RuntimeEnv wire struct
@@ -268,18 +213,18 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // ring_task_window points at the first slot of a per-ring array in the RuntimeEnv
-// wire struct (0 = unset); hbg has one ring and reads slot 0. Precedence:
-// per-task entry > PTO2_RING_TASK_WINDOW env value > compile-time default.
+// wire struct (0 = unset); hbg has one ring and reads slot 0. A per-task entry
+// wins over the compile-time default, and there is nothing between them.
 //
 // The heap takes no configuration: its device region is committed after
 // orchestration, sized to what the graph turned out to need, so there is nothing
-// to resolve up front. RuntimeEnv::ring_heap and PTO2_RING_HEAP remain the
-// reclaiming runtime's knobs; this function does not resolve them, and the caller
-// reads them only to warn that they reach nothing here.
+// to resolve up front. RuntimeEnv::ring_heap stays the reclaiming runtime's knob;
+// this function does not resolve it, and the caller reads it only to warn that it
+// reaches nothing here.
 static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t *eff_task_window_size) {
-    *eff_task_window_size = PTO2_TASK_WINDOW_SIZE;
+    *eff_task_window_size = CHIP_TASK_WINDOW_SIZE;
 
-    apply_env_ring_value("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_size);
+    warn_on_retired_ring_env();
 
     const uint64_t task_window_override = read_ring_override(ring_task_window, 0);
     if (task_window_override != 0) {
@@ -294,7 +239,7 @@ static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t 
     // A slot state reaches its payload and descriptor through a 32-bit
     // self-relative delta, so every pair of addresses in the shared-memory
     // image must be within INT32_MAX of each other.
-    const uint64_t sm_bytes = pto2_sm_layout::ring_segment_offsets(*eff_task_window_size).end;
+    const uint64_t sm_bytes = sm_layout::ring_segment_offsets(*eff_task_window_size).end;
     if (sm_bytes > static_cast<uint64_t>(INT32_MAX)) {
         LOG_ERROR(
             "ring_task_window=%" PRIu64 " needs a %" PRIu64 "-byte shared memory image, past the %d-byte limit "
@@ -307,19 +252,19 @@ static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t 
     return true;
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, const HostApi *api, PTO2SharedMemoryHeader *host_header) {
+static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedMemoryHeader *host_header) {
     if (runtime == nullptr || api == nullptr || host_header == nullptr) {
         return 0;
     }
 
-    void *pto2_sm = runtime->get_gm_sm_ptr();
-    if (pto2_sm == nullptr) {
+    void *device_sm = runtime->get_gm_sm_ptr();
+    if (device_sm == nullptr) {
         return 0;
     }
 
-    int hdr_rc = api->copy_from_device(host_header, pto2_sm, sizeof(PTO2SharedMemoryHeader));
+    int hdr_rc = api->copy_from_device(host_header, device_sm, sizeof(SharedMemoryHeader));
     if (hdr_rc != 0) {
-        LOG_WARN("Failed to copy PTO2 header from device");
+        LOG_WARN("Failed to copy the shared-memory header from device");
         return 0;
     }
 
@@ -373,7 +318,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
     return true;
 }
 
-// The orchestration .so exports these (PTO2 submit_task form).
+// The orchestration .so exports these (submit_task form).
 typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(RuntimeContext *);
 typedef void (*OrchestrationPrewarmFunc)();
@@ -539,13 +484,13 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
 }
 
 struct GraphHostStateBinding {
-    explicit GraphHostStateBinding(PTO2OrchestratorState &orchestrator, GraphHostState *state) :
+    explicit GraphHostStateBinding(OrchestratorState &orchestrator, GraphHostState *state) :
         orchestrator(orchestrator) {
         orchestrator.graph_host_state = state;
     }
     ~GraphHostStateBinding() { orchestrator.graph_host_state = nullptr; }
 
-    PTO2OrchestratorState &orchestrator;
+    OrchestratorState &orchestrator;
 };
 
 int32_t run_host_orchestration(
@@ -560,21 +505,21 @@ int32_t run_host_orchestration(
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
-    const pto2_sm_layout::PTO2RingSegmentOffsets sm_segs = pto2_sm_layout::ring_segment_offsets(eff_task_window_size);
+    const sm_layout::ChipRingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
     // Over-allocated and rounded up: every segment offset is a multiple of
-    // PTO2_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
+    // CHIP_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.
-    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + PTO2_ALIGN_SIZE]);
+    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + CHIP_ALIGN_SIZE]);
     void *host_sm = reinterpret_cast<void *>(
-        (reinterpret_cast<uintptr_t>(host_sm_buf.get()) + PTO2_ALIGN_SIZE - 1) &
-        ~static_cast<uintptr_t>(PTO2_ALIGN_SIZE - 1)
+        (reinterpret_cast<uintptr_t>(host_sm_buf.get()) + CHIP_ALIGN_SIZE - 1) &
+        ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
     );
     std::memset(host_sm, 0, sm_segs.descriptors);
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
     // Host-owned and destroyed with this frame, so rt->orchestrator is dropped on
     // every exit — it must never outlive the object it names.
-    PTO2OrchestratorState orchestrator;
+    OrchestratorState orchestrator;
     rt->orchestrator = &orchestrator;
     RAIIScopeGuard orchestrator_binding([rt]() {
         rt->orchestrator = nullptr;
@@ -592,7 +537,7 @@ int32_t run_host_orchestration(
     }
 
     // Initialize the host SM header (ring flow control) so submit_task can run.
-    PTO2SharedMemoryHandle host_sm_handle;
+    SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init(host_sm, sm_size, eff_task_window_size)) {
         LOG_ERROR("host-orch: host SM init failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -636,7 +581,7 @@ int32_t run_host_orchestration(
     runtime_bind_ops(rt);
     orchestrator.total_cluster_count = block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM;
     orchestrator.total_aiv_count = block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM;
-    rt->mode = PTO2_MODE_EXECUTE;
+    rt->mode = MODE_EXECUTE;
     // get_tensor_data/set_tensor_data resolve buffer.addr through the host
     // views registered at staging time (runtime/host_tensor_access.h), so the
     // host orchestrator can read control tensors (e.g. paged_attention's
@@ -669,7 +614,7 @@ int32_t run_host_orchestration(
     // as spans rather than LOG_INFO because INFO is suppressed at the default log
     // level. Like the phase spans these are summed cost shares, not intervals.
     {
-        const PTO2OrchProfilingData prof = orchestrator_get_profiling();
+        const OrchProfilingData prof = orchestrator_get_profiling();
         const std::pair<const char *, uint64_t> steps[] = {
             {"alloc", prof.alloc_cycle},   {"args", prof.args_cycle},   {"lookup", prof.lookup_cycle},
             {"insert", prof.insert_cycle}, {"fanin", prof.fanin_cycle},
@@ -687,7 +632,7 @@ int32_t run_host_orchestration(
     // described — a heap or tensormap exhaustion drops tasks, a fanin overflow drops
     // edges. Uploading it would launch the device on an incomplete graph and surface
     // the cause as whatever the device notices second, usually a scheduler timeout.
-    const int32_t orch_error = pto2_sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t orch_error = sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
     if (orch_error != SIMPLER_ERROR_NONE || orchestrator.fatal) {
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
@@ -703,7 +648,7 @@ int32_t run_host_orchestration(
         return status;
     }
 
-    const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t total_tasks = sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     {
         char attrs[160];
         snprintf(
@@ -760,14 +705,14 @@ int32_t run_host_orchestration(
     // What this bind actually put in the pools. The orchestrator's cursors are the
     // exact populated extent of each one — no scan of the mirror is needed, and the
     // image ships that much rather than the worst case the mirror is dimensioned for.
-    const PTO2OrchestratorState &orch_state = orchestrator;
-    const pto2_sm_layout::BindUsage bind_usage{
+    const OrchestratorState &orch_state = orchestrator;
+    const sm_layout::BindUsage bind_usage{
         nt,
         static_cast<uint64_t>(orch_state.fanin_pool_cursor),
         static_cast<uint64_t>(orch_state.tensor_pool_cursor),
         static_cast<uint64_t>(orch_state.scalar_pool_cursor),
     };
-    const uint64_t image_bytes = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(bind_usage)).end;
+    const uint64_t image_bytes = sm_layout::ring_segment_offsets(sm_layout::image_extents(bind_usage)).end;
     runtime->sm_image_bytes = image_bytes;
 
     // Only now are both sizes known, so this is where the two device regions are
@@ -789,8 +734,8 @@ int32_t run_host_orchestration(
     // same boundary it starts on, so an access at the tail of the last packed buffer
     // stays inside the region even when its width exceeds the bytes that buffer
     // asked for.
-    const uint64_t heap_bytes = PTO2_ALIGN_UP(
-        std::max<uint64_t>(orchestrator.task_allocator.heap_used_bytes(), PTO2_ALIGN_SIZE),
+    const uint64_t heap_bytes = CHIP_ALIGN_UP(
+        std::max<uint64_t>(orchestrator.task_allocator.heap_used_bytes(), CHIP_ALIGN_SIZE),
         DeviceArena::kDefaultBaseAlign
     );
     if (api->setup_static_arena(heap_bytes, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
@@ -848,19 +793,19 @@ int32_t run_host_orchestration(
         "a Graph node's storage alignment must be covered by the heap region's base alignment"
     );
     always_assert(reinterpret_cast<uint64_t>(gm_heap) % DeviceArena::kDefaultBaseAlign == 0);
-    const pto2_sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};
+    const sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};
 
     // One host source for one copy: the copied zone and shared-memory image at
     // exactly the offsets they occupy on the device.
     // Over-allocated and rounded up because every segment offset is
-    // PTO2_ALIGN_SIZE-aligned and ChipTaskSlotState is alignas(64), which a byte
+    // CHIP_ALIGN_SIZE-aligned and ChipTaskSlotState is alignas(64), which a byte
     // vector's data() is not.
     const uint64_t copied_bytes = layout.off_copied_end - layout.off_copied_begin;
     const uint64_t upload_bytes = copied_bytes + image_bytes;
-    std::vector<std::byte> storage(upload_bytes + PTO2_ALIGN_SIZE, std::byte{0});
+    std::vector<std::byte> storage(upload_bytes + CHIP_ALIGN_SIZE, std::byte{0});
     char *upload_base = reinterpret_cast<char *>(
-        (reinterpret_cast<uintptr_t>(storage.data()) + PTO2_ALIGN_SIZE - 1) &
-        ~static_cast<uintptr_t>(PTO2_ALIGN_SIZE - 1)
+        (reinterpret_cast<uintptr_t>(storage.data()) + CHIP_ALIGN_SIZE - 1) &
+        ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
     );
 
     // The copied zone carries no host address: the orchestrator is host-only and
@@ -868,7 +813,7 @@ int32_t run_host_orchestration(
     // the pointer goes early rather than at the guard's scope exit.
     rt->orchestrator = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
-    const uint64_t compacted = pto2_sm_layout::compact_live_image(
+    const uint64_t compacted = sm_layout::compact_live_image(
         static_cast<const char *>(host_sm), eff_task_window_size, bind_usage, heap_rebase, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
@@ -1013,7 +958,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 
 /**
  * Per-run binding: build device-side argument storage (tensor copy-out, GM
- * heap, PTO2 shared memory) and publish it to the runtime. Assumes the
+ * heap, shared memory) and publish it to the runtime. Assumes the
  * callable-side state (kernel binaries, orch SO bytes, func/config names)
  * is already populated by register_callable_impl.
  *
@@ -1064,13 +1009,13 @@ extern "C" int bind_callable_to_runtime_impl(
     if (!resolve_task_window_size(ring_task_window, &eff_task_window_size)) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    // The heap takes no configuration, so a set ring_heap / PTO2_RING_HEAP reaches
-    // nothing in this runtime — most often it is a config written for the reclaiming
-    // one, whose knob it still is.
-    if (read_ring_override(ring_heap, 0) != 0 || std::getenv("PTO2_RING_HEAP") != nullptr) {
+    // The heap takes no configuration, so a set ring_heap reaches nothing in this
+    // runtime — most often it is a config written for the reclaiming one, whose knob
+    // it still is.
+    if (read_ring_override(ring_heap, 0) != 0) {
         LOG_WARN(
-            "%s", "host_build_graph ignores ring_heap / PTO2_RING_HEAP: its graph heap is committed after "
-                  "orchestration at the size the graph turned out to need"
+            "%s", "host_build_graph ignores ring_heap: its graph heap is committed after orchestration at the "
+                  "size the graph turned out to need"
         );
     }
     LOG_INFO("Ring task window: %" PRIu64, eff_task_window_size);
@@ -1173,7 +1118,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // runs — do NOT record in tensor_pairs_; the free is deferred to
     // DeviceRunner::finalize(). The runtime-arena size is determined by replaying
     // the reserve sequence on a host-side arena.
-    uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size(eff_task_window_size);
+    uint64_t sm_size = SharedMemoryHandle::calculate_size(eff_task_window_size);
 
     const int64_t t_arena_build_ns = bind_now_ns();
     DeviceArena host_arena;
@@ -1210,7 +1155,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
     RuntimeContext *rt =
-        runtime_init_data_from_layout(host_arena, layout, PTO2_MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size);
+        runtime_init_data_from_layout(host_arena, layout, MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size);
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1311,11 +1256,11 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
-    PTO2SharedMemoryHeader host_header;
+    SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
 
     if (execution_rc != 0) {
-        runtime_status = pto2_read_runtime_status(runtime, api, &host_header);
+        runtime_status = read_runtime_status(runtime, api, &host_header);
     }
     if (runtime_status != 0) {
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);

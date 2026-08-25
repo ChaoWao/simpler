@@ -72,8 +72,8 @@ The shared image uses three per-slot structures:
 
 | Structure | Purpose |
 | --------- | ------- |
-| `PTO2TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
-| `PTO2TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
+| `TaskDescriptor` | Full task ID, kernel IDs, packed-buffer addresses |
+| `TaskPayload` | Argument counts, predicate, dispatch metadata, and a delta naming each of its tensor, scalar and fanin regions — the arguments themselves live in the pool segments, so the payload is a fixed three cache lines regardless of the argument caps |
 | `ChipTaskSlotState` | Active mask, attributes, block/subtask counters, completion state, task/payload bindings |
 
 The host/device boundary is POD and position-independent. Fanins are integer
@@ -102,7 +102,7 @@ reserves them in this order:
 
 | Zone | Regions | Copied | Allocated on device | Written by |
 | ---- | ------- | ------ | ------------------- | ---------- |
-| device-only | `sm_handle`, the completion mailbox, `PTO2SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
+| device-only | `sm_handle`, the completion mailbox, `SchedulerState` and its thirteen queue slot arrays | never | yes | AICPU at boot |
 | copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | yes | host |
 
 The copied zone comes last, so `bind` is a single contiguous `copy_to_device`
@@ -114,7 +114,7 @@ a boundary from which region happens to be reserved first —
 **Why the orchestrator is not in the arena at all.** hbg has no device-side
 orchestrator, so nothing on the device reads its state: not the `fanin_seen_epoch`
 table, not the scope arrays, not the TensorMap (~9.3 MB between them). It is
-therefore a plain host object that owns those arrays — `PTO2OrchestratorState::init`
+therefore a plain host object that owns those arrays — `OrchestratorState::init`
 allocates them — and `RuntimeContext` reaches it through a pointer that `bind` drops
 before the copied zone is uploaded, so no host address crosses the boundary. A
 `static_assert` keeps `RuntimeContext` trivially copyable, which is what forbids
@@ -122,7 +122,7 @@ putting an owning member back inside it. The one orchestrator value the device-s
 scheduler reads, the count of tasks completed inline during orchestration, is a
 scalar `rt_orchestration_done` publishes into the runtime header.
 
-**Why the scheduler state is device-written.** `PTO2SchedulerState` holds no
+**Why the scheduler state is device-written.** `SchedulerState` holds no
 per-run content: `sm_header` and the ring pointer derive from a pooled SM base,
 queue capacities are compile-time constants, hbg never advances
 `last_task_alive`, and it has no host-side entry point at all. So the host would
@@ -137,7 +137,7 @@ when that slot's `sequence` already equals `pos`, so an empty queue is a
 match and every later position reads a lower sequence, which is the full-queue
 signal, so such a queue accepts one push and then reports full. The ramp is
 mandatory but it is a function of `capacity` alone, so
-`PTO2SchedulerState::seed_queue_slots()` writes it on the device rather than `bind`
+`SchedulerState::seed_queue_slots()` writes it on the device rather than `bind`
 shipping 1,775,616 bytes of it. The ready queues are still *not* bounded to
 `total_tasks`: graph execution expands a GRAPH task into on-device nodes that push
 past the host task count, so every slot must carry a valid sequence.
@@ -150,7 +150,7 @@ uninitialized queue.
 slot's sequence tracks the position it serves, and `pop` releases a slot with
 exactly the value the next lap's `push` expects. A drained queue is therefore
 already an empty queue, which is why `tensormap_and_ringbuffer` can leave
-`PTO2ReadyQueue::reset_for_reuse()` empty and never touch the positions. hbg
+`ChipReadyQueue::reset_for_reuse()` empty and never touch the positions. hbg
 re-establishes both on every attach today because the queue *headers* are reset
 per bind; the combination to avoid is resetting the positions while leaving the
 sequences mid-lap, which makes `push` read a sequence above its position and spin
