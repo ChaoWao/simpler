@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import re
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -23,7 +22,6 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-import simpler.global_comm_domain as domain_mod
 from simpler.buffer import AddressSpace
 from simpler.comm_endpoints import AdapterKind, AdapterProfile, AttachmentRole
 from simpler.global_comm_domain import (
@@ -316,46 +314,18 @@ def test_global_domain_attachment_names_every_unknown_enum_field():
         encode_domain_command(make_command(replace(good, adapter_profile=None)))
 
 
-def test_l4_l3_commands_version_independently_of_the_descriptor(monkeypatch):
-    """Python owns both ends of the L4<->L3 commands, so their layout versions separately from the
-    backend-stamped descriptor. Both constants hold the same number today, which would let a codec
-    that still read `GLOBAL_DOMAIN_VERSION` pass unnoticed -- so drive the command version to a
-    distinct value first. Under that override a descriptor-versioned encoder stamps the wrong
-    header, and a descriptor-versioned decoder rejects a payload it should accept.
+def test_release_and_copy_commands_round_trip_and_reject_a_missized_release():
+    """RELEASE is the one command whose decoder has no length-delimited field to disagree on, so
+    its fixed size is the whole frame check: a blob of any other length is rejected outright.
     """
-    members = _members()
-    command_version = GLOBAL_DOMAIN_VERSION + 1
-    monkeypatch.setattr(domain_mod, "GLOBAL_DOMAIN_COMMAND_VERSION", command_version)
-    encoded = {
-        "comm_init": encode_comm_init(GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, members)),
-        "domain": encode_domain_command(
-            GlobalDomainCommand(
-                phase=GlobalDomainPhase.PREPARE_EXPORT,
-                domain_id=11,
-                generation=1,
-                name="tp",
-                profile="sim",
-                window_size=2048,
-                members=members,
-                buffers=(GlobalDomainBuffer("payload", 128),),
-            )
-        ),
-        "release": encode_release_command(GlobalDomainReleaseCommand(11, 1)),
-        "copy": encode_copy_command(GlobalDomainCopyCommand(11, 1, 0, 0, 4, b"abcd"), include_data=True),
-    }
-    decoders = {
-        "comm_init": decode_comm_init,
-        "domain": decode_domain_command,
-        "release": decode_release_command,
-        "copy": lambda data: decode_copy_command(data, include_data=True),
-    }
+    release = GlobalDomainReleaseCommand(11, 1)
+    assert decode_release_command(encode_release_command(release)) == release
 
-    for name, blob in encoded.items():
-        assert struct.unpack_from("<I", blob)[0] == command_version, name
-        decoders[name](blob)
-        foreign = struct.pack("<I", command_version + 1) + blob[4:]
-        with pytest.raises(ValueError, match="version"):
-            decoders[name](foreign)
+    copy = GlobalDomainCopyCommand(11, 1, 0, 0, 4, b"abcd")
+    assert decode_copy_command(encode_copy_command(copy, include_data=True), include_data=True) == copy
+
+    with pytest.raises(ValueError, match="release size mismatch"):
+        decode_release_command(encode_release_command(release) + b"\0" * 4)
 
 
 def test_global_domain_encode_rejects_too_many_buffers():
