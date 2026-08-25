@@ -756,10 +756,10 @@ public:
 
     // DFX backpressure per-subsystem release predicate (CRTP hook). Default:
     // the freeze may release as soon as the framework's RQ-empty + FQ-full hold.
-    // A subsystem whose collector owns a separate, independently-overwritten
-    // region (only args_dump today: the payload arena) MUST override this to
-    // return false until its collector has drained that region, else the device
-    // resumes and overwrites not-yet-pulled data. Called once per mgmt tick
+    // A subsystem whose collector owns a separate reusable region (only
+    // args_dump today: the payload arena) MUST override this to return false
+    // until its collector has drained that region, else the device can reuse
+    // bytes the host has not pulled. Called once per mgmt tick
     // before the state-machine update. The idle path must use only local state;
     // an active-freeze check may refresh device state but must return without
     // waiting for asynchronous work.

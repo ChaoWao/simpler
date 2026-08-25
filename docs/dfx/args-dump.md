@@ -239,7 +239,6 @@ Example manifest (one input tensor captured before dispatch):
   "inout_args": 0,
   "truncated_args": 0,
   "dropped_records": 0,
-  "dropped_overwrite": 0,
   "bin_file": "args.bin",
   "args": [
     {
@@ -255,7 +254,6 @@ Example manifest (one input tensor captured before dispatch):
       "start_offset": 0,
       "is_contiguous": true,
       "truncated": false,
-      "overwritten": false,
       "bin_offset": 0,
       "bin_size": 65536
     }
@@ -292,10 +290,9 @@ Key fields:
   non-contiguous; scalar entries have `bin_size = 0`.
 - `bin_offset` — byte offset into `args.bin` where the
   payload starts.
-- `truncated` / `overwritten` — set when the tensor exceeded arena
-  size or was overwritten by a later task; see §7.
-- Top-level `dropped_records` / `dropped_overwrite` counters
-  surface aggregate loss — useful for spot-checking a run.
+- `truncated` — set when the tensor exceeded arena size; see §7.
+- Top-level `dropped_records` surfaces aggregate metadata-buffer loss — useful
+  for spot-checking a run.
 
 ### 3.3 Inspect with `dump_viewer`
 
@@ -380,9 +377,8 @@ What you can read out of `args_dump.json` and, when present, `args.bin`:
   logical-contiguous payload.
 - **Per-task identity** — `task_id`, `stage`, `role`, and `arg_index`
   identify each dumped argument within a task.
-- **Loss accounting** — `truncated` / `overwritten` per-record
-  flags, plus aggregate `dropped_records` / `dropped_overwrite` in
-  the summary.
+- **Loss accounting** — a per-record `truncated` flag plus aggregate
+  `dropped_records` in the summary.
 
 ## 5. Design Highlights
 
@@ -616,10 +612,10 @@ the fields host modified (advanced `queue_heads[q]`, refilled
 The per-thread arena lives outside the shm region, so
 `on_buffer_collected` separately refreshes `arena_write_offset` and
 copies the arena bytes. The freeze-release predicate refreshes each
-thread's `published_payload_count` before comparing their sum with the
-single host writer's completed payload count. Once equal, Host writes each
-thread's published watermark back as `completed_payload_count`; AICPU requires
-this acknowledgement before reusing that thread's arena.
+thread's `published_payload_count` and compares it with that thread's writer
+completion count. Once every thread's counts match, Host writes each published
+watermark back as `completed_payload_count`; AICPU requires this acknowledgement
+before reusing that thread's arena.
 
 ```text
         HOST                                         DEVICE
@@ -783,21 +779,22 @@ tensor you need to inspect.
 Before reserving an offset or copying payload bytes, AICPU checks whether the
 arena is already one full physical cycle deep or whether the new payload would
 cross the physical end. If so, it seals/publishes the current metadata buffer
-and opens the existing freeze.
+and raises `fq_contended`; the host then opens, drains, and releases the existing
+freeze cycle.
 
 At each existing RQ publish point, AICPU counts the non-empty tensor payload
-records in that metadata buffer. The host's single writer increments one global
-completion count only after `args.bin` accepts a payload.
+records in that metadata buffer. The host's single writer increments the
+originating thread's completion count only after `args.bin` accepts a payload.
 `backpressure_release_ready()` therefore holds an existing queue freeze until
-the completed count reaches the sum of all threads' published counts. The common
-framework still independently requires all RQs drained and FQs refilled. Host
-also acknowledges each completed per-thread watermark. The triggering thread
-requires that acknowledgement, even if the common queue freeze has already
-released, before aligning its monotonic logical offset to the next physical
-arena boundary and writing the pending payload from the arena start.
+each thread's written count equals its published count. The common framework
+still independently requires all RQs drained and FQs refilled. Host then
+acknowledges each completed per-thread watermark. The triggering thread requires
+that acknowledgement, even if the common queue freeze has already released,
+before aligning its monotonic logical offset to the next physical arena boundary
+and writing the pending payload from the arena start.
 The cursor is never reset and no reclaimed/published arena offset is needed.
 
-### 7.3 Record discard (`dropped_count` / `dropped_records`)
+### 7.3 Record discard (`dropped_record_count` / `dropped_records`)
 
 **Trigger:** the metadata record buffer (not the payload arena) is
 full and no replacement buffer is available.
@@ -817,7 +814,7 @@ host-crash timeout expires, the current records are accounted as
 dropped.
 
 ```text
-// Overwrite current buffer — account for lost records
+// Reuse current buffer — account for lost records
 account_dropped_records(state, cur_buf.count)
 cur_buf.count = 0          ← reset and reuse
 dropped_record_count += N  ← tracks total lost records
@@ -827,8 +824,8 @@ The same fallback applies during `dump_args_flush()` at end of
 execution if the ready queue is full.
 
 **Effect:** `dropped_records` in the manifest summary shows how
-many tensor records were lost. Dropped tensors do not appear in
-the `tensors[]` array at all.
+many argument records were lost. Dropped arguments do not appear in
+the `args[]` array at all.
 
 **Tuning:** raise `PLATFORM_DUMP_BUFFERS_PER_THREAD` (more
 rotation buffers) and/or `PLATFORM_DUMP_READYQUEUE_SIZE` (deeper
@@ -840,8 +837,7 @@ host hand-off queue).
 | --------- | ---- | -------- | ------- | ---- | -- |
 | Tensor > arena | `truncated` | Preserved | Partial (`arena/2` bytes) | Same | Same |
 | Arena host writer falls behind | none on success | Preserved | Preserved after bounded freeze | Same | Same |
-| Arena collection/write fails | `overwritten` or run error | Preserved | May be lost | Same | Same |
-| Record buffer full, no free buffer | `dropped_count` | Lost | Lost | After freeze timeout | Same |
+| Record buffer full, no free buffer | `dropped_records` summary | Lost | Lost | After freeze timeout | Same |
 
 ### 7.5 Configuration knobs
 
@@ -897,12 +893,6 @@ the barrier).
 **`truncated_args > 0` in summary.** A tensor exceeded the
 per-thread arena (default 128 MiB). Bump
 `PLATFORM_DUMP_AVG_TENSOR_BYTES` to extend the arena and rerun.
-
-**`dropped_overwrite > 0` in summary.** On a5, the run produced
-more total payload than fits in the arena; on a2a3, the host
-mgmt/collector pipeline couldn't keep up. Reduce the number of dumped
-tasks (filter by `func_id` upstream) or increase
-`PLATFORM_DUMP_BUFFERS_PER_THREAD`.
 
 **`dropped_records > 0` in summary.** Metadata-buffer pressure.
 On a5 raise `PLATFORM_DUMP_RECORDS_PER_BUFFER`; on a2a3 raise

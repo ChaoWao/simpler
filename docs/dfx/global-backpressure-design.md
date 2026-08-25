@@ -1,7 +1,7 @@
 # Global DFX Backpressure — block-on-contention + dual-signal freeze
 
 The shared design for how every DFX profiling subsystem (ChipSwimlane, PMU,
-DepGen, ArgsDump, ScopeStats, tensor_dump) reacts when the host collector
+DepGen, ArgsDump, ScopeStats) reacts when the host collector
 cannot keep the device-side buffer pool refilled. It replaces the older
 "bounded wait, then drop the record" model with a **resident block-on-contention
 freeze**: an AICPU writer that runs out of ready-queue space or free buffers
@@ -68,7 +68,7 @@ Three primitives in `dfx_backpressure_device.h`, driven from
    pre-release queue writes are visible to the reads that follow.
 3. **Leader park** — `wait_for_release` is used only by a leader whose own
    reclaim depends on the host completing a full open→drain→release cycle on the
-   free-queue side (only tensor_dump's arena barrier today). It spins on the
+   free-queue side (only args_dump's arena barrier today). It spins on the
    **disjunction** `fq_contended || fq_freeze_active`.
 
 The push and pop loops in the engine bridge the host round-trip: raising
@@ -121,12 +121,12 @@ gap with no immediate re-stall.
 ### Per-subsystem release predicate
 
 `backpressure_release_ready()` is a CRTP hook, default `true`. A subsystem whose
-collector owns a separate, independently-overwritten region must override it to
-hold the release until that region is drained — otherwise the device resumes and
-overwrites not-yet-pulled data. Only **tensor_dump** does this today: RQ-empty
-alone does not imply its payload arena has been pulled. The hook is evaluated on
-the replenish thread inside the freeze loop, so overrides must be cheap,
-non-blocking, and read only atomics.
+collector owns a separate reusable region must override it to hold the release
+until that region is drained — otherwise the device can reuse bytes the host has
+not pulled. Only **args_dump** does this today: RQ-empty alone does not imply its
+payload arena has been pulled. The hook is evaluated on the replenish thread
+inside the freeze loop, so overrides must be cheap, non-blocking, and read only
+atomics.
 
 ## Two correctness arguments
 

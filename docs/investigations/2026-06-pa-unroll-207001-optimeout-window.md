@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-16
 **Verdict**: #1019 itself is fixed by #1035 (op-execute timeout 1 s → 3 s,
-landed for an unrelated tensor-dump feature) — no code change is *needed* to
+landed for the feature now called args-dump, then named tensor-dump) — no code change is *needed* to
 close #1019. Separately, the a5 launch reorder (AICore before the AICPU Run
 task) **is kept** as a first-launch latency optimization (~1.4 s → ~0.4 ms,
 measured) and op-timeout-family defense-in-depth — it removes the slow launch

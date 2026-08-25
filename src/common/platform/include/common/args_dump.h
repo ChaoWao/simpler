@@ -170,7 +170,7 @@ static_assert(sizeof(DumpFreeQueue) == 128, "DumpFreeQueue must be 128 bytes");
  * - free_queue.head: Device writes (pops buffers)
  * - current_buf_ptr: Device writes (after pop), Host reads (for flush/collect)
  * - current_buf_seq: Device writes (monotonic counter)
- * - arena_write_offset: Device writes (monotonic), Host reads for overwrite detection
+ * - arena_write_offset: Device writes (monotonic), Host reads to size the arena snapshot
  * - published_payload_count: Device counts payload records committed to the ready queue
  * - completed_payload_count: Host acknowledges payloads after writer completion
  * - dropped_record_count: Device writes (records lost before host export)

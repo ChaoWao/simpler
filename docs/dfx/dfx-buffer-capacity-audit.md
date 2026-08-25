@@ -19,7 +19,7 @@ over-provisioned pools frees **~66 MB, zero ABI**.
 | **pmu** | over, free margin 75%, L≈1 | `BUFFERS_PER_CORE` **4→2** | 9.2 → **4.6 MB** |
 | **scope_stats** | over, free margin 87.5%, L≈1 | `BUFFERS_PER_INSTANCE` **8→4** | 0.21 → **0.11 MB** |
 | **dep_gen** | drops are **rate-limited, not capacity** | `RECORDS_PER_BUFFER` → **1024** (corrects a 2048 overshoot) | frees ~17.5 MB |
-| **args_dump** | adequate (0 overwrite across 6 cases) | **unchanged** | — |
+| **args_dump** | adequate (historical `ovf` counter stayed 0 across 6 cases) | **unchanged** | — |
 
 **Two counterintuitive findings** (argued in §6): ① drops are set by the
 **dispatch pattern (burst intensity)**, not submit count; ② dep_gen drops are
@@ -103,8 +103,9 @@ Reasoning per row:
 
 ### 4.1 Cross-example matrix + margin stats
 
-Format `lowest-free / peak-ready-backlog` (raw counts); `dropN`; `ovf` = tensor
-overwrite count.
+Format `lowest-free / peak-ready-backlog` (raw counts); `dropN` = dropped
+record count; historical `ovf` = the then-current tensor-overwrite counter,
+which #1698 later removed.
 
 | Example | dep_gen | l2_swim | pmu | scope | dump |
 | ------- | ------- | ------- | --- | ----- | ---- |
@@ -137,7 +138,7 @@ verdict reads the weaker dimension):
 | scope_stats | 7/8 → **87.5%** | 87% | **over** |
 | chip_swimlane | **0/4 → 0%** | 95% | **at edge** (free bottomed, but zero-drop) → §4.2 |
 | dep_gen | 3/4 → 75% | 50% | **rate-limited**: both have room yet it still drops (§5.2) |
-| args_dump | 3/4 → 75% | 92% | **adequate** (no overwrite) |
+| args_dump | 3/4 → 75% | 92% | **adequate** (historical `ovf=0`) |
 
 ### 4.2 chip_swimlane: the four pools in detail
 
@@ -261,9 +262,10 @@ drop ≈ (P − R) × T − N × S      P=produce rate, R=host drain rate, N×S=
 
 ### 5.4 args_dump: adequate, leave
 
-All 6 examples (including the bare flood) show `ovf=0` (no arena overwrite) and a
-steady free of 3/4. The old "arena overwrite under-provisioned" claim is refuted by
-the new data. Re-evaluate if a genuinely large-dump workload appears.
+All 6 examples (including the bare flood) reported `ovf=0` under the overwrite
+detector that existed when this audit was recorded, and show a steady free depth
+of 3/4. The old arena under-provisioning claim is refuted by the data. Re-evaluate
+if a genuinely large-dump workload appears.
 
 ## 6. Cross-cutting mechanisms
 

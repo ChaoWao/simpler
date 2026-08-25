@@ -407,7 +407,6 @@ def reconstruct_task_args(manifest: Path, func_id_list, task_id=None):
                 "bin_offset": int(t.get("bin_offset", 0)),
                 "bin_size": int(t.get("bin_size", 0)),
                 "truncated": bool(t.get("truncated", False)),
-                "overwritten": bool(t.get("overwritten", False)),
             }
         )
     for s in scalars:
@@ -515,8 +514,6 @@ def restore_arg_payloads(manifest: Path, kargs: list[dict], restore_slots):
                 )
             if arg.get("truncated"):
                 raise ValueError(f"--restore-arg slot {slot} payload is truncated")
-            if arg.get("overwritten"):
-                raise ValueError(f"--restore-arg slot {slot} payload was overwritten before export")
 
             dtype = arg["dtype"]
             if dtype not in DTYPE_SIZE:
