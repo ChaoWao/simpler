@@ -334,11 +334,46 @@ that. Every item of "Where a fix would go" above is now implemented, and the
 reported them unmoved when the recording's allocations went away, and this arm
 says the same about the mirror's. Two things follow. The decomposition in this
 entry attributed those faults to allocations that no longer happen, so it no
-longer explains the steady state; and node/tensor storage is already retained at
-its high-water mark, so pre-reserving it to `GRAPH_MAX_NODES` x
-`CORE_MAX_TENSOR_ARGS` (4 MB per recorder thread, ~32 MB across the prewarmed
-pool) would only move each thread's *first* recording off the growth path, not
-touch a warm bind.
+longer explains the steady state; and node/tensor storage is retained only at
+each thread's own high-water mark.
+
+## Amendment 2026-08-25 (later) — the high-water mark is not the steady state
+
+The paragraph above guessed that pre-sizing the recorder's node and tensor storage
+"would only move each thread's *first* recording off the growth path, not touch a
+warm bind". **That is wrong, and a counter proves it.** #1981's retention is
+per-thread, and which body a thread records is decided by the one FIFO all eight
+pool workers wait on, so a thread whose array is shorter than the body it is handed
+extends it — on whatever bind that happens to be. Counting slot creations per bind
+on dsv4, whose eight Definitions differ in size:
+
+| bind | 1 | 2 | 3 | 4 | 5 | 6 |
+| ---- | - | - | - | - | - | - |
+| node slots created | 365 | 1666 | **1336** | **401** | **219** | **56** |
+
+`standups=0` on binds 3-6 confirms the threads and their storage did survive; the
+slots are new all the same. So the growth is recurring, not amortized, and it is
+non-deterministic in which bind pays it — the shape this entry describes as a small
+median with a maximum two orders of magnitude above it.
+
+**And the obvious fix is a trap.** Reserving each node's own buffer to
+`CORE_MAX_TENSOR_ARGS` makes it 32 x 128 B = **exactly one page**, so a 1679-node
+body touches 1679 pages to hold ~210 KB of tensors. Measured against `a2ca70cff`,
+that took `host_orch`'s minflt from ~1070 to ~2540 and `record_node` from 4.4 ms to
+12-14 ms per bind, sign-consistent across two interleaved repetitions. Packing all
+of a body's tensors into one bump region — item 3's "flat array with a stable base",
+4 MB per thread, allocated once and never grown — is what actually helps: the same
+body touches ~53 pages, `record_node`'s warm minimum goes 1702/3423 -> 1239/1563 µs
+and the control plane's minimum of per-bind sums 837/1303 -> 719/943 µs.
+
+Two rules fall out, and both cost a wrong PR to learn:
+
+- **Retention is per thread, so a per-thread high-water mark is not the workload's.**
+  Where work is handed out by a shared queue, size the storage by the *contract*, not
+  by what this thread has seen.
+- **A reservation that is not packed can cost more than no reservation.** Per-object
+  buffers rounded up to a cap turn into a page each; the fault count follows the
+  number of *pages touched*, not the bytes reserved.
 
 ## References
 
