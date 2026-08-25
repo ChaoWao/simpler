@@ -243,8 +243,9 @@ struct ChipTaskSlotState;  // Forward declaration (defined below)
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
 struct TaskDescriptor {
-    // Mixed-task identification (encodes ring_id in upper 32 bits)
-    TaskId task_id;  // raw: (ring_id << 32) | local_id
+    // Task identity. See src/common/host_build_graph/task_id_encoding.h: the
+    // upper 32 bits are this runtime's id space, not a ring index.
+    TaskId task_id;
 
     // Per-slot kernel IDs (INVALID_KERNEL_ID = inactive)
     int32_t kernel_id[SUBTASK_SLOT_COUNT];

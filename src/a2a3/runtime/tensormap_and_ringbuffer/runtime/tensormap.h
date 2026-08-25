@@ -46,6 +46,7 @@
 #include "profiling_config.h"
 #include "utils/device_arena.h"
 #include "runtime_types.h"
+#include "tensormap_and_ringbuffer/task_id_encoding.h"
 #include "tensor.h"
 
 // Overlap geometry types. Relocated here from tensor.h: they are used only by
@@ -614,7 +615,8 @@ struct ChipTensorMap {
             // reused the slot (local_id + N * window) before this cleanup ran.
             // Free only entries produced by the retiring local_id, unlinking
             // each from the chain; entries from other tasks stay linked.
-            TaskId retired_task = TaskId::make(static_cast<uint8_t>(ring_id), static_cast<uint32_t>(local_id));
+            TaskId retired_task =
+                simpler::tmr::make_task_id(static_cast<uint8_t>(ring_id), static_cast<uint32_t>(local_id));
             ChipTensorMapEntry *cur_entry = task_entry_heads[ring_id][task_slot];
             while (cur_entry != nullptr) {
                 ChipTensorMapEntry *next_entry = cur_entry->next_in_task;  // free_entry clears it
@@ -659,8 +661,8 @@ struct ChipTensorMap {
         g_insert_count++;
 #endif
         uint32_t bucket_index = hash(addr);
-        auto ring_id = producer_task_id.ring();
-        auto local_id = producer_task_id.local();
+        auto ring_id = simpler::tmr::task_ring(producer_task_id);
+        auto local_id = simpler::tmr::task_local_id(producer_task_id);
         int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
 
         entry->producer_task_id = producer_task_id;
@@ -695,7 +697,8 @@ struct ChipTensorMap {
      * Check if entry is valid (producer has not retired)
      */
     bool entry_valid(const ChipTensorMapEntry &entry) const {
-        return static_cast<int32_t>(entry.producer_task_id.local()) >= last_task_alives[entry.producer_task_id.ring()];
+        return static_cast<int32_t>(simpler::tmr::task_local_id(entry.producer_task_id)) >=
+               last_task_alives[simpler::tmr::task_ring(entry.producer_task_id)];
     }
 
     void remove_entry(ChipTensorMapEntry &entry) {
@@ -712,8 +715,8 @@ struct ChipTensorMap {
         // Update predecessor's next pointer (O(1) via prev_in_task)
         if (entry.prev_in_task == nullptr) {
             // Entry is the head of its task chain, update task_entry_heads
-            int32_t ring_id = entry.producer_task_id.ring();
-            int32_t local_id = static_cast<int32_t>(entry.producer_task_id.local());
+            int32_t ring_id = simpler::tmr::task_ring(entry.producer_task_id);
+            int32_t local_id = static_cast<int32_t>(simpler::tmr::task_local_id(entry.producer_task_id));
             int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
             task_entry_heads[ring_id][task_slot] = entry.next_in_task;
         } else {

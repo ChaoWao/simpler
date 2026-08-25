@@ -16,6 +16,7 @@
 #include <new>
 
 #include "graph_cache.h"
+#include "host_build_graph/task_id_encoding.h"
 
 namespace {
 
@@ -438,9 +439,9 @@ GraphMaterializeResult graph_execution_materialize_slice(
         TaskPayload &payload = storage->payload;
         ChipTaskSlotState &slot = storage->slot;
 
-        const uint32_t synthetic_local =
-            (static_cast<uint32_t>(outer_slot.task->task_id.local()) << 10) | static_cast<uint32_t>(i);
-        task.task_id = TaskId::make(1, synthetic_local);
+        task.task_id = simpler::hbg::make_graph_node(
+            simpler::hbg::task_local_id(outer_slot.task->task_id), static_cast<uint32_t>(i)
+        );
         const GraphNodeDefinition &source = nodes[i];
         const uint64_t node_offset = node_offsets[i];
         const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), CHIP_ALIGN_SIZE);

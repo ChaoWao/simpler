@@ -89,7 +89,7 @@ def _task_display_name(func_id, func_id_to_name, tdisp, *, spmd=False):
 def normalize_task_id_int(v):
     """Unsigned 64-bit task id (matches host JSON / device ``task_id.raw``).
 
-    Normalizes signed values to unsigned for ``(ring_id << 32) | local_id``.
+    Normalizes signed values to unsigned so the high field decodes correctly.
     Returns None if ``v`` is not convertible to int.
     """
     try:
@@ -104,10 +104,14 @@ def normalize_task_id_int(v):
 def format_task_display(task_id):
     """Format a task_id for human-readable labels.
 
-    Layout: 64-bit raw = (ring_id << 32) | local_id (same as runtime TaskId).
+    The high 32 bits are a ring index under ``tensormap_and_ringbuffer`` (any ring in
+    ``0..CHIP_MAX_RING_DEPTH-1``) and an id space under ``host_build_graph``
+    (0 = RING, 1 = GRAPH_NODE). The short form below therefore covers tmr ring 0 and
+    every hbg RING task; a tmr task on ring 2 is equally ordinary and gets the long
+    form.
 
     Returns:
-        ``r{ring}t{local}`` when ring != 0 (e.g. r2t100), else ``t{local}`` for single-ring (ring 0).
+        ``r{high}t{local}`` when the high field != 0 (e.g. r2t100), else ``t{local}``.
 
     For invalid or non-numeric values, returns str(task_id).
     """
@@ -122,10 +126,11 @@ def format_task_display(task_id):
 
 
 def _decode_graph_node_task_id(task_id):
-    """Decode Scheduler-owned ring-1 Graph-node ids.
+    """Decode Scheduler-owned Graph-node ids.
 
-    Graph nodes use ``local=(outer_local << 10) | node_index`` while the
-    stream-visible outer Graph task remains on ring 0.
+    ``host_build_graph`` puts a materialized node in id space 1 (GRAPH_NODE) with
+    ``local=(outer_local << 10) | node_index``; the stream-visible outer Graph task
+    stays in space 0 (RING). See src/common/host_build_graph/task_id_encoding.h.
     """
     tid = normalize_task_id_int(task_id)
     if tid is None or ((tid >> 32) & 0xFFFFFFFF) != 1:

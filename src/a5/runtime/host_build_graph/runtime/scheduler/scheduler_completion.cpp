@@ -226,9 +226,9 @@ void SchedulerContext::complete_slot_task(
     if (is_pmu_enabled()) {
         // The slot key is the 32-bit register token AICore wrote into
         // dual_issue_slots[task_id & 1].task_id (the DATA_MAIN_BASE value), not
-        // task_id.raw — the latter carries the (ring_id << 32 | local_id)
-        // encoding and would never match. The task identity travels separately for
-        // the PmuRecord.
+        // task_id.raw — the latter is a 64-bit TaskId whose high bits carry this
+        // runtime's id space, so it would never match. The task identity travels
+        // separately for the PmuRecord.
         pmu_aicpu_complete_record(
             core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
             slot_state.task->kernel_id[static_cast<int32_t>(subslot)], hank[core_id].core_type

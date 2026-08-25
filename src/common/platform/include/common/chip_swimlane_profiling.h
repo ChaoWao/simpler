@@ -138,11 +138,11 @@ static_assert(sizeof(ChipSwimlaneAicpuTaskRecord) == 32, "ChipSwimlaneAicpuTaskR
  *
  * Two identity fields with different roles:
  *
- * - `task_token_raw` — the task identity `(ring_id << 32) | local_id`.
- *   Per-task unique. AICore reads it from
+ * - `task_token_raw` — the task identity, a `TaskId::raw` in whatever layout
+ *   the minting runtime uses. Per-task unique. AICore reads it from
  *   `LocalContext.async_ctx.task_token.raw` (already in the dispatch
  *   payload's cache line). The host pulls it from here as the canonical
- *   task id + ring decoder at ALL levels — the AICPU record carries no
+ *   task id at ALL levels — the AICPU record carries no
  *   identity after the slim-down (only dispatch/finish timestamps and the
  *   reg_task_id join key), so AICore is the single source of truth for
  *   task identity. NOT a join key on its own: SPMD `block_num > num_cores`,
@@ -608,7 +608,7 @@ static_assert(sizeof(ChipSwimlaneAicpuSchedPhaseRecord) == 64, "ChipSwimlaneAicp
 struct ChipSwimlaneAicpuOrchPhaseRecord {
     uint64_t start_time;  // Submit start timestamp
     uint64_t end_time;    // Submit end timestamp
-    uint64_t task_id;     // Full TaskId encoding (ring_id << 32) | local_id
+    uint64_t task_id;     // TaskId::raw, in the minting runtime's layout
     uint32_t submit_idx;  // Monotonic submit counter
     uint32_t _pad;        // 32B alignment padding
 };

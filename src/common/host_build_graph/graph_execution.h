@@ -18,10 +18,15 @@
 #include <cstddef>
 #include <type_traits>
 
+#include "host_build_graph/task_id_encoding.h"
 #include "runtime_types.h"
 #include "tensor.h"
 
 inline constexpr uint32_t GRAPH_MAX_NODES = 1024;
+static_assert(
+    GRAPH_MAX_NODES <= (1u << simpler::hbg::GRAPH_NODE_INDEX_BITS),
+    "a node index must fit the low field of a GRAPH_NODE task id"
+);
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_NODES = 4;
 
 enum class GraphTensorSource : uint8_t {

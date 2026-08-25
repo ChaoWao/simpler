@@ -33,6 +33,7 @@
 #include "utils/device_arena.h"
 #include "orchestrator.h"
 #include "shared_memory.h"
+#include "host_build_graph/task_id_encoding.h"
 
 namespace {
 
@@ -139,7 +140,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         const ChipTaskSlotState &st = tasks.slot_states[local];
 
         // Descriptor: the task id is written to this exact local id.
-        EXPECT_EQ(desc.task_id.local(), static_cast<uint32_t>(local));
+        EXPECT_EQ(simpler::hbg::task_local_id(desc.task_id), static_cast<uint32_t>(local));
         // task_state is written at submit (reset_for_reuse skips it): PENDING for a
         // dispatchable task, COMPLETED for a pre-completed hidden-alloc. Either way a
         // real enum, never poison.
@@ -163,8 +164,8 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     }
 
     // Field-specific coverage on the real task: tensors, scalar, packed output buffer.
-    const TaskDescriptor &root_desc = tasks.task_descriptors[root.task_id().local()];
-    const TaskPayload &root_pl = tasks.task_payloads[root.task_id().local()];
+    const TaskDescriptor &root_desc = tasks.task_descriptors[simpler::hbg::task_local_id(root.task_id())];
+    const TaskPayload &root_pl = tasks.task_payloads[simpler::hbg::task_local_id(root.task_id())];
     EXPECT_EQ(root_pl.tensor_count, 1);
     EXPECT_EQ(root_pl.scalar_count, 1);
     EXPECT_EQ(root_pl.dump_metadata.dump_arg_mask, (uint64_t{1} << 0) | (uint64_t{1} << 1));
@@ -175,7 +176,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     EXPECT_EQ(root_desc.kernel_id[static_cast<int>(SubtaskSlot::AIV0)], 0);
 
     // The consumer's fanin is written: two duplicate deps dedupe to one.
-    const TaskPayload &cons_pl = tasks.task_payloads[consumer.task_id().local()];
+    const TaskPayload &cons_pl = tasks.task_payloads[simpler::hbg::task_local_id(consumer.task_id())];
     EXPECT_EQ(cons_pl.fanin_count, 1);
-    EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(root.task_id().local()));
+    EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(simpler::hbg::task_local_id(root.task_id())));
 }

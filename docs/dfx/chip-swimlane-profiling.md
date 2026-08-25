@@ -222,7 +222,7 @@ microseconds, downstream code sees:
 
 | Field | Meaning |
 | ----- | ------- |
-| `task_id` | Runtime task id (`(ring_id << 32) \| local_id`); also exposed split as`ring_id` |
+| `task_id` | Runtime task id (`TaskId::raw`); its high 32 bits are also exposed split off as `ring_id`, which is a ring index under `tensormap_and_ringbuffer` and an id space under `host_build_graph` |
 | `func_id` | Kernel function id. Always `-1` on disk; resolved post-process from `deps.json::tasks[].kernel_ids[3]` (see `swimlane_converter.resolve_func_id_from_kernel_map`) |
 | `core_id` / `core_type` | Physical core index and `"aic"` / `"aiv"` string |
 | `start_time_us` / `end_time_us` / `duration_us` | AICore execution window in microseconds |

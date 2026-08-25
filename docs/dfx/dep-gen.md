@@ -178,11 +178,15 @@ silently lose precision if encoded as numbers. Python consumers pass
 these through `int(v)` which accepts either form, so the schema is
 JS-safe without burdening Python.
 
-Task ids encode `(ring_id << 32) | local_id` — the same layout as
-`TaskId::raw`:
+Task ids are `TaskId::raw`. The low 32 bits are a local id; the high 32 bits
+mean whatever the runtime that minted the record says they mean — a ring index
+(`tensormap_and_ringbuffer`, `0..CHIP_MAX_RING_DEPTH-1`) or an id space
+(`host_build_graph`, `0 = RING`, `1 = GRAPH_NODE`). See
+`src/common/{tensormap_and_ringbuffer,host_build_graph}/task_id_encoding.h`.
+Which one a record carries is a property of its runtime, not of the value:
 
 ```python
-ring = (raw >> 32) & 0xFF
+high = (raw >> 32) & 0xFF
 local = raw & 0xFFFFFFFF
 ```
 
