@@ -123,6 +123,91 @@ def _trivial_orch(orch, args, config):
 
 
 class TestNextLevelStartupFailure:
+    def test_sigterm_during_setup_unwinds_before_child_exit(self, monkeypatch):
+        """Cooperative cancellation lets setup release its resources before exit."""
+        import simpler.worker as worker_mod  # noqa: PLC0415
+
+        class ExitCalled(BaseException):
+            def __init__(self, code):
+                self.code = code
+
+        handlers = {worker_mod.signal.SIGTERM: worker_mod.signal.SIG_DFL}
+
+        def install_handler(signum, handler):
+            previous = handlers.get(signum, worker_mod.signal.SIG_DFL)
+            handlers[signum] = handler
+            return previous
+
+        setup_events = []
+
+        def cancel_during_setup():
+            try:
+                handlers[worker_mod.signal.SIGTERM](worker_mod.signal.SIGTERM, None)
+            finally:
+                setup_events.append("unwound")
+
+        def record_exit(code):
+            raise ExitCalled(code)
+
+        monkeypatch.setattr(worker_mod.signal, "signal", install_handler)
+        monkeypatch.setattr(worker_mod.os, "_exit", record_exit)
+
+        buf = memoryview(bytearray(worker_mod.MAILBOX_FRAME_SIZE))
+        try:
+            with pytest.raises(ExitCalled) as exit_info:
+                worker_mod._forked_child_main(
+                    buf,
+                    "next_level worker 1",
+                    cancel_during_setup,
+                    lambda _ctx: setup_events.append("served"),
+                )
+            assert exit_info.value.code == 1
+            assert setup_events == ["unwound"]
+            assert handlers[worker_mod.signal.SIGTERM] == worker_mod.signal.SIG_IGN
+        finally:
+            buf.release()
+
+    def test_sigterm_during_init_failed_publication_cannot_escape_child_main(self, monkeypatch):
+        """The fork boundary remains terminal when cancellation interrupts failure publication."""
+        import simpler.worker as worker_mod  # noqa: PLC0415
+
+        class ExitCalled(BaseException):
+            def __init__(self, code):
+                self.code = code
+
+        handlers = {worker_mod.signal.SIGTERM: worker_mod.signal.SIG_DFL}
+
+        def install_handler(signum, handler):
+            previous = handlers.get(signum, worker_mod.signal.SIG_DFL)
+            handlers[signum] = handler
+            return previous
+
+        def interrupt_failed_publication(_addr, value):
+            if value == worker_mod._INIT_FAILED:
+                handlers[worker_mod.signal.SIGTERM](worker_mod.signal.SIGTERM, None)
+
+        def record_exit(code):
+            raise ExitCalled(code)
+
+        monkeypatch.setattr(worker_mod.signal, "signal", install_handler)
+        monkeypatch.setattr(worker_mod, "_mailbox_store_i32", interrupt_failed_publication)
+        monkeypatch.setattr(worker_mod.os, "_exit", record_exit)
+
+        buf = memoryview(bytearray(worker_mod.MAILBOX_FRAME_SIZE))
+        try:
+            with pytest.raises(ExitCalled) as exit_info:
+                worker_mod._forked_child_main(
+                    buf,
+                    "next_level worker 1",
+                    _init_raises,
+                    lambda _ctx: None,
+                )
+            assert exit_info.value.code == 1
+            assert "injected inner init failure" in worker_mod._read_error_msg(buf)
+            assert handlers[worker_mod.signal.SIGTERM] == worker_mod.signal.SIG_IGN
+        finally:
+            buf.release()
+
     def test_inner_init_failure_raises_bounded_error(self):
         """A next-level child whose init raises surfaces its error at startup."""
         l3 = _l3_child()

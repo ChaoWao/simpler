@@ -4261,7 +4261,10 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
     with one ``killpg``; deeper descendants inherit the group and do not set
     their own. During ``setup`` a SIGTERM is a cooperative cancel: it raises
     ``_StartupCancelled``, which unwinds ``setup`` (recursively tearing down any
-    grandchildren and their nested shms) before the child exits.
+    grandchildren and their nested shms) before the child exits. Once the setup
+    frame has returned or unwound, SIGTERM terminates directly instead of
+    injecting another Python exception into readiness publication or failure
+    handling.
 
     Load-bearing invariant: a forked child must NEVER let an exception unwind
     back into the forked copy of the parent's ``_start_hierarchical`` frames.
@@ -4269,41 +4272,52 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
     into the startup rollback path would SIGKILL this child's *siblings* (real
     processes at those PIDs). Catch everything and exit instead.
     """
-    import traceback as _tb  # noqa: PLC0415
-
-    if make_group_leader:
-        with contextlib.suppress(OSError):
-            os.setpgid(0, 0)
-
-    state_addr = _buffer_field_addr(buf, _OFF_STATE)
-
-    def _on_cancel(_signum, _frame):
-        raise _StartupCancelled()
-
-    prev_term = signal.signal(signal.SIGTERM, _on_cancel)
+    exit_code = 1  # Fail closed; only a clean serve() return marks success.
     try:
-        ctx = setup()
-    except _StartupCancelled:
-        # Parent cancelled us mid-init; setup() already unwound its own subtree.
-        _tb.print_exc()
-        os._exit(1)
-    except BaseException as e:  # noqa: BLE001
-        _tb.print_exc()
-        _write_error(buf, 1, _format_exc(f"{label} init", e))
-        _mailbox_store_i32(state_addr, _INIT_FAILED)
-        os._exit(1)
-    # Serving is torn down via the SHUTDOWN mailbox state, not the cancel signal.
-    # signal.signal returns None when the prior handler was not installed from
-    # Python (e.g. a C library / host default); restore SIG_DFL in that case so
-    # the round-trip does not raise TypeError.
-    signal.signal(signal.SIGTERM, prev_term if prev_term is not None else signal.SIG_DFL)
-    _mailbox_store_i32(state_addr, _INIT_READY)
-    try:
-        serve(ctx)
-    except BaseException:  # noqa: BLE001
-        _tb.print_exc()
-        os._exit(1)
-    os._exit(0)
+        import traceback as _tb  # noqa: PLC0415
+
+        if make_group_leader:
+            with contextlib.suppress(OSError):
+                os.setpgid(0, 0)
+
+        state_addr = _buffer_field_addr(buf, _OFF_STATE)
+        setup_active = True
+
+        def _on_cancel(_signum, _frame):
+            # Make cancellation one-shot so setup unwinding cannot be interrupted again.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if setup_active:
+                raise _StartupCancelled()
+            os._exit(1)
+
+        prev_term = signal.signal(signal.SIGTERM, _on_cancel)
+        try:
+            try:
+                ctx = setup()
+            finally:
+                setup_active = False
+        except _StartupCancelled:
+            # Parent cancelled us mid-init; setup() already unwound its own subtree.
+            _tb.print_exc()
+        except BaseException as e:  # noqa: BLE001
+            _tb.print_exc()
+            _write_error(buf, 1, _format_exc(f"{label} init", e))
+            _mailbox_store_i32(state_addr, _INIT_FAILED)
+        else:
+            # Serving is torn down via the SHUTDOWN mailbox state, not the cancel signal.
+            # signal.signal returns None when the prior handler was not installed from
+            # Python (e.g. a C library / host default); restore SIG_DFL in that case so
+            # the round-trip does not raise TypeError.
+            signal.signal(signal.SIGTERM, prev_term if prev_term is not None else signal.SIG_DFL)
+            _mailbox_store_i32(state_addr, _INIT_READY)
+            try:
+                serve(ctx)
+            except BaseException:  # noqa: BLE001
+                _tb.print_exc()
+            else:
+                exit_code = 0
+    finally:
+        os._exit(exit_code)
 
 
 # ---------------------------------------------------------------------------
