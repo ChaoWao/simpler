@@ -924,7 +924,6 @@ inline void bind_worker(nb::module_ &m) {
             using namespace mpi_group_mailbox;
             nb::dict layout;
             layout["MAGIC"] = nb::bytes(reinterpret_cast<const char *>(MAGIC), sizeof(MAGIC));
-            layout["PROTOCOL_VERSION"] = PROTOCOL_VERSION;
             layout["HEADER_BYTES"] = HEADER_BYTES;
             layout["PAYLOAD_BYTES"] = PAYLOAD_BYTES;
             layout["ERROR_BYTES"] = ERROR_BYTES;
@@ -933,7 +932,6 @@ inline void bind_worker(nb::module_ &m) {
             layout["ERROR_OFFSET"] = ERROR_OFFSET;
             layout["MAILBOX_BYTES"] = MAILBOX_BYTES;
             layout["OFF_MAGIC"] = OFF_MAGIC;
-            layout["OFF_PROTOCOL_VERSION"] = OFF_PROTOCOL_VERSION;
             layout["OFF_HEADER_BYTES"] = OFF_HEADER_BYTES;
             layout["OFF_MAILBOX_BYTES"] = OFF_MAILBOX_BYTES;
             layout["OFF_WORLD_SIZE"] = OFF_WORLD_SIZE;

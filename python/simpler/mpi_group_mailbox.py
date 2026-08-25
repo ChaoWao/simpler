@@ -28,7 +28,6 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 
 MAILBOX_MAGIC = b"SMPIBOX\0"
-MAILBOX_PROTOCOL_VERSION = 1
 MAILBOX_HEADER_BYTES = 256
 MAILBOX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAILBOX_ERROR_BYTES = 64 * 1024
@@ -38,7 +37,6 @@ MAILBOX_ERROR_OFFSET = MAILBOX_RESPONSE_OFFSET + MAILBOX_PAYLOAD_BYTES
 MAILBOX_SIZE = MAILBOX_ERROR_OFFSET + MAILBOX_ERROR_BYTES
 
 _OFF_MAGIC = 0
-_OFF_PROTOCOL_VERSION = 8
 _OFF_HEADER_BYTES = 12
 _OFF_MAILBOX_BYTES = 16
 _OFF_WORLD_SIZE = 24
@@ -223,9 +221,7 @@ class MpiGroupMailbox:
             raise MpiGroupError("MPI group mailbox mapping returned no buffer")
         buffer = _as_byte_view(buffer)
         ctypes.memset(_buffer_address(buffer), 0, MAILBOX_SIZE)
-        struct.pack_into(
-            "<8sIIQ", buffer, _OFF_MAGIC, MAILBOX_MAGIC, MAILBOX_PROTOCOL_VERSION, MAILBOX_HEADER_BYTES, MAILBOX_SIZE
-        )
+        struct.pack_into("<8s4xIQ", buffer, _OFF_MAGIC, MAILBOX_MAGIC, MAILBOX_HEADER_BYTES, MAILBOX_SIZE)
         struct.pack_into("<I", buffer, _OFF_WORLD_SIZE, int(world_size))
         struct.pack_into("<i", buffer, _OFF_GROUP_STATE, int(MailboxGroupState.INITIALIZING))
         struct.pack_into("<i", buffer, _OFF_REQUEST_STATE, int(MailboxRequestState.IDLE))
@@ -269,7 +265,6 @@ class MpiGroupMailbox:
     def manifest(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "protocol_version": MAILBOX_PROTOCOL_VERSION,
             "mailbox_bytes": MAILBOX_SIZE,
             "world_size": self.world_size,
         }
@@ -456,11 +451,9 @@ class MpiGroupMailbox:
     def _validate_header(self) -> None:
         if len(self._buffer) < MAILBOX_SIZE:
             raise MpiGroupError("MPI group mailbox is smaller than the protocol layout")
-        magic, version, header_bytes, mailbox_bytes = struct.unpack_from("<8sIIQ", self._buffer, _OFF_MAGIC)
+        magic, header_bytes, mailbox_bytes = struct.unpack_from("<8s4xIQ", self._buffer, _OFF_MAGIC)
         if magic != MAILBOX_MAGIC:
             raise MpiGroupError("MPI group mailbox magic does not match")
-        if version != MAILBOX_PROTOCOL_VERSION:
-            raise MpiGroupError(f"MPI group mailbox protocol version {version} is not supported")
         if header_bytes != MAILBOX_HEADER_BYTES or mailbox_bytes != MAILBOX_SIZE:
             raise MpiGroupError("MPI group mailbox layout does not match the protocol")
         if self._read_u32(_OFF_WORLD_SIZE) == 0:
@@ -548,8 +541,6 @@ def open_rank_mailbox(manifest: dict[str, Any], *, rank: int) -> MpiGroupMailbox
 
     if int(rank) != 0:
         return None
-    if int(manifest.get("protocol_version", -1)) != MAILBOX_PROTOCOL_VERSION:
-        raise MpiGroupError("MPI group manifest mailbox protocol version does not match")
     if int(manifest.get("mailbox_bytes", -1)) != MAILBOX_SIZE:
         raise MpiGroupError("MPI group manifest mailbox size does not match")
     mailbox = MpiGroupMailbox.open(name=str(manifest["name"]))

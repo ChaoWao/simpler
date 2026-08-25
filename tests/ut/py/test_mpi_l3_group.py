@@ -32,7 +32,6 @@ class _ReadyMailbox:
     def manifest(self):
         return {
             "name": "pytest-mpi-mailbox",
-            "protocol_version": 1,
             "mailbox_bytes": MAILBOX_SIZE,
             "world_size": self.world_size,
         }

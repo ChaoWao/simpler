@@ -238,7 +238,6 @@ def test_python_and_cpp_mailbox_layouts_agree():
     layout = dict(_mpi_mailbox_layout())
     assert layout == {
         "MAGIC": mailbox_mod.MAILBOX_MAGIC,
-        "PROTOCOL_VERSION": mailbox_mod.MAILBOX_PROTOCOL_VERSION,
         "HEADER_BYTES": mailbox_mod.MAILBOX_HEADER_BYTES,
         "PAYLOAD_BYTES": mailbox_mod.MAILBOX_PAYLOAD_BYTES,
         "ERROR_BYTES": mailbox_mod.MAILBOX_ERROR_BYTES,
@@ -247,7 +246,6 @@ def test_python_and_cpp_mailbox_layouts_agree():
         "ERROR_OFFSET": mailbox_mod.MAILBOX_ERROR_OFFSET,
         "MAILBOX_BYTES": mailbox_mod.MAILBOX_SIZE,
         "OFF_MAGIC": mailbox_mod._OFF_MAGIC,  # noqa: SLF001
-        "OFF_PROTOCOL_VERSION": mailbox_mod._OFF_PROTOCOL_VERSION,  # noqa: SLF001
         "OFF_HEADER_BYTES": mailbox_mod._OFF_HEADER_BYTES,  # noqa: SLF001
         "OFF_MAILBOX_BYTES": mailbox_mod._OFF_MAILBOX_BYTES,  # noqa: SLF001
         "OFF_WORLD_SIZE": mailbox_mod._OFF_WORLD_SIZE,  # noqa: SLF001
