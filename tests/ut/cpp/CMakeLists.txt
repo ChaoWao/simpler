@@ -885,7 +885,6 @@ target_sources(test_a5_hbg_scheduler_drain PRIVATE
 )
 target_sources(test_hbg_ready_queue_seed PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -897,7 +896,6 @@ target_sources(test_hbg_ready_queue_seed PRIVATE
 add_a2a3_hbg_runtime_test(test_hbg_submit_poison a2a3/test_hbg_submit_poison.cpp)
 target_sources(test_hbg_submit_poison PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -907,7 +905,6 @@ target_sources(test_hbg_submit_poison PRIVATE
 add_a2a3_hbg_runtime_test(test_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
 target_sources(test_hbg_graph_submit_failure PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -918,7 +915,6 @@ add_a2a3_hbg_runtime_test(test_hbg_graph_async_submit common/test_hbg_graph_asyn
 add_a2a3_hbg_runtime_test(test_hbg_graph_definition_arena common/test_hbg_graph_definition_arena.cpp)
 target_sources(test_hbg_graph_definition_arena PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -930,7 +926,6 @@ target_sources(test_hbg_graph_definition_arena PRIVATE
 add_a2a3_hbg_runtime_test(test_hbg_slot_claim common/test_hbg_slot_claim.cpp)
 target_sources(test_hbg_slot_claim PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -940,7 +935,6 @@ target_sources(test_hbg_slot_claim PRIVATE
 add_a5_hbg_runtime_test(test_a5_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
 target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -951,7 +945,6 @@ add_a5_hbg_runtime_test(test_a5_hbg_graph_async_submit common/test_hbg_graph_asy
 add_a5_hbg_runtime_test(test_a5_hbg_graph_definition_arena common/test_hbg_graph_definition_arena.cpp)
 target_sources(test_a5_hbg_graph_definition_arena PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -961,7 +954,6 @@ target_sources(test_a5_hbg_graph_definition_arena PRIVATE
 add_a5_hbg_runtime_test(test_a5_hbg_slot_claim common/test_hbg_slot_claim.cpp)
 target_sources(test_a5_hbg_slot_claim PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -975,7 +967,6 @@ add_a5_hbg_runtime_test(test_a5_hbg_self_relative_ptr common/test_hbg_self_relat
 add_a5_hbg_runtime_test(test_a5_hbg_sm_compaction common/test_hbg_sm_compaction.cpp)
 target_sources(test_a5_hbg_ready_queue_seed PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
     ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
@@ -989,7 +980,6 @@ set(HBG_A5_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_gr
 add_a5_hbg_runtime_test(test_a5_hbg_submit_poison a5/test_hbg_submit_poison.cpp)
 target_sources(test_a5_hbg_submit_poison PRIVATE
     ${HBG_A5_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_A5_RUNTIME_DIR}/orchestrator_core/ring_buffer.cpp
     ${HBG_A5_RUNTIME_DIR}/shared/shared_memory.cpp
     ${HBG_A5_RUNTIME_DIR}/shared/tensormap.cpp
     ${HBG_A5_RUNTIME_DIR}/shared/runtime_init.cpp

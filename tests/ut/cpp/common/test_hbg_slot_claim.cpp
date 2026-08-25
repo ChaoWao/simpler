@@ -55,7 +55,7 @@ protected:
 
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_DEFAULT_GRAPH_TASKS, &sched));
 
         definition_staging.assign(STAGING_BYTES, std::byte{0});
         GraphDefinitionArena arena{};
@@ -81,25 +81,25 @@ protected:
     // pass left is what the claim has to overwrite. Every value here is one a
     // completed task really leaves behind.
     void poison_slot(int32_t slot) {
-        ChipTaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
+        ChipTaskSlotState &state = sm_handle->header->tasks.get_slot_state_by_task_id(slot);
         state.wake_list_head.store(WAKE_LIST_SENTINEL, std::memory_order_relaxed);
-        state.next_in_wake_list = &sm_handle->header->ring.get_slot_state_by_slot(slot + 1);
+        state.next_in_wake_list = &sm_handle->header->tasks.get_slot_state_by_task_id(slot + 1);
         state.any_subtask_deferred.store(true, std::memory_order_relaxed);
         state.completed_subtasks.store(7, std::memory_order_relaxed);
         state.next_block_idx.store(3, std::memory_order_relaxed);
         state.graph_node_index = 11;
-        sm_handle->header->ring.completion_flags[slot].store(1, std::memory_order_relaxed);
+        sm_handle->header->tasks.completion_flags[slot].store(1, std::memory_order_relaxed);
     }
 
     void expect_slot_pristine(int32_t slot) {
-        ChipTaskSlotState &state = sm_handle->header->ring.get_slot_state_by_slot(slot);
+        ChipTaskSlotState &state = sm_handle->header->tasks.get_slot_state_by_task_id(slot);
         EXPECT_EQ(state.wake_list_head.load(std::memory_order_relaxed), nullptr)
             << "a stale SENTINEL closes the wake list, so no consumer can register on this producer";
         EXPECT_EQ(state.next_in_wake_list, nullptr);
         EXPECT_FALSE(state.has_any_subtask_deferred());
         EXPECT_EQ(state.completed_subtasks.load(std::memory_order_relaxed), 0);
         EXPECT_EQ(state.next_block_idx.load(std::memory_order_relaxed), 0);
-        EXPECT_EQ(sm_handle->header->ring.completion_flags[slot].load(std::memory_order_relaxed), 0)
+        EXPECT_EQ(sm_handle->header->tasks.completion_flags[slot].load(std::memory_order_relaxed), 0)
             << "a stale completion flag reports this task done before it has run";
     }
 };
@@ -119,7 +119,7 @@ TEST_F(HbgSlotClaimTest, OrdinarySubmitClaimsAPoisonedSlot) {
     expect_slot_pristine(0);
 }
 
-// The outer task of a recorded Graph takes a ring slot like any other task, and
+// The outer task of a recorded Graph takes a table slot like any other task, and
 // takes it through its own placement rather than through prepare_task — so it
 // needs the same claim-time reset. It occupies one heap block and one slot for a
 // whole sub-DAG, which is exactly why it is easy to overlook.
@@ -149,7 +149,7 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
-    ChipTaskSlotState &outer = sm_handle->header->ring.get_slot_state_by_slot(0);
+    ChipTaskSlotState &outer = sm_handle->header->tasks.get_slot_state_by_task_id(0);
     ASSERT_EQ(outer.task_kind, TaskKind::GRAPH);
     expect_slot_pristine(0);
 }

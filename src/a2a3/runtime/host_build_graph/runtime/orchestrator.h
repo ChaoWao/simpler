@@ -30,7 +30,7 @@
 #include <memory>
 
 #include "common/chip_swimlane_profiling.h"
-#include "ring_buffer.h"
+#include "task_allocator.h"
 #include "graph_cache.h"
 #include "runtime_types.h"
 #include "submit_types.h"
@@ -106,8 +106,8 @@ struct OrchestratorState {
     // binds its region at the cursor and advances it by what the task uses, so the
     // pools stay packed and the bind path reads the cursors as the image's pool
     // extents. Nothing is ever returned, and the pools are dimensioned for the worst
-    // case (task_window tasks each at their full cap), so a bump cannot overflow.
-    // The bases live here, not in the ring header: nothing on the device resolves one.
+    // case (max_tasks tasks each at their full cap), so a bump cannot overflow.
+    // The bases live here, not in the task header: nothing on the device resolves one.
     //
     // The fanin cursor does not advance at bind time. FaninBuilder appends and
     // dedups producers afterwards, so the region's length is known only when the count
@@ -135,11 +135,12 @@ struct OrchestratorState {
     // and bind this orchestrator to one shared-memory mirror, GM heap and
     // scheduler. sm_base is the base of the mirror this orchestrator writes; it
     // is dereferenced, so a host-orch pass passes its host mirror rather than a
-    // device address. task_window_size must be a power of two.
+    // device address. `max_tasks` is the slot count that mirror is dimensioned
+    // for — the bind's resolved ring_task_window — and the cap alloc() enforces.
     //
     // Returns false when an allocation fails; the caller then has no hazard map
     // and must not orchestrate.
-    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t task_window_size, SchedulerState *scheduler);
+    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler);
 
     void set_scheduler(SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);

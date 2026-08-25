@@ -54,40 +54,39 @@ uint64_t g_insert_count = 0;
  * Allocate the four arrays and reset the map to empty. Clears the bucket heads
  * and the per-task entry heads and resets the pool cursors (next_entry_idx /
  * free_num); the entry pool is left uninitialized and initialized on write by
- * new_entry(), so this is O(num_buckets + task_window_size), not O(pool_size).
+ * new_entry(), so this is O(num_buckets + max_tasks), not O(pool_size).
  *
  * `new (std::nothrow) T[n]` rather than a vector: a vector would value-initialize
  * the whole entry pool, which is megabytes of zeroing the init-on-write path
  * exists to avoid, and nothrow keeps the failure reportable to a caller that
  * still has an alternative path.
  */
-bool ChipTensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_task_window_size) {
-    // num_buckets must be a power of two for the hash truncation to work, and
-    // task_window_size for the task-chain slot mask.
+bool ChipTensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, int32_t new_max_tasks) {
+    // num_buckets must be a power of two for the hash truncation to work. The
+    // task-chain count needs no such property: a task id indexes its chain directly.
     always_assert(new_num_buckets > 0 && (new_num_buckets & (new_num_buckets - 1)) == 0);
-    always_assert(new_task_window_size > 0 && (new_task_window_size & (new_task_window_size - 1)) == 0);
+    always_assert(new_max_tasks > 0);
     always_assert(new_pool_size > 0);
 
     buckets.reset(new (std::nothrow) ChipTensorMapEntry *[new_num_buckets]);
     entry_pool.reset(new (std::nothrow) ChipTensorMapEntry[new_pool_size]);
     free_entry_list.reset(new (std::nothrow) ChipTensorMapEntry *[new_pool_size]);
-    task_entry_heads.reset(new (std::nothrow) ChipTensorMapEntry *[new_task_window_size]);
+    task_entry_heads.reset(new (std::nothrow) ChipTensorMapEntry *[new_max_tasks]);
     if (buckets == nullptr || entry_pool == nullptr || free_entry_list == nullptr || task_entry_heads == nullptr) {
         LOG_ERROR(
-            "TensorMap init failed (buckets=%d, pool=%d, window=%d)", new_num_buckets, new_pool_size,
-            new_task_window_size
+            "TensorMap init failed (buckets=%d, pool=%d, max_tasks=%d)", new_num_buckets, new_pool_size, new_max_tasks
         );
         return false;
     }
 
     num_buckets = new_num_buckets;
     pool_size = new_pool_size;
-    task_window_size = new_task_window_size;
+    max_tasks = new_max_tasks;
 
     for (int32_t i = 0; i < num_buckets; i++) {
         buckets[i] = nullptr;
     }
-    for (int32_t i = 0; i < task_window_size; i++) {
+    for (int32_t i = 0; i < max_tasks; i++) {
         task_entry_heads[i] = nullptr;
     }
 
@@ -111,7 +110,7 @@ void ChipTensorMap::reset() {
     for (int32_t i = 0; i < num_buckets; i++) {
         buckets[i] = nullptr;
     }
-    for (int32_t i = 0; i < task_window_size; i++) {
+    for (int32_t i = 0; i < max_tasks; i++) {
         task_entry_heads[i] = nullptr;
     }
     // Entries are reached only through a bucket chain, and every chain is now empty, so
@@ -121,8 +120,8 @@ void ChipTensorMap::reset() {
     free_num = 0;
 }
 
-bool ChipTensorMap::init_default(int32_t new_task_window_size) {
-    return init(CHIP_TENSORMAP_NUM_BUCKETS, CHIP_TENSORMAP_POOL_SIZE, new_task_window_size);
+bool ChipTensorMap::init_default(int32_t new_max_tasks) {
+    return init(CHIP_TENSORMAP_NUM_BUCKETS, CHIP_TENSORMAP_POOL_SIZE, new_max_tasks);
 }
 
 // =============================================================================

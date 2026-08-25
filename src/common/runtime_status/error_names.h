@@ -86,8 +86,8 @@ static inline const char *error_desc(int32_t code) {
     case SIMPLER_ERROR_HEAP_RING_DEADLOCK:
         return "the task allocator could not reserve the heap bytes required for another task";
     case SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK:
-        return "the task allocator could not admit another task because the configured task window "
-               "had no available slot";
+        return "the task allocator could not admit another task because the task table had no "
+               "available slot";
     case SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED:
         return "a task's producer dependencies exceeded the runtime's available fanin "
                "representation capacity";
@@ -137,8 +137,9 @@ static inline const char *error_hint(int32_t code) {
         return "raise runtime_env.ring_task_window or split the scope so slots are "
                "reclaimed sooner; enable CallConfig.enable_scope_stats to see which scope peaked";
     case SIMPLER_ERROR_HEAP_RING_DEADLOCK:
-        return "raise runtime_env.ring_heap or shrink per-task args / intermediate tensors; the "
-               "'Ring buffer sizes:' line above reports the configured capacities";
+        return "shrink per-task args / intermediate tensors; in a reclaiming runtime raise "
+               "runtime_env.ring_heap -- host_build_graph's graph heap has no knob, so a graph too "
+               "large for the device fails host-side at the region commit instead";
     case SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK:
         return "raise runtime_env.ring_task_window or shrink the graph; in a reclaiming "
                "runtime also check for nested submission or a stalled consumer";

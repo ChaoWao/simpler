@@ -15,7 +15,7 @@ resource and determines how strong that diagnosis is:
 - `No reclaim progress for ~500 ms` or `cannot reclaim space after ~500 ms` is
   the backstop. It proves that reclaim remained stalled, but not whether the root
   cause is undersizing, a stuck consumer, or a stalled scheduler.
-- `Task Window Exhausted` / `Fanin Capacity Exhausted` / `TensorMap Entry Pool
+- `Graph Too Large` / `Fanin Capacity Exhausted` / `TensorMap Entry Pool
   Exhausted` is HBG, and it is unambiguous: that runtime builds a
   whole-graph-resident image on the host, so the graph simply does not fit. These
   checks return immediately; there is no concurrent scheduler progress that could
@@ -42,10 +42,10 @@ that trips the code.
 
 | Runtime | Bottleneck resource | Code | Fix |
 | ------- | ------------------- | ---- | --- |
-| HBG | task window | 3 | raise `runtime_env.ring_task_window`, or shrink the graph |
+| HBG | task count | 3 | raise `runtime_env.ring_task_window` (any positive count), or shrink the graph |
 | HBG | inline fanin | 4 | reduce distinct producers to `CHIP_MAX_FANIN` (currently 128) or less; HBG has no dependency spill pool |
 | HBG | TensorMap entries | 11 | increase `CHIP_TENSORMAP_POOL_SIZE`, or reduce registered outputs |
-| TRB | open-scope task window | 1 or 3 | raise `runtime_env.ring_task_window`, split the scope, or diagnose stalled reclaim |
+| TRB | open-scope task window | 1 or 3 | raise `runtime_env.ring_task_window` (a power of two, >= 4), split the scope, or diagnose stalled reclaim |
 | TRB | heap | 2 | raise `runtime_env.ring_heap`, shrink allocations, or diagnose stalled reclaim |
 | TRB | dependency pool | 4 | raise `runtime_env.ring_dep_pool`, cut fanin, or diagnose stalled reclaim |
 

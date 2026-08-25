@@ -27,10 +27,10 @@
 // Size Calculation
 // =============================================================================
 
-uint64_t SharedMemoryHandle::calculate_size(uint64_t task_window_size) {
-    // Total SM size = offset just past the ring's slot_states, from the single
-    // source of truth for the layout (sm_layout::ring_segment_offsets).
-    return sm_layout::ring_segment_offsets(task_window_size).end;
+uint64_t SharedMemoryHandle::calculate_size(uint64_t max_tasks) {
+    // Total SM size = offset just past the last segment, from the single
+    // source of truth for the layout (sm_layout::segment_offsets).
+    return sm_layout::segment_offsets(max_tasks).end;
 }
 
 // =============================================================================
@@ -41,60 +41,59 @@ void SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     char *base = (char *)sm_base;
     header = (SharedMemoryHeader *)base;
 
-    // Per-ring descriptors / payloads / slot_states — offsets from the single source
-    // of truth (sm_layout::ring_segment_offsets), so this setup and the
+    // descriptors / payloads / slot_states — offsets from the single source
+    // of truth (sm_layout::segment_offsets), so this setup and the
     // device-address helpers cannot drift.
     //
     // Only the four slot-pitched segments, and no argument pool: the pool extents
     // differ between the mirror and the image, while these four depend on the pitch
     // alone. The orchestrator holds the mirror's pool bases; the device resolves an
     // argument region through the payload's delta and needs no base at all.
-    auto off = sm_layout::ring_segment_offsets(sm_layout::image_extents({pitch, 0, 0, 0}));
-    auto &ring = header->ring;
-    ring.task_descriptors = (TaskDescriptor *)(base + off.descriptors);
-    ring.task_payloads = (TaskPayload *)(base + off.payloads);
-    ring.slot_states = (ChipTaskSlotState *)(base + off.slot_states);
-    ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
+    auto off = sm_layout::segment_offsets(sm_layout::image_extents({pitch, 0, 0, 0}));
+    auto &tasks = header->tasks;
+    tasks.task_descriptors = (TaskDescriptor *)(base + off.descriptors);
+    tasks.task_payloads = (TaskPayload *)(base + off.payloads);
+    tasks.slot_states = (ChipTaskSlotState *)(base + off.slot_states);
+    tasks.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
-bool SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size) {
+bool SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t max_tasks) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
-    const uint64_t mirror_bytes = calculate_size(task_window_size);
+    const uint64_t mirror_bytes = calculate_size(max_tasks);
     // The mirror has to stay inside an int32 delta's reach: a payload names its
     // argument regions that way, and set() leaves a field unbound rather than
     // truncating, so a pool out of reach would read back as null and be dereferenced
     // as one. attach_populated makes the same check on the shipped image.
     //
-    // Tested before the region's own size, because this rejects the ring capacity
-    // itself: no region, however large, makes such a window usable.
+    // Tested before the region's own size, because this rejects `max_tasks` itself:
+    // no region, however large, makes such a reservation usable.
     if (mirror_bytes > static_cast<uint64_t>(INT32_MAX)) return false;
     if (sm_size_arg < mirror_bytes) return false;
 
     sm_base = sm_base_arg;
     sm_size = sm_size_arg;
     is_owner = false;
-    setup_pointers(task_window_size);
-    init_header(task_window_size);
+    setup_pointers(max_tasks);
+    init_header();
     return true;
 }
 
 bool SharedMemoryHandle::attach_populated(
-    void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t live_slots, uint64_t image_bytes
+    void *sm_base_arg, uint64_t sm_size_arg, uint64_t max_tasks, uint64_t live_slots, uint64_t image_bytes
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
-    // A pitch above the capacity would name a slot the ring cannot address, and one
+    // A pitch above `max_tasks` names a slot the host could not have built, and one
     // below what the host used would place every segment past the descriptors
     // short. This is the whole contract between the two sides, checked once at
     // attach rather than trusted.
-    if (live_slots == 0 || live_slots > task_window_size) return false;
+    if (live_slots == 0 || live_slots > max_tasks) return false;
     // The image must at least hold the four slot-pitched segments; anything beyond
     // that is its argument pools, whose extents are the bind's cursors and are not
     // recomputable here. The first pool's offset is exactly where those four end.
-    const uint64_t slots_end =
-        sm_layout::ring_segment_offsets(sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
+    const uint64_t slots_end = sm_layout::segment_offsets(sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
     if (image_bytes < slots_end) return false;
-    // The region holds the compacted image, so that is what has to fit — the ring
-    // capacity is no longer its size.
+    // The region holds the compacted image, so that is what has to fit — the
+    // dimensioned size is no longer its size.
     if (sm_size_arg < image_bytes) return false;
     // A slot state names its payload and descriptor by an int32 delta from its own
     // address, and a payload names its argument regions the same way, so no two
@@ -106,12 +105,12 @@ bool SharedMemoryHandle::attach_populated(
     is_owner = false;
     setup_pointers(live_slots);
     // Deliberately NO init_header: the SM already holds the host orchestrator's
-    // task graph (descriptors, slot states, ring counters).
+    // task graph (descriptors, slot states, completion flags).
     return true;
 }
 
 SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &arena) {
-    const uint64_t buffer_size = calculate_size(CHIP_TASK_WINDOW_SIZE);
+    const uint64_t buffer_size = calculate_size(CHIP_DEFAULT_GRAPH_TASKS);
     const size_t off_handle = arena.reserve(sizeof(SharedMemoryHandle), alignof(SharedMemoryHandle));
     const size_t off_buffer = arena.reserve(static_cast<size_t>(buffer_size), CHIP_ALIGN_SIZE);
     if (arena.commit() == nullptr) return nullptr;
@@ -120,7 +119,7 @@ SharedMemoryHandle *SharedMemoryHandle::create_and_init_default(DeviceArena &are
     memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     memset(buffer, 0, static_cast<size_t>(buffer_size));
-    if (!handle->init(buffer, buffer_size, CHIP_TASK_WINDOW_SIZE)) return nullptr;
+    if (!handle->init(buffer, buffer_size, CHIP_DEFAULT_GRAPH_TASKS)) return nullptr;
     return handle;
 }
 
@@ -138,24 +137,21 @@ void SharedMemoryHandle::destroy() {
 // =============================================================================
 //
 // no need init data in pool, init pool data when used
-void SharedMemoryHandle::init_header(uint64_t task_window_size) {
-    // Flow control (starts at 0)
-    header->ring.fc.init();
-
+void SharedMemoryHandle::init_header() {
     // Polling completion: -1 = "no task completed yet"; the first task to
     // complete (local_id 0) advances the watermark to 0.
-    header->ring.completed_watermark.store(-1, std::memory_order_relaxed);
+    header->tasks.completed_watermark.store(-1, std::memory_order_relaxed);
+
+    // 0 until run_host_orchestration writes the run's count; init runs before
+    // orchestration, so the real value is not known here yet.
+    header->tasks.total_tasks = 0;
 
     header->orchestrator_done.store(0, std::memory_order_relaxed);
 
-    // Ring layout info
-    uint64_t offset = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
-    header->ring.task_window_size = task_window_size;
-    header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
-    header->ring.task_descriptors_offset = offset;
-    offset += CHIP_ALIGN_UP(task_window_size * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
-    offset += CHIP_ALIGN_UP(task_window_size * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
-    offset += CHIP_ALIGN_UP(task_window_size * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
+    // Layout info. The descriptors are the first segment, so their offset is where
+    // the header's own padded size ends — pitch-independent, unlike every segment
+    // after them.
+    header->tasks.task_descriptors_offset = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
 
     header->total_size = sm_size;
 
@@ -168,8 +164,8 @@ void SharedMemoryHandle::init_header(uint64_t task_window_size) {
     // Per-slot init (slot_states.reset_for_reuse() + active_mask, and clearing the
     // completion flag) happens init-on-write in orch::prepare_task as each slot
     // [0, total_tasks) is claimed, so the SM init/upload cost tracks the task
-    // count, not ring capacity. The device reads no slot past total_tasks, so the
-    // unclaimed tail is left uninitialized.
+    // count, not the size the table was dimensioned for. The device reads no slot
+    // past total_tasks, so the unclaimed tail is left uninitialized.
 }
 
 // =============================================================================
@@ -184,13 +180,12 @@ void SharedMemoryHandle::print_layout() {
     LOG_DEBUG("=== Shared Memory Layout ===");
     LOG_DEBUG("Base address:       %p", sm_base);
     LOG_DEBUG("Total size:         %" PRIu64 " bytes", h->total_size);
-    LOG_DEBUG("Ring:");
-    LOG_DEBUG("  task_window_size: %" PRIu64, h->ring.task_window_size);
+    LOG_DEBUG("Task table:");
     LOG_DEBUG(
-        "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->ring.task_descriptors_offset,
-        h->ring.task_descriptors_offset
+        "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->tasks.task_descriptors_offset,
+        h->tasks.task_descriptors_offset
     );
-    LOG_DEBUG("  current_task_idx: %d", h->ring.fc.current_task_index.load(std::memory_order_acquire));
+    LOG_DEBUG("  completed_wm:     %d", h->tasks.completed_watermark.load(std::memory_order_acquire));
     LOG_DEBUG("orchestrator_done:  %d", h->orchestrator_done.load(std::memory_order_acquire));
     LOG_DEBUG("Error state:");
     LOG_DEBUG("  orch_error_code:    %d", h->orch_error_code.load(std::memory_order_relaxed));
@@ -204,28 +199,13 @@ bool SharedMemoryHandle::validate() {
     if (!sm_base) return false;
     if (!header) return false;
 
-    SharedMemoryHeader *h = header;
-
-    if (!h->ring.fc.validate(this)) return false;
-
-    return true;
-}
-
-bool ChipRingFlowControl::validate(SharedMemoryHandle *handle) const {
-    if (!handle) return false;
-    if (!handle->header) return false;
-
-    const SharedMemoryHeader *h = handle->header;
+    const SharedMemoryHeader *h = header;
 
     // Check that offsets are within bounds
-    if (h->ring.task_descriptors_offset >= h->total_size) return false;
+    if (h->tasks.task_descriptors_offset >= h->total_size) return false;
 
     // Check pointer alignment
-    if ((uintptr_t)h->ring.task_descriptors % CHIP_ALIGN_SIZE != 0) return false;
-
-    // Check flow control pointer sanity
-    int32_t current = current_task_index.load(std::memory_order_acquire);
-    if (current < 0) return false;
+    if ((uintptr_t)h->tasks.task_descriptors % CHIP_ALIGN_SIZE != 0) return false;
 
     return true;
 }

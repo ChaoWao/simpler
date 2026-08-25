@@ -120,11 +120,9 @@ extern "C" int concurrent_native_prepare_supported_impl(void) {
 
 // RuntimeEnv (call_config.h) is the cross-runtime ABI for per-ring config and
 // carries RUNTIME_ENV_RING_COUNT slots, shared with tensormap_and_ringbuffer.
-// host_build_graph has one ring and reads slot 0, so it only needs the ABI to
-// carry at least one.
-static_assert(RUNTIME_ENV_RING_COUNT >= 1, "RuntimeEnv must carry the ring slot host_build_graph reads");
-
-static bool is_power_of_2_u64(uint64_t value) { return value != 0 && (value & (value - 1)) == 0; }
+// host_build_graph keeps one task table and reads slot 0, so it only needs the ABI
+// to carry at least one.
+static_assert(RUNTIME_ENV_RING_COUNT >= 1, "RuntimeEnv must carry the slot host_build_graph reads");
 
 // Host monotonic clock, shared with the record pool so spans and records can be
 // read against each other.
@@ -197,7 +195,7 @@ static void warn_on_retired_ring_env() {
     }
 }
 
-// ring_task_window points into the #pragma pack(1) RuntimeEnv wire struct
+// A RuntimeEnv knob array points into the #pragma pack(1) wire struct
 // (call_config.h), so its uint64_t entries are only byte-aligned — runtime_env
 // sits at offset 28 in CallConfig (after 7 int32_t), i.e. 4-byte but not 8-byte
 // aligned. Reading them as `base[idx]` is an unaligned 8-byte load: UB, and fatal
@@ -213,38 +211,42 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
 }
 
 // ring_task_window points at the first slot of a per-ring array in the RuntimeEnv
-// wire struct (0 = unset); hbg has one ring and reads slot 0. A per-task entry
-// wins over the compile-time default, and there is nothing between them.
+// wire struct (0 = unset); hbg keeps one task table and reads slot 0. A per-task
+// entry wins over the compile-time default, and there is nothing between them.
 //
 // The heap takes no configuration: its device region is committed after
 // orchestration, sized to what the graph turned out to need, so there is nothing
 // to resolve up front. RuntimeEnv::ring_heap stays the reclaiming runtime's knob;
 // this function does not resolve it, and the caller reads it only to warn that it
 // reaches nothing here.
-static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t *eff_task_window_size) {
-    *eff_task_window_size = CHIP_TASK_WINDOW_SIZE;
+static bool resolve_graph_task_capacity(const uint64_t *ring_task_window, uint64_t *task_capacity) {
+    *task_capacity = CHIP_DEFAULT_GRAPH_TASKS;
 
     warn_on_retired_ring_env();
 
-    const uint64_t task_window_override = read_ring_override(ring_task_window, 0);
-    if (task_window_override != 0) {
-        *eff_task_window_size = task_window_override;
+    const uint64_t override_value = read_ring_override(ring_task_window, 0);
+    if (override_value != 0) {
+        *task_capacity = override_value;
     }
 
-    if (*eff_task_window_size < 4 || *eff_task_window_size > static_cast<uint64_t>(INT32_MAX) ||
-        !is_power_of_2_u64(*eff_task_window_size)) {
-        LOG_ERROR("ring_task_window=%" PRIu64 " must be a power of 2 in [4, INT32_MAX]", *eff_task_window_size);
+    // Any positive count is usable: a task id indexes its slot directly, so
+    // nothing masks with this value. The power-of-two, >= 4 requirement belongs to
+    // tensormap_and_ringbuffer, which does mask, and is enforced in that runtime's
+    // own resolve; neither the RuntimeEnv setter nor Worker.run constrains the
+    // value, so this bound is the only one a ring_task_window passes through.
+    if (*task_capacity < 1 || *task_capacity > static_cast<uint64_t>(INT32_MAX)) {
+        LOG_ERROR("ring_task_window=%" PRIu64 " must be in [1, INT32_MAX]", *task_capacity);
         return false;
     }
     // A slot state reaches its payload and descriptor through a 32-bit
     // self-relative delta, so every pair of addresses in the shared-memory
     // image must be within INT32_MAX of each other.
-    const uint64_t sm_bytes = sm_layout::ring_segment_offsets(*eff_task_window_size).end;
+    const uint64_t sm_bytes = sm_layout::segment_offsets(*task_capacity).end;
     if (sm_bytes > static_cast<uint64_t>(INT32_MAX)) {
         LOG_ERROR(
             "ring_task_window=%" PRIu64 " needs a %" PRIu64 "-byte shared memory image, past the %d-byte limit "
             "a slot state's self-relative payload/descriptor delta can span",
-            *eff_task_window_size, sm_bytes, INT32_MAX
+            *task_capacity, sm_bytes, INT32_MAX
         );
         return false;
     }
@@ -495,7 +497,7 @@ struct GraphHostStateBinding {
 
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, RuntimeContext *rt,
-    DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, uint64_t eff_task_window_size,
+    DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, uint64_t task_capacity,
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     // The dep_gen graph belongs to the orchestration that is about to run.
@@ -505,7 +507,7 @@ int32_t run_host_orchestration(
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
-    const sm_layout::ChipRingSegmentOffsets sm_segs = sm_layout::ring_segment_offsets(eff_task_window_size);
+    const sm_layout::SegmentOffsets sm_segs = sm_layout::segment_offsets(task_capacity);
     // Over-allocated and rounded up: every segment offset is a multiple of
     // CHIP_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
     // new uint8_t[] does not guarantee.
@@ -529,8 +531,7 @@ int32_t run_host_orchestration(
     // actually needs, and compact_live_image moves every address the orchestrator
     // wrote onto the real base before the image travels.
     if (!orchestrator.init(
-            host_sm, reinterpret_cast<void *>(HEAP_VIRTUAL_BASE), HEAP_VIRTUAL_CAPACITY, eff_task_window_size,
-            rt->scheduler
+            host_sm, reinterpret_cast<void *>(HEAP_VIRTUAL_BASE), HEAP_VIRTUAL_CAPACITY, task_capacity, rt->scheduler
         )) {
         LOG_ERROR("host-orch: orchestrator init against host SM failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -538,7 +539,7 @@ int32_t run_host_orchestration(
 
     // Initialize the host SM header (ring flow control) so submit_task can run.
     SharedMemoryHandle host_sm_handle;
-    if (!host_sm_handle.init(host_sm, sm_size, eff_task_window_size)) {
+    if (!host_sm_handle.init(host_sm, sm_size, task_capacity)) {
         LOG_ERROR("host-orch: host SM init failed");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
@@ -648,7 +649,7 @@ int32_t run_host_orchestration(
         return status;
     }
 
-    const int32_t total_tasks = sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t total_tasks = orchestrator.task_allocator.active_count();
     {
         char attrs[160];
         snprintf(
@@ -684,23 +685,29 @@ int32_t run_host_orchestration(
     }
 
     // total_tasks sizes the bounded per-segment H2D copies below; a value outside
-    // [0, task_window] would make those copies read/write out of bounds.
-    if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > eff_task_window_size) {
-        LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, eff_task_window_size);
+    // [0, task_capacity] would make those copies read/write out of bounds.
+    if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > task_capacity) {
+        LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, task_capacity);
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     host_phase_trace_note_submitted(static_cast<uint64_t>(total_tasks));
 
-    // The device reads no ring slot past total_tasks, so only that prefix of each
+    // The count travels inside the header the restack copies wholesale, which is
+    // what lets the device bound its completed_watermark walk without a second
+    // carrier. Written after the range check above, so the value the device reads
+    // is one the segments are actually pitched to.
+    reinterpret_cast<SharedMemoryHeader *>(host_sm)->tasks.total_tasks = total_tasks;
+
+    // The device reads no task slot past total_tasks, so only that prefix of each
     // segment has to travel. In the mirror the orchestrator wrote, the four
-    // prefixes are a ring capacity apart, which would make the upload four copies
-    // of a few hundred kilobytes each — and at these sizes a copy_to_device is
-    // priced by the call, not by the bytes.
+    // prefixes are a whole task_capacity apart, which would make the upload four
+    // copies of a few hundred kilobytes each — and at these sizes a copy_to_device
+    // is priced by the call, not by the bytes.
     //
     // So the prefixes are restacked into an image pitched to total_tasks, where
     // they are contiguous, and that image goes up as one copy. The device attaches
-    // with the same pitch. The ring capacity and mask are untouched: `local_id &
-    // mask` is `local_id`, which is below the pitch for every ring task.
+    // with the same pitch, which is sound because a task id is its own slot index:
+    // every id is below total_tasks and indexes the image directly.
     const uint64_t nt = static_cast<uint64_t>(total_tasks);
     // What this bind actually put in the pools. The orchestrator's cursors are the
     // exact populated extent of each one — no scan of the mirror is needed, and the
@@ -712,7 +719,7 @@ int32_t run_host_orchestration(
         static_cast<uint64_t>(orch_state.tensor_pool_cursor),
         static_cast<uint64_t>(orch_state.scalar_pool_cursor),
     };
-    const uint64_t image_bytes = sm_layout::ring_segment_offsets(sm_layout::image_extents(bind_usage)).end;
+    const uint64_t image_bytes = sm_layout::segment_offsets(sm_layout::image_extents(bind_usage)).end;
     runtime->sm_image_bytes = image_bytes;
 
     // Only now are both sizes known, so this is where the two device regions are
@@ -814,7 +821,7 @@ int32_t run_host_orchestration(
     rt->orchestrator = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
     const uint64_t compacted = sm_layout::compact_live_image(
-        static_cast<const char *>(host_sm), eff_task_window_size, bind_usage, heap_rebase, upload_base + copied_bytes
+        static_cast<const char *>(host_sm), task_capacity, bind_usage, heap_rebase, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
 
@@ -1005,8 +1012,8 @@ extern "C" int bind_callable_to_runtime_impl(
         host_phase_trace_end();
     });
 
-    uint64_t eff_task_window_size = 0;
-    if (!resolve_task_window_size(ring_task_window, &eff_task_window_size)) {
+    uint64_t task_capacity = 0;
+    if (!resolve_graph_task_capacity(ring_task_window, &task_capacity)) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     // The heap takes no configuration, so a set ring_heap reaches nothing in this
@@ -1018,7 +1025,6 @@ extern "C" int bind_callable_to_runtime_impl(
                   "size the graph turned out to need"
         );
     }
-    LOG_INFO("Ring task window: %" PRIu64, eff_task_window_size);
 
     // Build device args: copy from input, replace host tensor pointers with device pointers
     ChipStorageTaskArgs device_args;
@@ -1118,11 +1124,11 @@ extern "C" int bind_callable_to_runtime_impl(
     // runs — do NOT record in tensor_pairs_; the free is deferred to
     // DeviceRunner::finalize(). The runtime-arena size is determined by replaying
     // the reserve sequence on a host-side arena.
-    uint64_t sm_size = SharedMemoryHandle::calculate_size(eff_task_window_size);
+    uint64_t sm_size = SharedMemoryHandle::calculate_size(task_capacity);
 
     const int64_t t_arena_build_ns = bind_now_ns();
     DeviceArena host_arena;
-    RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_size);
+    RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, task_capacity);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1185,8 +1191,7 @@ extern "C" int bind_callable_to_runtime_impl(
         ChipTaskArgs orch_l2;
         orch_l2.create_from_entry_storage(runtime->get_orch_args());
         int32_t total_tasks = run_host_orchestration(
-            runtime, api, tensor_access, rt, host_arena, layout, sm_size, eff_task_window_size, host_orch_func_ptr,
-            orch_l2
+            runtime, api, tensor_access, rt, host_arena, layout, sm_size, task_capacity, host_orch_func_ptr, orch_l2
         );
         // The orchestrator is the only host-view reader; from here the device
         // owns these buffers, so drop the window on both exits.

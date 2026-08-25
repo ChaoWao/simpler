@@ -231,7 +231,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // and every cross-task reference it wrote is an offset from its own block, so
     // the SM/arena this thread sees need no address fixup. This thread attaches
     // the prebuilt arena, points the SM
-    // handle's ring-header pointers at the device SM WITHOUT resetting the
+    // handle's task-header pointers at the device SM WITHOUT resetting the
     // host-populated data, hands the host-computed task count to the scheduler,
     // and releases the other threads. It then falls through and schedules its own
     // cores like every other thread — host_build_graph has no device-side
@@ -264,9 +264,10 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             void *sm_ptr = runtime->get_gm_sm_ptr();
             // The image the host shipped is pitched to the submitted task count,
-            // not to the ring capacity, and the device region holds exactly that
-            // image — so its size comes from the same pitch. attach_populated
-            // rejects a pitch outside (0, capacity] and a region too small for it.
+            // not to the count the table was dimensioned for, and the device region
+            // holds exactly that image — so its size comes from the same pitch.
+            // attach_populated rejects a pitch outside (0, task_capacity] and a
+            // region too small for it.
             const uint64_t live_slots = sm_layout::live_slot_pitch(static_cast<uint64_t>(runtime->host_total_tasks));
             const uint64_t sm_size = runtime->sm_image_bytes;
             // sm_handle and the scheduler state are the device-only zone: their
@@ -276,7 +277,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // attach_populated.
             memset(rt->sm_handle, 0, sizeof(*rt->sm_handle));
             if (!rt->sm_handle->attach_populated(
-                    sm_ptr, sm_size, rt->prebuilt_layout.task_window_size, live_slots, runtime->sm_image_bytes
+                    sm_ptr, sm_size, rt->prebuilt_layout.task_capacity, live_slots, runtime->sm_image_bytes
                 )) {
                 LOG_ERROR("Thread %d: host-orch: sm_handle->attach_populated failed", thread_idx);
                 rt = nullptr;

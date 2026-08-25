@@ -71,7 +71,7 @@ protected:
 
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, CHIP_DEFAULT_GRAPH_TASKS, &sched));
 
         definition_staging.assign(STAGING_BYTES, std::byte{0});
         arena.base = definition_staging.data();
@@ -427,7 +427,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
     TaskAllocator &allocator = orch.task_allocator;
-    while (allocator.active_count() < allocator.window_size() - 1) {
+    while (allocator.active_count() < allocator.capacity() - 1) {
         ASSERT_FALSE(allocator.alloc(0).failed());
     }
 
@@ -435,9 +435,9 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
 
     EXPECT_FALSE(replay.execute_block);
     ASSERT_TRUE(replay.task_id.is_valid());
-    EXPECT_EQ(replay.task_id.local(), static_cast<uint32_t>(allocator.window_size() - 1));
-    EXPECT_EQ(allocator.active_count(), allocator.window_size());
-    EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), allocator.window_size());
+    EXPECT_EQ(replay.task_id.local(), static_cast<uint32_t>(allocator.capacity() - 1));
+    EXPECT_EQ(allocator.active_count(), allocator.capacity());
+    EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
 }
 
@@ -742,9 +742,9 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     EXPECT_FALSE(orch.fatal);
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
-    SharedMemoryRingHeader &ring = sm_handle->header->ring;
-    const int32_t shell_slot = ring.get_slot_by_task_id(static_cast<int32_t>(graph.task_id.local()));
-    const TaskDescriptor *shell = ring.slot_states[shell_slot].task.get();
+    SharedMemoryTaskHeader &tasks = sm_handle->header->tasks;
+    const int32_t shell_slot = static_cast<int32_t>(graph.task_id.local());
+    const TaskDescriptor *shell = tasks.slot_states[shell_slot].task.get();
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
     EXPECT_GE(
@@ -865,13 +865,13 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
 }
 
 // A hidden-alloc task's payload passes through TaskPayload::init() and nothing
-// else — unlike an ordinary ring task, no dispatch-predicate assignment follows it,
+// else — unlike an ordinary task, no dispatch-predicate assignment follows it,
 // and unlike an outer GRAPH task, no graph_reset_outer_payload precedes it. So
 // init() is where its predicate has to acquire a defined value: the ring's payload
 // storage is reused raw memory that no constructor runs over, and compact_live_image
 // translates every submitted slot's predicate.addr as a graph-heap address.
 TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefined) {
-    TaskPayload *payloads = sm_handle->header->ring.task_payloads;
+    TaskPayload *payloads = sm_handle->header->tasks.task_payloads;
     ASSERT_NE(payloads, nullptr);
     // 0x4A repeated has 01 as its top two bits, so read as an address it lands
     // inside [HEAP_VIRTUAL_BASE, GRAPH_RECORD_VIRTUAL_BASE) — the quarter of the
@@ -894,7 +894,7 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     ASSERT_TRUE(outputs.task_id().is_valid());
     ASSERT_FALSE(orch.fatal);
 
-    const uint64_t slot = outputs.task_id().local() & (CHIP_TASK_WINDOW_SIZE - 1);
+    const uint64_t slot = outputs.task_id().local();
     ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
     EXPECT_EQ(payloads[slot].predicate.op, PredicateOp::NONE);
     EXPECT_EQ(payloads[slot].predicate.addr, 0u);

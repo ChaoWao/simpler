@@ -11,14 +11,14 @@
 /**
  * Poison test for the "every device-read SM field is written at submit" contract.
  *
- * host_build_graph no longer zero-fills the shared-memory task window (init-on-write):
- * init_header_per_ring writes only the header, and each slot's device-read fields are
+ * host_build_graph does not zero-fill the shared-memory task table (init-on-write):
+ * init_header writes only the header, and each slot's device-read fields are
  * written per task at submit (prepare_task + submit_task_common + TaskPayload::init).
- * Nothing else clears the window, so a device-read field a submit forgets to write would
+ * Nothing else clears the table, so a device-read field a submit forgets to write would
  * read as 0 only by allocator accident — passing every zero-backed test and failing
  * non-deterministically on device.
  *
- * This test fills the whole per-slot window with a 0xAA poison byte before submitting a
+ * This test fills the whole task table with a 0xAA poison byte before submitting a
  * representative mix, then asserts that for every claimed slot [0, total_tasks) the
  * device-read fields carry real values, not poison. Add a device-read field and forget
  * its submit-path write, and this fails in-tree.
@@ -65,7 +65,7 @@ protected:
         // Same order the AICPU boots in: the slot arrays are not part of the
         // uploaded image, so nothing can push until they carry their ramp.
         sched.seed_queue_slots();
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, CHIP_TASK_WINDOW_SIZE, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, CHIP_DEFAULT_GRAPH_TASKS, &sched));
     }
 
     void TearDown() override {
@@ -74,21 +74,21 @@ protected:
         sm_arena.release();
     }
 
-    // Fill the per-slot window (descriptors / payloads / slot_states / completion_flags)
-    // with poison. init_header_per_ring wrote only the header, so this is the state the
-    // window is in before any submit writes it — modelling the never-zeroed device SM.
-    void poison_window() {
-        auto &ring = sm_handle->header->ring;  // host_build_graph is single-ring
-        const size_t n = static_cast<size_t>(ring.task_window_mask) + 1;
-        std::memset(ring.task_descriptors, POISON, n * sizeof(TaskDescriptor));
-        std::memset(ring.task_payloads, POISON, n * sizeof(TaskPayload));
-        std::memset(ring.slot_states, POISON, n * sizeof(ChipTaskSlotState));
-        std::memset(ring.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
+    // Fill the task table (descriptors / payloads / slot_states / completion_flags)
+    // with poison. init_header wrote only the header, so this is the state the table
+    // is in before any submit writes it — modelling the never-zeroed device SM.
+    void poison_task_table() {
+        auto &tasks = sm_handle->header->tasks;
+        const size_t n = static_cast<size_t>(CHIP_DEFAULT_GRAPH_TASKS);
+        std::memset(tasks.task_descriptors, POISON, n * sizeof(TaskDescriptor));
+        std::memset(tasks.task_payloads, POISON, n * sizeof(TaskPayload));
+        std::memset(tasks.slot_states, POISON, n * sizeof(ChipTaskSlotState));
+        std::memset(tasks.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
     }
 };
 
 TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
-    poison_window();
+    poison_task_table();
     orch.begin_scope();
 
     // 1. Zero-fanin root: a real mixed (AIV0) task with an output tensor and a scalar.
@@ -127,17 +127,16 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
 
     orch.end_scope();
 
-    auto &ring = sm_handle->header->ring;
-    const int32_t total = ring.fc.current_task_index.load(std::memory_order_acquire);
+    auto &tasks = sm_handle->header->tasks;
+    const int32_t total = orch.task_allocator.active_count();
     ASSERT_GE(total, 4);
 
     // Every claimed slot's device-read fields must carry real values, not poison.
     for (int32_t local = 0; local < total; local++) {
         SCOPED_TRACE(testing::Message() << "slot local_id=" << local);
-        const int32_t slot = ring.get_slot_by_task_id(local);
-        const TaskDescriptor &desc = ring.task_descriptors[slot];
-        const TaskPayload &pl = ring.task_payloads[slot];
-        const ChipTaskSlotState &st = ring.slot_states[slot];
+        const TaskDescriptor &desc = tasks.task_descriptors[local];
+        const TaskPayload &pl = tasks.task_payloads[local];
+        const ChipTaskSlotState &st = tasks.slot_states[local];
 
         // Descriptor: the task id is written to this exact local id.
         EXPECT_EQ(desc.task_id.local(), static_cast<uint32_t>(local));
@@ -148,7 +147,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         EXPECT_TRUE(state == CHIP_TASK_PENDING || state == CHIP_TASK_COMPLETED);
         // Completion flag is written to a real 0/1 (pending vs pre-completed), not a
         // poison byte (0xAA).
-        const uint8_t cflag = ring.completion_flags[slot].load(std::memory_order_relaxed);
+        const uint8_t cflag = tasks.completion_flags[local].load(std::memory_order_relaxed);
         EXPECT_LE(cflag, uint8_t{1});
         // Payload counts are real, not the poison bit pattern.
         EXPECT_GE(pl.fanin_count, 0);
@@ -164,8 +163,8 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     }
 
     // Field-specific coverage on the real task: tensors, scalar, packed output buffer.
-    const TaskDescriptor &root_desc = ring.task_descriptors[ring.get_slot_by_task_id(root.task_id().local())];
-    const TaskPayload &root_pl = ring.task_payloads[ring.get_slot_by_task_id(root.task_id().local())];
+    const TaskDescriptor &root_desc = tasks.task_descriptors[root.task_id().local()];
+    const TaskPayload &root_pl = tasks.task_payloads[root.task_id().local()];
     EXPECT_EQ(root_pl.tensor_count, 1);
     EXPECT_EQ(root_pl.scalar_count, 1);
     EXPECT_EQ(root_pl.dump_metadata.dump_arg_mask, (uint64_t{1} << 0) | (uint64_t{1} << 1));
@@ -176,7 +175,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     EXPECT_EQ(root_desc.kernel_id[static_cast<int>(SubtaskSlot::AIV0)], 0);
 
     // The consumer's fanin is written: two duplicate deps dedupe to one.
-    const TaskPayload &cons_pl = ring.task_payloads[ring.get_slot_by_task_id(consumer.task_id().local())];
+    const TaskPayload &cons_pl = tasks.task_payloads[consumer.task_id().local()];
     EXPECT_EQ(cons_pl.fanin_count, 1);
     EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(root.task_id().local()));
 }

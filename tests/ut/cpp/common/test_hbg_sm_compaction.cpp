@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * The orchestrator writes a ring-pitched shared-memory mirror; the image that
+ * The orchestrator writes a reservation-pitched shared-memory mirror; the image that
  * ships is pitched to the submitted count so its four live prefixes are
  * contiguous and travel as one copy. compact_live_image is the restack, and it
  * owes the device three things: the live payloads, a header carrying no host
@@ -29,7 +29,7 @@
 
 namespace {
 
-constexpr uint64_t WINDOW = 64;  // stands in for the ring capacity
+constexpr uint64_t WINDOW = 64;  // stands in for the mirror's task capacity
 constexpr uint64_t SUBMITTED = 5;
 
 // The per-task argument shape these tests write. Deliberately far below every cap, so
@@ -69,17 +69,17 @@ private:
 class Mirror {
 public:
     Mirror() :
-        image_(sm_layout::ring_segment_offsets(WINDOW).end) {
-        const auto off = sm_layout::ring_segment_offsets(WINDOW);
+        image_(sm_layout::segment_offsets(WINDOW).end) {
+        const auto off = sm_layout::segment_offsets(WINDOW);
         auto *header = reinterpret_cast<SharedMemoryHeader *>(image_.base());
-        auto &ring = header->ring;
-        ring.task_window_size = WINDOW;
-        ring.task_window_mask = static_cast<int32_t>(WINDOW - 1);
-        ring.fc.current_task_index.store(static_cast<int32_t>(SUBMITTED), std::memory_order_relaxed);
-        ring.task_descriptors = descriptors();
-        ring.task_payloads = payloads();
-        ring.slot_states = slot_states();
-        ring.completion_flags = completion_flags();
+        auto &tasks = header->tasks;
+        tasks.task_descriptors_offset = off.descriptors;
+        tasks.completed_watermark.store(-1, std::memory_order_relaxed);
+        tasks.total_tasks = static_cast<int32_t>(SUBMITTED);
+        tasks.task_descriptors = descriptors();
+        tasks.task_payloads = payloads();
+        tasks.slot_states = slot_states();
+        tasks.completion_flags = completion_flags();
         (void)off;
 
         // Each live slot takes a packed region in each pool, exactly as the
@@ -134,30 +134,26 @@ public:
     const char *base() const { return image_.base(); }
 
     TaskDescriptor *descriptors() {
-        return reinterpret_cast<TaskDescriptor *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).descriptors);
+        return reinterpret_cast<TaskDescriptor *>(image_.base() + sm_layout::segment_offsets(WINDOW).descriptors);
     }
     TaskPayload *payloads() {
-        return reinterpret_cast<TaskPayload *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).payloads);
+        return reinterpret_cast<TaskPayload *>(image_.base() + sm_layout::segment_offsets(WINDOW).payloads);
     }
     simpler::hbg::Tensor *tensor_pool() {
-        return reinterpret_cast<simpler::hbg::Tensor *>(
-            image_.base() + sm_layout::ring_segment_offsets(WINDOW).tensor_pool
-        );
+        return reinterpret_cast<simpler::hbg::Tensor *>(image_.base() + sm_layout::segment_offsets(WINDOW).tensor_pool);
     }
     uint64_t *scalar_pool() {
-        return reinterpret_cast<uint64_t *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).scalar_pool);
+        return reinterpret_cast<uint64_t *>(image_.base() + sm_layout::segment_offsets(WINDOW).scalar_pool);
     }
     int32_t *fanin_pool() {
-        return reinterpret_cast<int32_t *>(image_.base() + sm_layout::ring_segment_offsets(WINDOW).fanin_pool);
+        return reinterpret_cast<int32_t *>(image_.base() + sm_layout::segment_offsets(WINDOW).fanin_pool);
     }
     ChipTaskSlotState *slot_states() {
-        return reinterpret_cast<ChipTaskSlotState *>(
-            image_.base() + sm_layout::ring_segment_offsets(WINDOW).slot_states
-        );
+        return reinterpret_cast<ChipTaskSlotState *>(image_.base() + sm_layout::segment_offsets(WINDOW).slot_states);
     }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(
-            image_.base() + sm_layout::ring_segment_offsets(WINDOW).completion_flags
+            image_.base() + sm_layout::segment_offsets(WINDOW).completion_flags
         );
     }
 
@@ -188,14 +184,14 @@ struct Compacted {
     explicit Compacted(
         Mirror &mirror, uint64_t submitted = SUBMITTED, const sm_layout::HeapRebase &rebase = kNoHeapAddresses
     ) :
-        image(sm_layout::ring_segment_offsets(sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
+        image(sm_layout::segment_offsets(sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
         bytes(0),
         used(usage_for(submitted)) {
         bytes = sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
     }
 
-    sm_layout::ChipRingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
-        return sm_layout::ring_segment_offsets(sm_layout::image_extents(usage_for(submitted)));
+    sm_layout::SegmentOffsets off(uint64_t submitted = SUBMITTED) const {
+        return sm_layout::segment_offsets(sm_layout::image_extents(usage_for(submitted)));
     }
 
     TaskPayload *payload_at(uint64_t i) { return reinterpret_cast<TaskPayload *>(image.base() + off().payloads) + i; }
@@ -219,7 +215,7 @@ TEST(HbgSmCompaction, ShipsOnlyTheLivePrefix) {
     Compacted compacted(mirror);
 
     EXPECT_EQ(compacted.bytes, compacted.off().end);
-    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(WINDOW).end);
+    EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(WINDOW).end);
 }
 
 TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
@@ -237,9 +233,12 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     }
     // The header's pitch-independent fields come across; the mirror slot past the
     // prefix does not.
-    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
-    EXPECT_EQ(ring.task_window_size, WINDOW);
-    EXPECT_EQ(ring.fc.current_task_index.load(std::memory_order_relaxed), static_cast<int32_t>(SUBMITTED));
+    auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
+    EXPECT_EQ(tasks.task_descriptors_offset, sm_layout::segment_offsets(WINDOW).descriptors);
+    EXPECT_EQ(tasks.completed_watermark.load(std::memory_order_relaxed), -1);
+    // The device bounds its completed_watermark walk with this, and the restack is
+    // the only thing that carries it there.
+    EXPECT_EQ(tasks.total_tasks, static_cast<int32_t>(SUBMITTED));
 }
 
 // The load-bearing one. Restacking changes the distance between a slot state and
@@ -284,11 +283,11 @@ TEST(HbgSmCompaction, LeavesNoHostPointerInTheHeader) {
     Mirror mirror;
     Compacted compacted(mirror);
 
-    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
-    EXPECT_EQ(ring.task_descriptors, nullptr);
-    EXPECT_EQ(ring.task_payloads, nullptr);
-    EXPECT_EQ(ring.slot_states, nullptr);
-    EXPECT_EQ(ring.completion_flags, nullptr);
+    auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
+    EXPECT_EQ(tasks.task_descriptors, nullptr);
+    EXPECT_EQ(tasks.task_payloads, nullptr);
+    EXPECT_EQ(tasks.slot_states, nullptr);
+    EXPECT_EQ(tasks.completion_flags, nullptr);
 }
 
 // A bind that submits nothing still ships its header and still attaches. Its pools
@@ -299,10 +298,10 @@ TEST(HbgSmCompaction, ZeroSubmittedShipsTheHeaderAlone) {
     Compacted compacted(mirror, /*submitted=*/0);
 
     EXPECT_EQ(compacted.bytes, compacted.off(0).end);
-    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(1).end);
-    auto &ring = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->ring;
-    EXPECT_EQ(ring.task_window_size, WINDOW);
-    EXPECT_EQ(ring.task_descriptors, nullptr);
+    EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(1).end);
+    auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
+    EXPECT_EQ(tasks.task_descriptors_offset, sm_layout::segment_offsets(WINDOW).descriptors);
+    EXPECT_EQ(tasks.task_descriptors, nullptr);
 }
 
 // The pools ship what the bind used, not what the mirror is dimensioned for. That
@@ -314,7 +313,7 @@ TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
 
     // The mirror's pools cover WINDOW tasks at their full caps; the image's cover
     // SUBMITTED tasks at the shape they actually used.
-    EXPECT_LT(compacted.bytes, sm_layout::ring_segment_offsets(WINDOW).end);
+    EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(WINDOW).end);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         TaskPayload *shipped = compacted.payload_at(i);
@@ -408,16 +407,45 @@ TEST(HbgSmCompaction, LayoutStaysWithinDeltaReach) {
     EXPECT_LT(compacted.bytes, static_cast<uint64_t>(INT32_MAX));
 
     constexpr uint64_t REACH = static_cast<uint64_t>(INT32_MAX);
-    EXPECT_LE(sm_layout::ring_segment_offsets(CHIP_TASK_WINDOW_SIZE).end, REACH);
+    EXPECT_LE(sm_layout::segment_offsets(CHIP_DEFAULT_GRAPH_TASKS).end, REACH);
 
     // The bound is a property of the layout, not of the capacity alone: there is a
     // capacity past which the mirror no longer fits, and it is above the default.
-    uint64_t window = CHIP_TASK_WINDOW_SIZE;
-    while (window <= (UINT64_MAX / 2) && sm_layout::ring_segment_offsets(window).end <= REACH) {
+    uint64_t window = CHIP_DEFAULT_GRAPH_TASKS;
+    while (window <= (UINT64_MAX / 2) && sm_layout::segment_offsets(window).end <= REACH) {
         window *= 2;
     }
-    EXPECT_GT(window, static_cast<uint64_t>(CHIP_TASK_WINDOW_SIZE));
-    EXPECT_GT(sm_layout::ring_segment_offsets(window).end, REACH);
+    EXPECT_GT(window, static_cast<uint64_t>(CHIP_DEFAULT_GRAPH_TASKS));
+    EXPECT_GT(sm_layout::segment_offsets(window).end, REACH);
+}
+
+// A task id indexes its slot directly, so no capacity is masked and a bind may pass
+// any positive runtime_env.ring_task_window through. The layout walk therefore has to
+// hold for a slot count that is not a power of two: every segment stays
+// CHIP_ALIGN_SIZE-aligned, and each one leaves room for its own array at that pitch.
+TEST(HbgSmCompaction, SegmentLayoutHoldsForANonPowerOfTwoCapacity) {
+    for (uint64_t capacity : {uint64_t{1}, uint64_t{3}, uint64_t{10}, uint64_t{1000}, uint64_t{16383}}) {
+        const sm_layout::ImageExtents e = sm_layout::mirror_extents(capacity);
+        const sm_layout::SegmentOffsets off = sm_layout::segment_offsets(e);
+
+        // The descriptors sit right after the padded header, whatever the pitch.
+        EXPECT_EQ(off.descriptors, CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE))
+            << "capacity " << capacity;
+
+        const uint64_t starts[] = {off.descriptors, off.payloads,    off.slot_states, off.completion_flags,
+                                   off.fanin_pool,  off.tensor_pool, off.scalar_pool, off.end};
+        const uint64_t spans[] = {
+            capacity * sizeof(TaskDescriptor),    capacity * sizeof(TaskPayload),
+            capacity * sizeof(ChipTaskSlotState), capacity * sizeof(std::atomic<uint8_t>),
+            e.fanin_elems * sizeof(int32_t),      e.tensor_elems * sizeof(simpler::hbg::Tensor),
+            e.scalar_elems * sizeof(uint64_t),
+        };
+        for (size_t i = 0; i < std::size(spans); ++i) {
+            EXPECT_EQ(starts[i] % CHIP_ALIGN_SIZE, 0u) << "capacity " << capacity << " segment " << i;
+            EXPECT_GE(starts[i + 1] - starts[i], spans[i]) << "capacity " << capacity << " segment " << i;
+        }
+        EXPECT_EQ(off.end % CHIP_ALIGN_SIZE, 0u) << "capacity " << capacity;
+    }
 }
 
 // The graph heap's device region is committed after orchestration, so the

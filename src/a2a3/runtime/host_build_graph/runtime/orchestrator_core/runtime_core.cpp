@@ -195,15 +195,14 @@ static bool wait_for_tensor_ready(
             return nullptr;
         }
 
-        auto &ring = orch.sm_header->ring;
+        auto &tasks = orch.sm_header->tasks;
         int32_t local_id = static_cast<int32_t>(producer.local());
-        int32_t slot_index = ring.get_slot_by_task_id(local_id);
-        auto &slot = ring.get_slot_state_by_slot(slot_index);
+        auto &slot = tasks.get_slot_state_by_task_id(local_id);
         if (slot.task == nullptr || slot.task->task_id != producer) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
                 "tensor producer task %#llx does not match the descriptor bound to slot %d",
-                static_cast<unsigned long long>(producer.raw), slot_index
+                static_cast<unsigned long long>(producer.raw), local_id
             );
             failed = true;
             return nullptr;
@@ -212,7 +211,6 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
-        uint8_t ring_id = 0;
         int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
@@ -228,8 +226,8 @@ static bool wait_for_tensor_ready(
                 if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): producer (ring=%d, local=%d) not completed",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        "Timeout (%llu cycles): producer (local=%d) not completed",
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, local_id
                     );
                     failed = true;
                     return;
@@ -239,7 +237,6 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
-        uint8_t ring_id = 0;
         int32_t local_id = slot.task->task_id.local();
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
@@ -247,8 +244,8 @@ static bool wait_for_tensor_ready(
         // completed_watermark reaches the producer's highest consumer id (set at
         // submit in append_fanin_or_fail). Replaces the fanout_refcount ==
         // fanout_count wiring check, which polling removes.
-        SharedMemoryRingHeader &cons_ring = orch.sm_header->ring;
-        while (cons_ring.completed_watermark.load(std::memory_order_acquire) < slot.last_consumer_local_id) {
+        SharedMemoryTaskHeader &cons_tasks = orch.sm_header->tasks;
+        while (cons_tasks.completed_watermark.load(std::memory_order_acquire) < slot.last_consumer_local_id) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
                 // A fatal latched elsewhere (e.g. the scheduler-side wiring
@@ -260,8 +257,8 @@ static bool wait_for_tensor_ready(
                 if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): consumers of producer (ring=%d, local=%d) not done",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        "Timeout (%llu cycles): consumers of producer (local=%d) not done",
+                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, local_id
                     );
                     failed = true;
                     return;
