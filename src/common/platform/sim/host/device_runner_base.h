@@ -199,6 +199,7 @@ public:
         uint32_t pipeline_slot, size_t bytes, size_t alignment, void **device_out, void **staging_out
     );
     void get_graph_definition_staging(uint32_t pipeline_slot, void **addr, size_t *size);
+    int acquire_sm_mirror(uint32_t pipeline_slot, size_t bytes, size_t alignment, void **addr_out);
     void clear_temporary_buffer();
 
     // On sim, allocate_tensor returns a plain host pointer, so the "device"
@@ -319,6 +320,9 @@ protected:
     void release_callable_state();
     void release_graph_definition_blocks();
 
+    /** Drop every retained host SM mirror, returning its pages to the allocator. */
+    void release_sm_mirrors();
+
     // --- Shared state (protected so subclass execution / init_* / finalize()
     // can read or write directly) ----------------------------------------
 
@@ -353,6 +357,26 @@ protected:
         std::vector<std::byte> staging;
     };
     std::array<RetainedGraphBlock, PTO_PIPELINE_MAX_DEPTH> graph_definition_blocks_{};
+    // Host mirror of the runtime shared memory, one retained buffer per pipeline
+    // slot — see HostApi acquire_sm_mirror. A host-side orchestrator writes its
+    // whole shared-memory image here and the bind ships the live prefix, so the
+    // buffer is capacity-sized (tens of MB) and stays mapped across binds: one
+    // buffer per slot rather than one per bind, because two binds in different
+    // slots are in flight at once. `capacity` counts the raw block, which is over-allocated
+    // by the requested alignment so the aligned address handed out has the
+    // requested bytes behind it.
+    //
+    // The block is never value-initialized. The caller's layout is init-on-write
+    // and it ships only the prefixes it wrote, so the resident set is the pages a
+    // bind touches rather than the whole capacity — which is also why this is not a
+    // std::vector: `resize` would zero every page of a capacity the caller writes
+    // a fraction of, and would copy the old bytes on growth for a buffer whose
+    // contents mean nothing between binds.
+    struct RetainedSmMirror {
+        std::unique_ptr<std::byte[]> storage;
+        size_t capacity{0};
+    };
+    std::array<RetainedSmMirror, PTO_PIPELINE_MAX_DEPTH> sm_mirrors_{};
 
     // Each arena bank backs the three pooled regions (GM heap / shared
     // shared memory / trb prebuilt runtime arena) for one pipeline slot. They

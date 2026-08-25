@@ -74,6 +74,20 @@ struct HostApiOps {
     // into it — the run's total is not known until every recording has ended, so
     // the capacity on offer is whatever the previous bind left behind.
     void (*get_graph_definition_staging)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
+    // Runner-owned host mirror of the runtime shared memory, one retained buffer
+    // per pipeline slot: the block a host-side orchestrator (host_build_graph)
+    // writes its shared-memory image into before the bounded H2D ships the live
+    // prefix.
+    // Host memory only — nothing device-side is reserved here. `addr_out`
+    // receives a pointer aligned to `alignment` (a power of two) with at least
+    // `bytes` usable behind it. Grow-only retention: a request that fits the
+    // retained buffer reuses it, a larger one replaces it, and the buffer is
+    // released at Worker finalization, so a page of it faults once per Worker
+    // instead of once per bind. The block is handed over uninitialized and its
+    // bytes carry no meaning between binds — the caller re-clears the header and
+    // re-writes every segment it ships, so only the pages it touches ever become
+    // resident. Returns 0 on success.
+    int (*acquire_sm_mirror)(void *runner_ctx, uint32_t pipeline_slot, size_t bytes, size_t alignment, void **addr_out);
     // Commit the three pooled regions (GM heap, runtime shared memory, and
     // prebuilt runtime arena) of the arena bank selected by this run, as three
     // independent device allocations. `runtime_arena_size == 0` skips the
@@ -183,6 +197,13 @@ public:
             return;
         }
         ops_->get_graph_definition_staging(runner_ctx_, pipeline_slot_, addr, size);
+    }
+    int acquire_sm_mirror(size_t bytes, size_t alignment, void **addr_out) const {
+        if (ops_->acquire_sm_mirror == nullptr) {
+            if (addr_out != nullptr) *addr_out = nullptr;
+            return -1;
+        }
+        return ops_->acquire_sm_mirror(runner_ctx_, pipeline_slot_, bytes, alignment, addr_out);
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);

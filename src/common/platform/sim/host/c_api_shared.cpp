@@ -163,6 +163,18 @@ static void get_graph_definition_staging(void *runner_ctx, uint32_t pipeline_slo
     } catch (...) {}
 }
 
+static int
+acquire_sm_mirror(void *runner_ctx, uint32_t pipeline_slot, size_t bytes, size_t alignment, void **addr_out) {
+    if (addr_out != nullptr) *addr_out = nullptr;
+    if (runner_ctx == nullptr) return -1;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->acquire_sm_mirror(pipeline_slot, bytes, alignment, addr_out);
+    } catch (...) {
+        return -1;
+    }
+}
+
 static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void *callable) {
     if (runner_ctx == nullptr) return 0;
     try {
@@ -279,6 +291,7 @@ static const HostApiOps g_host_api_ops = {
     .set_retained_temp_buffer = set_retained_temp_buffer,
     .acquire_graph_definition_block = acquire_graph_definition_block,
     .get_graph_definition_staging = get_graph_definition_staging,
+    .acquire_sm_mirror = acquire_sm_mirror,
     .setup_static_arena = setup_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,

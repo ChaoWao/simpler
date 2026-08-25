@@ -508,14 +508,18 @@ int32_t run_host_orchestration(
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
     const sm_layout::SegmentOffsets sm_segs = sm_layout::segment_offsets(task_capacity);
-    // Over-allocated and rounded up: every segment offset is a multiple of
-    // CHIP_ALIGN_SIZE and ChipTaskSlotState is alignas(64), which a plain
-    // new uint8_t[] does not guarantee.
-    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size + CHIP_ALIGN_SIZE]);
-    void *host_sm = reinterpret_cast<void *>(
-        (reinterpret_cast<uintptr_t>(host_sm_buf.get()) + CHIP_ALIGN_SIZE - 1) &
-        ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
-    );
+    // The mirror belongs to the runner, one per pipeline slot, and lives past the
+    // bind that writes it: at the configured task capacity it is tens of MB, far
+    // above the block size glibc recycles, so a per-bind buffer costs an mmap and
+    // an munmap per bind. Nothing carries over inside it — the header is cleared
+    // here, and the prefix of each segment that ships is one this bind wrote. The
+    // layout needs CHIP_ALIGN_SIZE: every segment offset is a multiple of it and
+    // ChipTaskSlotState is alignas(64).
+    void *host_sm = nullptr;
+    if (api->acquire_sm_mirror(static_cast<size_t>(sm_size), CHIP_ALIGN_SIZE, &host_sm) != 0 || host_sm == nullptr) {
+        LOG_ERROR("host-orch: host SM mirror of %" PRIu64 " bytes unavailable", sm_size);
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
     std::memset(host_sm, 0, sm_segs.descriptors);
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).

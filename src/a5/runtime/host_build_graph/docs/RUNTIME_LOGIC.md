@@ -186,6 +186,17 @@ apart, so `compact_live_image` restacks them (plus the three argument pools) int
 an image pitched to `total_tasks`, where they are contiguous and travel as **one**
 `copy_to_device`. The device attaches with the same pitch.
 
+The mirror itself is the platform runner's, one buffer per pipeline slot, held
+across binds and grown to the largest capacity any bind has asked for
+(`HostApi::acquire_sm_mirror`). At the configured task capacity it is tens of MB,
+so a per-bind buffer is an `mmap` and an `munmap` per bind. The block is handed
+over uninitialized, so first touch still commits it and a run pays only for the
+bytes it writes. Init-on-write is what makes the reuse safe, and reuse does not
+weaken it: every byte a device-side reader reaches inside a shipped prefix is
+written by the bind that ships it. The one shipped byte range no reader reaches is
+the alignment padding the fanin cursor rounds past, which lies outside every
+payload's `fanin_count`.
+
 ## 4. Whole-Graph Capacity
 
 The runtime uses one task table, one graph heap, and one TensorMap pool. They are
