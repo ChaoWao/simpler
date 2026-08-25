@@ -106,8 +106,10 @@ def test_run_class_cases_reports_the_failing_case_name() -> None:
 
     case = {"name": "large_bf16", "params": {"batch": 64, "dtype": "bfloat16"}}
 
+    # The scene's own exception type reaches the caller: a negative scene test
+    # asserts on it, so a fixed-type wrapper would make such a test unable to pass.
     with pytest.raises(
-        RuntimeError,
+        ValueError,
         match=r"SceneTest case failed: FailingScene::large_bf16: device run failed$",
     ) as failure:
         run_class_cases(
@@ -125,8 +127,36 @@ def test_run_class_cases_reports_the_failing_case_name() -> None:
             enable_scope_stats=False,
         )
 
-    assert isinstance(failure.value.__cause__, ValueError)
-    assert str(failure.value.__cause__) == "device run failed"
+    # Annotated in place, so there is no wrapper to unwrap and the traceback still
+    # points at the scene that raised.
+    assert failure.value.__cause__ is None
+    assert failure.value.args[0] == "SceneTest case failed: FailingScene::large_bf16: device run failed"
+
+
+def test_run_class_cases_names_the_case_without_args() -> None:
+    """An exception carrying no message still gets the case name, not `'…: '`."""
+
+    class FailingScene:
+        def _run_and_validate(self, *_args, **_kwargs):
+            raise ValueError
+
+    with pytest.raises(ValueError) as failure:
+        run_class_cases(
+            object(),
+            FailingScene(),
+            [{"name": "empty_args"}],
+            callable_obj=object(),
+            sub_handles={},
+            rounds=1,
+            skip_golden=False,
+            enable_chip_swimlane=0,
+            enable_dump_args=0,
+            enable_pmu=0,
+            enable_dep_gen=False,
+            enable_scope_stats=False,
+        )
+
+    assert str(failure.value) == "SceneTest case failed: FailingScene::empty_args"
 
 
 def test_run_class_cases_keeps_device_error_visible_to_poison_classifier() -> None:
