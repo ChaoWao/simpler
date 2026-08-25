@@ -63,20 +63,8 @@ jobs:
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/ut -m requires_hardware --platform a2a3 --device ${DEVICE_RANGE} -v
-            python3 -c "
-          import json, os
-          p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]
-          npus = [{'id': str(i), 'slots': 1} for i in range(int(s), int(e)+1)]
-          json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
-                    open('tests/ut/cpp/build/resources.json', 'w'))
-          "
-            ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure --timeout 300
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/ut -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v && python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure --timeout 300"
-          fi
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+            --run "python -m pytest tests/ut -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v && python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure --timeout 300"
 
       - name: Build cann-examples/query
         if: inputs.include_cann_examples

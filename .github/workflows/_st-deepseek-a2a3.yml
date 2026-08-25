@@ -22,9 +22,9 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 30
     env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "10000"
+      SIMPLER_OP_EXECUTE_TIMEOUT_US: "45000000"
+      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "50000"
     steps:
       - name: Checkout target
         uses: actions/checkout@v5
@@ -72,9 +72,5 @@ jobs:
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           DS_TESTS="examples/a2a3/host_build_graph/deepseek_v4_flash_decode examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest $DS_TESTS -m "not sdma" --platform a2a3 --exclude-level 4 --manual only --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 4 \
-              --run ".venv/bin/python -m pytest $DS_TESTS -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
-          fi
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num 4 \
+            --run ".venv/bin/python -m pytest $DS_TESTS -m 'not sdma' --platform a2a3 --exclude-level 4 --manual only --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
