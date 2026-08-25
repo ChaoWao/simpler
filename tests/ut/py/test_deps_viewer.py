@@ -769,6 +769,94 @@ def test_main_reduced_mode_keeps_transitive_creator_reference(tmp_path, capsys):
     assert "removed 0 redundant edge(s)" in capsys.readouterr().out
 
 
+def test_main_reduced_mode_reports_creator_retained_count(tmp_path, capsys):
+    # Same graph as above: reduction removes nothing, but one edge is redundant
+    # and kept only for tensor lifetime. Without the retention count, "removed 0"
+    # is indistinguishable from a graph that carries no redundancy at all.
+    t0, t1, t3, t4 = 1, 2, 3, 4
+    edges = [(t0, t1), (t1, t3), (t3, t4), (t0, t4)]
+    deps_path = _write_deps_edges(tmp_path, edges, sources={(t0, t4): "creator"})
+
+    rc = deps_viewer.main([str(deps_path), "--edge-mode", "reduced", "-o", str(tmp_path / "graph.txt")])
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "removed 0 redundant edge(s)" in stdout
+    assert "1 further redundant edge(s) retained for creator tensor lifetime" in stdout
+    assert "--edge-mode retained lists them" in stdout
+
+
+def test_main_reduced_mode_reports_no_retention_when_nothing_is_protected(tmp_path, capsys):
+    a, b, c = 1, 2, 3
+    deps_path = _write_deps_edges(tmp_path, [(a, b), (b, c), (a, c)])
+
+    rc = deps_viewer.main([str(deps_path), "--edge-mode", "reduced", "-o", str(tmp_path / "graph.txt")])
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "removed 1 redundant edge(s)" in stdout
+    assert "retained for creator tensor lifetime" not in stdout
+
+
+def test_main_retained_mode_selects_only_creator_protected_redundant_edges(tmp_path, capsys):
+    t0, t1, t3, t4 = 1, 2, 3, 4
+    edges = [(t0, t1), (t1, t3), (t3, t4), (t0, t4)]
+    deps_path = _write_deps_edges(tmp_path, edges, sources={(t0, t4): "creator"})
+    out = tmp_path / "graph.txt"
+
+    rc = deps_viewer.main([str(deps_path), "--edge-mode", "retained", "-o", str(out)])
+
+    assert rc == 0
+    assert "unique_task_edges: 1" in out.read_text()
+    stdout = capsys.readouterr().out
+    assert "Creator-protected redundant edges: showing 1 of 4 edge(s)" in stdout
+    assert "  - 1 -> 4" in stdout
+
+
+def test_main_retained_mode_is_empty_when_reduction_drops_everything(tmp_path, capsys):
+    a, b, c = 1, 2, 3
+    deps_path = _write_deps_edges(tmp_path, [(a, b), (b, c), (a, c)])
+    out = tmp_path / "graph.txt"
+
+    rc = deps_viewer.main([str(deps_path), "--edge-mode", "retained", "-o", str(out)])
+
+    assert rc == 0
+    assert "unique_task_edges: 0" in out.read_text()
+    assert "showing 0 of 3 edge(s)" in capsys.readouterr().out
+
+
+def test_main_retained_dataflow_drops_the_edge_its_proof_licenses(tmp_path, capsys):
+    # The dataflow proof licenses removing the middle Output edge, so it leaves
+    # the retained set; the OUTPUT_EXISTING reuse boundary stays retained.
+    deps_path, _nodes = _write_output_lifetime_deps(tmp_path)
+
+    structural_rc = deps_viewer.main([str(deps_path), "--edge-mode", "retained", "-o", str(tmp_path / "s.txt")])
+    structural_out = capsys.readouterr().out
+    dataflow_rc = deps_viewer.main([str(deps_path), "--edge-mode", "retained_dataflow", "-o", str(tmp_path / "d.txt")])
+    dataflow_out = capsys.readouterr().out
+
+    assert structural_rc == 0
+    assert dataflow_rc == 0
+    assert "showing 2 of 5 edge(s)" in structural_out
+    assert "  - 1 -> 3" in structural_out
+    assert "  - 1 -> 4" in structural_out
+    assert "Creator-protected redundant edges (dataflow-verified): showing 1 of 5 edge(s)" in dataflow_out
+    assert "  - 1 -> 3" not in dataflow_out
+    assert "  - 1 -> 4" in dataflow_out
+
+
+def test_main_retained_default_output_stem(tmp_path):
+    ring = 1 << 32
+    a, b, c = ring + 1, ring + 2, ring + 3
+    deps_path = _write_deps_edges(tmp_path, [(a, b), (b, c), (a, c)])
+
+    rc = deps_viewer.main([str(deps_path), "--edge-mode", "retained"])
+
+    assert rc == 0
+    assert (tmp_path / "deps_viewer_retained.txt").exists()
+    assert not (tmp_path / "deps_viewer.txt").exists()
+
+
 def test_main_full_mode_keeps_all_edges(tmp_path, capsys):
     ring = 1 << 32
     a, b, c = ring + 1, ring + 2, ring + 3

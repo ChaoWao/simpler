@@ -35,6 +35,7 @@ Usage:
     python -m simpler_setup.tools.deps_viewer DEPS_JSON --format html --engine sfdp
     python -m simpler_setup.tools.deps_viewer DEPS_JSON --edge-mode reduced
     python -m simpler_setup.tools.deps_viewer DEPS_JSON --edge-mode omitted
+    python -m simpler_setup.tools.deps_viewer DEPS_JSON --edge-mode retained
     python -m simpler_setup.tools.deps_viewer DEPS_JSON --edge-mode reduced_dataflow
     python -m simpler_setup.tools.deps_viewer DEPS_JSON --edge-mode omitted_dataflow
 
@@ -47,13 +48,21 @@ warning if the graph contains a cycle:
   ``A->C`` when ``A->B->C`` exists), while retaining every ``creator`` edge.
 - ``omitted`` — only the redundant edges ``reduced`` would drop (its complement),
   useful for auditing exactly which dependencies are transitively covered.
-- ``reduced_dataflow`` / ``omitted_dataflow`` — structural reduction only
+- ``retained`` — the redundant edges reduction keeps for creator tensor
+  lifetime. These are transitively implied as ordering, so ``reduced`` cannot
+  drop them and ``omitted`` never lists them; without this mode a graph whose
+  redundancy is entirely creator-protected is indistinguishable from a graph
+  with no redundancy at all.
+- ``reduced_dataflow`` / ``omitted_dataflow`` / ``retained_dataflow`` — structural reduction only
   selects candidate edges. Each candidate creator edge is preserved unless
   full, unfiltered annotations prove every byte of an ``INOUT`` has direct
   TensorMap dataflow from an earlier Output and to a later ``INOUT`` owned by
   the same creator. ``OUTPUT_EXISTING`` reuse boundaries are always preserved.
 
-All reduction modes print the redundant edges to stdout. Text output
+All reduction modes print the redundant edges to stdout, and ``reduced`` /
+``omitted`` additionally report how many further redundant edges creator
+protection retained, so a ``removed 0`` is never mistaken for a graph that
+carries no redundancy. Text output
 emits only the selected edge set. HTML output keeps every edge in the Graphviz
 layout and colors the unselected edges like the page background, preserving the
 full-graph layout while drawing the selected edge set above unselected edges.
@@ -1768,17 +1777,27 @@ Examples:
     )
     p.add_argument(
         "--edge-mode",
-        choices=["full", "reduced", "omitted", "reduced_dataflow", "omitted_dataflow"],
+        choices=[
+            "full",
+            "reduced",
+            "omitted",
+            "retained",
+            "reduced_dataflow",
+            "omitted_dataflow",
+            "retained_dataflow",
+        ],
         default="full",
         help=(
             "full (default) selects every dependency edge; reduced applies transitive reduction, selecting the "
             "minimal scheduling-edge set while preserving creator tensor-lifetime edges; omitted selects only "
-            "the redundant edges reduced would drop (the complement of reduced). reduced/omitted print the "
-            "redundant edges to stdout. reduced_dataflow/omitted_dataflow use structural reduction only to select "
-            "candidates, then inspect full original annotations: OUTPUT_EXISTING reuse boundaries are retained, "
-            "and every byte of an INOUT needs direct TensorMap dataflow into and out of it before its creator edge "
-            "is omitted. All reduction modes work for text and html and are skipped with a warning on a cyclic graph. "
-            "In html, all edges still participate in layout; "
+            "the redundant edges reduced would drop (the complement of reduced); retained selects the redundant "
+            "edges reduction keeps for creator tensor lifetime, which reduced/omitted can never drop and which "
+            "reduced/omitted therefore report only as a count. reduced/omitted print the redundant edges to "
+            "stdout, retained prints the retained ones. The _dataflow variants use structural reduction only to "
+            "select candidates, then inspect full original annotations: OUTPUT_EXISTING reuse boundaries are "
+            "retained, and every byte of an INOUT needs direct TensorMap dataflow into and out of it before its "
+            "creator edge is omitted. All reduction modes work for text and html and are skipped with a warning "
+            "on a cyclic graph. In html, all edges still participate in layout; "
             "unselected edges are colored as background and drawn below selected edges."
         ),
     )
@@ -1844,20 +1863,41 @@ def _apply_edge_mode(edge_mode, output_format, edges, nodes, annotations, tensor
         )
         return edges, annotations, "deps_viewer", hidden_html_edges, visible_html_edge_count
 
+    # Structural reduction ignores creator protection, so the edges it drops that
+    # this mode still keeps are exactly the ones held for tensor lifetime.
+    _, structural_redundant, _ = _transitive_reduction(edges, nodes)
+    removed_set = set(removed)
+    retained = [edge for edge in structural_redundant if edge not in removed_set]
+
     fmt_task = _make_task_formatter(nodes)
-    is_reduced = edge_mode.startswith("reduced")
-    shown = kept if is_reduced else removed
-    if is_reduced:
-        prefix = "Dataflow-verified transitive reduction" if is_dataflow else "Transitive reduction"
-        print(f"{prefix}: removed {len(removed)} redundant edge(s) of {len(edges)} ({len(kept)} kept)")
+    selection = edge_mode.split("_", 1)[0]
+    shown = {"reduced": kept, "omitted": removed, "retained": retained}[selection]
+    listed = retained if selection == "retained" else removed
+    headline = {
+        ("reduced", False): "Transitive reduction",
+        ("reduced", True): "Dataflow-verified transitive reduction",
+        ("omitted", False): "Redundant edges only",
+        ("omitted", True): "Dataflow-verified redundant edges only",
+        ("retained", False): "Creator-protected redundant edges",
+        ("retained", True): "Creator-protected redundant edges (dataflow-verified)",
+    }[(selection, is_dataflow)]
+    if selection == "reduced":
+        print(f"{headline}: removed {len(removed)} redundant edge(s) of {len(edges)} ({len(kept)} kept)")
+    elif selection == "omitted":
+        print(f"{headline}: showing {len(removed)} redundant edge(s) of {len(edges)}")
     else:
-        prefix = "Dataflow-verified redundant edges only" if is_dataflow else "Redundant edges only"
-        print(f"{prefix}: showing {len(removed)} redundant edge(s) of {len(edges)}")
-    for pred, succ in removed:
+        print(f"{headline}: showing {len(retained)} of {len(edges)} edge(s), retained for tensor lifetime")
+    if selection != "retained" and retained:
+        lister = "retained_dataflow" if is_dataflow else "retained"
+        print(
+            f"  ({len(retained)} further redundant edge(s) retained for creator tensor lifetime; "
+            f"--edge-mode {lister} lists them)"
+        )
+    for pred, succ in listed:
         print(f"  - {fmt_task(pred)} -> {fmt_task(succ)}")
 
     if output_format == "html":
-        hidden_html_edges = set(removed if is_reduced else kept)
+        hidden_html_edges = set(edges) - set(shown)
         visible_html_edge_count = len(shown)
         print(
             f"HTML layout preserves all {len(edges)} edge(s); "

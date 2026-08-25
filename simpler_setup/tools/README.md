@@ -486,6 +486,10 @@ python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
 python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
     --edge-mode omitted
 
+# Retained: the redundant edges reduction keeps for creator tensor lifetime
+python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
+    --edge-mode retained
+
 # Dataflow-verified view: preserve OUTPUT_EXISTING reuse boundaries and require
 # direct TensorMap dataflow around every byte of an omitted INOUT
 python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
@@ -502,6 +506,12 @@ python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
   alone cannot replace that lifetime relationship.
 - `omitted` — only the redundant edges `reduced` would drop (its complement),
   for auditing exactly which dependencies are transitively covered.
+- `retained` — only the redundant edges `reduced` keeps for creator tensor
+  lifetime. These are transitively implied as ordering but must not be dropped,
+  so `reduced` cannot remove them and `omitted` never lists them. Without this
+  mode a graph whose redundancy is entirely creator-protected looks exactly
+  like a graph with no redundancy: on a captured attention graph of 6128 edges,
+  `reduced` reports `removed 0` while 2032 edges are transitively implied.
 - `reduced_dataflow` — structural reduction only selects candidate edges; it
   does not reduce the annotations used for proof. Every candidate is checked
   against the complete original `creator` and `tensormap` annotations before
@@ -514,8 +524,15 @@ python -m simpler_setup.tools.deps_viewer outputs/<case>_<ts>/deps.json \
   preserved conservatively.
 - `omitted_dataflow` — only structurally redundant edges that pass the
   dataflow proof; the complement of `reduced_dataflow`.
+- `retained_dataflow` — the redundant edges still retained after that proof.
+  An edge the proof licenses leaves this set, so it is always a subset of
+  `retained`.
 
-All reduction modes print the redundant edges to stdout as a
+`reduced` and `omitted` also report how many further redundant edges creator
+protection retained, naming the mode that lists them, so a `removed 0` is never
+read as "this graph carries no redundancy".
+
+All reduction modes print their redundant edges to stdout as a
 `<task> -> <task>` list, where each task uses the same label as the rendered
 graph — the bare `local` counter when every task is in ring 0, or the explicit
 `(ring, local)` tuple once any task lives in ring >= 1. Text output emits only
@@ -524,8 +541,8 @@ colors unselected edges like the page background, so `reduced` / `omitted`
 preserve the full-graph node placement and routing while showing only the
 selected edge set. Selected edges are drawn above background-colored edges so
 they stay visible where routes overlap. When `-o` is omitted the graph is
-written to a mode-specific stem (`deps_viewer_reduced.*` /
-`deps_viewer_omitted.*`) rather than `deps_viewer.*` so it never clobbers a
+written to a mode-specific stem (`deps_viewer_reduced.*`,
+`deps_viewer_retained.*`, …) rather than `deps_viewer.*` so it never clobbers a
 full-graph render in the same directory. In `reduced` / `omitted`, any
 annotation with `source=creator` protects that `(pred, succ)` pair from
 reduction. The dataflow modes use the complete original annotations to prove
@@ -539,7 +556,7 @@ the graph contains a cycle.
 | `input` | | Path to `deps.json` (default: newest under `./outputs/`) |
 | `--output` | `-o` | Output path; default stem is `deps_viewer`, or `deps_viewer_{mode}` for any reduction mode |
 | `--format` | | Output format: `text` (default) or `html` |
-| `--edge-mode` | | Select visible edges: `full`, `reduced`, `omitted`, `reduced_dataflow`, or `omitted_dataflow`; HTML preserves full layout. |
+| `--edge-mode` | | Select visible edges: `full`, `reduced`, `omitted`, `retained`, or their `_dataflow` variants; HTML preserves full layout. |
 | `--engine` | | HTML-only Graphviz layout engine: `dot` (default), `sfdp`, `neato`, `fdp`, `circo`, `twopi` |
 | `--direction` | | HTML-only flow direction for hierarchical layouts: `LR` (default) / `TB` / `BT` / `RL` |
 | `--show-tensor-info` | | HTML-only: render per-task tensor rows and route edges to specific arg ports |
