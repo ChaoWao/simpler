@@ -622,8 +622,8 @@ uint64_t Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype,
     s.fanin_count.store(0, std::memory_order_relaxed);
     s.fanin_released.store(0, std::memory_order_relaxed);
 
-    // Initial fanout_total = scope_ref. Consumers that wire on this slot
-    // will increment fanout_total in infer_deps.
+    // Initial fanout_total = scope_ref. Tensor-derived consumers that retain
+    // this slot increment fanout_total in infer_deps.
     const int32_t scope_ref = (scope_->depth() > 0) ? 1 : 0;
     if (scope_ref > 0) {
         // Register before charging fanout_total. If registration throws, scope
@@ -717,6 +717,7 @@ SubmitResult Orchestrator::submit_impl(
     config.validate();
     validate_worker_eligibility(worker_type, args_list.size(), target_worker_ids, eligible_worker_ids);
     validate_remote_sidecars(args_list, remote_sidecars, eligible_worker_ids);
+    validate_explicit_deps(run->id, args_list);
     validate_submit_args(args_list);
 
     {
@@ -777,8 +778,8 @@ SubmitResult Orchestrator::submit_impl(
     // terminal release, the threshold is never reached, the slot never reaches
     // CONSUMED, and the run's task count — and its fence — never resolve.
     // fanout_total is charged here rather than later for the opposite reason:
-    // once Step 2 publishes this slot's outputs, a consumer can wire onto it
-    // and increment fanout_total, and a later assignment would drop that.
+    // once Step 2 publishes this slot's outputs, a retaining consumer can wire
+    // onto it and increment fanout_total, and a later assignment would drop that.
     int32_t scope_ref = (scope_->depth() > 0) ? 1 : 0;
     if (scope_ref > 0) {
         scope_->register_task(slot);
@@ -795,7 +796,7 @@ SubmitResult Orchestrator::submit_impl(
     // --- Step 2: Walk tags → tensormap.lookup (deps) + tensormap.insert
     // (outputs). Must happen before we move args_list into the slot because
     // infer_deps reads tensor data pointers and tags from it.
-    std::vector<TaskSlot> producers;
+    std::vector<ProducerDependency> producers;
     infer_deps(slot, args_list, target_worker_ids, remote_sidecars, producers, s.output_keys);
 
     // --- Step 3: Store TaskArgs directly (no chip-storage pre-build) ---
@@ -839,7 +840,8 @@ SubmitResult Orchestrator::submit_impl(
     int32_t live_fanins = 0;
     bool poisoned_by_failed_producer = false;
     std::string poison_message;
-    for (TaskSlot prod : producers) {
+    for (const ProducerDependency &dependency : producers) {
+        TaskSlot prod = dependency.slot;
         TaskSlotState &ps = slot_state(prod);
         std::lock_guard<std::mutex> lk(ps.fanout_mu);
 
@@ -847,15 +849,24 @@ SubmitResult Orchestrator::submit_impl(
         if (ps_state == TaskState::CONSUMED) {
             continue;
         }
+        if (!dependency.retain && (ps_state == TaskState::COMPLETED || ps_state == TaskState::FAILED)) {
+            if (ps_state == TaskState::FAILED) {
+                poisoned_by_failed_producer = true;
+                if (poison_message.empty()) poison_message = ps.failure_message;
+            }
+            continue;
+        }
         ps.fanout_consumers.push_back(slot);
-        ps.fanout_total++;
-        try {
-            if (test_hook_) test_hook_(OrchestratorTestPoint::PRODUCER_FORWARD_EDGE_PUBLISHED);
-            s.fanin_producers.push_back(prod);
-        } catch (...) {
-            ps.fanout_total--;
-            ps.fanout_consumers.pop_back();
-            throw;
+        if (dependency.retain) {
+            ps.fanout_total++;
+            try {
+                if (test_hook_) test_hook_(OrchestratorTestPoint::PRODUCER_FORWARD_EDGE_PUBLISHED);
+                s.fanin_producers.push_back(prod);
+            } catch (...) {
+                ps.fanout_total--;
+                ps.fanout_consumers.pop_back();
+                throw;
+            }
         }
         if (ps_state == TaskState::FAILED) {
             poisoned_by_failed_producer = true;
@@ -945,7 +956,7 @@ SubmitResult Orchestrator::submit_impl(
                 try_consume(prod);
             }
         }
-        return SubmitResult{slot};
+        return SubmitResult{run->id, slot};
     }
 
     // Enqueued outside the publication lock: enqueue_ready takes runs_mu_, and
@@ -956,7 +967,7 @@ SubmitResult Orchestrator::submit_impl(
         if (ready_notify_cb_) ready_notify_cb_();
     }
 
-    return SubmitResult{slot};
+    return SubmitResult{run->id, slot};
 }
 
 void Orchestrator::enqueue_ready(TaskSlot slot) {
@@ -1138,6 +1149,21 @@ void Orchestrator::validate_remote_sidecars(
     }
 }
 
+void Orchestrator::validate_explicit_deps(RunId run_id, const std::vector<TaskArgs> &args_list) const {
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.explicit_dep_count(); ++i) {
+            const TaskHandle &dep = args.explicit_dep(i);
+            if (dep.run_id != run_id) {
+                throw std::invalid_argument("Orchestrator: explicit dependency belongs to another run");
+            }
+            TaskSlotState *producer = allocator_->slot_state(dep.task_slot);
+            if (producer == nullptr || producer->run_id != run_id) {
+                throw std::invalid_argument("Orchestrator: explicit dependency names an unknown task");
+            }
+        }
+    }
+}
+
 // =============================================================================
 // reserve_slot — claim this submit's task slot
 // =============================================================================
@@ -1161,27 +1187,38 @@ AllocResult Orchestrator::reserve_outputs_and_slot(
 
 void Orchestrator::infer_deps(
     TaskSlot slot, const std::vector<TaskArgs> &args_list, const std::vector<int32_t> &target_worker_ids,
-    const std::vector<RemoteTaskArgsSidecar> &remote_sidecars, std::vector<TaskSlot> &producers,
+    const std::vector<RemoteTaskArgsSidecar> &remote_sidecars, std::vector<ProducerDependency> &producers,
     std::vector<TensorKey> &output_keys
 ) {
     RunId run_id = slot_state(slot).run_id;
-    std::unordered_set<TaskSlot> producer_seen;
+    std::unordered_map<TaskSlot, size_t> producer_indices;
     size_t tensor_count_hint = 0;
+    size_t explicit_dep_count_hint = 0;
     for (const TaskArgs &args : args_list) {
         tensor_count_hint += static_cast<size_t>(args.tensor_count());
+        explicit_dep_count_hint += static_cast<size_t>(args.explicit_dep_count());
     }
-    producer_seen.reserve(tensor_count_hint);
+    producer_indices.reserve(tensor_count_hint + explicit_dep_count_hint);
 
-    auto add_unique_producer = [&](TaskSlot p) {
+    auto add_unique_producer = [&](TaskSlot p, bool retain) {
         // Group submits walk many TaskArgs under one slot: if two entries in
         // the same group tag the same buffer (e.g. both OUTPUT 0xCAFE), the
         // second-pass lookup would return the slot that the first pass just
         // inserted — a self-loop. Skip it.
         if (p == slot) return;
-        if (producer_seen.insert(p).second) {
-            producers.push_back(p);
+        auto [it, inserted] = producer_indices.emplace(p, producers.size());
+        if (inserted) {
+            producers.push_back(ProducerDependency{p, retain});
+        } else if (retain) {
+            producers[it->second].retain = true;
         }
     };
+
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.explicit_dep_count(); ++i) {
+            add_unique_producer(args.explicit_dep(i).task_slot, args.explicit_dep_retain(i));
+        }
+    }
 
     // One key can resolve to several producers, one per live view under it that this arg's own
     // view reaches. `overlapping` is scratch reused across args.
@@ -1190,7 +1227,7 @@ void Orchestrator::infer_deps(
         overlapping.clear();
         tensormap_->lookup_overlapping(run_id, key, view, overlapping);
         for (TaskSlot prod : overlapping) {
-            add_unique_producer(prod);
+            add_unique_producer(prod, true);
         }
     };
 

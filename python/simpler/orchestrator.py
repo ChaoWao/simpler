@@ -54,6 +54,7 @@ from .task_interface import (
     GlobalCommDomainView,
     RemoteAddressSpace,
     TaskArgs,
+    TaskHandle,
     _empty_remote_sidecar_for,
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
@@ -304,12 +305,16 @@ class Orchestrator:
     # User-facing submit API
     # ------------------------------------------------------------------
 
-    def submit_next_level(self, callable_handle: Any, args: TaskArgs, config: CallConfig | None = None, *, worker: int):
+    def submit_next_level(
+        self, callable_handle: Any, args: TaskArgs, config: CallConfig | None = None, *, worker: int
+    ) -> TaskHandle:
         """Submit a NEXT_LEVEL task by registered callable handle.
 
         ``callable_handle`` must be returned by ``Worker.register``. Tags inside ``args`` drive deps.
         ``worker`` is the exact stable NEXT_LEVEL worker id that runs the
         task. For L3 chip dispatch, these are the existing chip worker ids.
+        Returns an opaque ``TaskHandle`` accepted by ``TaskArgs.add_dep`` or
+        ``TaskArgs.add_dep_wait`` during the same orchestration run.
         """
         cfg = config if config is not None else CallConfig()
         cpp_worker_id = _require_next_level_worker_id(worker, argument="worker")
@@ -353,7 +358,7 @@ class Orchestrator:
                 worker._adopt_remote_sidecar_refs((remote_sidecar,))
                 worker._record_touched_identities(c_args)
             _admit_task_submission(self._worker)
-            self._o.submit_next_level(
+            return self._o.submit_next_level(
                 digest, kind, target_namespace, c_args, cfg, cpp_worker_id, final_worker_ids, remote_sidecar
             )
 
@@ -364,7 +369,7 @@ class Orchestrator:
         config: CallConfig | None = None,
         *,
         workers: list,
-    ):
+    ) -> TaskHandle:
         """Submit a group of NEXT_LEVEL tasks (N TaskArgs → N worker selections, 1 DAG node).
 
         ``workers`` contains the exact stable NEXT_LEVEL worker id for each
@@ -373,6 +378,7 @@ class Orchestrator:
         ``args_list`` becomes one per-rank mailbox request: MPI rank
         ``workers[i]`` executes only ``args_list[i]``. A single worker id remains
         directed and is never silently widened to the whole group.
+        Returns one opaque ``TaskHandle`` for the group DAG node.
         """
         cfg = config if config is not None else CallConfig()
         worker_ids = [_require_next_level_worker_id(value, argument="workers entries") for value in workers]
@@ -464,7 +470,7 @@ class Orchestrator:
                 for c_args in c_args_list:
                     worker._record_touched_identities(c_args)
             _admit_task_submission(self._worker)
-            self._o.submit_next_level_group(
+            return self._o.submit_next_level_group(
                 digest, kind, target_namespace, c_args_list, cfg, worker_ids, worker_id_sets, remote_sidecars
             )
 

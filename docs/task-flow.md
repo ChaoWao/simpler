@@ -106,9 +106,12 @@ class TaskArgs {
     std::vector<ChipTensor> tensors_;
     std::vector<TensorArgType>    tags_;     // per-tensor: INPUT/OUTPUT/INOUT/OUTPUT_EXISTING/NO_DEP
     std::vector<uint64_t>         scalars_;
+    std::vector<TaskHandle>       explicit_deps_;  // parent graph only
 public:
     void add_tensor(const ChipTensor&, TensorArgType tag = TensorArgType::INPUT);
     void add_scalar(uint64_t);
+    void add_dep(const TaskHandle&);
+    void add_dep_wait(const TaskHandle&);
     TaskArgsView view() const;
     int32_t tensor_count() const;
     int32_t scalar_count() const;
@@ -135,11 +138,12 @@ remote sidecars; the remote framed path encodes the sidecar as a
 | **③ Dispatch wire (PROCESS only)** | length-prefixed blob | shm mailbox (MAP_SHARED) | parent WorkerThread encodes | forked child decodes |
 | **④ L2 ABI edge** | `ChipStorageTaskArgs` POD | child stack | `ChipWorker::run` assembles | `simpler_run` consumes |
 
-### Tags stripped at submit
+### Tags and explicit dependencies stay parent-side
 
 Tags are consumed by `Orchestrator::submit_*` to derive TensorMap dependencies
-and then discarded. Phases ②, ③, ④ do not carry tags — scheduler, worker
-thread, child, and runtime.so all ignore per-tensor direction.
+and `TaskHandle` dependencies are consumed to add task-to-task ordering edges.
+Neither reaches phases ③ or ④ — scheduler dispatch payloads, child workers,
+and runtime.so do not receive them.
 
 ### Blob byte layout (phase ③)
 
@@ -493,8 +497,8 @@ framed protocol instead of the local mailbox.
 ## 6. Data flow through a submit
 
 The user's Python orch fn receives an `Orchestrator` facade (not a `Worker`)
-and calls `submit_next_level` / `submit_sub`. These Python methods return
-`None`; the task slot remains internal to the scheduling engine.
+and calls `submit_next_level` / `submit_sub`. NEXT_LEVEL submits return an
+opaque, run-scoped `TaskHandle`; SUB submits return `None`.
 
 ```python
 class Orchestrator:
@@ -502,23 +506,24 @@ class Orchestrator:
     # remote L3 dispatch, stable ids are returned by add_worker(...) or
     # add_remote_worker(...). For L3 ChipCallable dispatch, worker ids are
     # the existing chip worker ids.
-    def submit_next_level(self, handle, args, config=None, *, worker) -> None: ...
-    def submit_next_level_group(self, handle, args_list, config=None, *, workers) -> None: ...
+    def submit_next_level(self, handle, args, config=None, *, worker) -> TaskHandle: ...
+    def submit_next_level_group(self, handle, args_list, config=None, *, workers) -> TaskHandle: ...
     def submit_sub(self, handle, args=None) -> None: ...
     def submit_sub_group(self, handle, args_list) -> None: ...
 ```
 
-The C++ implementation still allocates an internal task slot to drive
-scheduling, but nanobind does not expose that slot. Downstream consumers
-reference tensors by their own pointers (already registered in TensorMap by
-the OUTPUT/INOUT tag).
+The handle exposes no slot fields or constructor in Python. It can only be
+passed to `TaskArgs.add_dep` or `TaskArgs.add_dep_wait`, which creates a task
+edge without inventing a tensor dependency. `add_dep` retains the producer
+until the consumer completes; `add_dep_wait` only waits for producer
+completion. Handles from another run are rejected before a slot is allocated.
 
 Where the data goes after submit:
 
 1. `CallableIdentity` — copied into `slot.callable` (parent heap)
 2. `TaskArgs` — moved into `slot.task_args` (parent heap, vector-backed).
-   Tags are consumed during the same submit call for dep inference and
-   **never carried further**.
+   Tags and explicit handles are consumed during the same submit call for dep
+   inference and **never carried across the dispatch boundary**.
 3. `CallConfig` — copied into `slot.config` (parent heap, POD)
 4. `PipelineSlotLease` — copied from the owning run into
    `slot.pipeline_lease`; local chip mailboxes forward `{slot_id, generation}`

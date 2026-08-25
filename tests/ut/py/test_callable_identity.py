@@ -815,6 +815,26 @@ def test_chip_submit_uses_chip_index_worker_id():
     assert call[6] == []
 
 
+def test_next_level_submit_returns_native_task_handle():
+    task_handle = object()
+
+    class FakeCOrchestrator:
+        def submit_next_level(self, *args):
+            self.submit_next_level_args = args
+            return task_handle
+
+    handle = CallableHandle(
+        "sha256:" + "00" * 32,
+        "CHIP_CALLABLE",
+        "LOCAL_CHIP",
+    )
+    orch = Orchestrator(FakeCOrchestrator())
+
+    result = orch.submit_next_level(handle, TaskArgs(), worker=0)
+
+    assert result is task_handle
+
+
 def test_next_level_submit_requires_valid_explicit_targets():
     class FakeCOrchestrator:
         def submit_next_level(self, *args):

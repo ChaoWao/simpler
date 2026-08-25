@@ -88,6 +88,20 @@ rt_submit_aic_task(FUNC_WRITE_X, w_args);
 Multiple readers each contribute one `add_dep(reader.task_id())` on the writer
 and still run in parallel with each other — only the writer waits.
 
+At L3 and above, the Python API offers the same two dependency names as L2
+with opaque host task handles. This WAR edge is ordering-only, so it uses
+`add_dep_wait` rather than the retaining `add_dep`:
+
+```python
+reader = orch.submit_next_level(reader_handle, reader_args, cfg, worker=rank)
+writer_args.add_dep_wait(reader)
+orch.submit_next_level(writer_handle, writer_args, cfg, worker=rank)
+```
+
+The handle is valid only in the run that returned it. Host `TaskArgs` stores an
+unbounded dynamic list, so there is no `CoreTaskArgsWithDeps<N>`-style fixed
+capacity.
+
 **`add_dep` is a task-to-task edge only — it is invisible to the host-side
 `set_tensor_data`.** `set_tensor_data(X)` is a host write, not a task in the
 graph, so a "writer depends on reader" edge places no constraint on it. Its

@@ -264,8 +264,8 @@ inline void bind_worker(nb::module_ &m) {
             "submit_next_level",
             [](Orchestrator &self, nb::bytes digest, const std::string &kind, const std::string &target_namespace,
                const TaskArgs &args, const CallConfig &config, int32_t worker_id,
-               const std::vector<int32_t> &eligible_worker_ids, nb::object remote_sidecar) {
-                self.submit_next_level(
+               const std::vector<int32_t> &eligible_worker_ids, nb::object remote_sidecar) -> TaskHandle {
+                return self.submit_next_level(
                     make_callable_identity(digest, kind, target_namespace), args, config, worker_id,
                     eligible_worker_ids, parse_remote_task_args_sidecar(remote_sidecar)
                 );
@@ -280,8 +280,8 @@ inline void bind_worker(nb::module_ &m) {
             "submit_next_level_group",
             [](Orchestrator &self, nb::bytes digest, const std::string &kind, const std::string &target_namespace,
                const std::vector<TaskArgs> &args_list, const CallConfig &config, const std::vector<int32_t> &worker_ids,
-               const std::vector<std::vector<int32_t>> &eligible_worker_ids, nb::object remote_sidecars) {
-                self.submit_next_level_group(
+               const std::vector<std::vector<int32_t>> &eligible_worker_ids, nb::object remote_sidecars) -> TaskHandle {
+                return self.submit_next_level_group(
                     make_callable_identity(digest, kind, target_namespace), args_list, config, worker_ids,
                     eligible_worker_ids, parse_remote_task_args_sidecars(remote_sidecars)
                 );

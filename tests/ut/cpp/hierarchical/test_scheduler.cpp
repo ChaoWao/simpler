@@ -2627,6 +2627,156 @@ TEST_F(SchedulerFixture, DependentTaskDispatchedAfterProducerCompletes) {
     (void)a;
 }
 
+TEST_F(SchedulerFixture, ExplicitTaskDependencyOrdersIndependentTaskWithoutRetainingProducer) {
+    auto producer = orch.submit_next_level(C(12), single_tensor_args(0xA100, TensorArgType::OUTPUT), cfg, 0);
+    EXPECT_EQ(producer.run_id, run_id);
+
+    TaskArgs consumer_args = single_tensor_args(0xB200, TensorArgType::OUTPUT);
+    consumer_args.add_dep_wait(producer);
+    auto consumer = orch.submit_next_level(C(13), consumer_args, cfg, 0);
+
+    EXPECT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+    EXPECT_EQ(S(consumer.task_slot).fanin_count.load(std::memory_order_acquire), 1);
+    EXPECT_TRUE(S(consumer.task_slot).fanin_producers.empty());
+    {
+        std::lock_guard<std::mutex> lk(S(producer.task_slot).fanout_mu);
+        EXPECT_EQ(S(producer.task_slot).fanout_consumers, (std::vector<TaskSlot>{consumer.task_slot}));
+        EXPECT_EQ(S(producer.task_slot).fanout_total, 0);
+    }
+
+    mock_worker.wait_running();
+    ASSERT_EQ(mock_worker.dispatched_count(), 1);
+    EXPECT_EQ(mock_worker.dispatched[0].callable_hash0, 12u);
+    mock_worker.complete();
+
+    wait_consumed(producer.task_slot);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (mock_worker.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(mock_worker.dispatched_count(), 2);
+    EXPECT_EQ(mock_worker.dispatched[1].callable_hash0, 13u);
+
+    mock_worker.complete();
+    wait_consumed(consumer.task_slot);
+}
+
+TEST_F(SchedulerFixture, ExplicitWaitAndRetainDependenciesDeduplicateAndKeepProducerAlive) {
+    auto producer = orch.submit_next_level(C(22), single_tensor_args(0xFA00, TensorArgType::OUTPUT), cfg, 0);
+
+    TaskArgs consumer_args = single_tensor_args(0xFB00, TensorArgType::OUTPUT);
+    consumer_args.add_dep_wait(producer);
+    consumer_args.add_dep(producer);
+    auto consumer = orch.submit_next_level(C(23), consumer_args, cfg, 0);
+
+    EXPECT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+    EXPECT_EQ(S(consumer.task_slot).fanin_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(S(consumer.task_slot).fanin_producers, (std::vector<TaskSlot>{producer.task_slot}));
+    {
+        std::lock_guard<std::mutex> lk(S(producer.task_slot).fanout_mu);
+        EXPECT_EQ(S(producer.task_slot).fanout_consumers, (std::vector<TaskSlot>{consumer.task_slot}));
+        EXPECT_EQ(S(producer.task_slot).fanout_total, 1);
+    }
+
+    mock_worker.wait_running();
+    mock_worker.complete();
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (mock_worker.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(mock_worker.dispatched_count(), 2);
+    EXPECT_EQ(mock_worker.dispatched[1].callable_hash0, 23u);
+    EXPECT_EQ(S(producer.task_slot).state.load(std::memory_order_acquire), TaskState::COMPLETED);
+
+    mock_worker.complete();
+    wait_consumed(producer.task_slot);
+    wait_consumed(consumer.task_slot);
+}
+
+TEST_F(SchedulerFixture, ExplicitTaskDependencyOnAnAlreadyConsumedProducerIsSatisfied) {
+    auto producer = orch.submit_next_level(C(18), single_tensor_args(0xF600, TensorArgType::OUTPUT), cfg, 0);
+    mock_worker.wait_running();
+    mock_worker.complete();
+    wait_consumed(producer.task_slot);
+
+    TaskArgs consumer_args = single_tensor_args(0xF700, TensorArgType::OUTPUT);
+    consumer_args.add_dep_wait(producer);
+    auto consumer = orch.submit_next_level(C(19), consumer_args, cfg, 0);
+
+    EXPECT_EQ(S(consumer.task_slot).fanin_count.load(std::memory_order_acquire), 0);
+    EXPECT_NE(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (mock_worker.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(mock_worker.dispatched_count(), 2);
+    EXPECT_EQ(mock_worker.dispatched[1].callable_hash0, 19u);
+
+    mock_worker.complete();
+    wait_consumed(consumer.task_slot);
+}
+
+TEST_F(SchedulerFixture, FailedExplicitTaskDependencyPoisonsConsumer) {
+    auto producer = orch.submit_next_level(C(20), single_tensor_args(0xF800, TensorArgType::OUTPUT), cfg, 0);
+    TaskArgs consumer_args = single_tensor_args(0xF900, TensorArgType::OUTPUT);
+    consumer_args.add_dep_wait(producer);
+    auto consumer = orch.submit_next_level(C(21), consumer_args, cfg, 0);
+
+    EXPECT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+    mock_worker.wait_running();
+    mock_worker.complete_with_error("explicit producer boom");
+
+    wait_consumed(producer.task_slot);
+    wait_consumed(consumer.task_slot);
+    EXPECT_TRUE(orch.run_failed(run_id));
+    EXPECT_EQ(mock_worker.dispatched_count(), 1);
+}
+
+TEST_F(SchedulerFixture, ExplicitTaskDependencyDeduplicatesAnInferredLifetimeEdge) {
+    auto producer = orch.submit_next_level(C(14), single_tensor_args(0xC300, TensorArgType::OUTPUT), cfg, 0);
+
+    TaskArgs consumer_args = single_tensor_args(0xC300, TensorArgType::INPUT);
+    consumer_args.add_dep_wait(producer);
+    consumer_args.add_dep_wait(producer);
+    auto consumer = orch.submit_next_level(C(15), consumer_args, cfg, 0);
+
+    EXPECT_EQ(S(consumer.task_slot).fanin_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(S(consumer.task_slot).fanin_producers, (std::vector<TaskSlot>{producer.task_slot}));
+    {
+        std::lock_guard<std::mutex> lk(S(producer.task_slot).fanout_mu);
+        EXPECT_EQ(S(producer.task_slot).fanout_consumers, (std::vector<TaskSlot>{consumer.task_slot}));
+        EXPECT_EQ(S(producer.task_slot).fanout_total, 1);
+    }
+
+    mock_worker.wait_running();
+    mock_worker.complete();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (mock_worker.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(mock_worker.dispatched_count(), 2);
+    mock_worker.complete();
+    wait_consumed(producer.task_slot);
+    wait_consumed(consumer.task_slot);
+}
+
+TEST_F(SchedulerFixture, ExplicitTaskDependencyRejectsAHandleFromAnotherRunBeforeAllocating) {
+    auto producer = orch.submit_next_level(C(16), single_tensor_args(0xD400, TensorArgType::OUTPUT), cfg, 0);
+    TaskHandle foreign = producer;
+    foreign.run_id++;
+
+    TaskArgs consumer_args = single_tensor_args(0xE500, TensorArgType::OUTPUT);
+    consumer_args.add_dep_wait(foreign);
+    int32_t next_task_id = allocator.next_task_id();
+    EXPECT_THROW((void)orch.submit_next_level(C(17), consumer_args, cfg, 0), std::invalid_argument);
+    EXPECT_EQ(allocator.next_task_id(), next_task_id);
+
+    mock_worker.wait_running();
+    mock_worker.complete();
+    wait_consumed(producer.task_slot);
+}
+
 // Issue #1024: composed child kernels can carry far more tensor args than a
 // top-level entry (repro: 76 tensors + 2 scalars = 3064-byte blob). The
 // mailbox must hold any blob the runtime itself accepts, i.e. up to

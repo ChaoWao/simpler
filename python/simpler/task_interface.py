@@ -10,10 +10,10 @@
 """Public Python API for task_interface nanobind bindings.
 
 Re-exports the canonical C++ types (DataType, ChipTensor, ChipStorageTaskArgs, TaskArgs,
-TensorArgType) plus ``scalar_to_uint64``, and re-exports the address-free ``Tensor`` — the task
-argument users build — from ``simpler.buffer``. Torch-aware helpers (``make_chip_tensor_arg``,
-``torch_dtype_to_datatype``) live in ``simpler_setup.torch_interop`` — this module has no torch
-dependency.
+TaskHandle, TensorArgType) plus ``scalar_to_uint64``, and re-exports the address-free ``Tensor`` —
+the task argument users build — from ``simpler.buffer``. Torch-aware helpers
+(``make_chip_tensor_arg``, ``torch_dtype_to_datatype``) live in ``simpler_setup.torch_interop`` —
+this module has no torch dependency.
 
 ``ChipTensor`` is the chip-only POD the runtime ABI expects, paired with
 ``ChipStorageTaskArgs`` on the direct ``ChipWorker`` path; it carries a
@@ -61,6 +61,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     DataType,
     RuntimeEnv,
     TaskArgs,
+    TaskHandle,
     TaskState,
     TensorArgType,
     WorkerType,
@@ -154,6 +155,7 @@ __all__ = [
     "ChipStorageTaskArgs",
     "TensorArgType",
     "TaskArgs",
+    "TaskHandle",
     "RemoteAddressSpace",
     "RemoteBufferHandle",
     "RemoteBufferExport",

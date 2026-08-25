@@ -20,12 +20,13 @@ flows through `submit`, see [task-flow.md](task-flow.md).
 ## 1. Python Facade and C++ Internal API
 
 The Python user's orch fn receives a `simpler.orchestrator.Orchestrator`
-facade. Its `submit_*` methods enqueue DAG nodes and return `None`; task slots
-remain internal to the worker.
+facade. `submit_next_level` and `submit_next_level_group` enqueue DAG nodes and
+return opaque `TaskHandle` objects. A later `TaskArgs.add_dep(handle)` or
+`TaskArgs.add_dep_wait(handle)` uses the handle to add an edge that tensor-tag
+inference cannot derive.
+`submit_sub` and `submit_sub_group` still return `None`.
 
-The C++ Orchestrator still returns `SubmitResult` for internal scheduling and
-C++ tests, but nanobind intentionally drops that return value instead of
-exposing it to Python:
+The C++ `SubmitResult` name is an alias of the same run-scoped handle:
 
 ```cpp
 class Orchestrator {
@@ -69,8 +70,19 @@ private:
     // ... components: Ring, TensorMap, Scope, and the RunState registry
 };
 
-struct SubmitResult { TaskSlot task_slot; };  // internal only; not bound to Python
+struct TaskHandle {
+    RunId run_id;
+    TaskSlot task_slot;
+};
+using SubmitResult = TaskHandle;
 ```
+
+Python does not expose either field or a public constructor. A handle is valid
+only while building the run that returned it; passing it to another run is a
+submit-time error. Naming a producer that has already completed or reached
+`CONSUMED` in the same run is valid and the dependency is already satisfied.
+The monotonic `run_id` prevents a stale handle from accidentally naming a slot
+reused after the Ring resets.
 
 **Status**: `submit_sub` takes only `(CallableIdentity, args)` — no
 `config`, since SUB has no per-call config.
@@ -147,18 +159,21 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
     s.config      = config;
     s.target_worker_ids = {worker};
 
-    // 3. Walk task_args tags, derive dependencies
-    //    (dedup producers: same producer may appear on multiple input tensors)
-    std::vector<TaskSlot> producers;
-    std::unordered_set<TaskSlot> producers_seen;
+    // 3. Collect explicit deps, then walk task_args tags to derive retained
+    //    dependencies. Repeated producers collapse to one edge and retention
+    //    wins when any path names the same producer with retain=true.
+    std::vector<ProducerDependency> producers;
+    for (int i = 0; i < s.task_args.explicit_dep_count(); ++i) {
+        add_unique_producer(s.task_args.explicit_dep(i).task_slot,
+                            s.task_args.explicit_dep_retain(i));
+    }
     for (int i = 0; i < s.task_args.tensor_count(); i++) {
         TensorArgType tag = s.task_args.tag(i);
         TensorKey key     = key_for_tensor_or_remote_sidecar(i);
 
         if (tag == INPUT || tag == INOUT) {
             if (TaskSlot prod = tensormap_.lookup(key); prod != INVALID)
-                if (producers_seen.insert(prod).second)
-                    producers.push_back(prod);
+                add_unique_producer(prod, /*retain=*/true);
         }
         if (tag == OUTPUT || tag == INOUT || tag == OUTPUT_EXISTING) {
             tensormap_.insert(key, sid);
@@ -188,13 +203,13 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
         ready = s.fanin_released >= live;   // releases that landed while BUILDING
         if (!s.state.compare_exchange_strong(BUILDING, ready ? READY : PENDING)) {
             propagate_failure(sid);         // a producer claimed us mid-wiring
-            return {sid};
+            return {run_id, sid};
         }
     }
     if (ready) enqueue_ready(sid);          // outside the lock: takes runs_mu_
 
     // 7. Return handle
-    return {sid};
+    return {run_id, sid};
 }
 ```
 
@@ -207,9 +222,9 @@ if all slots are in-flight; this is the system's back-pressure mechanism.
 small POD copied by value. `callable` is a `uint64_t` opaque handle (see
 [task-flow.md](task-flow.md) §2).
 
-**Step 3 — tag walk**: The only place tags are consumed. After this step tags
-are never inspected again; they are not carried into the slot's stored
-`task_args` value during dispatch (see [task-flow.md](task-flow.md) §3).
+**Step 3 — explicit deps and tag walk**: The only place dependency handles and
+tags are consumed. Neither is carried across the dispatch boundary (see
+[task-flow.md](task-flow.md) §3).
 Every TensorMap key starts with the current `RunId`. Local tensor identity is
 then `(LOCAL_HOST, ptr)` or `(LOCAL_CHILD, worker, ptr)`. Remote tensors with
 sidecars use `(address_kind, owner_worker_id, buffer_id, generation, offset)`.
@@ -228,6 +243,16 @@ register this task as the new producer of the tensor's dependency key. For
 local tensors this key contains `tensor.data`; for remote sidecars it contains
 remote buffer identity and logical offset.
 
+`TaskArgs.add_dep(*handles)` and `TaskArgs.add_dep_wait(*handles)` accept one or
+more handles and may be called before or after `add_tensor` / `add_scalar`.
+Their dynamic host-side vector has no fixed dependency cap. Every handle must
+belong to the current run and name an already submitted task. Both edge kinds
+contribute to the consumer's `fanin_count`, propagate producer failure, and
+delay READY until the producer finishes. `add_dep` additionally retains each
+producer until the consumer finishes; `add_dep_wait` is ordering-only. Neither
+creates a TensorMap entry. Repeated handles and tag-inferred edges deduplicate,
+with lifetime retention winning if any path requests it.
+
 Before each output mapping becomes visible, its key is appended to the slot's
 cleanup journal. A failed journal append therefore publishes no mapping, while
 a later failure leaves a key `on_consumed` can erase. Erasure remains
@@ -241,11 +266,12 @@ See [§6 Scope](#6-scope).
 
 **Step 5 — fanout attachment and live-fanin count**: Submission synchronously
 locks each producer's `fanout_mu`, attaches the consumer, and counts only live
-producers. The producer's forward edge and the consumer's reverse edge are one
-transaction: failure to publish the reverse edge rolls the forward edge and
-its reference charge back. A completing live producer advances
-`fanin_released`; completed producers retain the reference edge but do not
-contribute to `fanin_count`.
+producers. Every edge registers the consumer for completion notification.
+Tensor-derived and explicit `add_dep` edges additionally charge `fanout_total`
+and record a reverse edge so the consumer retains the producer until it
+finishes; `add_dep_wait` edges omit both lifetime operations. A completed
+producer contributes no live fanin. A completed wait-only dependency needs no
+notification edge at all.
 
 **Step 6 — publication and READY routing**: `fanin_count` and the transition
 from BUILDING to PENDING or READY are published together under `fanout_mu`. An
@@ -454,8 +480,8 @@ Scope solves two concerns at once:
    to a deeper HeapRing (§5), so a long-lived outer-scope task cannot hold
    the FIFO head against inner-scope churn.
 
-Every slot has a `fanout_total` counter: the number of outstanding
-references (downstream consumers + any scope refs). A slot transitions to
+Every slot has a `fanout_total` counter: the number of outstanding lifetime
+references (retaining consumers + any scope refs). A slot transitions to
 `CONSUMED` (slot + heap slab freed) only when `fanout_released` meets the
 threshold (`>= total + 1`; see §8 fanout-release threshold).
 
@@ -680,7 +706,7 @@ rules carry that:
 - **The charge immediately follows successful registration** and precedes Step
   2 publishing the slot's outputs. A failure between registration and charge
   leaves an extra scope release, which is safe; the opposite order would leave
-  an unreleasable charge. Once an output is published, downstream consumers
+  an unreleasable charge. Once an output is published, retaining consumers
   increment the same `fanout_total` field.
 - **The output cleanup journal precedes TensorMap publication.** A failure can
   never leave a mapping cancellation does not know to erase, and the map's
@@ -784,18 +810,20 @@ per-slab free syscall.
 
 ### Consumer interaction
 
-`infer_deps` treats `COMPLETED` producers specially: it still wires the
-fanout edge (so the producer waits for the consumer before being consumed and
-freeing its buffer) but does not bump `live_fanins` (the consumer is
-immediately ready because the producer is already done). A producer that is
-already `FAILED` is not a successful fanin; downstream consumers are poisoned
-by the Scheduler rather than dispatched.
+`infer_deps` treats `COMPLETED` producers specially. A retained tensor or
+`add_dep` edge still holds the producer until the consumer finishes, but
+contributes no live fanin. An ordering-only `add_dep_wait` is already satisfied
+and adds no lifetime reference. A producer that is already `FAILED` poisons
+downstream consumers instead of dispatching them.
 
 ```cpp
 if (ps_state == TaskState::CONSUMED) continue;  // already gone
+if (!dep.retain && ps_state == TaskState::COMPLETED) continue;
 ps.fanout_consumers.push_back(slot);
-ps.fanout_total++;
-s.fanin_producers.push_back(prod);
+if (dep.retain) {
+    ps.fanout_total++;
+    s.fanin_producers.push_back(prod);
+}
 if (ps_state != TaskState::COMPLETED) live_fanins++;   // wait only if not yet done
 ```
 

@@ -17,7 +17,7 @@ extension.
 from simpler import Worker           # or: from simpler.worker import Worker
 from simpler.task_interface import (
     ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs,
-    ChipTensor, CoreCallable, DataType,
+    ChipTensor, CoreCallable, DataType, TaskArgs, TaskHandle,
 )
 from simpler_setup import KernelCompiler, SceneTestCase, scene_test
 ```
@@ -84,7 +84,8 @@ callable is a **Python orchestration function** `f(orch, args, cfg)`, where
 
 | Method | Notes |
 | ------ | ----- |
-| `submit_next_level(callable_handle, args, config=None, *, worker: int)` | Hands a `ChipCallable` to one chip child. `worker` is keyword-only |
+| `submit_next_level(callable_handle, args, config=None, *, worker: int) -> TaskHandle` | Hands a callable to one exact NEXT_LEVEL child and returns an opaque handle for explicit task dependencies |
+| `submit_next_level_group(callable_handle, args_list, config=None, *, workers: list[int]) -> TaskHandle` | Submits one group DAG node and returns its opaque handle |
 | `submit_sub(callable_handle, args=None)` | Schedules a registered host-side Python callable |
 | `allocate_domain(name, workers, window_size, buffers=[...])` | Context manager returning a handle indexed by domain-local rank |
 | `malloc(worker_id, size) -> int` | **Argument order is `(worker_id, size)`** — the reverse of `Worker.malloc(size, worker_id=0)` |
@@ -105,6 +106,13 @@ ChipCallable.build(
 `ArgDirection` is `SCALAR`, `IN`, `OUT`, or `INOUT`. The signature list is
 positional and defines the task-arg order. `func_id` must match the id the
 orchestration submits. `ChipCallable` exposes `binary_size`.
+
+For L3+ graph construction, `TaskArgs.add_dep(*handles)` adds `WAIT | RETAIN`
+edges: each consumer waits for its producers and keeps their task-owned
+resources alive until it completes. `TaskArgs.add_dep_wait(*handles)` adds
+ordering-only `WAIT` edges. Handles must come from a NEXT_LEVEL submit in the
+same orchestration run; they are opaque and cannot be constructed by the
+caller.
 
 ```python
 args = ChipStorageTaskArgs()
