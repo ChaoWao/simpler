@@ -66,8 +66,6 @@ class TestBatchPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3"],
-            # The complete graph's task outputs exceed the default 256 MiB heap.
-            "config": {"runtime_env": {"ring_heap": 512 * 1024 * 1024}},
             "params": {
                 "batch": 256,
                 "num_heads": 16,
@@ -83,7 +81,6 @@ class TestBatchPagedAttentionHostBuildGraph(SceneTestCase):
             "name": "Case2",
             "platforms": ["a2a3"],
             "manual": True,
-            "config": {"runtime_env": {"ring_heap": 512 * 1024 * 1024}},
             "params": {
                 "batch": 64,
                 "num_heads": 64,
@@ -99,7 +96,6 @@ class TestBatchPagedAttentionHostBuildGraph(SceneTestCase):
             "name": "Case3",
             "platforms": ["a2a3"],
             "manual": True,
-            "config": {"runtime_env": {"ring_heap": 1024 * 1024 * 1024}},
             "params": {
                 "batch": 64,
                 "num_heads": 64,

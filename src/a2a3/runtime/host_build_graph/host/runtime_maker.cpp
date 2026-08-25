@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <sys/resource.h>
@@ -44,7 +45,6 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -252,12 +252,12 @@ apply_env_ring_value(const char *name, uint64_t min_val, uint64_t max_val, bool 
     *out = value;
 }
 
-// ring_task_window / ring_heap / ring_dep_pool point into the #pragma pack(1)
-// RuntimeEnv wire struct (call_config.h), so their uint64_t entries are only
-// byte-aligned — runtime_env sits at offset 28 in CallConfig (after 7 int32_t),
-// i.e. 4-byte but not 8-byte aligned. Reading them as `base[idx]` is an
-// unaligned 8-byte load: UB, and fatal under UBSan (-fsanitize=alignment). Copy
-// the bytes out instead. A null base means "no per-task overrides" -> 0 (unset).
+// ring_task_window points into the #pragma pack(1) RuntimeEnv wire struct
+// (call_config.h), so its uint64_t entries are only byte-aligned — runtime_env
+// sits at offset 28 in CallConfig (after 7 int32_t), i.e. 4-byte but not 8-byte
+// aligned. Reading them as `base[idx]` is an unaligned 8-byte load: UB, and fatal
+// under UBSan (-fsanitize=alignment). Copy the bytes out instead. A null base
+// means "no per-task overrides" -> 0 (unset).
 static uint64_t read_ring_override(const uint64_t *base, int idx) {
     if (base == nullptr) {
         return 0;
@@ -267,35 +267,28 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
     return value;
 }
 
-// ring_task_window / ring_heap point at the first slot of a per-ring array in the
-// RuntimeEnv wire struct (0 = unset); hbg has one ring and reads slot 0.
-// Precedence: per-task entry > PTO2_RING_* env value > compile-time default.
-// (Polling has no dep_pool, so the former PTO2_RING_DEP_POOL knob is gone.)
-static bool resolve_ring_config(
-    const uint64_t *ring_task_window, const uint64_t *ring_heap, uint64_t *eff_task_window_size, uint64_t *eff_heap_size
-) {
+// ring_task_window points at the first slot of a per-ring array in the RuntimeEnv
+// wire struct (0 = unset); hbg has one ring and reads slot 0. Precedence:
+// per-task entry > PTO2_RING_TASK_WINDOW env value > compile-time default.
+//
+// The heap takes no configuration: its device region is committed after
+// orchestration, sized to what the graph turned out to need, so there is nothing
+// to resolve up front. RuntimeEnv::ring_heap and PTO2_RING_HEAP remain the
+// reclaiming runtime's knobs; this function does not resolve them, and the caller
+// reads them only to warn that they reach nothing here.
+static bool resolve_task_window_size(const uint64_t *ring_task_window, uint64_t *eff_task_window_size) {
     *eff_task_window_size = PTO2_TASK_WINDOW_SIZE;
-    *eff_heap_size = PTO2_HEAP_SIZE;
 
     apply_env_ring_value("PTO2_RING_TASK_WINDOW", 4, static_cast<uint64_t>(INT32_MAX), true, eff_task_window_size);
-    apply_env_ring_value("PTO2_RING_HEAP", 1024, std::numeric_limits<uint64_t>::max(), false, eff_heap_size);
 
     const uint64_t task_window_override = read_ring_override(ring_task_window, 0);
-    const uint64_t heap_override = read_ring_override(ring_heap, 0);
     if (task_window_override != 0) {
         *eff_task_window_size = task_window_override;
-    }
-    if (heap_override != 0) {
-        *eff_heap_size = heap_override;
     }
 
     if (*eff_task_window_size < 4 || *eff_task_window_size > static_cast<uint64_t>(INT32_MAX) ||
         !is_power_of_2_u64(*eff_task_window_size)) {
         LOG_ERROR("ring_task_window=%" PRIu64 " must be a power of 2 in [4, INT32_MAX]", *eff_task_window_size);
-        return false;
-    }
-    if (*eff_heap_size < 1024) {
-        LOG_ERROR("ring_heap=%" PRIu64 " must be >= 1024", *eff_heap_size);
         return false;
     }
     // A slot state reaches its payload and descriptor through a 32-bit
@@ -552,8 +545,8 @@ struct GraphHostStateBinding {
 
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, RuntimeContext *rt,
-    DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, void *device_arena, void *gm_heap,
-    uint64_t eff_heap_size, uint64_t eff_task_window_size, void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
+    DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, uint64_t eff_task_window_size,
+    void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     dep_gen_host_graph_begin_capture();
 
@@ -580,14 +573,21 @@ int32_t run_host_orchestration(
     RAIIScopeGuard orchestrator_binding([rt]() {
         rt->orchestrator = nullptr;
     });
-    if (!orchestrator.init(host_sm, gm_heap, eff_heap_size, eff_task_window_size, rt->scheduler)) {
+    // The graph heap is allocated out of the HEAP_VIRTUAL_BASE window: its device
+    // region is committed below, once this pass has revealed how many bytes it
+    // actually needs, and compact_live_image moves every address the orchestrator
+    // wrote onto the real base before the image travels.
+    if (!orchestrator.init(
+            host_sm, reinterpret_cast<void *>(HEAP_VIRTUAL_BASE), HEAP_VIRTUAL_CAPACITY, eff_task_window_size,
+            rt->scheduler
+        )) {
         LOG_ERROR("host-orch: orchestrator init against host SM failed");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     PTO2SharedMemoryHandle host_sm_handle;
-    if (!host_sm_handle.init(host_sm, sm_size, eff_task_window_size, eff_heap_size)) {
-        LOG_ERROR("host-orch: host SM init_per_ring failed");
+    if (!host_sm_handle.init(host_sm, sm_size, eff_task_window_size)) {
+        LOG_ERROR("host-orch: host SM init failed");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
@@ -754,22 +754,46 @@ int32_t run_host_orchestration(
     const uint64_t image_bytes = pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(bind_usage)).end;
     runtime->sm_image_bytes = image_bytes;
 
-    // Only now is the size known, so this is where the device region grows to cover
-    // its shared-memory tail. setup_static_arena grows per region and
-    // short-circuits a request it already covers, so the heap is untouched and a
-    // repeated workload grows the arena once. Growing reallocates, so the base is
-    // re-acquired rather than reused.
-    const int64_t t_sm_ns = bind_now_ns();
+    // Only now are both sizes known, so this is where the two device regions are
+    // committed: the arena up to its shared-memory tail, and the graph heap to the
+    // bytes orchestration actually handed out. setup_static_arena commits per
+    // region and short-circuits a request an existing one already covers, so a
+    // repeated workload pays for neither twice and the heap is grow-only across a
+    // Worker's binds.
+    const int64_t t_static_arena_ns = bind_now_ns();
     // The compact shared-memory image is the only per-run tail in the device
     // arena. GraphExecution is initialized later in each outer Graph heap.
     const uint64_t device_arena_bytes = layout.off_copied_end + image_bytes;
-    if (api->setup_static_arena(eff_heap_size, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
-        LOG_ERROR("host-orch: failed to commit %" PRIu64 " bytes of device runtime arena", device_arena_bytes);
+    // A graph whose every output is caller-owned allocates nothing, but its tasks
+    // still carry the window's base as their zero-length packed buffer, so the
+    // region has to exist for that address to be rebasable. Asking for 0 would
+    // release it and leave acquire_pooled_gm_heap with nothing to return.
+    //
+    // Rounded up to the region's base alignment: the committed span then ends on the
+    // same boundary it starts on, so an access at the tail of the last packed buffer
+    // stays inside the region even when its width exceeds the bytes that buffer
+    // asked for.
+    const uint64_t heap_bytes = PTO2_ALIGN_UP(
+        std::max<uint64_t>(orchestrator.task_allocator.heap_used_bytes(), PTO2_ALIGN_SIZE),
+        DeviceArena::kDefaultBaseAlign
+    );
+    if (api->setup_static_arena(heap_bytes, /*gm_sm_size=*/0, device_arena_bytes) != 0) {
+        LOG_ERROR(
+            "host-orch: failed to commit %" PRIu64 " bytes of graph heap + %" PRIu64 " bytes of device runtime arena",
+            heap_bytes, device_arena_bytes
+        );
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    device_arena = api->acquire_pooled_runtime_arena();
+    {
+        char attrs[96];
+        snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, heap_bytes, device_arena_bytes);
+        record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
+    }
+
+    const int64_t t_sm_ns = bind_now_ns();
+    void *device_arena = api->acquire_pooled_runtime_arena();
     if (device_arena == nullptr) {
-        LOG_ERROR("%s", "host-orch: failed to re-acquire the pooled runtime arena");
+        LOG_ERROR("%s", "host-orch: failed to acquire the pooled runtime arena");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     char *arena_dev = static_cast<char *>(device_arena);
@@ -780,6 +804,35 @@ int32_t run_host_orchestration(
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, image_bytes);
         record_bind_phase(HostPhaseKind::BindSharedMem, t_sm_ns, attrs, image_bytes);
     }
+
+    const int64_t t_heap_ns = bind_now_ns();
+    void *gm_heap = api->acquire_pooled_gm_heap();
+    record_bind_phase(HostPhaseKind::BindGmHeap, t_heap_ns);
+    if (gm_heap == nullptr) {
+        LOG_ERROR("host-orch: failed to acquire the pooled GM heap");
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    // The virtual heap window sits above every device address, which is what keeps
+    // a real address from being mistaken for one the rebase has to move. Device
+    // memory is the only source of addresses this pass cannot inspect one by one,
+    // so its base is checked here.
+    always_assert(
+        reinterpret_cast<uint64_t>(gm_heap) < HEAP_VIRTUAL_BASE && "device memory reaches into the virtual heap window"
+    );
+    // The alignment bind_graph_definitions checked on the virtual base — a Graph
+    // task's runtime storage must land on alignof(GraphNodeStorage) — carries to
+    // the real base only while the two are congruent: both are aligned to
+    // kDefaultBaseAlign, and that covers the storage's own requirement.
+    static_assert(
+        HEAP_VIRTUAL_BASE % DeviceArena::kDefaultBaseAlign == 0,
+        "the virtual heap base must share the committed region's alignment"
+    );
+    static_assert(
+        alignof(GraphNodeStorage) <= DeviceArena::kDefaultBaseAlign,
+        "a Graph node's storage alignment must be covered by the heap region's base alignment"
+    );
+    always_assert(reinterpret_cast<uint64_t>(gm_heap) % DeviceArena::kDefaultBaseAlign == 0);
+    const pto2_sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};
 
     // One host source for one copy: the copied zone and shared-memory image at
     // exactly the offsets they occupy on the device.
@@ -800,7 +853,7 @@ int32_t run_host_orchestration(
     rt->orchestrator = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
     const uint64_t compacted = pto2_sm_layout::compact_live_image(
-        static_cast<const char *>(host_sm), eff_task_window_size, bind_usage, upload_base + copied_bytes
+        static_cast<const char *>(host_sm), eff_task_window_size, bind_usage, heap_rebase, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
 
@@ -960,7 +1013,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const ArgDirection *signature, int sig_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    [[maybe_unused]] const uint64_t *ring_dep_pool
+    [[maybe_unused]] const uint64_t *ring_dep_pool  // polling has no dep_pool; kept for ABI stability
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
@@ -992,11 +1045,19 @@ extern "C" int bind_callable_to_runtime_impl(
     });
 
     uint64_t eff_task_window_size = 0;
-    uint64_t eff_heap_size = 0;
-    if (!resolve_ring_config(ring_task_window, ring_heap, &eff_task_window_size, &eff_heap_size)) {
+    if (!resolve_task_window_size(ring_task_window, &eff_task_window_size)) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    LOG_INFO("Ring buffer sizes: task_window=%" PRIu64 " heap=%" PRIu64, eff_task_window_size, eff_heap_size);
+    // The heap takes no configuration, so a set ring_heap / PTO2_RING_HEAP reaches
+    // nothing in this runtime — most often it is a config written for the reclaiming
+    // one, whose knob it still is.
+    if (read_ring_override(ring_heap, 0) != 0 || std::getenv("PTO2_RING_HEAP") != nullptr) {
+        LOG_WARN(
+            "%s", "host_build_graph ignores ring_heap / PTO2_RING_HEAP: its graph heap is committed after "
+                  "orchestration at the size the graph turned out to need"
+        );
+    }
+    LOG_INFO("Ring task window: %" PRIu64, eff_task_window_size);
 
     // Build device args: copy from input, replace host tensor pointers with device pointers
     ChipStorageTaskArgs device_args;
@@ -1012,7 +1073,12 @@ extern "C" int bind_callable_to_runtime_impl(
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
+        // Caller tensors are the one class of address orchestration sees that this
+        // pass did not mint, so this is where they are checked against the virtual
+        // heap window they must stay below — an address inside it would be rebased
+        // as if it were a graph-heap allocation.
         if (t.is_device_memory()) {
+            always_assert(t.buffer.addr < HEAP_VIRTUAL_BASE && "caller tensor reaches into the virtual heap window");
             LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             device_args.add_tensor(t);
             continue;
@@ -1068,6 +1134,7 @@ extern "C" int bind_callable_to_runtime_impl(
         }
 
         t.buffer.addr = reinterpret_cast<uint64_t>(dev_ptr);
+        always_assert(t.buffer.addr < HEAP_VIRTUAL_BASE && "device_malloc reaches into the virtual heap window");
         device_args.add_tensor(t);
     }
     for (int i = 0; i < scalar_count; i++) {
@@ -1081,17 +1148,20 @@ extern "C" int bind_callable_to_runtime_impl(
         record_bind_phase(HostPhaseKind::BindArgs, t_args_ns, attrs);
     }
 
-    // Lay out the per-Worker static device arena. GM heap, PTO2 shared memory,
-    // and the prebuilt runtime arena use three independent pooled device
-    // allocations committed together by setup_static_arena.
-    // Owned by DeviceRunner across runs — do NOT record in tensor_pairs_; the
-    // free is deferred to DeviceRunner::finalize(). The runtime-arena size is
-    // determined by replaying the reserve sequence on a host-side arena.
+    // Lay out the per-Worker static device arena. The GM heap and the prebuilt
+    // runtime arena are two independent pooled device allocations, and neither is
+    // committed here: the arena's size is known only once orchestration has
+    // submitted its tasks, and the heap's only once orchestration has allocated
+    // its intermediate buffers. Both are committed by the single
+    // setup_static_arena in run_host_orchestration. Owned by DeviceRunner across
+    // runs — do NOT record in tensor_pairs_; the free is deferred to
+    // DeviceRunner::finalize(). The runtime-arena size is determined by replaying
+    // the reserve sequence on a host-side arena.
     uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size(eff_task_window_size);
 
     const int64_t t_arena_build_ns = bind_now_ns();
     DeviceArena host_arena;
-    RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_size, eff_heap_size);
+    RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_size);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1102,41 +1172,10 @@ extern "C" int bind_callable_to_runtime_impl(
         record_bind_phase(HostPhaseKind::BindArenaBuild, t_arena_build_ns, attrs);
     }
 
-    const int64_t t_static_arena_ns = bind_now_ns();
-    // No pooled shared memory: hbg's shared-memory image is the tail of its own
-    // runtime-arena region, so this asks for 0 and leaves that pool uncommitted.
-    // The arena is asked for only up to that tail, whose size is the submitted task
-    // count — run_host_orchestration grows it once it knows. The heap must exist
-    // first either way: the orchestrator hands out device heap addresses as it
-    // places tasks.
-    if (api->setup_static_arena(eff_heap_size, /*gm_sm_size=*/0, layout.arena_size) != 0) {
-        LOG_ERROR("Failed to setup pooled static arena");
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
-    {
-        char attrs[96];
-        snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, eff_heap_size, layout.arena_size);
-        record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
-    }
-
-    const int64_t t_heap_ns = bind_now_ns();
-    void *gm_heap = api->acquire_pooled_gm_heap();
-    record_bind_phase(HostPhaseKind::BindGmHeap, t_heap_ns);
-    if (gm_heap == nullptr) {
-        LOG_ERROR("Failed to acquire pooled GM heap");
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
-    runtime->set_gm_heap(gm_heap);
     // The shared memory is placed at the end of orchestration, so until then this
-    // bind has no SM. Clearing it keeps a failure before that point from leaving the
-    // previous bind's address for the error-code read to follow.
+    // bind has none. Clearing the pointer keeps a failure before that point from
+    // leaving the previous bind's address for the error-code read to follow.
     runtime->set_gm_sm_ptr(nullptr);
-
-    void *runtime_arena_dev = api->acquire_pooled_runtime_arena();
-    if (runtime_arena_dev == nullptr) {
-        LOG_ERROR("Failed to acquire pooled runtime arena");
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
 
     // Set up orchestration state (consumed by the host orchestrator below)
     runtime->set_orch_args(device_args);
@@ -1154,9 +1193,8 @@ extern "C" int bind_callable_to_runtime_impl(
     const int64_t t_runtime_init_ns = bind_now_ns();
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
-    RuntimeContext *rt = runtime_init_data_from_layout(
-        host_arena, layout, PTO2_MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size, gm_heap, eff_heap_size
-    );
+    RuntimeContext *rt =
+        runtime_init_data_from_layout(host_arena, layout, PTO2_MODE_EXECUTE, /*sm_dev_base=*/nullptr, sm_size);
     if (rt == nullptr) {
         LOG_ERROR("runtime_init_data_from_layout failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1179,8 +1217,8 @@ extern "C" int bind_callable_to_runtime_impl(
         ChipTaskArgs orch_l2;
         orch_l2.create_from_chip_args(device_args);
         int32_t total_tasks = run_host_orchestration(
-            runtime, api, tensor_access, rt, host_arena, layout, sm_size, runtime_arena_dev, gm_heap, eff_heap_size,
-            eff_task_window_size, host_orch_func_ptr, orch_l2
+            runtime, api, tensor_access, rt, host_arena, layout, sm_size, eff_task_window_size, host_orch_func_ptr,
+            orch_l2
         );
         // The orchestrator is the only host-view reader; from here the device
         // owns these buffers, so drop the window on both exits.
@@ -1201,12 +1239,11 @@ extern "C" int bind_callable_to_runtime_impl(
         LOG_INFO("host-orch: submitted %d tasks on host", total_tasks);
     }
 
-    // Orchestration grew the device region to cover its shared-memory tail, which
-    // reallocates, so the base acquired before it may no longer be the one the
-    // image was copied into.
-    runtime_arena_dev = api->acquire_pooled_runtime_arena();
+    // Orchestration is what committed the device region, sized to cover its
+    // shared-memory tail, so this is the first point at which its base exists.
+    void *runtime_arena_dev = api->acquire_pooled_runtime_arena();
     if (runtime_arena_dev == nullptr) {
-        LOG_ERROR("%s", "Failed to re-acquire the pooled runtime arena after orchestration");
+        LOG_ERROR("%s", "Failed to acquire the pooled runtime arena after orchestration");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);

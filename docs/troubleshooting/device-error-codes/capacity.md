@@ -15,11 +15,15 @@ resource and determines how strong that diagnosis is:
 - `No reclaim progress for ~500 ms` or `cannot reclaim space after ~500 ms` is
   the backstop. It proves that reclaim remained stalled, but not whether the root
   cause is undersizing, a stuck consumer, or a stalled scheduler.
-- `Task Window Exhausted` / `Graph Heap Exhausted` / `Fanin Capacity Exhausted`
-  / `TensorMap Entry Pool Exhausted` is HBG, and it is unambiguous: that runtime
-  builds a whole-graph-resident image on the host, so the graph simply does not
-  fit. These checks return immediately; there is no concurrent scheduler
-  progress that could free capacity while the host is building.
+- `Task Window Exhausted` / `Fanin Capacity Exhausted` / `TensorMap Entry Pool
+  Exhausted` is HBG, and it is unambiguous: that runtime builds a
+  whole-graph-resident image on the host, so the graph simply does not fit. These
+  checks return immediately; there is no concurrent scheduler progress that could
+  free capacity while the host is building. `Graph Heap Exhausted` shares the
+  wording but not the meaning — HBG's heap allocator is handed the whole virtual
+  window during a real bind, so it does not report exhaustion there; the graph
+  heap's size shows up instead as a failed device-region commit after
+  orchestration.
 
 Do not guess at the ring sizes from the error code alone. Turn on `scope_stats`,
 which records the high-water mark of all four resources (task-window slots, heap
@@ -39,12 +43,16 @@ that trips the code.
 | Runtime | Bottleneck resource | Code | Fix |
 | ------- | ------------------- | ---- | --- |
 | HBG | task window | 3 | raise `ring_task_window` (`PTO2_RING_TASK_WINDOW`), or shrink the graph |
-| HBG | graph heap | 2 | raise `ring_heap` (`PTO2_RING_HEAP`), or shrink intermediate tensors |
 | HBG | inline fanin | 4 | reduce distinct producers to `PTO2_MAX_FANIN` (currently 128) or less; HBG has no `PTO2_RING_DEP_POOL` |
 | HBG | TensorMap entries | 11 | increase `PTO2_TENSORMAP_POOL_SIZE`, or reduce registered outputs |
 | TRB | open-scope task window | 1 or 3 | raise `PTO2_RING_TASK_WINDOW`, split the scope, or diagnose stalled reclaim |
 | TRB | heap | 2 | raise `PTO2_RING_HEAP`, shrink allocations, or diagnose stalled reclaim |
 | TRB | dependency pool | 4 | raise `PTO2_RING_DEP_POOL`, cut fanin, or diagnose stalled reclaim |
+
+HBG's graph heap is absent from the table because it has no knob and cannot latch
+code 2: orchestration allocates it out of a virtual window, and the device region
+is committed afterwards at the measured size. A graph too large for the device
+fails at that commit, on the host, naming the byte count it asked for.
 
 The runtime's own `error hint:` line already names the knob for the code it
 latched; this table is for when you have `scope_stats` output and want to read the

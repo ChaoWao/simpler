@@ -73,7 +73,8 @@ class TestPagedAttentionHostBuildGraphA5(SceneTestCase):
             # before the device schedules — so the ring cannot reclaim
             # mid-orchestration and must hold the entire graph at once. That
             # exceeds the default ring window (16384 slots). Run it explicitly
-            # with a large PTO2_RING_TASK_WINDOW / PTO2_RING_HEAP if needed.
+            # with a large PTO2_RING_TASK_WINDOW if needed; the GM heap needs no
+            # knob, since it is committed to the size orchestration measured.
             "name": "Case1",
             "platforms": ["a5"],
             "manual": True,

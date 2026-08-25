@@ -39,7 +39,6 @@ Runtime::Runtime() {
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;
-    gm_heap_ptr_ = nullptr;
     slot_states_ptr_ = nullptr;
     orch_args_storage_.clear();
     prebuilt_arena_base_ = nullptr;
@@ -62,10 +61,8 @@ Runtime::Runtime() {
 // =============================================================================
 
 void *Runtime::get_gm_sm_ptr() const { return gm_sm_ptr_; }
-void *Runtime::get_gm_heap_ptr() const { return gm_heap_ptr_; }
 const ChipStorageTaskArgs &Runtime::get_orch_args() const { return orch_args_storage_; }
 void Runtime::set_gm_sm_ptr(void *p) { gm_sm_ptr_ = p; }
-void Runtime::set_gm_heap(void *p) { gm_heap_ptr_ = p; }
 void Runtime::set_slot_states_ptr(void *p) { slot_states_ptr_ = p; }
 void Runtime::set_orch_args(const ChipStorageTaskArgs &args) { orch_args_storage_ = args; }
 

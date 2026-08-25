@@ -24,6 +24,7 @@
 #include <cstring>
 #include <vector>
 
+#include "graph_execution.h"
 #include "shared_memory.h"
 
 namespace {
@@ -111,6 +112,25 @@ public:
         descriptors()[SUBMITTED].task_id = TaskId::make(0, 0xBEEF);
     }
 
+    // Overwrite the three fields that can hold a graph-heap address with ones out
+    // of the virtual window, as the orchestrator leaves them. Tensor 0 of each task
+    // becomes a heap output; tensor 1 keeps the real address it already had, which
+    // is what makes "only heap addresses move" checkable on the same image.
+    void plant_heap_addresses() {
+        for (uint64_t i = 0; i < SUBMITTED; ++i) {
+            const uint64_t packed = HEAP_VIRTUAL_BASE + i * kPackedStride;
+            descriptors()[i].packed_buffer_base = reinterpret_cast<void *>(packed);
+            descriptors()[i].packed_buffer_end = reinterpret_cast<void *>(packed + kPackedStride);
+            payloads()[i].predicate.addr = packed + 8;
+            payloads()[i].tensor_data()[0].buffer.addr = packed;
+        }
+    }
+
+    static constexpr uint64_t kPackedStride = 512;
+    // What plant_heap_addresses handed out, i.e. what the allocator's
+    // heap_used_bytes() would report for it.
+    static constexpr uint64_t kHeapUsed = SUBMITTED * kPackedStride;
+
     const char *base() const { return image_.base(); }
 
     PTO2TaskDescriptor *descriptors() {
@@ -158,16 +178,22 @@ inline pto2_sm_layout::BindUsage usage_for(uint64_t submitted) {
     };
 }
 
+// A bind that allocated nothing out of the graph heap, so the restack has no
+// address to move. Every test that is not about the rebase passes this.
+inline constexpr pto2_sm_layout::HeapRebase kNoHeapAddresses{HEAP_VIRTUAL_BASE, 0};
+
 struct Compacted {
     AlignedImage image;
     uint64_t bytes;
     pto2_sm_layout::BindUsage used;
 
-    explicit Compacted(Mirror &mirror, uint64_t submitted = SUBMITTED) :
+    explicit Compacted(
+        Mirror &mirror, uint64_t submitted = SUBMITTED, const pto2_sm_layout::HeapRebase &rebase = kNoHeapAddresses
+    ) :
         image(pto2_sm_layout::ring_segment_offsets(pto2_sm_layout::image_extents(usage_for(submitted))).end, 0xAA),
         bytes(0),
         used(usage_for(submitted)) {
-        bytes = pto2_sm_layout::compact_live_image(mirror.base(), WINDOW, used, image.base());
+        bytes = pto2_sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
     }
 
     pto2_sm_layout::PTO2RingSegmentOffsets off(uint64_t submitted = SUBMITTED) const {
@@ -182,6 +208,7 @@ struct Compacted {
     }
     PTO2TaskPayload *payloads() { return payload_at(0); }
     ChipTaskSlotState *slot_states() { return reinterpret_cast<ChipTaskSlotState *>(image.base() + off().slot_states); }
+    ChipTensor *tensor_pool() { return reinterpret_cast<ChipTensor *>(image.base() + off().tensor_pool); }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(image.base() + off().completion_flags);
     }
@@ -395,4 +422,95 @@ TEST(HbgSmCompaction, LayoutStaysWithinDeltaReach) {
     }
     EXPECT_GT(window, static_cast<uint64_t>(PTO2_TASK_WINDOW_SIZE));
     EXPECT_GT(pto2_sm_layout::ring_segment_offsets(window).end, REACH);
+}
+
+// The graph heap's device region is committed after orchestration, so the
+// orchestrator allocates out of the HEAP_VIRTUAL_BASE window and the restack is
+// what puts the real base into the image. Three fields carry such an address: a
+// descriptor's packed buffer bounds, a payload's dispatch predicate, and a
+// tensor's buffer address.
+TEST(HbgSmCompaction, MovesEveryHeapAddressOntoTheRealBase) {
+    constexpr uint64_t REAL_BASE = 0x7F0000000000ULL;
+    Mirror mirror;
+    mirror.plant_heap_addresses();
+    Compacted compacted(mirror, SUBMITTED, {REAL_BASE, Mirror::kHeapUsed});
+
+    for (uint64_t i = 0; i < SUBMITTED; ++i) {
+        const uint64_t packed = REAL_BASE + i * Mirror::kPackedStride;
+        EXPECT_EQ(reinterpret_cast<uint64_t>(compacted.descriptors()[i].packed_buffer_base), packed) << "slot " << i;
+        EXPECT_EQ(
+            reinterpret_cast<uint64_t>(compacted.descriptors()[i].packed_buffer_end), packed + Mirror::kPackedStride
+        ) << "slot "
+          << i;
+        EXPECT_EQ(compacted.payload_at(i)->predicate.addr, packed + 8) << "slot " << i;
+        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[0].buffer.addr, packed) << "slot " << i;
+    }
+}
+
+// A caller's tensor is a real device address the bind did not mint, and it shares
+// the pools with the heap ones. It must come through the restack unchanged, or a
+// boundary tensor would be pointed at the graph heap.
+TEST(HbgSmCompaction, LeavesNonHeapAddressesAlone) {
+    constexpr uint64_t REAL_BASE = 0x7F0000000000ULL;
+    Mirror mirror;
+    mirror.plant_heap_addresses();
+    Compacted compacted(mirror, SUBMITTED, {REAL_BASE, Mirror::kHeapUsed});
+
+    // Tensor 1 of every task kept the address the Mirror gave it.
+    for (uint64_t i = 0; i < SUBMITTED; ++i) {
+        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[1].buffer.addr, 0x1000 + i * 0x10 + 1) << "slot " << i;
+    }
+}
+
+// A bind whose outputs are all caller-owned puts nothing in the window, so the
+// restack must leave every address exactly as the mirror had it — including the
+// zero a payload's unset predicate carries.
+TEST(HbgSmCompaction, RebaseIsANoOpWhenNothingCameFromTheHeap) {
+    constexpr uint64_t REAL_BASE = 0x7F0000000000ULL;
+    Mirror mirror;
+    Compacted rebased(mirror, SUBMITTED, {REAL_BASE, 0});
+    Compacted plain(mirror);
+
+    ASSERT_EQ(rebased.bytes, plain.bytes);
+    EXPECT_EQ(std::memcmp(rebased.image.base(), plain.image.base(), rebased.bytes), 0);
+    for (uint64_t i = 0; i < SUBMITTED; ++i) {
+        EXPECT_EQ(rebased.payload_at(i)->predicate.addr, 0u) << "slot " << i;
+    }
+}
+
+// An outer GRAPH task's boundary tensors are GraphTensors packed at their own
+// stride into the ChipTensor-slotted pool (graph_boundary_tensor_pool_slots sizes
+// the slots), so only the first one starts on a ChipTensor boundary. The rebase
+// therefore cannot walk the pool as ChipTensors: every boundary past the first
+// keeps a virtual address the device then dereferences, and the bytes that *are*
+// rewritten land in the middle of a GraphTensor.
+TEST(HbgSmCompaction, MovesEveryGraphBoundaryAddressOntoTheRealBase) {
+    constexpr uint64_t REAL_BASE = 0x7F0000000000ULL;
+    // Two is enough to expose the stride: the second GraphTensor starts at
+    // sizeof(GraphTensor), which is not a ChipTensor boundary. Their packed bytes
+    // still fit the ChipTensor slots this slot's region owns.
+    constexpr uint32_t BOUNDARIES = 2;
+    ASSERT_LT(sizeof(GraphTensor), sizeof(ChipTensor))
+        << "the packing this test is about only exists while GraphTensor is the smaller";
+    ASSERT_LE(BOUNDARIES * sizeof(GraphTensor), TENSORS_PER_TASK * sizeof(ChipTensor));
+
+    Mirror mirror;
+    // One GRAPH task whose boundaries all live in the graph heap. task_kind is what
+    // tells the restack which element type this task's region holds.
+    constexpr uint64_t GRAPH_SLOT = 0;
+    mirror.slot_states()[GRAPH_SLOT].task_kind = TaskKind::GRAPH;
+    mirror.payloads()[GRAPH_SLOT].tensor_count = static_cast<int32_t>(BOUNDARIES);
+    auto *boundaries = reinterpret_cast<GraphTensor *>(mirror.payloads()[GRAPH_SLOT].tensor_data());
+    for (uint32_t j = 0; j < BOUNDARIES; ++j) {
+        boundaries[j] = GraphTensor{};
+        boundaries[j].buffer_addr = HEAP_VIRTUAL_BASE + 0x1000 * (j + 1);
+        boundaries[j].buffer_size = 0x40;
+    }
+
+    Compacted compacted(mirror, SUBMITTED, {REAL_BASE, 1ULL << 30});
+    const auto *shipped = reinterpret_cast<const GraphTensor *>(compacted.payload_at(GRAPH_SLOT)->tensor_data());
+    for (uint32_t j = 0; j < BOUNDARIES; ++j) {
+        EXPECT_EQ(shipped[j].buffer_addr, REAL_BASE + 0x1000 * (j + 1)) << "boundary " << j;
+        EXPECT_EQ(shipped[j].buffer_size, 0x40u) << "boundary " << j << " had a neighbouring field rewritten";
+    }
 }

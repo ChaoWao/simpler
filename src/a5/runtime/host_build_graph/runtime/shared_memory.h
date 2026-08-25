@@ -37,6 +37,7 @@
 #include <cstring>
 
 #include "utils/device_arena.h"
+#include "graph_execution.h"
 #include "runtime_types.h"
 
 // =============================================================================
@@ -88,7 +89,6 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Layout metadata (set once at init)
     alignas(64) uint64_t task_window_size;
     int32_t task_window_mask;
-    uint64_t heap_size;
     uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
 
     // Per-ring data pointers (host-side, set by setup_pointers)
@@ -158,7 +158,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
 static_assert(sizeof(PTO2SharedMemoryRingHeader) == 192, "PTO2SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 152,
+    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 144,
     "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 
@@ -217,10 +217,10 @@ struct PTO2SharedMemoryHandle {
 
     static uint64_t calculate_size(uint64_t task_window_size);
 
-    // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init
-    // using default PTO2_TASK_WINDOW_SIZE / PTO2_HEAP_SIZE. Only valid when the
-    // arena is otherwise empty (the call performs the single commit). All
-    // memory is owned by the arena — caller must not call destroy().
+    // UT convenience: reserve wrapper + sm_base on `arena`, commit, and init using
+    // default PTO2_TASK_WINDOW_SIZE. Only valid when the arena is otherwise empty
+    // (the call performs the single commit). All memory is owned by the arena —
+    // caller must not call destroy().
     static PTO2SharedMemoryHandle *create_and_init_default(DeviceArena &arena);
 
     // === Instance methods ===
@@ -229,7 +229,7 @@ struct PTO2SharedMemoryHandle {
     // out of a DeviceArena). Sets is_owner = false, calls setup_pointers and
     // init_header. Returns false when `sm_size` is too small for the requested
     // `task_window_size`.
-    bool init(void *sm_base, uint64_t sm_size, uint64_t task_window_size, uint64_t heap_size);
+    bool init(void *sm_base, uint64_t sm_size, uint64_t task_window_size);
 
     // Attach to an ALREADY-populated shared memory region: point the handle and
     // every ring header's data pointers (descriptors / payloads / slot_states)
@@ -259,7 +259,7 @@ struct PTO2SharedMemoryHandle {
     bool validate();
 
 private:
-    void init_header(uint64_t task_window_size, uint64_t heap_size);
+    void init_header(uint64_t task_window_size);
     // `pitch` is the slot count the arrays are dimensioned for. init passes the
     // ring capacity (the mirror the orchestrator writes into); attach_populated
     // passes the submitted count (the compacted image that shipped).
@@ -409,6 +409,33 @@ inline RingImageExtents image_extents(const BindUsage &used) noexcept {
     };
 }
 
+// Where the graph heap ended up, for the image's heap addresses.
+//
+// The orchestrator allocates the heap out of the HEAP_VIRTUAL_BASE window,
+// because the heap's device region is committed only after orchestration, from
+// the byte count orchestration turned out to need. `real_base` is that region's
+// device base and `used_bytes` is what the allocator handed out, so the window
+// actually in play is [HEAP_VIRTUAL_BASE, HEAP_VIRTUAL_BASE + used_bytes].
+struct HeapRebase {
+    uint64_t real_base;
+    uint64_t used_bytes;
+};
+
+// Translate one address the image carries. Anything below HEAP_VIRTUAL_BASE is a
+// real device address the caller owns — a boundary tensor, or an unset field left
+// at 0 — and is returned untouched. At or above it, the address came from the
+// graph heap: a recorded node's outputs live in its Definition as offsets, so no
+// Graph-recording address (>= GRAPH_RECORD_VIRTUAL_BASE) reaches the image, and
+// the committed-heap bound below rejects one rather than classifying by it.
+inline uint64_t rebased_heap_addr(uint64_t addr, const HeapRebase &rebase) noexcept {
+    if (addr < HEAP_VIRTUAL_BASE) {
+        return addr;
+    }
+    const uint64_t offset = addr - HEAP_VIRTUAL_BASE;
+    always_assert(offset <= rebase.used_bytes && "image address is outside the committed graph heap");
+    return rebase.real_base + offset;
+}
+
 // Restack the live prefix of every ring segment from the ring-pitched mirror the
 // orchestrator wrote into an image dimensioned for what this bind holds, where the
 // prefixes are contiguous and can travel as one copy.
@@ -416,7 +443,7 @@ inline RingImageExtents image_extents(const BindUsage &used) noexcept {
 // `out_base` must be PTO2_ALIGN_SIZE-aligned and hold
 // `ring_segment_offsets(image_extents(used)).end` bytes. Returns that byte count.
 //
-// Two things the restack has to fix up, both because the image is not the mirror:
+// Three things the restack has to fix up, all because the image is not the mirror:
 //
 //   - the ring header's data pointers name the mirror's arrays, so they leave as
 //     null rather than carrying host addresses into device memory (the device
@@ -425,9 +452,23 @@ inline RingImageExtents image_extents(const BindUsage &used) noexcept {
 //     argument regions, by a delta from the naming field's own address; the restack
 //     changed those distances, so every one is re-taken against the image. A region
 //     keeps its position within its pool, so the re-take is the same arithmetic with
-//     the image's bases.
-inline uint64_t
-compact_live_image(const char *mirror_base, uint64_t task_window_size, const BindUsage &used, char *out_base) noexcept {
+//     the image's bases;
+//   - every heap address the orchestrator wrote is in the HEAP_VIRTUAL_BASE window,
+//     so `rebase` moves it onto the device region committed after orchestration.
+//     Three fields carry one: a descriptor's packed buffer bounds (read on the
+//     device by the Graph expansion in graph_execution.cpp), a payload's dispatch
+//     predicate (dereferenced by the scheduler), and a tensor argument's buffer
+//     address — the last one per task and in that task's own element type, since an
+//     outer GRAPH task's boundaries are GraphTensors rather than ChipTensors.
+//
+// Those three are the whole surface: a heap address that reached the device through
+// an untyped channel would not be moved, and the scalar pool cannot be swept for
+// one, because a scalar's value is arbitrary and a quarter of the 64-bit range
+// falls inside the window. Orchestration must therefore pass a runtime-created
+// buffer as the tensor it got back, never as a scalar carrying its address.
+inline uint64_t compact_live_image(
+    const char *mirror_base, uint64_t task_window_size, const BindUsage &used, const HeapRebase &rebase, char *out_base
+) noexcept {
     // The mirror is dimensioned for the worst case, so a live count or a cursor past
     // it reads beyond the segment it is copying from and ships a corrupt image.
     // attach_populated tests the slot bound again on the device side.
@@ -496,6 +537,30 @@ compact_live_image(const char *mirror_base, uint64_t task_window_size, const Bin
             src_scalars == nullptr ? nullptr : out_scalars + (src_scalars - mirror_scalars),
             src_fanin == nullptr ? nullptr : out_fanin + (src_fanin - mirror_fanin)
         );
+        // The tensor pool holds two element types, so each task's own region is walked
+        // with the type that task wrote: an outer GRAPH task's boundaries are
+        // GraphTensors packed at their own stride, merely occupying the number of
+        // ChipTensor slots graph_boundary_tensor_pool_slots reserves for them. Walking
+        // the pool itself as one ChipTensor array would reach only the first boundary
+        // of each Graph and rewrite bytes in the middle of the rest.
+        if (out_slots[i].task_kind == TaskKind::GRAPH) {
+            auto *boundaries = reinterpret_cast<GraphTensor *>(out_payloads[i].tensor_data());
+            for (int32_t j = 0; j < out_payloads[i].tensor_count; ++j) {
+                boundaries[j].buffer_addr = rebased_heap_addr(boundaries[j].buffer_addr, rebase);
+            }
+        } else {
+            ChipTensor *tensors = out_payloads[i].tensor_data();
+            for (int32_t j = 0; j < out_payloads[i].tensor_count; ++j) {
+                tensors[j].buffer.addr = rebased_heap_addr(tensors[j].buffer.addr, rebase);
+            }
+        }
+        PTO2TaskDescriptor &out_task = out_descriptors[i];
+        out_task.packed_buffer_base = reinterpret_cast<void *>(
+            rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_base), rebase)
+        );
+        out_task.packed_buffer_end =
+            reinterpret_cast<void *>(rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_end), rebase));
+        out_payloads[i].predicate.addr = rebased_heap_addr(out_payloads[i].predicate.addr, rebase);
     }
     return to.end;
 }

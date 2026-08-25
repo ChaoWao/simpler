@@ -70,10 +70,11 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             # Marked manual for host_build_graph: this batch=256 case submits
             # ~64K tasks, and host-orchestration populates the whole task graph
-            # before the device schedules — so the ring/heap cannot reclaim
+            # before the device schedules — so the ring cannot reclaim
             # mid-orchestration and must hold the entire graph at once. That
-            # exceeds the default ring window / GM heap. Run it explicitly with
-            # a large PTO2_RING_TASK_WINDOW / PTO2_RING_HEAP if needed.
+            # exceeds the default ring window. Run it explicitly with a large
+            # PTO2_RING_TASK_WINDOW if needed; the GM heap needs no knob, since
+            # it is committed to the size orchestration measured.
             "name": "Case1",
             "platforms": ["a2a3"],
             "manual": True,

@@ -706,6 +706,9 @@ Key fields:
 - The framework owns the `config` namespace. Its keys are
   `aicpu_thread_num`, `runtime_env`, `device_count`, and `num_sub_workers`;
   `runtime_env` accepts `ring_task_window`, `ring_heap`, and `ring_dep_pool`.
+  Which of those the runtime under test reads differs: `host_build_graph` reads
+  only `ring_task_window` and warns when `ring_heap` is set, since it commits its
+  graph heap to the size orchestration measured.
   Unknown keys fail when the `@scene_test` class is imported instead of being
   silently ignored. Case-level extension keys outside `config` remain allowed.
 

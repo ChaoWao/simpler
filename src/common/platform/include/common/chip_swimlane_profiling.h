@@ -60,6 +60,7 @@
 
 #include "common/core_type.h"
 #include "common/dfx_backpressure_device.h"
+#include "common/host_phase_kind.h"
 #include "common/platform_config.h"
 
 // =============================================================================
@@ -638,40 +639,11 @@ struct HostPhaseRecord {
 static_assert(sizeof(HostPhaseRecord) == 40, "HostPhaseRecord layout drift");
 
 /**
- * What one HostPhaseRecord measured.
- *
- * The bind kinds partition the bind stage: their durations sum to the
- * `chip.run.bind` span. The orchestrator kinds are nested inside BindHostOrch
- * and do not partition it — some are sub-operations of others.
+ * What one HostPhaseRecord measured — the kinds themselves live in
+ * common/host_phase_kind.h, so the AICPU build and the orchestration .so can name
+ * them without taking this header's dependencies. The predicates below are
+ * host-only and stay here.
  */
-enum class HostPhaseKind : uint32_t {
-    BindArgs = 0,
-    BindArenaBuild,
-    BindStaticArena,
-    BindGmHeap,
-    BindSharedMem,
-    BindRuntimeInit,
-    BindHostOrch,
-    BindGraphUpload,
-    BindRelocate,
-    BindSmH2d,
-    BindArenaH2d,
-    BindHostViewClose,
-    OrchSubmitTask,
-    OrchAllocTensors,
-    OrchRecordNode,
-    OrchGraphSubmit,
-    OrchBuildDefinition,
-    OrchGraphBegin,
-    OrchRecordingWait,
-    OrchGraphCommit,
-    OrchSubmitAdmit,
-    OrchRecordHandoff,
-    OrchGeneratedArgs,
-    Count
-};
-
-constexpr uint32_t kHostPhaseKindCount = static_cast<uint32_t>(HostPhaseKind::Count);
 
 /**
  * Whether this kind ends with a task submitted to the runtime, i.e. whether its

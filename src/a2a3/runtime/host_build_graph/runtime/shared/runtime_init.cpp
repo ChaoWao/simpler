@@ -209,8 +209,6 @@ bool PTO2OrchestratorState::init(
     always_assert(task_window_size > 0 && (task_window_size & (task_window_size - 1)) == 0);
 
     orch->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_base);
-    orch->gm_heap_base = gm_heap;
-    orch->gm_heap_size = heap_size;
     orch->fatal = false;
     orch->scheduler = scheduler_arg;
 
@@ -253,11 +251,10 @@ void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this-
 // Top-level runtime arena
 // =============================================================================
 
-RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size, uint64_t heap_size) {
+RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_window_size) {
     RuntimeArenaLayout layout{};
 
     layout.task_window_size = task_window_size;
-    layout.heap_size = heap_size;
 
     // Reservation order is the zone partition (see RuntimeArenaLayout):
     // everything the device initializes itself, then the one copied range. Each
@@ -284,26 +281,23 @@ RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_wind
 /**
  * Populate the prebuilt runtime-arena image in place (host build path).
  *
- * Zeroes the RuntimeContext header at layout.off_runtime, records the GM heap,
- * and initializes the scheduler (ready / sync / dummy / graph queues) against
- * the device SM. rt->orchestrator is left null: the orchestrator is a host-owned
- * object the host-orch path (run_host_orchestration) stands up against the host
- * SM once that buffer exists, and it is never uploaded to the device. Caller must
- * follow up with runtime_wire_arena_pointers. Returns the arena-resident
- * RuntimeContext*, or nullptr on failure.
+ * Zeroes the RuntimeContext header at layout.off_runtime and initializes the
+ * scheduler (ready / sync / dummy / graph queues) against the device SM.
+ * rt->orchestrator is left null: the
+ * orchestrator is a host-owned object the host-orch path
+ * (run_host_orchestration) stands up against the host SM once that buffer
+ * exists, and it is never uploaded to the device. Caller must follow up with
+ * runtime_wire_arena_pointers. Returns the arena-resident RuntimeContext*, or
+ * nullptr on failure.
  */
 RuntimeContext *runtime_init_data_from_layout(
-    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/,
-    void *gm_heap_dev_base, uint64_t heap_size
+    DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/
 ) {
     RuntimeContext *rt = static_cast<RuntimeContext *>(arena.region_ptr(layout.off_runtime));
     memset(rt, 0, sizeof(*rt));
 
     // rt->ops is filled by the AICPU at boot.
     rt->mode = mode;
-    rt->gm_heap = gm_heap_dev_base;
-    rt->gm_heap_size = heap_size;
-    rt->gm_heap_owned = false;
     rt->total_cycles = 0;
     rt->active_callable_hash = 0;
 

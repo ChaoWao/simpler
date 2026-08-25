@@ -43,6 +43,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/host_phase_kind.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "dep_gen_host_graph.h"
@@ -198,19 +199,8 @@ __attribute__((weak, visibility("hidden"))) void host_phase_record(uint64_t, uin
 __attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { return 0; }
 
 #if SIMPLER_DFX
-// Kinds this file records, spelled as the HostPhaseKind values the host side
-// reads. Only the host orchestrator reaches these sites, so the bind-stage kinds
-// that precede them in the enum are not named here.
-enum class HostOrchPhase : uint32_t {
-    Submit = 12,           // submit_task_common: one ordinary ring task
-    Prepare = 13,          // prepare_task: one alloc_tensors slot
-    RecordNode = 14,       // graph_record_submit_node: one recorded Graph node
-    GraphSubmit = 15,      // graph_submit_definition: one outer GRAPH task
-    BuildDefinition = 16,  // graph_layout_definition + graph_fill_definition: one image
-    GraphBegin = 17,       // graph_begin: the whole entry, GraphSubmit nested inside
-    RecordingWait = 18,    // graph_commit's wait for the last recorder to finish
-    GraphCommit = 19,      // graph_commit: the wait plus back-patching every shell
-};
+// Only the host orchestrator reaches these sites, so this file names only the Orch*
+// half of HostPhaseKind; the bind kinds never appear here.
 #define ORCH_PHASE_START() const uint64_t _orch_phase_t0 = host_phase_now_ns()
 #define ORCH_PHASE_END(phase, detail)                                                                         \
     do {                                                                                                      \
@@ -1629,7 +1619,7 @@ static TaskOutputTensors submit_task_common(
     (void)sched;
 
     CYCLE_COUNT_LAP(g_orch_fanin_cycle);
-    ORCH_PHASE_END(HostOrchPhase::Submit, task_id.raw);
+    ORCH_PHASE_END(HostPhaseKind::OrchSubmitTask, task_id.raw);
 
 #if SIMPLER_DFX
     orch->tasks_submitted++;
@@ -2226,7 +2216,7 @@ TaskOutputTensors graph_record_submit_node(
     // slot is not part of the recording, so nothing that scans the recorded nodes can see
     // the node being built.
     recording.node_count = node_index + 1;
-    ORCH_PHASE_END(HostOrchPhase::RecordNode, task_id.raw);
+    ORCH_PHASE_END(HostPhaseKind::OrchRecordNode, task_id.raw);
     return result;
 }
 
@@ -2236,7 +2226,7 @@ GraphScopeResult
 PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     ORCH_PHASE_START_SPANNING();
     const GraphScopeResult result = graph_begin_inner(graph_key, args, callable_hash);
-    ORCH_PHASE_END_SPANNING(HostOrchPhase::GraphBegin, graph_key);
+    ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphBegin, graph_key);
     return result;
 }
 
@@ -2271,7 +2261,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
             )) {
             result.execute_block = false;
             result.task_id = submitted;
-            ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
+            ORCH_PHASE_END(HostPhaseKind::OrchGraphSubmit, submitted.raw);
 #if SIMPLER_DFX
             g_orch_submit_idx++;
 #if SIMPLER_ORCH_PROFILING
@@ -2296,7 +2286,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
         if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
             result.execute_block = false;
             result.task_id = submitted;
-            ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
+            ORCH_PHASE_END(HostPhaseKind::OrchGraphSubmit, submitted.raw);
 #if SIMPLER_DFX
             g_orch_submit_idx++;
 #if SIMPLER_ORCH_PROFILING
@@ -2344,7 +2334,7 @@ PTO2OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs
         result.recording = true;
         result.recording_handle = entry_ptr;
         result.task_id = submitted;
-        ORCH_PHASE_END(HostOrchPhase::GraphSubmit, submitted.raw);
+        ORCH_PHASE_END(HostPhaseKind::OrchGraphSubmit, submitted.raw);
 #if SIMPLER_DFX
         g_orch_submit_idx++;
 #if SIMPLER_ORCH_PROFILING
@@ -2447,7 +2437,7 @@ bool PTO2OrchestratorState::graph_end() {
     }
     const bool built = layout.has_value() && graph_fill_definition(*recording, *layout, image);
     if (built) {
-        ORCH_PHASE_END(HostOrchPhase::BuildDefinition, recording->node_count);
+        ORCH_PHASE_END(HostPhaseKind::OrchBuildDefinition, recording->node_count);
     }
     const GraphDefinition *header = built ? graph_record_definition(*state, record) : nullptr;
     if (header == nullptr) {
@@ -2484,7 +2474,7 @@ bool PTO2OrchestratorState::graph_end() {
 void PTO2OrchestratorState::graph_commit() {
     ORCH_PHASE_START_SPANNING();
     graph_commit_inner();
-    ORCH_PHASE_END_SPANNING(HostOrchPhase::GraphCommit, 0);
+    ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphCommit, 0);
 }
 
 void PTO2OrchestratorState::graph_commit_inner() {
@@ -2501,7 +2491,7 @@ void PTO2OrchestratorState::graph_commit_inner() {
             state->recording_cv.wait(lock, [&]() {
                 return !state->any_recording();
             });
-            ORCH_PHASE_END(HostOrchPhase::RecordingWait, state->inflight.size());
+            ORCH_PHASE_END(HostPhaseKind::OrchRecordingWait, state->inflight.size());
         }
         drained.swap(state->inflight);
         state->inflight_count.store(0, std::memory_order_release);
@@ -2768,7 +2758,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
     orch->inline_completed_tasks++;
 
     CYCLE_COUNT_LAP(g_orch_fanin_cycle);
-    ORCH_PHASE_END(HostOrchPhase::Prepare, prepared.task_id.raw);
+    ORCH_PHASE_END(HostPhaseKind::OrchAllocTensors, prepared.task_id.raw);
 
 #if SIMPLER_DFX
     orch->tasks_submitted++;

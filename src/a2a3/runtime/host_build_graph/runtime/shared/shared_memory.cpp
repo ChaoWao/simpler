@@ -57,9 +57,7 @@ void PTO2SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     ring.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
-bool PTO2SharedMemoryHandle::init(
-    void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size, uint64_t heap_size
-) {
+bool PTO2SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t task_window_size) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
     const uint64_t mirror_bytes = calculate_size(task_window_size);
     // The mirror has to stay inside an int32 delta's reach: a payload names its
@@ -76,7 +74,7 @@ bool PTO2SharedMemoryHandle::init(
     sm_size = sm_size_arg;
     is_owner = false;
     setup_pointers(task_window_size);
-    init_header(task_window_size, heap_size);
+    init_header(task_window_size);
     return true;
 }
 
@@ -122,7 +120,7 @@ PTO2SharedMemoryHandle *PTO2SharedMemoryHandle::create_and_init_default(DeviceAr
     memset(handle, 0, sizeof(*handle));
     void *buffer = arena.region_ptr(off_buffer);
     memset(buffer, 0, static_cast<size_t>(buffer_size));
-    if (!handle->init(buffer, buffer_size, PTO2_TASK_WINDOW_SIZE, PTO2_HEAP_SIZE)) return nullptr;
+    if (!handle->init(buffer, buffer_size, PTO2_TASK_WINDOW_SIZE)) return nullptr;
     return handle;
 }
 
@@ -140,7 +138,7 @@ void PTO2SharedMemoryHandle::destroy() {
 // =============================================================================
 //
 // no need init data in pool, init pool data when used
-void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size, uint64_t heap_size) {
+void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size) {
     // Flow control (starts at 0)
     header->ring.fc.init();
 
@@ -154,7 +152,6 @@ void PTO2SharedMemoryHandle::init_header(uint64_t task_window_size, uint64_t hea
     uint64_t offset = PTO2_ALIGN_UP(sizeof(PTO2SharedMemoryHeader), PTO2_ALIGN_SIZE);
     header->ring.task_window_size = task_window_size;
     header->ring.task_window_mask = static_cast<int32_t>(task_window_size - 1);
-    header->ring.heap_size = heap_size;
     header->ring.task_descriptors_offset = offset;
     offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskDescriptor), PTO2_ALIGN_SIZE);
     offset += PTO2_ALIGN_UP(task_window_size * sizeof(PTO2TaskPayload), PTO2_ALIGN_SIZE);
@@ -189,7 +186,6 @@ void PTO2SharedMemoryHandle::print_layout() {
     LOG_DEBUG("Total size:         %" PRIu64 " bytes", h->total_size);
     LOG_DEBUG("Ring:");
     LOG_DEBUG("  task_window_size: %" PRIu64, h->ring.task_window_size);
-    LOG_DEBUG("  heap_size:        %" PRIu64 " bytes", h->ring.heap_size);
     LOG_DEBUG(
         "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->ring.task_descriptors_offset,
         h->ring.task_descriptors_offset

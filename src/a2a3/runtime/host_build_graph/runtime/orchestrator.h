@@ -86,10 +86,6 @@ struct PTO2OrchestratorState {
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
     int32_t total_aiv_count{0};      // AIV cores (= 2 × clusters on standard hardware)
 
-    // === GM HEAP (for output buffers) ===
-    void *gm_heap_base;     // Base address of GM heap
-    uint64_t gm_heap_size;  // Total size of GM heap (all rings)
-
     // === FATAL ERROR ===
     // Fatal error flag (single-thread access by orchestrator, no atomic needed)
     // Cross-thread notification uses shared memory orch_error_code (atomic)
