@@ -32,7 +32,10 @@
 
 namespace {
 
-TaskId make_token(uint32_t local) { return TaskId::make(/*ring=*/0, local); }
+// The mailbox stores a token and compares it for identity; it never decodes one,
+// and the encoding belongs to whichever runtime minted it, so any distinct 64-bit
+// value serves here.
+TaskId make_token(uint32_t local) { return TaskId{local}; }
 
 AICoreCompletionMailbox *fresh_mailbox() {
     // ~256KB heap allocation — avoid stack/BSS pressure across tests.

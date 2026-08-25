@@ -31,6 +31,7 @@
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host_build_graph/task_id_encoding.h"
 #include "host_tensor_access.h"
 
 // simpler::hbg::Tensor-byte access for a caller that can load a device address directly.
@@ -185,18 +186,20 @@ static bool wait_for_tensor_ready(
     // Callers branch on the returned pointer, not on `failed`: the slot is
     // dereferenced immediately and a null return is the only safe signal.
     auto resolve_producer = [&](TaskId producer) -> const ChipTaskSlotState * {
-        if (!producer.is_valid() || producer.ring() != 0) {
+        if (!producer.is_valid() || !simpler::hbg::is_ring_task(producer)) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
-                "tensor producer task %#llx has invalid ring %u; host_build_graph uses ring 0",
-                static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(producer.ring())
+                "tensor producer task %#llx is in id space %u, not RING; host_build_graph resolves a producer against "
+                "its one task table",
+                static_cast<unsigned long long>(producer.raw),
+                static_cast<unsigned int>(simpler::hbg::task_id_space(producer))
             );
             failed = true;
             return nullptr;
         }
 
         auto &tasks = orch.sm_header->tasks;
-        int32_t local_id = static_cast<int32_t>(producer.local());
+        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(producer));
         auto &slot = tasks.get_slot_state_by_task_id(local_id);
         if (slot.task == nullptr || slot.task->task_id != producer) {
             orch.report_fatal(
@@ -211,7 +214,7 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
+        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot.task->task_id));
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
@@ -237,7 +240,7 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = slot.task->task_id.local();
+        int32_t local_id = simpler::hbg::task_local_id(slot.task->task_id);
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         // Polling: all consumers of this producer have retired once the per-ring

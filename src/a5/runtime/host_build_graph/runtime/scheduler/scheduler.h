@@ -39,6 +39,7 @@
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId for the early-dispatch doorbell
 #include "async_wait.h"
 #include "graph_execution.h"
+#include "host_build_graph/task_id_encoding.h"
 #include "task_allocator.h"
 #include "runtime_types.h"
 #include "shared_memory.h"
@@ -624,7 +625,7 @@ struct SchedulerState {
     // watermark >= producer.last_consumer_local_id). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
-        const int32_t task_id = static_cast<int32_t>(slot_state.task->task_id.local());
+        const int32_t task_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot_state.task->task_id));
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)

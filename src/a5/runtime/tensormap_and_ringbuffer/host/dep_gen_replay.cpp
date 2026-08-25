@@ -73,6 +73,7 @@
 #include "data_type.h"
 #include "dep_compute.h"
 #include "task_id.h"
+#include "tensormap_and_ringbuffer/task_id_encoding.h"
 #include "tensormap.h"
 #include "tensor.h"
 
@@ -486,8 +487,8 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     uint32_t max_local[CHIP_MAX_RING_DEPTH] = {0};
     for (size_t i = 0; i < num_records; i++) {
         TaskId tid{records[i].task_id};
-        uint8_t ring = tid.ring();
-        uint32_t local = tid.local();
+        uint8_t ring = simpler::tmr::task_ring(tid);
+        uint32_t local = simpler::tmr::task_local_id(tid);
         if (ring < CHIP_MAX_RING_DEPTH && local > max_local[ring]) {
             max_local[ring] = local;
         }

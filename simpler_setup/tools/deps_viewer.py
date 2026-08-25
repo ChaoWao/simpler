@@ -122,7 +122,13 @@ def _normalize_small_int(v):
 
 
 def _node_id(task_id):
-    """DOT-safe node id: ``T{ring}_{local}``."""
+    """DOT-safe node id: ``T{high}_{local}``.
+
+    The high field is a ring index under ``tensormap_and_ringbuffer`` (any ring in
+    ``0..CHIP_MAX_RING_DEPTH-1``) and an id space under ``host_build_graph``
+    (0 = RING, 1 = GRAPH_NODE), so its meaning depends on which runtime wrote the
+    record. It is printed verbatim either way.
+    """
     tid = _normalize_task_id(task_id)
     if tid is None:
         return f"T_{task_id}"
@@ -134,12 +140,12 @@ def _node_id(task_id):
 def _make_task_formatter(nodes):
     """Build a task-id → display-string formatter sized to the graph.
 
-    If every node lives in ring 0 the display is just ``{local}`` (the local
+    If every node has a 0 high field the display is just ``{local}`` (the local
     counter alone — no noise on workloads that never enter a manual scope).
-    The moment any node is in ring ≥ 1 we switch to the explicit
-    ``({ring}, {local})`` tuple for *every* node so the asymmetry is visible
-    instead of hidden (you can't have ``t0`` next to ``r1t3`` and know which
-    ring t0 lives in without context).
+    The moment any node has a nonzero one we switch to the explicit
+    ``({high}, {local})`` tuple for *every* node so the asymmetry is visible
+    instead of hidden (you can't have ``t0`` next to ``r1t3`` and know what
+    t0's high field is without context).
     """
     has_multi_ring = False
     for n in nodes:

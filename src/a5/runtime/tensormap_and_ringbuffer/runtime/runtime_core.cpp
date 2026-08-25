@@ -29,6 +29,7 @@
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"  // PLATFORM_PROF_SYS_CNT_FREQ (data-wait deadline)
 #include "common/unified_log.h"
+#include "tensormap_and_ringbuffer/task_id_encoding.h"
 #if SIMPLER_DFX
 #include "aicpu/scope_stats_collector_aicpu.h"
 #endif
@@ -114,7 +115,7 @@ static bool wait_for_tensor_ready(
 
     auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = slot.ring_id;
-        int32_t local_id = static_cast<int32_t>(slot.task->task_id.local());
+        int32_t local_id = static_cast<int32_t>(simpler::tmr::task_local_id(slot.task->task_id));
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
@@ -140,7 +141,7 @@ static bool wait_for_tensor_ready(
 
     auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
         uint8_t ring_id = slot.ring_id;
-        int32_t local_id = slot.task->task_id.local();
+        int32_t local_id = simpler::tmr::task_local_id(slot.task->task_id);
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         while ((slot.fanout_refcount.load(std::memory_order_acquire) & ~FANOUT_SCOPE_BIT) <
@@ -190,7 +191,9 @@ static bool wait_for_tensor_ready(
     auto do_wait = [&]() {
         // Step A: creator retention — read owner directly from tensor metadata
         if (owner.is_valid()) {
-            auto &s = orch.sm_header->rings[owner.ring()].get_slot_state_by_task_id(owner.local());
+            auto &s = orch.sm_header->rings[simpler::tmr::task_ring(owner)].get_slot_state_by_task_id(
+                simpler::tmr::task_local_id(owner)
+            );
             try_push(s);
             if (failed) return;
         }
@@ -198,7 +201,9 @@ static bool wait_for_tensor_ready(
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](ChipTensorMapEntry &entry, OverlapStatus) -> bool {
             TaskId pid = entry.producer_task_id;
-            auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
+            auto &s = orch.sm_header->rings[simpler::tmr::task_ring(pid)].get_slot_state_by_task_id(
+                simpler::tmr::task_local_id(pid)
+            );
             try_push(s);
             return !failed;
         });

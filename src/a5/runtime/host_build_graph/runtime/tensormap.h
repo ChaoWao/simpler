@@ -50,6 +50,7 @@
 #include <memory>
 
 #include "common.h"
+#include "host_build_graph/task_id_encoding.h"
 #include "profiling_config.h"
 #include "runtime_types.h"
 #include "tensor.h"
@@ -564,7 +565,7 @@ struct ChipTensorMap {
         g_insert_count++;
 #endif
         uint32_t bucket_index = hash(addr);
-        auto local_id = producer_task_id.local();
+        auto local_id = simpler::hbg::task_local_id(producer_task_id);
         const int32_t task_slot = local_id;
 
         entry->producer_task_id = producer_task_id;
@@ -602,7 +603,7 @@ struct ChipTensorMap {
         // Update predecessor's next pointer (O(1) via prev_in_task)
         if (entry.prev_in_task == nullptr) {
             // Entry is the head of its task chain, update task_entry_heads
-            int32_t local_id = static_cast<int32_t>(entry.producer_task_id.local());
+            int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(entry.producer_task_id));
             const int32_t task_slot = local_id;
             task_entry_heads[task_slot] = entry.next_in_task;
         } else {

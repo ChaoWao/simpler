@@ -14,6 +14,8 @@
 
 #include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
+#include "host_build_graph/task_id_encoding.h"
+
 #define FUNC_NOOP_AIC 0
 #define FUNC_NOOP_AIV0 1
 #define FUNC_NOOP_AIV1 2
@@ -40,8 +42,19 @@ void submit_overflowing_mix_task() {
 
 simpler::hbg::Tensor tensor_with_unbound_owner(const simpler::hbg::Tensor &external) {
     simpler::hbg::Tensor forged = external;
-    forged.owner_task_id = TaskId::make(0, 17);
+    forged.owner_task_id = simpler::hbg::make_ring_task(17);
     return forged;
+}
+
+// A GRAPH_NODE id names storage inside a Graph execution, not a ring slot, so it
+// can never be a fanin producer. Declaring one as an explicit dependency is the
+// caller error append_fanin_or_fail rejects.
+void submit_task_depending_on_graph_node() {
+    const TaskId deps[1] = {simpler::hbg::make_graph_node(/*outer_local_id=*/1, /*node_index=*/0)};
+    CoreTaskArgs args;
+    args.launch_spec.set_block_num(1);
+    args.set_dependencies(deps, 1);
+    rt_submit_aiv_task(FUNC_NOOP_AIV0, args);
 }
 
 }  // namespace
@@ -70,6 +83,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     case 3:
         set_tensor_data<int32_t>(tensor_with_unbound_owner(external), 1, index, 7);
+        return;
+    case 4:
+        submit_task_depending_on_graph_node();
         return;
     default:
         rt_report_fatal(

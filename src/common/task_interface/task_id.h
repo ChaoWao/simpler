@@ -21,26 +21,25 @@
 #include <cstdint>
 
 /**
- * TaskId: 64-bit encoding shared by both runtimes.
+ * TaskId: an opaque 64-bit task handle.
  *
- * raw encoding: (ring_id << 32) | local_id
+ * The bit layout belongs to the runtime that mints the id, and the two runtimes
+ * encode different things in the high bits — a ring index in `tmr`, an id space in
+ * `hbg`. Neither is declared here; code that mints or decodes an id includes its
+ * own runtime's encoding header:
+ *   src/common/host_build_graph/task_id_encoding.h
+ *   src/common/tensormap_and_ringbuffer/task_id_encoding.h
  *
- * ring_id:  which ring layer (0..CHIP_MAX_RING_DEPTH-1)
- * local_id: per-ring monotonic counter
+ * What every holder may rely on: the handle is 8 bytes, copyable, comparable for
+ * identity, and has one reserved sentinel.
  *
  * Invalid sentinel: raw == UINT64_MAX (no valid task has this encoding).
  */
 struct TaskId {
     uint64_t raw;
 
-    static constexpr TaskId make(uint8_t ring_id, uint32_t local_id) {
-        return TaskId{(static_cast<uint64_t>(ring_id) << 32) | static_cast<uint64_t>(local_id)};
-    }
-
     static constexpr TaskId invalid() { return TaskId{UINT64_MAX}; }
 
-    constexpr uint8_t ring() const { return static_cast<uint8_t>(raw >> 32); }
-    constexpr uint32_t local() const { return static_cast<uint32_t>(raw & 0xFFFFFFFFu); }
     constexpr bool is_valid() const { return raw != UINT64_MAX; }
     constexpr bool is_invalid() const { return raw == UINT64_MAX; }
 
