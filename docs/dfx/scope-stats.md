@@ -157,7 +157,7 @@ only the `real_occupancy` curve.
   by site to compute the metrics above.
 - **Per-ring.** Each ring's task window, heap, and dep pool are tracked
   independently; a scope only ever touches its own ring
-  (`ring = min(depth, MAX_RING_DEPTH−1)`).
+  (`ring = min(depth, CHIP_MAX_RING_DEPTH−1)`).
 - **Capacity denominators.** The `*_max` capacities in the metadata line
   are snapshots of what the runtime actually configured for that run, so
   `used/cap` ratios are exact.

@@ -15,8 +15,8 @@
  * task window flow control, and heap_available semantics.
  *
  * The allocator is single-threaded (orchestrator thread), so no concurrency
- * tests are needed. The unified TaskAllocator replaces the previous
- * separate ChipHeapRing + ChipTaskRing.
+ * tests are needed. TaskAllocator owns the task window and the heap together,
+ * so a slot and its output buffer are checked and committed as one unit.
  *
  * Design contracts (try_bump_heap):
  *
