@@ -24,6 +24,55 @@ constructing span attributes; `WARN`, `ERROR`, and `NUL` therefore disable the
 instrumentation work as well as the output. Device logging still uses the
 initialization-time policy described in [logging.md](../logging.md).
 
+## Where the records go
+
+The host logger writes to stderr until it is given a directory, and then it
+writes to `<directory>/host.<pid>.log` instead. The directory is
+`CallConfig.output_prefix` — the one every other diagnostic artifact already goes
+under — so a run that has one gets its host log beside its other artifacts, and a
+run that does not keeps its records on the console. There is no separate switch to
+configure, and the runtime never derives the path itself.
+
+**The destination belongs to the logger, not to a record.** Everything that logger
+writes follows it: `LOG_*` records, `[STRACE]` spans, `[CLOCK_ANCHOR]`, the
+`bind phase=` summaries, and the spans Python emits through
+`unified_log_host_span`. Nothing declares an intent and no record kind is treated
+specially, so there is no state in which part of a run's log is in one place and
+part in another. The first non-empty directory in a process wins, and a record
+falls back to stderr rather than being lost whenever the file cannot take it: a
+path that does not fit, a failed open, a failed write, or a failed flush.
+
+**What stays on the console regardless:** messages Python logs through its own
+`logging` module. Those are a second logging system — same threshold, different
+envelope, no timestamp — so they are not part of this stream and cannot be
+ordered against it. Routing them through the host logger is a separate change.
+
+Each process's file is fully buffered. It is flushed when a depth-zero invocation
+record completes, which is the point at which the records so far describe a whole
+invocation, and whenever a `WARN` or `ERROR` record is written, which is rare and
+worth having on disk if the process dies. That flush runs on the thread that
+emitted the record, so this reduces the observer effect by roughly the ratio of
+records to flushes rather than removing it: expect a residual tail at each flush
+boundary, not a clean floor. A system tracer would hand the bytes to a consumer
+instead, and would bound its buffer and count what it drops; this does neither,
+deliberately.
+
+## Reading a run back
+
+Every record carries its own `pid`, so the tools take several inputs and
+concatenate them, and a directory expands to the `host.*.log` files inside it:
+
+```bash
+python -m simpler_setup.tools.strace_timing <output_prefix> --swimlane swimlane.json
+```
+
+A process writes its `[CLOCK_ANCHOR]` ahead of its first record and into the same
+stream, so each file is self-contained for wall-clock recovery. If an input is
+truncated or a process's file is missing, the pids in it stay monotonic-only and
+`clockAnchors` is absent from the output rather than wrong — the tool warns when a
+pid emitted spans and no anchor was found for it, which is the signal that this
+happened.
+
 ## Marker grammar
 
 Every host log record starts with a `CLOCK_MONOTONIC` nanosecond timestamp:

@@ -3090,6 +3090,36 @@ class TestRunHandle:
         with pytest.raises(ValueError, match="bad graph"):
             worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
 
+    def test_submit_seeds_the_log_directory_from_the_run_output_prefix(self, monkeypatch):
+        """This process's log lands beside the run's other diagnostic artifacts.
+
+        `CallConfig.output_prefix` is the directory every diagnostic artifact
+        already goes under, and its contract is that the runtime never derives a
+        path itself — so the submit path hands that directory to the log layer
+        rather than the log layer reading one from the environment.
+        """
+        worker, _events = self._submission_failure_worker(failures=0)
+        seeded: list[str] = []
+        monkeypatch.setattr(worker_mod, "_native_set_host_log_directory", seeded.append)
+
+        def bad_graph(*_args):
+            raise ValueError("bad graph")
+
+        with pytest.raises(ValueError, match="bad graph"):
+            worker._submit_l3_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="/tmp/run-artifacts")))
+        assert seeded == ["/tmp/run-artifacts"]
+
+        # No prefix means no directory to seed, and spans stay on stderr.
+        seeded.clear()
+        with pytest.raises(ValueError, match="bad graph"):
+            worker._submit_l3_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="")))
+        assert seeded == []
+
+        # A config without the field at all must not be what fails a submit.
+        with pytest.raises(ValueError, match="bad graph"):
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+        assert seeded == []
+
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)
         graph_error = ValueError("bad graph")

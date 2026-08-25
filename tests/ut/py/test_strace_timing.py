@@ -591,6 +591,84 @@ def test_swimlane_cli_writes_trace(tmp_path):
     assert event["args"]["wall_ts_ns"] == "1700000000000000050"
 
 
+def test_cli_reads_every_input_so_a_run_needs_no_manual_merge(tmp_path, capsys):
+    """A run's per-process logs, passed together.
+
+    Records carry their own pid, so concatenating inputs is all the merge that
+    was ever needed — but the tool used to take one path, which left the merge to
+    whoever ran it.
+    """
+    first = tmp_path / "host.71.log"
+    second = tmp_path / "host.72.log"
+    # Each process's own file carries its anchor ahead of its records.
+    first.write_text(
+        _anchor_record(71, 50, 1_700_000_000_000_000_000)
+        + _span_record(pid=71, tid=710, inv=1, name="node.submit", ts=100, dur=10),
+        encoding="utf-8",
+    )
+    second.write_text(
+        _anchor_record(72, 60, 1_700_000_000_000_000_010)
+        + _span_record(pid=72, tid=720, inv=1, name="chip.run", ts=200, dur=20),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "swimlane.json"
+
+    assert main([str(first), str(second), "--swimlane", str(output_path)]) == 0
+
+    trace = json.loads(output_path.read_text(encoding="utf-8"))
+    assert {event["pid"] for event in trace["traceEvents"] if event.get("ph") == "X"} == {71, 72}
+    assert {int(anchor["pid"]) for anchor in trace["clockAnchors"]} == {71, 72}
+    assert "no [CLOCK_ANCHOR] record" not in capsys.readouterr().err
+
+
+def test_cli_expands_a_run_directory_to_its_per_process_log_files(tmp_path):
+    """A run's output_prefix can be passed as-is."""
+    prefix = tmp_path / "case_20260824"
+    prefix.mkdir()
+    (prefix / "host.71.log").write_text(
+        _span_record(pid=71, tid=710, inv=1, name="node.submit", ts=100, dur=10), encoding="utf-8"
+    )
+    (prefix / "host.72.log").write_text(
+        _span_record(pid=72, tid=720, inv=1, name="chip.run", ts=200, dur=20), encoding="utf-8"
+    )
+    # A sibling artifact must not be read as a log.
+    (prefix / "pmu.csv").write_text("not,a,log\n", encoding="utf-8")
+    output_path = tmp_path / "swimlane.json"
+
+    assert main([str(prefix), "--swimlane", str(output_path)]) == 0
+
+    trace = json.loads(output_path.read_text(encoding="utf-8"))
+    assert {event["pid"] for event in trace["traceEvents"] if event.get("ph") == "X"} == {71, 72}
+
+
+def test_cli_rejects_a_directory_with_no_span_files(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    with pytest.raises(SystemExit, match="holds no host\\."):
+        main([str(empty)])
+
+
+def test_cli_warns_when_a_pid_emitted_spans_without_a_clock_anchor(tmp_path, capsys):
+    """An incomplete input leaves those pids monotonic-only.
+
+    `clockAnchors` is then simply absent from the output rather than wrong, which
+    is exactly the kind of loss nobody notices.
+    """
+    log_file = tmp_path / "host.71.log"
+    log_file.write_text(
+        _span_record(pid=71, tid=710, inv=1, name="node.submit", ts=100, dur=10)
+        + _span_record(pid=72, tid=720, inv=1, name="chip.run", ts=200, dur=20),
+        encoding="utf-8",
+    )
+
+    assert main([str(log_file)]) == 0
+
+    err = capsys.readouterr().err
+    assert "no [CLOCK_ANCHOR] record for pid(s) 71, 72" in err
+    assert "check that every input is complete" in err
+
+
 def test_cli_warns_when_one_pid_has_multiple_clock_anchors(tmp_path, capsys):
     log_path = tmp_path / "run.log"
     log_path.write_text(

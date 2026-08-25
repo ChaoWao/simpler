@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <algorithm>
 #include <cerrno>
+#include <fstream>
 #include <sstream>
 #include <set>
 #include <string>
@@ -350,6 +351,161 @@ TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
     EXPECT_LE(record.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
     ASSERT_GE(record.size(), 2u);
     EXPECT_EQ(record[record.size() - 2], '~');
+}
+
+// The output directory is frozen on the first non-empty value, so a test that
+// needs its own clears the binding first — the same shape as this file's
+// existing `clock_anchor_pid` resets. Restoring it on scope exit is what keeps
+// one directory test from redirecting every later test's records away from
+// stderr, including when an ASSERT leaves the test early.
+class ScopedLogDirectory {
+public:
+    explicit ScopedLogDirectory(const char *directory) {
+        unbind();
+        HostLogger::get_instance().set_log_directory(directory);
+    }
+
+    ~ScopedLogDirectory() { unbind(); }
+
+    ScopedLogDirectory(const ScopedLogDirectory &) = delete;
+    ScopedLogDirectory &operator=(const ScopedLogDirectory &) = delete;
+
+private:
+    static void unbind() {
+        g_shared_log_state.log_directory_bound = 0;
+        g_shared_log_state.log_directory[0] = '\0';
+    }
+};
+
+std::string read_log_file(const char *directory, pid_t pid) {
+    const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(pid)) + ".log";
+    std::ifstream input(path);
+    if (!input.good()) return "";
+    return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+TEST(HostLogTest, LogDirectorySendsEveryRecordToOneBufferedFilePerProcess) {
+    char directory_template[] = "/tmp/simpler-host-strace-XXXXXX";
+    char *directory = mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+    ScopedLogDirectory scoped_log_directory(directory);
+    ASSERT_STREQ(HostLogger::get_instance().log_directory(), directory);
+
+    const SimplerHostSpan nested{
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 1, 0, 100, 25, "chip.run.bind", "run_id=7"
+    };
+    const SimplerHostSpan root{
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 90, 50, "chip.run", "run_id=7"
+    };
+    g_shared_log_state.clock_anchor_pid = 0;
+    const auto captured = run_with_config(LogLevel::TIMING, [&] {
+        unified_log_host_span(&nested);
+        unified_log_host_span(&root);
+    });
+    // The destination belongs to the logger, so nothing is left behind on
+    // stderr — not the spans and not the anchor they are unreadable without.
+    EXPECT_EQ(captured.err, "");
+
+    const std::string contents = read_log_file(directory, getpid());
+    std::istringstream records(contents);
+    std::string anchor_record;
+    std::string nested_record;
+    std::string root_record;
+    ASSERT_TRUE(static_cast<bool>(std::getline(records, anchor_record)));
+    ASSERT_TRUE(static_cast<bool>(std::getline(records, nested_record)));
+    ASSERT_TRUE(static_cast<bool>(std::getline(records, root_record)));
+    EXPECT_NE(anchor_record.find("[CLOCK_ANCHOR] v=1"), std::string::npos);
+    // Field sequence, not just the name: `name=chip.run` is a prefix of
+    // `name=chip.run.bind`, so a name alone cannot tell the root record from the
+    // nested one.
+    EXPECT_NE(nested_record.find("depth=1 name=chip.run.bind ts=100 dur=25"), std::string::npos) << nested_record;
+    EXPECT_NE(root_record.find("depth=0 name=chip.run ts=90 dur=50"), std::string::npos) << root_record;
+    std::string extra_record;
+    EXPECT_FALSE(static_cast<bool>(std::getline(records, extra_record)));
+
+    // Every line went through the same envelope, which is what lets one reader
+    // parse the anchor and the spans out of this one file.
+    for (const std::string &record : {anchor_record, nested_record, root_record}) {
+        EXPECT_EQ(record.find("[mono_ns="), 0u) << record;
+    }
+
+    const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
+    EXPECT_EQ(unlink(path.c_str()), 0);
+    EXPECT_EQ(rmdir(directory), 0);
+}
+
+TEST(HostLogTest, LogDirectoryTakesOrdinaryRecordsAndFlushesTheSevereOnes) {
+    char directory_template[] = "/tmp/simpler-host-log-ordinary-XXXXXX";
+    char *directory = mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+    ScopedLogDirectory scoped_log_directory(directory);
+
+    g_shared_log_state.clock_anchor_pid = 0;
+    const auto captured = run_with_config(LogLevel::TIMING, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "disk-please");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "buffered-please");
+    });
+    EXPECT_EQ(captured.err, "");
+
+    // Read before any root span closes: an error is rare and worth having on
+    // disk if the process dies, so it is flushed as it is written. The INFO
+    // record rides the buffer and need not be visible yet.
+    const std::string contents = read_log_file(directory, getpid());
+    EXPECT_NE(contents.find("disk-please"), std::string::npos);
+
+    const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
+    EXPECT_EQ(unlink(path.c_str()), 0);
+    EXPECT_EQ(rmdir(directory), 0);
+}
+
+TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
+    char directory_template[] = "/tmp/simpler-host-strace-fork-XXXXXX";
+    char *directory = mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+    ScopedLogDirectory scoped_log_directory(directory);
+    // Emission is gated on the live threshold, and an unbound module defaults to
+    // NUL, so this test sets the level rather than inheriting whatever an earlier
+    // test in this binary left behind.
+    HostLogger::get_instance().set_level(LogLevel::TIMING);
+
+    const SimplerHostSpan parent_span{
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 8, 0x1234, 1, 0, 100, 25, "parent.span", ""
+    };
+    unified_log_host_span(&parent_span);
+
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        const SimplerHostSpan child_span{
+            SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 9, 0x1234, 0, 0, 200, 25, "child.span", ""
+        };
+        unified_log_host_span(&child_span);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    const std::string parent_path =
+        std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
+    const std::string child_path = std::string(directory) + "/host." + std::to_string(static_cast<int>(child)) + ".log";
+    std::ifstream child_input(child_path);
+    ASSERT_TRUE(child_input.good());
+    const std::string child_contents((std::istreambuf_iterator<char>(child_input)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(child_contents.find("name=parent.span"), std::string::npos);
+    EXPECT_NE(child_contents.find("name=child.span"), std::string::npos);
+    // The parent's record is depth 1, so it is still unflushed in the parent's
+    // own buffer. It can only have reached the parent's file if the child
+    // flushed the copy it inherited — which is what this test is named for, and
+    // what the child's file alone cannot show.
+    std::ifstream parent_input(parent_path);
+    const std::string parent_contents((std::istreambuf_iterator<char>(parent_input)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(parent_contents.find("name=parent.span"), std::string::npos)
+        << "the child flushed the parent's copied stdio buffer";
+    EXPECT_EQ(unlink(parent_path.c_str()), 0);
+    EXPECT_EQ(unlink(child_path.c_str()), 0);
+    EXPECT_EQ(rmdir(directory), 0);
 }
 
 TEST(HostLogTest, DisabledHostSpanProducesNoRecord) {

@@ -54,6 +54,17 @@ public:
 
     void set_level(simpler::log::LogLevel level);
 
+    // Write this process's records to `path`/host.<pid>.log instead of stderr.
+    // The caller is the one that knows where this run's artifacts go —
+    // CallConfig::output_prefix — so the logger never derives a path itself.
+    // The first non-empty path wins; a null or empty one leaves the logger on
+    // stderr. This is the logger's output, so it applies to every record: no
+    // caller declares anything and no record kind is treated specially.
+    void set_log_directory(const char *path);
+
+    // The bound output directory, or nullptr while this logger writes to stderr.
+    const char *log_directory() const;
+
     // Runtime modules read this from their bound process-owned state when
     // populating InitArgs.log_level at device init.
     int level() const;
@@ -80,7 +91,11 @@ private:
     HostLogger &operator=(HostLogger &&) = delete;
 
     const char *level_name(simpler::log::LogLevel level) const;
-    bool emit(const char *level_tag, const char *func, const char *fmt, va_list args);
+    bool emit(const char *level_tag, const char *func, const char *fmt, va_list args, bool flush);
+    // Writes one formatted record wherever this logger is configured to write.
+    // The only place a destination is chosen, and it is chosen per logger, not
+    // per record: no caller declares anything and no record kind is special.
+    bool write_record(const char *record, size_t size, bool flush);
     bool emit_ungated(const char *level_tag, const char *func, const char *fmt, ...);
     void emit_clock_anchor_if_needed();
 
