@@ -1735,12 +1735,62 @@ NB_MODULE(_task_interface, m) {
     );
     m.def(
         "_initialize_host_log",
-        [](int level) {
+        [](int level, bool defer_writer) {
             if (!simpler::log::is_valid_level(level)) return false;
-            HostLogger::get_instance().set_level(static_cast<simpler::log::LogLevel>(level));
-            return true;
+            HostLogger &logger = HostLogger::get_instance();
+            if (defer_writer && !logger.prepare_to_fork()) return false;
+            logger.set_level(static_cast<simpler::log::LogLevel>(level), /*defer_writer=*/true);
+            return defer_writer || logger.start_writer();
         },
-        nb::arg("level"), "Seed the process-owned host-log state before workers fork or load runtime modules."
+        nb::arg("level"), nb::arg("defer_writer") = false,
+        "Seed the process-owned host-log state. A hierarchical worker defers its writer until after its last fork."
+    );
+    m.def(
+        "_start_host_log_writer",
+        [] {
+            return HostLogger::get_instance().start_writer();
+        },
+        "Start this process's bounded host-log writer after its final local fork."
+    );
+    m.def(
+        "_flush_host_log",
+        [](uint32_t timeout_ms) {
+            return HostLogger::get_instance().flush(timeout_ms);
+        },
+        nb::arg("timeout_ms") = 1000, nb::call_guard<nb::gil_scoped_release>(),
+        "Wait boundedly for all host-log records accepted by this process to be written."
+    );
+    m.def(
+        "_host_log_dropped_records",
+        [] {
+            return HostLogger::get_instance().dropped_records();
+        },
+        "Return the number of host-log records rejected by or lost from this process sink."
+    );
+    m.def(
+        "_host_log_dropped_records_by_reason",
+        [] {
+            const HostLogger &logger = HostLogger::get_instance();
+            nb::dict counts;
+            counts["queue_full"] = logger.dropped_records(SIMPLER_HOST_LOG_DROP_QUEUE_FULL);
+            counts["claim_exhausted"] = logger.dropped_records(SIMPLER_HOST_LOG_DROP_CLAIM_EXHAUSTED);
+            counts["output_failed"] = logger.dropped_records(SIMPLER_HOST_LOG_DROP_OUTPUT_FAILED);
+            counts["not_admitted"] = logger.dropped_records(SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+            return counts;
+        },
+        "Return this process's host-log drops attributed by cause. The keys sum to "
+        "_host_log_dropped_records(). `queue_full` means the queue is too small for the burst; "
+        "`claim_exhausted` means the lock-free claim budget lost to contention with room still "
+        "in the queue; `output_failed` means the destination rejected the write; `not_admitted` "
+        "means there was no sink to submit to. They call for different fixes, which is why the "
+        "total alone is not actionable."
+    );
+    m.def(
+        "_host_log_pending_records",
+        [] {
+            return HostLogger::get_instance().pending_records();
+        },
+        "Return the number of accepted host-log records not yet written by this process sink."
     );
     m.def(
         "_set_host_log_directory",

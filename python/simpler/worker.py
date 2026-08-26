@@ -83,7 +83,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
@@ -279,7 +279,9 @@ from .task_interface import (
     RemoteBufferExport,
     RemoteBufferHandle,
     TaskArgs,
+    _flush_host_log_or_warn,
     _initialize_host_log,
+    _start_host_log_writer,
     _Worker,
 )
 from .worker_chip_orch_comm import (
@@ -4339,6 +4341,12 @@ class RunHandle:
             raise
 
 
+def _exit_after_host_log_flush(status: int) -> NoReturn:
+    """Boundedly preserve accepted records before a fork child uses os._exit()."""
+    _flush_host_log_or_warn("fork-child os._exit()")
+    os._exit(status)
+
+
 def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_leader: bool = False) -> None:
     """Run a forked child to completion, always terminating via ``os._exit``.
 
@@ -4385,6 +4393,9 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
         try:
             try:
                 ctx = setup()
+                # setup may recursively fork a complete lower-level subtree.
+                # Starting here keeps every C++ writer behind the final fork.
+                _start_host_log_writer()
             finally:
                 setup_active = False
         except _StartupCancelled:
@@ -4408,7 +4419,7 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
             else:
                 exit_code = 0
     finally:
-        os._exit(exit_code)
+        _exit_after_host_log_flush(exit_code)
 
 
 # ---------------------------------------------------------------------------
@@ -7671,6 +7682,20 @@ class Worker:
             try:
                 self._cleanup_partial_init()
             finally:
+                # _start_hierarchical() quiesces the process-owned log writer
+                # before its first fork. If anything fails before the normal
+                # post-fork restart, restore that process-global service after
+                # rollback; otherwise this failed Worker silently disables logs
+                # from unrelated Workers and callers in the same parent.
+                if self.level >= 3:
+                    try:
+                        _start_host_log_writer()
+                    except BaseException as log_restore_error:  # noqa: BLE001 -- preserve the startup cause
+                        with contextlib.suppress(BaseException):
+                            sys.stderr.write(
+                                f"[worker pid={os.getpid()}] WARN: failed to restore host-log writer after "
+                                f"startup rollback: {log_restore_error}\n"
+                            )
                 with self._hierarchical_start_cv:
                     # Only an INITIALIZING epoch commits FAILED. FAILED is only
                     # written by the init thread. CLOSED is absorbing.
@@ -7873,7 +7898,7 @@ class Worker:
         # and emits their spans. A chip child re-seeds its inherited state before
         # binding the logger copies embedded in the runtime modules it loads.
         chip_log_level = _simpler_log.get_current_config()
-        _initialize_host_log(chip_log_level)
+        _initialize_host_log(chip_log_level, defer_writer=True)
 
         # Bind the level word this process's host-scheduler spans lead with. The
         # C++ emit sites in Orchestrator / WorkerThread are level-agnostic — the
@@ -7974,8 +7999,8 @@ class Worker:
                         if _mailbox_load_i32(_buffer_field_addr(buf, _OFF_STATE)) == _IDLE:
                             _write_error(buf, 1, _format_exc(f"chip worker {idx} dev={dev_id} init", e))
                             _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _INIT_FAILED)
-                        os._exit(1)
-                    os._exit(0)
+                        _exit_after_host_log_flush(1)
+                    _exit_after_host_log_flush(0)
                 else:
                     self._chip_pids.append(pid)
                     if self._is_startup_root:
@@ -8065,6 +8090,11 @@ class Worker:
         # its descendants, so its INIT_READY means the whole subtree is ready. A
         # failure, exit, or hang aborts startup here.
         self._await_children_ready(self._next_level_shms, self._next_level_pids, "next_level", deadline)
+
+        # No local fork may follow this point. Only now is it safe to create the
+        # process-owned C++ writer thread; remote activation below creates its
+        # own health threads too.
+        _start_host_log_writer()
 
         # Last local fork is done. Now — and only now — open and register remote
         # L3 sessions: opening starts the remote subtree and registering spawns
@@ -11899,6 +11929,11 @@ class Worker:
                     if result is None:
                         result = exc
                 finally:
+                    # CLOSED prevents new admissions and teardown has quiesced
+                    # this Worker's producers. Preserve accepted records before
+                    # publishing completion, but never turn a stuck output into
+                    # an unbounded wait or a new close failure.
+                    _flush_host_log_or_warn("Worker.close()")
                     # The immutable outcome reference is the completion flag and
                     # result. A reader can therefore never observe completion
                     # without its error/incomplete payload. Publication precedes

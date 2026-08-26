@@ -26,7 +26,9 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import sys
 import threading
 import uuid
 import weakref
@@ -77,10 +79,22 @@ from _task_interface import (
     _emit_host_log as _native_emit_host_log,
 )
 from _task_interface import (
+    _flush_host_log as _native_flush_host_log,
+)
+from _task_interface import (
     _host_log_directory as _native_host_log_directory,
 )
 from _task_interface import (
+    _host_log_dropped_records as _native_host_log_dropped_records,
+)
+from _task_interface import (
+    _host_log_pending_records as _native_host_log_pending_records,
+)
+from _task_interface import (
     _initialize_host_log as _native_initialize_host_log,
+)
+from _task_interface import (
+    _start_host_log_writer as _native_start_host_log_writer,
 )
 
 from .buffer import Buffer, Tensor
@@ -1240,8 +1254,8 @@ class GlobalCommDomainView:
         return self._committed
 
 
-def _initialize_host_log(log_level: int | None = None) -> None:
-    """Seed the extension-owned host-log state before runtime use or fork.
+def _initialize_host_log(log_level: int | None = None, *, defer_writer: bool = False) -> None:
+    """Seed host-log state, optionally leaving its writer stopped for local forks.
 
     Also points the Python `simpler` logger at that same host logger, so the two
     stop being separate logging systems that agree only on a threshold. This is
@@ -1253,9 +1267,61 @@ def _initialize_host_log(log_level: int | None = None) -> None:
 
     if log_level is None:
         log_level = _log.get_current_config()
-    if not _native_initialize_host_log(int(log_level)):
+    if int(log_level) not in (10, 20, 25, 30, 40, 60):
         raise ValueError(f"unsupported simpler log threshold: {log_level}")
+    if not _native_initialize_host_log(int(log_level), bool(defer_writer)):
+        raise RuntimeError(f"cannot initialize simpler host logging at threshold {log_level}")
     _log.attach_unified_log_handler(_native_emit_host_log, _native_host_log_directory)
+
+
+def _start_host_log_writer() -> None:
+    """Start the process-owned writer after the process's final local fork."""
+    if not _native_start_host_log_writer():
+        raise RuntimeError("cannot start simpler host-log writer")
+
+
+def _flush_host_log(timeout_ms: int = 1000) -> bool:
+    """Wait boundedly for this process's accepted host-log records."""
+    return bool(_native_flush_host_log(int(timeout_ms)))
+
+
+def _host_log_dropped_records() -> int:
+    """Return the process-owned sink's explicit loss counter."""
+    return int(_native_host_log_dropped_records())
+
+
+def _host_log_pending_records() -> int:
+    """Return accepted records that the process writer has not completed."""
+    return int(_native_host_log_pending_records())
+
+
+def _flush_host_log_or_warn(context: str, timeout_ms: int = 1000) -> bool:
+    """Flush boundedly and make a timeout or logger failure observable."""
+    try:
+        flushed = _flush_host_log(timeout_ms)
+    except BaseException as flush_error:  # noqa: BLE001
+        # The native logger is the failed component, so stderr is the only
+        # non-recursive diagnostic path left during teardown.
+        with contextlib.suppress(BaseException):
+            sys.stderr.write(f"WARNING: host-log flush failed during {context}: {flush_error}\n")
+        return False
+    if flushed:
+        return True
+
+    try:
+        pending: int | str = _host_log_pending_records()
+    except BaseException:  # noqa: BLE001
+        pending = "unknown"
+    try:
+        dropped: int | str = _host_log_dropped_records()
+    except BaseException:  # noqa: BLE001
+        dropped = "unknown"
+    with contextlib.suppress(BaseException):
+        sys.stderr.write(
+            f"WARNING: host-log flush timed out after {timeout_ms} ms during {context}; "
+            f"pending_records={pending}, dropped_records={dropped}; accepted records may be lost.\n"
+        )
+    return False
 
 
 class ChipWorker:
@@ -1377,6 +1443,7 @@ class ChipWorker:
         try:
             self._impl.finalize()
         finally:
+            _flush_host_log_or_warn("ChipWorker.finalize()")
             with self._registry_lock:
                 self._callable_registry.clear()
                 self._identity_registry.clear()

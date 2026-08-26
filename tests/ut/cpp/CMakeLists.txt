@@ -1151,6 +1151,56 @@ add_dependencies(test_host_log_dso_unload test_host_log_unload_consumer)
 add_test(NAME test_host_log_dso_unload COMMAND test_host_log_dso_unload)
 set_tests_properties(test_host_log_dso_unload PROPERTIES LABELS "no_hardware")
 
+add_executable(test_host_log_nonblocking
+    common/test_host_log_nonblocking.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_compile_definitions(test_host_log_nonblocking PRIVATE SIMPLER_HOST_LOG_TEST_HOOKS=1)
+target_include_directories(test_host_log_nonblocking PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_nonblocking PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_host_log_nonblocking COMMAND test_host_log_nonblocking)
+set_tests_properties(test_host_log_nonblocking PROPERTIES TIMEOUT 8 LABELS "no_hardware")
+
+add_library(test_host_log_consumer SHARED
+    common/test_host_log_consumer.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_include_directories(test_host_log_consumer PRIVATE
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_consumer PRIVATE pthread)
+
+add_executable(test_host_log_cross_dso
+    common/test_host_log_cross_dso.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_compile_definitions(test_host_log_cross_dso PRIVATE
+    TEST_HOST_LOG_CONSUMER_PATH="$<TARGET_FILE:test_host_log_consumer>"
+)
+target_include_directories(test_host_log_cross_dso PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_cross_dso PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    ${CMAKE_DL_LIBS}
+    pthread
+)
+add_dependencies(test_host_log_cross_dso test_host_log_consumer)
+add_test(NAME test_host_log_cross_dso COMMAND test_host_log_cross_dso)
+set_tests_properties(test_host_log_cross_dso PROPERTIES LABELS "no_hardware")
+
 set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
 function(add_device_phase_capture_test name host_strace device_strace expected)
     add_executable(${name}

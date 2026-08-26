@@ -209,11 +209,14 @@ int DeviceRunner::ensure_binaries_loaded() {
         using SetLogLevelFunc = void (*)(int);
         SetLogLevelFunc set_log_level_func = nullptr;
         if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return PTO_RUNTIME_ERR_INTERNAL;
-        using SetHostLogStateFunc = void (*)(SimplerHostLogState *);
+        using SetHostLogStateFunc = int (*)(SimplerHostLogState *);
         SetHostLogStateFunc set_host_log_state_func = nullptr;
         if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func)))
             return PTO_RUNTIME_ERR_INTERNAL;
-        set_host_log_state_func(HostLogger::get_instance().state());
+        if (set_host_log_state_func(HostLogger::get_instance().state()) != 0) {
+            LOG_ERROR("AICPU SO rejected the host-log state ABI");
+            return PTO_RUNTIME_ERR_INTERNAL;
+        }
         set_log_level_func(HostLogger::get_instance().level());
 
         aicpu_so_loaded_ = true;

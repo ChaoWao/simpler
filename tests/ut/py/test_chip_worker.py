@@ -343,6 +343,65 @@ class TestChipWorkerPython:
         with pytest.raises(RuntimeError, match=r"while ChipWorker\.init\(\) is in progress"):
             worker.finalize()
 
+    def test_public_wrapper_flush_failure_does_not_skip_finalize_cleanup(self, monkeypatch, capsys):
+        import simpler.task_interface as task_interface_mod  # noqa: PLC0415
+        from _task_interface import ChipCallable  # noqa: PLC0415
+        from simpler.task_interface import ChipWorker  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+
+        finalized = []
+
+        class FakeImpl:
+            initialized = True
+            device_id = 0
+
+            def finalize(self):
+                finalized.append(True)
+
+        def fail_flush(_timeout_ms):
+            raise RuntimeError("injected host-log flush failure")
+
+        worker = ChipWorker()
+        worker._impl = FakeImpl()
+        worker._callable_registry[0] = ChipCallable.build(signature=[], func_name="test", binary=b"\x00", children=[])
+        worker._identity_registry[b"digest"] = object()
+        worker._live_handles[1] = b"digest"
+        monkeypatch.setattr(task_interface_mod, "_flush_host_log", fail_flush)
+
+        worker.finalize()
+
+        assert finalized == [True]
+        assert worker._callable_registry == {}
+        assert worker._identity_registry == {}
+        assert worker._live_handles == {}
+        expected_warning = (
+            "WARNING: host-log flush failed during ChipWorker.finalize(): injected host-log flush failure"
+        )
+        assert expected_warning in capsys.readouterr().err
+
+    def test_public_wrapper_flush_timeout_is_reported_with_loss_counters(self, monkeypatch, capsys):
+        import simpler.task_interface as task_interface_mod  # noqa: PLC0415
+        from simpler.task_interface import ChipWorker  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+
+        class FakeImpl:
+            initialized = True
+            device_id = 0
+
+            def finalize(self):
+                pass
+
+        worker = ChipWorker()
+        worker._impl = FakeImpl()
+        monkeypatch.setattr(task_interface_mod, "_flush_host_log", lambda _timeout_ms: False)
+        monkeypatch.setattr(task_interface_mod, "_host_log_pending_records", lambda: 7)
+        monkeypatch.setattr(task_interface_mod, "_host_log_dropped_records", lambda: 3)
+
+        worker.finalize()
+
+        warning = capsys.readouterr().err
+        assert "host-log flush timed out after 1000 ms during ChipWorker.finalize()" in warning
+        assert "pending_records=7, dropped_records=3" in warning
+        assert "accepted records may be lost" in warning
+
 
 # ============================================================================
 # Mailbox CallConfig wire round-trip

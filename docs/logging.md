@@ -118,26 +118,44 @@ forwards to its local backend.
 
 ### Layer 3 — backend primitives
 
-`HostLogger::vlog` is the host-side authority for level gating. It formats a
-complete record and performs one `write(2)` under its module-local mutex.
+`HostLogger::vlog` is the host-side authority for level gating. It formats one
+bounded record (at most the portable 512-byte `PIPE_BUF` floor) and submits it
+to the process-owned queue. The queue has 4096 fixed slots and a lock-free
+multi-producer claim path. Once the writer is published, producers never perform
+file or stderr I/O, wait on a condition variable, acquire the drain mutex, or
+grow memory. During hierarchical initialization only, before the final local
+fork and writer startup, records use the synchronous destination so startup
+failures are not silently discarded. A full queue or exhausted bounded claim is
+a dropped record and increments `dropped_record_count`. An immediately-unlinked
+named semaphore provides the writer wakeup because unnamed semaphores are not
+available on every supported host OS.
+
+Any ordinary human-readable record whose formatted envelope and body exceed
+512 bytes is truncated to that fixed size and ends in `~\n`. This keeps one
+record to one atomic pipe write when several forked processes share captured
+stderr; callers that need a large payload must split it into separate records.
+
+One background writer drains the queue. When `CallConfig.output_prefix` is
+present it appends every C++ host-log record to the process-private
+`host.<pid>.log`; otherwise it writes to stderr. The bound directory is the
+destination, not a preference: a record it cannot take is counted as a drop
+rather than relocated, so a run's log is never split across two places.
+Severity and span depth no longer choose synchronous producer-side flush paths.
+Explicit lifecycle drains wait boundedly for records already accepted by the
+process.
+
 `HostLogger::log_host_span` additionally bounds and escapes machine-readable
 fields so a STRACE record fits the portable `PIPE_BUF` floor. Its early gate
 keeps direct ABI and legacy STRACE callers from paying those encoding costs
 when TIMING is disabled; `vlog` remains the final check if the threshold changes
 between the caller's query and emission.
 
-The mutex serializes writers only within the DSO that owns it. Writers from
-different DSOs, or from forked processes sharing a pipe, are indivisible only
-when their single `write(2)` is no larger than that pipe's `PIPE_BUF`.
-Machine-readable `[STRACE]` records satisfy that bound. Longer human-readable
-records are best-effort and may interleave across module boundaries. Blocking
-and drop accounting for those writes remain part of issue #1792 item 6.
-
 The AICPU `dev_vlog_*` interface remains source-compatible on both platforms.
 Sim implements it as a thin `va_list` adapter into its bound `HostLogger`, so it
-shares the live threshold, envelope, destination, and fallback with the other
-host-side modules in that process. Only real-silicon AICPU retains a separate
-backend, because its records go through CANN dlog rather than a host process.
+shares the live threshold, envelope, queue, destination, and fallback with
+the other host-side modules in that process. Only real-silicon AICPU retains a
+separate backend because its records go through CANN dlog rather than a host
+process.
 
 ## Cross-DSO host state
 
@@ -145,20 +163,39 @@ Each host DSO has a private `HostLogger` object, but every copy in one process
 reads the same `SimplerHostLogState`:
 
 ```c
+struct SimplerHostLogState;
+typedef int (*SimplerHostLogEnqueueFn)(
+    void *context, struct SimplerHostLogState *state,
+    const char *record, uint32_t size, int32_t anchor_pid);
+
 typedef struct SimplerHostLogState {
-    uint32_t abi_version;
-    uint32_t struct_size;
     int32_t threshold;
     int32_t clock_anchor_pid;
+    int32_t log_directory_bound;
+    char log_directory[1024];
+    int32_t sink_owner_pid;
+    int32_t sink_process_pid;
+    void *sink_context;
+    SimplerHostLogEnqueueFn sink_enqueue;
+    uint64_t dropped_record_count;
+    uint64_t pending_record_count;
+    uint64_t sink_producer_state;
+    uint64_t dropped_by_reason[4];
+    uint64_t reported_drop_count;
 } SimplerHostLogState;
 
 int simpler_host_log_bind_state(SimplerHostLogState *state);
 ```
 
-The native `_task_interface` extension owns the state for the process. The
-fields are plain fixed-width integers to keep the ABI compiler-independent;
-`host_log.cpp` accesses mutable fields with atomic builtins. ABI version and
-size are checked before a module accepts the pointer.
+The native `_task_interface` extension owns the state for the process.
+Thresholds and counters use fixed-width integers; `sink_context` and
+`sink_enqueue` are process-local native pointer values shared only by modules
+from the same build. `host_log.cpp` accesses mutable fields with atomic
+builtins. The struct carries no version or size word: every module that binds it
+is compiled from this repository in the same build, and the orchestration SOs
+compiled at run time hash this header's whole include closure into their
+scene-test cache key, so a stale layout cannot reach a binding. A module that
+binds is rejected only for a null pointer or a threshold outside the ladder.
 
 Only `simpler_host_log_bind_state` is exported from a host logging consumer.
 `HostLogger` and every `unified_log_*` definition are hidden. This avoids
@@ -167,17 +204,67 @@ interposition while still giving loaders one stable binding entry point.
 
 `clock_anchor_pid` is also shared. Consequently the private logger copies
 coordinate one successful `[CLOCK_ANCHOR]` per process. A negative PID is a
-temporary writer claim; a failed stderr write releases the claim so the next
-record can retry.
+temporary writer claim; a failed output releases the claim so the next record
+can retry. The first non-empty `log_directory` binding wins, so every bound DSO
+in the process chooses the same output without moving a file already in use.
+
+The owner publishes a C callback and opaque context in the same state. A private
+logger in any bound DSO can therefore submit to the one process queue without
+exporting a C++ object or relying on ELF interposition. The callback accepts a
+record only after it owns a queue slot. Binding marks that private logger as a
+consumer: it can recognize and use an existing sink, but it cannot create one.
+Only the extension copy that owns the process state creates the writer, so a
+transient DSO cannot leave its callback or thread behind after `dlclose()`.
+`pending_record_count` tracks accepted
+work for bounded drains; `dropped_record_count` tracks enqueue rejection and
+final write failure. The high bit of `sink_producer_state` closes admission
+before a fork boundary; its low bits keep `sink_context` alive until every DSO
+caller that may have loaded it has returned. `_host_log_dropped_records()`
+exposes the drop counter to diagnostics and tests, while
+`_host_log_pending_records()` distinguishes accepted work still waiting for the
+writer. Python and C++ flush defaults are both 1000 ms. Teardown and `os._exit()`
+paths report a timeout with both counters instead of silently abandoning the
+accepted backlog.
+
+### Attributing a drop, and saying so in the log
+
+`dropped_by_reason` splits the total four ways, because the total alone is not
+actionable — `queue_full` says the queue is too small for the burst,
+`claim_exhausted` says the lock-free claim budget lost to contention with room
+still in the queue, `output_failed` says the destination rejected the write, and
+`not_admitted` says there was no sink to submit to. Those call for four different
+fixes. Every drop increments the total and exactly one reason, so the breakdown
+always sums to the total; `_host_log_dropped_records_by_reason()` returns it as a
+dict.
+
+The counters live in process memory and die with the process, so a reader holding
+only `host.<pid>.log` would otherwise have no way to know records are missing —
+truncation leaves a record header behind, a drop leaves nothing. `prepare_to_fork()`
+therefore writes the breakdown into the log itself, at ERROR, whenever the total
+has grown since the last report:
+
+```text
+[HOSTLOG_DROPS] v=1 pid=1234 new=3 total=5 queue_full=5 claim_exhausted=0 output_failed=0 not_admitted=0
+```
+
+It reports a growth rather than a running total, so a process that quiesces at
+several fork boundaries does not restate the same losses each time. Every path
+that stops logging passes through that boundary, including `~HostLogger`.
+`strace_timing.py` parses these records and warns before it prints any timing,
+since a run that dropped records produces numbers derived from an incomplete log.
 
 ### Load and bind order
 
 Python seeds the extension-owned state before C++ loads consumers:
 
 ```python
-_initialize_host_log(level)
+_initialize_host_log(level, defer_writer=is_hierarchical)
+# Hierarchical workers perform all local forks here.
+_start_host_log_writer()
 self._impl.init(host_path, aicpu_path, aicore_path, dispatcher_path,
                 device_id, prewarm_config, enable_sdma, sim_context_path)
+# At submit, after CallConfig is available:
+_set_host_log_directory(config.output_prefix)
 ```
 
 `ChipWorker::init` then performs the module-specific work:
@@ -245,7 +332,7 @@ message tag.
 | Stage | Action | Source |
 | ----- | ------ | ------ |
 | Python import | Register `TIMING` / `NUL`; default the `simpler` logger to TIMING | `python/simpler/_log.py` |
-| `Worker.init()` | Normalize the Python logger level, seed native state before the first fork, and point the `simpler` logger at the host logger | `python/simpler/worker.py` |
+| `Worker.init()` | Normalize the Python level, attach it to the host logger, quiesce an old writer before local forks, then start a new writer after the final fork | `python/simpler/worker.py` |
 | `ChipWorker.init()` | Re-seed inherited native state in a chip child, then enter C++ | `python/simpler/task_interface.py` |
 | `_ChipWorker.init()` | Load sim context and host runtime, then bind each module's logger state | `src/common/worker/chip_worker.cpp` |
 | `simpler_init` | Onboard maps the bound threshold to CANN; attach and take executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
@@ -289,11 +376,14 @@ someone gave a custom number.
 
 ### Forked chip subprocesses
 
-The hierarchical parent seeds native state before `fork()` and passes the
-normalized level explicitly to `_chip_process_loop`. The child re-seeds its
-inherited copy before loading runtime modules. This covers both chip-owning L3
-workers and higher-level processes that emit scheduler spans without loading a
-chip runtime.
+The hierarchical parent seeds native state and joins any prior writer before
+`fork()`. It starts its new writer only after the final local child exists and
+before remote activation creates other threads. A generic fork child starts a
+writer after its fallible setup returns (setup may recursively fork a lower
+subtree); a chip child starts one while initializing its `ChipWorker`. Normal
+`os._exit()` paths and Worker/ChipWorker teardown perform a bounded drain. This
+covers both chip-owning L3 workers and higher-level processes that emit
+scheduler spans without loading a chip runtime.
 
 ### Onboard AICPU severity is CANN-owned
 
