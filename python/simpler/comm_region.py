@@ -13,10 +13,11 @@ from __future__ import annotations
 import ctypes
 import itertools
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import Any, Iterator
+from typing import Any
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     _host_vmm_copy_from,
@@ -28,6 +29,15 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 
 from .buffer import AddressSpace, Buffer
+from .comm_delegated_region_control import (
+    ALLOCATE_REPLY_BYTES,
+    ALLOCATE_REQUEST_HARD_CEILING,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedAllocateRequest,
+    encode_request,
+    parse_reply,
+)
 from .comm_endpoints import (
     DEVICE_AICPU,
     HOST_CPU,
@@ -46,14 +56,6 @@ from .comm_endpoints import (
     SingleOwnerPlan,
     UnsupportedRegionPlan,
     parse_endpoint_path,
-)
-from .comm_delegated_region_control import (
-    ALLOCATE_REPLY_BYTES,
-    ALLOCATE_REQUEST_HARD_CEILING,
-    DelegatedAllocateReplyTag,
-    DelegatedAllocateRequest,
-    encode_request,
-    parse_reply,
 )
 from .comm_provider import (
     PosixShmImport,
@@ -371,7 +373,7 @@ class RegionInstanceRegistry:
 
     @contextmanager
     def _delegated_allocate_dispatch(
-        self, *, registry: EndpointRegistry, expected_registry_epoch: int
+        self, *, registry: object, expected_registry_epoch: int
     ) -> Iterator[tuple[bytes, int]]:
         with self._delegated_allocate_dispatch_lock:
             session = _require_session_instance_id(getattr(registry, "session_instance_id", None))
@@ -642,9 +644,7 @@ class RegionInstance:
         self._ever_live = True
         self._state = RegionInstanceState.LIVE
 
-    def _bind_delegated_identity(
-        self, session_instance_id: bytes, transaction_id: int, provider_path: bytes
-    ) -> None:
+    def _bind_delegated_identity(self, session_instance_id: bytes, transaction_id: int, provider_path: bytes) -> None:
         self._worker._region_instance_registry._require_tracked(self)
         session = _require_session_instance_id(session_instance_id)
         if type(transaction_id) is not int or transaction_id < 1 or transaction_id > _UINT64_MAX:
@@ -755,7 +755,9 @@ class RegionInstance:
             )
         if status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
             return RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
-        return RuntimeError(f"region instance: delegated release failed for transaction {self._delegated_transaction_id}")
+        return RuntimeError(
+            f"region instance: delegated release failed for transaction {self._delegated_transaction_id}"
+        )
 
     def _close_owned(self, *, poison_on_error: bool) -> None:
         if self._state is RegionInstanceState.CLOSED:
@@ -1024,7 +1026,7 @@ def _consumer_adapter(part: RegionPartPlan, consumer: EndpointRecord) -> tuple[A
     if len(matches) != 1 or matches[0].adapter_kind is None or matches[0].adapter_profile is None:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_ATTACHMENT,
-            "W5a first shape requires a consumer adapter on each part",
+            "single-owner first shape requires a consumer adapter on each part",
         )
     return matches[0].adapter_kind, matches[0].adapter_profile
 
@@ -1076,12 +1078,24 @@ def materialize_delegated_region_instance(ctx: MaterializationContext) -> Region
         ) as (session_instance_id, transaction_id):
             instance._bind_delegated_identity(session_instance_id, transaction_id, shape.provider_path)
             if not isinstance(ctx.plan, BackendPlan):
-                raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
+                raise MaterializationRefusal(
+                    RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan"
+                )
             request = _delegated_allocate_request(shape, ctx.plan, ctx.layout, session_instance_id, transaction_id)
             staged = encode_request(request, staged_capacity=max(ALLOCATE_REQUEST_HARD_CEILING, ALLOCATE_REPLY_BYTES))
-            reply_payload = dispatcher(memoryview(staged))
-            outcome = parse_reply(reply_payload if reply_payload is not None else staged).decode_outcome()
-        if getattr(outcome, "tag", None) is not DelegatedAllocateReplyTag.ALLOCATED or outcome.result is None:
+            raw_reply = dispatcher(memoryview(staged))
+            if isinstance(raw_reply, (bytes, bytearray, memoryview)):
+                reply_payload = raw_reply
+            else:
+                reply_payload = staged
+            outcome = parse_reply(reply_payload).decode_outcome()
+        if (
+            not isinstance(outcome, DelegatedAllocateReply)
+            or outcome.tag is not DelegatedAllocateReplyTag.ALLOCATED
+            or outcome.result is None
+            or outcome.payload_view is None
+            or outcome.counter_view is None
+        ):
             raise MaterializationError("delegated allocate did not return a committed ALLOCATED reply")
         instance._commit_delegated_allocation(int(outcome.result.provider_resource_id))
         validate_committed_region_allocation(

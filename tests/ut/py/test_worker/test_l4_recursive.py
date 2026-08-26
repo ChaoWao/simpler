@@ -793,6 +793,26 @@ class TestW5aPhaseAIntegration:
         assert callable(Worker._dispatch_delegated_allocate)
         assert callable(Worker._dispatch_delegated_release)
 
+    def test_private_delegated_wrapper_uses_w5a_materializer(self):
+        tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
+        create = None
+        context = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "Worker":
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef) and item.name == "_create_delegated_worker_chip_region":
+                        create = item
+                    if isinstance(item, ast.FunctionDef) and item.name == "_admitted_delegated_region_context":
+                        context = item
+        assert create is not None and context is not None
+        create_names = {n.id for n in ast.walk(create) if isinstance(n, ast.Name)}
+        context_names = {n.id for n in ast.walk(context) if isinstance(n, ast.Name)}
+        assert "materialize_delegated_region_instance" in create_names
+        assert "materialize_region_instance" not in create_names
+        assert "validate_delegated_single_owner_region_shape" in context_names
+        assert "validate_single_owner_region_shape" not in context_names
+        assert "create_worker_chip_region" not in create_names
+
     def test_w5a_runtime_helpers_do_not_call_old_codec(self):
         tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
         names = {
@@ -801,6 +821,8 @@ class TestW5aPhaseAIntegration:
             "_handle_ctrl_delegated_region_terminal",
             "_dispatch_delegated_allocate",
             "_dispatch_delegated_release",
+            "_admitted_delegated_region_context",
+            "_create_delegated_worker_chip_region",
         }
         forbidden = {"handle_ctrl_region_allocate", "handle_ctrl_region_release"}
         for node in ast.walk(tree):

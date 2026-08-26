@@ -478,8 +478,8 @@ class RegionPartKind(str, Enum):
 
 
 # These three enums plus the numeric tables below are a wire contract. Global CommDomain and
-# W5a both encode them as little-endian u32. A new enumerator needs a new id; a rename or
-# renumber is a wire break.
+# delegated-region control both encode them as little-endian u32. A new enumerator needs a
+# new id; a rename or renumber is a wire break.
 class AttachmentRole(str, Enum):
     PROVIDER = "PROVIDER"
     CONSUMER = "CONSUMER"

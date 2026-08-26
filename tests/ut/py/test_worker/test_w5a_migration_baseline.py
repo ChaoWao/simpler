@@ -17,6 +17,7 @@ import pytest
 from simpler.buffer import BackendKind
 from simpler.comm_endpoints import AdapterKind, AdapterProfile
 from simpler.comm_provider import (
+    PosixShmImport,
     ProviderCleanupFailure,
     ProviderReleaseResult,
     ProviderReleaseStatus,
@@ -29,7 +30,6 @@ from simpler.comm_provider import (
     RegionPartExportDescriptor,
     RegionPartKind,
     RegionPartLocalView,
-    PosixShmImport,
     VmmShareableHandleImport,
 )
 from simpler.comm_provider_control import (
@@ -60,8 +60,8 @@ from tests.ut.py.test_worker.w5a_migration_baseline import (
     W4_5_ALLOCATE_SUCCESS_OUTCOME,
     W4_5_CTRL_REGION_ALLOCATE,
     W4_5_CTRL_REGION_RELEASE,
-    W4_5_RELEASE_CLEANUP_INCOMPLETE_OUTCOMES,
     W4_5_RELEASE_CLEAN_OUTCOMES,
+    W4_5_RELEASE_CLEANUP_INCOMPLETE_OUTCOMES,
     W4_5_RELEASE_ERROR_OUTCOMES,
     W4_5_RELEASE_OUTCOME_BYTES,
     W4_5_RELEASE_REPLY_PREFIX_BYTES,

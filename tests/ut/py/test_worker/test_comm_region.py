@@ -1746,7 +1746,7 @@ def _endpoint_session(session: bytes = _DELEGATED_SESSION_A, epoch: int = 3) -> 
 
 
 class _RecordingLease:
-    def __init__(self, name: str, calls: list[str], fail: BaseException | None = None) -> None:
+    def __init__(self, name: str, calls: list[str], fail: Optional[BaseException] = None) -> None:
         self.name = name
         self.calls = calls
         self.fail = fail

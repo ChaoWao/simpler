@@ -17,18 +17,31 @@ from dataclasses import dataclass
 from _task_interface import AddressSpace  # pyright: ignore[reportMissingImports]
 
 from .comm_endpoints import (
+    _ADAPTER_KIND_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
+    _ADAPTER_PROFILE_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
     AdapterKind,
     AdapterProfile,
     AttachmentRole,
+<<<<<<< HEAD
     BufferAccessQuery,
     EndpointDeployment,
     EndpointIdentity,
     EndpointRecord,
     _ADAPTER_KIND_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
     _ADAPTER_PROFILE_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
+=======
+)
+from .comm_endpoints import (
+>>>>>>> 72e5e286 (Add: private delegated-region scene tests and Worker wrapper)
     _adapter_kind_from_id as _neutral_adapter_kind_from_id,
+)
+from .comm_endpoints import (
     _adapter_kind_id as _neutral_adapter_kind_id,
+)
+from .comm_endpoints import (
     _adapter_profile_from_id as _neutral_adapter_profile_from_id,
+)
+from .comm_endpoints import (
     _adapter_profile_id as _neutral_adapter_profile_id,
     _backend_kind_for_provider,
     buffer_adapter_candidates,

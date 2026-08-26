@@ -69,6 +69,7 @@ from simpler.comm_provider import (
     RegionPartLocalView,
     VmmShareableHandleImport,
 )
+
 from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _open_store
 from tests.ut.py.test_worker.w5a_migration_baseline import (
     W4_5_ALLOCATE_ALLOCATION_ERROR_OUTCOMES,
@@ -180,7 +181,7 @@ def _canonical_path_of_length(n: int) -> bytes:
         return ("L3" + child * count).encode()
     if count == 0:
         return f"L3/L1[{10 ** (remaining - 6)}]".encode()
-    last = f"/L1[{10 ** extra}]"
+    last = f"/L1[{10**extra}]"
     text = "L3" + child * (count - 1) + last
     assert len(text) == n
     return text.encode()
@@ -643,15 +644,15 @@ def test_error_kind_lives_only_in_outcome():
     assert tag == int(DelegatedAllocateReplyTag.ERROR)
     assert operation == int(DelegatedRegionOperation.DELEGATED_ALLOCATE)
     assert reserved == 0
-    resource, error_kind, failed_part, failed_operation, debt = struct.unpack_from("<QIIII", frame, ALLOCATE_OUTCOME_OFFSET)
+    resource, error_kind, failed_part, failed_operation, debt = struct.unpack_from(
+        "<QIIII", frame, ALLOCATE_OUTCOME_OFFSET
+    )
     assert error_kind == int(RegionControlErrorKind.BAD_MESSAGE_SIZE)
     assert resource == 0
     assert failed_part == 0
     assert failed_operation == 0
     assert debt == 0
-    assert frame[ALLOCATE_PAYLOAD_EXPORT_OFFSET:] == b"\x00" * (
-        ALLOCATE_REPLY_BYTES - ALLOCATE_PAYLOAD_EXPORT_OFFSET
-    )
+    assert frame[ALLOCATE_PAYLOAD_EXPORT_OFFSET:] == b"\x00" * (ALLOCATE_REPLY_BYTES - ALLOCATE_PAYLOAD_EXPORT_OFFSET)
 
 
 def test_store_lifecycle_allocate_error_is_zero_resource_protocol_outcome():
@@ -732,9 +733,7 @@ def test_table_conflict_and_late_allocate_do_not_call_store():
     assert first.tag is DelegatedAllocateReplyTag.ALLOCATED
     assert counted.allocate_calls == 1
 
-    conflict = _decode_allocate(
-        table.execute(_allocate_request(transaction_id=2, provider_path=b"L3/L2[1]"), counted)
-    )
+    conflict = _decode_allocate(table.execute(_allocate_request(transaction_id=2, provider_path=b"L3/L2[1]"), counted))
     assert conflict.tag is DelegatedAllocateReplyTag.ERROR
     assert conflict.error_kind is RegionControlErrorKind.INVALID_FIELD_VALUE
     assert counted.allocate_calls == 1

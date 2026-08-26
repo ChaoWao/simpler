@@ -9,6 +9,7 @@
 """Unit tests for W2 endpoint selectors, registry resolution, and planning."""
 
 import dataclasses
+from typing import Any, cast
 
 import pytest
 from simpler import comm_endpoints as ce
@@ -365,7 +366,7 @@ def test_adapter_numeric_ids_are_frozen_little_endian_u32_not_enum_order():
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]
         assert ce._adapter_profile_from_id(value) is profile
     with pytest.raises(ValueError, match="adapter_kind is unknown"):
-        ce._adapter_kind_id("NOT_A_KIND")
+        ce._adapter_kind_id(cast(Any, "NOT_A_KIND"))
     with pytest.raises(ValueError, match="adapter_profile id is unknown"):
         ce._adapter_profile_from_id(99)
 

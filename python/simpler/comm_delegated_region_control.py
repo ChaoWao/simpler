@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Delegated-region control wire (DRCT v1) and terminal transaction table.
 
-This module owns the W5a envelope codec. Physical allocation, release, cleanup
+This module owns the delegated-region envelope codec. Physical allocation, release, cleanup
 ledger, and sweep authority stay in ProviderRegionStore.
 """
 
@@ -18,7 +18,7 @@ import re
 import struct
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from _task_interface import BackendKind  # pyright: ignore[reportMissingImports]
 
@@ -38,7 +38,6 @@ from .comm_provider import (
     POSIX_SHM_TOKEN_MAX_BYTES,
     PosixShmImport,
     ProviderCleanupFailure,
-    ProviderRegionStore,
     ProviderReleaseResult,
     ProviderReleaseStatus,
     RegionAllocationError,
@@ -61,9 +60,7 @@ DELEGATED_REGION_CTRL_MAGIC = 0x44524354
 DELEGATED_REGION_CTRL_ABI_MAJOR = 1
 DELEGATED_REGION_CTRL_ABI_MINOR = 0
 DELEGATED_REGION_CTRL_MAGIC_VERSION = (
-    (DELEGATED_REGION_CTRL_MAGIC << 32)
-    | (DELEGATED_REGION_CTRL_ABI_MAJOR << 16)
-    | DELEGATED_REGION_CTRL_ABI_MINOR
+    (DELEGATED_REGION_CTRL_MAGIC << 32) | (DELEGATED_REGION_CTRL_ABI_MAJOR << 16) | DELEGATED_REGION_CTRL_ABI_MINOR
 )
 
 REQUEST_HEADER_BYTES = 40
@@ -284,9 +281,7 @@ class DelegatedRegionReplyEnvelope:
         return _decode_release_reply(self)
 
 
-def encode_request(
-    request: DelegatedAllocateRequest | DelegatedReleaseRequest, *, staged_capacity: int
-) -> bytearray:
+def encode_request(request: DelegatedAllocateRequest | DelegatedReleaseRequest, *, staged_capacity: int) -> bytearray:
     if isinstance(request, DelegatedAllocateRequest):
         active = _encode_allocate_request(request)
         ceiling = ALLOCATE_REQUEST_HARD_CEILING
@@ -975,9 +970,7 @@ def _decode_allocate_reply(envelope: DelegatedRegionReplyEnvelope) -> DelegatedA
             payload_view=payload_view,
             counter_view=counter_view,
         )
-    _require_zero_span(
-        envelope.frame, ALLOCATE_PAYLOAD_EXPORT_OFFSET, 2 * EXPORT_PART_BYTES + 2 * LOCAL_VIEW_BYTES
-    )
+    _require_zero_span(envelope.frame, ALLOCATE_PAYLOAD_EXPORT_OFFSET, 2 * EXPORT_PART_BYTES + 2 * LOCAL_VIEW_BYTES)
     kind = _require_enum(RegionControlErrorKind, int(error_kind), allow_zero=True)
     if kind is RegionControlErrorKind.NONE:
         raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "ERROR requires a nonzero error_kind")
@@ -1062,7 +1055,9 @@ def _encode_release_reply(reply: DelegatedReleaseReply) -> bytes:
         _RELEASE_OUTCOME.pack_into(frame, RELEASE_OUTCOME_OFFSET, resource_id, 0, int(typed), 0, 0, 0, 0)
     else:
         if reply.result is None:
-            raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, f"{tag.name} requires a release result")
+            raise RegionControlError(
+                RegionControlErrorKind.INVALID_FIELD_VALUE, f"{tag.name} requires a release result"
+            )
         status_tag = {
             ProviderReleaseStatus.RELEASED: DelegatedReleaseReplyTag.RELEASED,
             ProviderReleaseStatus.ALREADY_GONE: DelegatedReleaseReplyTag.ALREADY_GONE,
@@ -1138,7 +1133,13 @@ def _decode_release_reply(envelope: DelegatedRegionReplyEnvelope) -> DelegatedRe
                 RegionControlErrorKind.INVALID_ENUM_VALUE,
                 "release ERROR kind must be INVALID_FIELD_VALUE, STORE_LIFECYCLE, or INTERNAL_INVARIANT",
             )
-        if int(mask) != 0 or int(payload_op) != 0 or int(payload_cause) != 0 or int(counter_op) != 0 or int(counter_cause) != 0:
+        if (
+            int(mask) != 0
+            or int(payload_op) != 0
+            or int(payload_cause) != 0
+            or int(counter_op) != 0
+            or int(counter_cause) != 0
+        ):
             raise RegionControlError(
                 RegionControlErrorKind.INVALID_FIELD_VALUE,
                 "release ERROR requires inactive failure entries",
@@ -1151,7 +1152,9 @@ def _decode_release_reply(envelope: DelegatedRegionReplyEnvelope) -> DelegatedRe
             error=RegionControlError(typed),
         )
     if int(error_kind) != 0:
-        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "clean release tags require error_kind NONE")
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE, "clean release tags require error_kind NONE"
+        )
     if tag is DelegatedReleaseReplyTag.CLEANUP_INCOMPLETE:
         failures = _decode_cleanup_incomplete_failures(
             int(mask), int(payload_op), int(payload_cause), int(counter_op), int(counter_cause)
@@ -1167,7 +1170,13 @@ def _decode_release_reply(envelope: DelegatedRegionReplyEnvelope) -> DelegatedRe
             transaction_id=envelope.transaction_id,
             result=result,
         )
-    if int(mask) != 0 or int(payload_op) != 0 or int(payload_cause) != 0 or int(counter_op) != 0 or int(counter_cause) != 0:
+    if (
+        int(mask) != 0
+        or int(payload_op) != 0
+        or int(payload_cause) != 0
+        or int(counter_op) != 0
+        or int(counter_cause) != 0
+    ):
         raise RegionControlError(
             RegionControlErrorKind.INVALID_FIELD_VALUE,
             "clean release tags require inactive failure entries",
@@ -1381,13 +1390,21 @@ class _ProviderTransactionRecord:
     terminal_reply: bytes | None = None
 
 
+class _ProviderRegionStoreOps(Protocol):
+    def allocate_and_export(self, spec: RegionAllocationSpec) -> RegionAllocationResult: ...
+
+    def local_view(self, provider_resource_id: int, part: RegionPartKind) -> RegionPartLocalView: ...
+
+    def release(self, provider_resource_id: int) -> ProviderReleaseResult: ...
+
+
 class ProviderTransactionTable:
     def __init__(self) -> None:
         self._records: dict[tuple[bytes, int], _ProviderTransactionRecord] = {}
         self._waterline: dict[bytes, int] = {}
 
     def execute(
-        self, request: DelegatedAllocateRequest | DelegatedReleaseRequest, store: ProviderRegionStore
+        self, request: DelegatedAllocateRequest | DelegatedReleaseRequest, store: _ProviderRegionStoreOps
     ) -> bytes:
         if isinstance(request, DelegatedAllocateRequest):
             return self._execute_allocate(request, store)
@@ -1398,7 +1415,7 @@ class ProviderTransactionTable:
     def _key(self, session_instance_id: bytes, transaction_id: int) -> tuple[bytes, int]:
         return (session_instance_id, transaction_id)
 
-    def _execute_allocate(self, request: DelegatedAllocateRequest, store: ProviderRegionStore) -> bytes:
+    def _execute_allocate(self, request: DelegatedAllocateRequest, store: _ProviderRegionStoreOps) -> bytes:
         key = self._key(request.session_instance_id, request.transaction_id)
         body = request.projection_bytes + request.initiator_path
         record = self._records.get(key)
@@ -1515,7 +1532,9 @@ class ProviderTransactionTable:
                 tag=DelegatedAllocateReplyTag.ERROR,
                 session_instance_id=request.session_instance_id,
                 transaction_id=request.transaction_id,
-                error_kind=error.kind if error.kind in _ALLOCATE_PROTOCOL_ERROR_KINDS else RegionControlErrorKind.INTERNAL_INVARIANT,
+                error_kind=error.kind
+                if error.kind in _ALLOCATE_PROTOCOL_ERROR_KINDS
+                else RegionControlErrorKind.INTERNAL_INVARIANT,
             )
         )
         record.state = ProviderTransactionState.TERMINAL_FAILURE
@@ -1527,7 +1546,7 @@ class ProviderTransactionTable:
         key: tuple[bytes, int],
         record: _ProviderTransactionRecord,
         request: DelegatedAllocateRequest,
-        store: ProviderRegionStore,
+        store: _ProviderRegionStoreOps,
     ) -> bytes:
         try:
             result = store.release(record.provider_resource_id)
@@ -1577,7 +1596,7 @@ class ProviderTransactionTable:
         record.terminal_reply = committed
         return committed
 
-    def _execute_release(self, request: DelegatedReleaseRequest, store: ProviderRegionStore) -> bytes:
+    def _execute_release(self, request: DelegatedReleaseRequest, store: _ProviderRegionStoreOps) -> bytes:
         key = self._key(request.session_instance_id, request.transaction_id)
         record = self._records.get(key)
         if record is None:
@@ -1658,7 +1677,7 @@ class ProviderTransactionTable:
 
 
 def handle_terminal_delegated_region(
-    payload: memoryview, table: ProviderTransactionTable, store: ProviderRegionStore
+    payload: memoryview, table: ProviderTransactionTable, store: _ProviderRegionStoreOps
 ) -> None:
     view = _as_writable_bytes(payload)
     try:
@@ -1686,9 +1705,7 @@ def _publish_invalid_terminal_request(view: memoryview, error: RegionControlErro
         return
     if op is DelegatedRegionOperation.DELEGATED_ALLOCATE:
         kind = (
-            error.kind
-            if error.kind in _ALLOCATE_PROTOCOL_ERROR_KINDS
-            else RegionControlErrorKind.INVALID_FIELD_VALUE
+            error.kind if error.kind in _ALLOCATE_PROTOCOL_ERROR_KINDS else RegionControlErrorKind.INVALID_FIELD_VALUE
         )
         committed = encode_reply(
             DelegatedAllocateReply(

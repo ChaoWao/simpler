@@ -9,7 +9,7 @@
 """Fixed private provider-region control wire, transport handlers, and one-shot clients.
 
 This module owns the versioned mailbox codec and transport adapters. It does not
-import worker-chip compatibility types, W2 planning, or W5a identity.
+import worker-chip compatibility types, endpoint-planner types, or delegated-region identity.
 """
 
 from __future__ import annotations

@@ -24,19 +24,21 @@ from typing import cast
 import pytest
 from simpler.buffer import AddressSpace
 from simpler.comm_endpoints import (
+    _ADAPTER_KIND_IDS,
+    _ADAPTER_PROFILE_IDS,
     AdapterKind,
     AdapterProfile,
     AttachmentRole,
-    _ADAPTER_KIND_IDS,
-    _ADAPTER_PROFILE_IDS,
     _adapter_kind_id,
     _adapter_profile_id,
 )
 from simpler.global_comm_domain import (
     _ADAPTER_KIND_IDS as _DOMAIN_ADAPTER_KIND_IDS,
+)
+from simpler.global_comm_domain import (
     _ADAPTER_PROFILE_IDS as _DOMAIN_ADAPTER_PROFILE_IDS,
-    _adapter_kind_id as _domain_adapter_kind_id,
-    _adapter_profile_id as _domain_adapter_profile_id,
+)
+from simpler.global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
     CTRL_GLOBAL_DOMAIN_IMPORT,
@@ -69,6 +71,19 @@ from simpler.global_comm_domain import (
     encode_release_command,
     resolve_global_comm_capability,
     validate_descriptor_table,
+)
+from simpler.global_comm_domain import (
+    _adapter_kind_id as _domain_adapter_kind_id,
+)
+from simpler.global_comm_domain import (
+    _adapter_profile_id as _domain_adapter_profile_id,
+)
+
+from tests.ut.py.test_worker.w5a_migration_baseline import (
+    FROZEN_ADAPTER_KIND_LE_U32,
+    FROZEN_ADAPTER_KIND_U32,
+    FROZEN_ADAPTER_PROFILE_LE_U32,
+    FROZEN_ADAPTER_PROFILE_U32,
 )
 
 
@@ -327,13 +342,6 @@ def test_global_domain_attachment_names_every_unknown_enum_field():
 
 
 def test_adapter_numeric_authority_is_shared_with_comm_endpoints():
-    from tests.ut.py.test_worker.w5a_migration_baseline import (
-        FROZEN_ADAPTER_KIND_LE_U32,
-        FROZEN_ADAPTER_KIND_U32,
-        FROZEN_ADAPTER_PROFILE_LE_U32,
-        FROZEN_ADAPTER_PROFILE_U32,
-    )
-
     assert _DOMAIN_ADAPTER_KIND_IDS is _ADAPTER_KIND_IDS
     assert _DOMAIN_ADAPTER_PROFILE_IDS is _ADAPTER_PROFILE_IDS
     live_kinds = {None: 0, **{kind.name: value for kind, value in _ADAPTER_KIND_IDS.items()}}
