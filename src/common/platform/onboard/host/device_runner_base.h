@@ -511,7 +511,7 @@ public:
 
     // ---- Virtual entry points called by the shared c_api ----------------
     //
-    // The shared `pto_runtime_c_api` glue (`src/common/platform/onboard/host/
+    // The shared `runtime_c_api` glue (`src/common/platform/onboard/host/
     // c_api_shared.cpp`) works through `DeviceRunnerBase *` and dispatches
     // through these virtuals. Each arch's `DeviceRunner` overrides the
     // enqueue/poll/drain lifecycle and `finalize`; a2a3 and a5 both override

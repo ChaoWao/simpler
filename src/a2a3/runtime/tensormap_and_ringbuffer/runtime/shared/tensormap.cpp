@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - TensorMap Implementation
+ * tensormap_and_ringbuffer TensorMap implementation
  *
  * Implements TensorMap with ring buffer pool, lazy invalidation,
  * and chain truncation optimization.

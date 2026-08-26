@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Ring Buffer Data Structures
+ * tensormap_and_ringbuffer ring buffer data structures
  *
  * Implements ring buffer designs for zero-overhead memory management:
  *

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Shared Memory Layout
+ * tensormap_and_ringbuffer shared-memory layout
  *
  * Defines the shared memory structure for Orchestrator-Scheduler communication.
  *

@@ -10,11 +10,11 @@
  */
 
 /**
- * PTO Runtime2 - TensorMap Interface
+ * host_build_graph TensorMap interface
  *
  * TensorMap provides producer lookup for dependency discovery:
  * - Maps simpler::hbg::Tensor -> producer task ID
- * - Used by pto_submit_task() to find dependencies
+ * - Used by rt_submit_task() to find dependencies
  *
  * host_build_graph runs its orchestrator on the host, so this map is host-only
  * state: it owns its four arrays outright rather than addressing them as offsets

@@ -127,28 +127,39 @@
     "PTO Runtime2", and a bare "Runtime2" are not names of anything** — the
     `2` never denoted a version any reader can identify.
 
-    **The retirement is complete** (snapshot 2026-08-24: 6.6k occurrences across
-    367 files on 2026-07-26 → 0 that this repo reads). Nothing here reads a
-    `PTO2` name any more: the last of them were the `PTO2_RING_*` ring-sizing
-    environment variables, retired in favour of per-task
-    `CallConfig.runtime_env`. What is left in the tree is this rule's own
-    examples, the warning that fires if a caller still exports a retired ring
-    variable, prose recording that these names are gone, and
-    `PTO2_MANUAL_MAX_SEQ` — a pypto-lib knob two example READMEs document and
-    this repo never reads. **So a new `PTO2` match is a defect** — there is no
-    backlog to work through. Find the surface with:
+    **No `PTO2` identifier is left.** The last of them were the `PTO2_RING_*`
+    ring-sizing environment variables, retired in favour of per-task
+    `CallConfig.runtime_env`; `git grep -Io -E "PTO2|pto2_"` now finds only this
+    rule's own examples, the warning that fires if a caller still exports a
+    retired ring variable, prose recording that these names are gone, and
+    `PTO2_MANUAL_MAX_SEQ` — a pypto-lib knob two example READMEs document and this
+    repo never reads. **So a new `PTO2` match is a defect.**
+
+    **The brand spellings are held by a hook, not by a count.**
+    `tests/lint/check_retired_names.py` fails pre-commit on any new
+    `PTO Runtime`, `PTO Runtime2`, or bare `Runtime2`. That hook exists because
+    this paragraph once asserted the whole surface was empty while the rule's own
+    grep found 38 banners across 36 files: the assertion had been measured with
+    `PTO2|pto2_`, which cannot see a brand name with a space in it. Do not put a
+    number here again — put it in the hook.
+
+    Find the surface with the rule's own pattern, which is wider than the hook's
+    on purpose (it also reaches the tiers below):
 
     ```bash
     grep -rIn -E "PTO Runtime2?|PTO2|pto2_|pto_runtime2" --include=* . | grep -v '^\./\.git/'
     ```
 
-    Each match falls in exactly one tier, and the tier decides what you owe:
+    Each match falls in exactly one tier, and the tier decides what you owe. Note
+    that **the first two tiers share the `pto_*` namespace and have opposite
+    risk** — that is the trap this table exists to spell out:
 
     | Tier | What | Policy |
     | ---- | ---- | ------ |
-    | **A — prose** | Brand mentions in docs, headings, skill descriptions, issue templates, and code comments (`# PTO Runtime2 Profiling Levels`, "the PTO Runtime consists of…") | **Fix on sight, unconditionally.** No compile risk, no contract. Say `simpler`, or name the actual component ("the AICPU orchestrator", "the `tensormap_and_ringbuffer` runtime") when that is what the sentence means. |
+    | **A1 — brand prose** | The brand itself in docs, headings, skill descriptions, issue templates, and code comments (`# PTO Runtime2 Profiling Levels`, "the PTO Runtime consists of…") | **Fix on sight, unconditionally**, and the hook will make you. No compile risk, no contract, and no Tier-C name can hide in a file banner. Say `simpler`, or name the actual component ("the AICPU orchestrator", "the `tensormap_and_ringbuffer` runtime"). Follow the banner style already in the tree: `orchestrator_core/orchestrator.cpp` opens `* host_build_graph orchestrator implementation`. |
+    | **A2 — comments naming a `pto_*` that does not exist** | e.g. `pto_submit_task` (the entry is `rt_submit_task`), `pto_runtime2_init` (the work is `SchedulerState::init_data_from_layout`) | **Fix on sight**, but this is a [`doc-consistency.md`](doc-consistency.md) §3 defect, not a naming preference: a reader who greps the name finds nothing. Confirm the symbol is absent before renaming it — `git grep -w <name>` returning only comments is the test. |
     | **B — internal identifiers** | `PTO2Foo` types, `pto2_*` functions, internal `PTO2_*` macros and enumerators, `pto_*.h` / `pto_runtime2*.cpp` file names | Rename **only when you are already modifying that code**, per rule 9, and finish the identifier you started (below). |
-    | **C — external contracts** | `runtime_env` knobs, `extern "C"` symbols in `runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
+    | **C — external contracts** | `runtime_env` knobs, `extern "C"` symbols in `runtime_c_api.h`, on-wire / serialized names, and **every live `pto_cpu_sim_*` / `pto_sim_*` hook** | **Exempt until a migration ships.** Renaming these breaks callers in other repos. The sim hooks are the worst case and the reason A2 above demands a grep first: `cpu_sim_context.cpp` exports them for "pto-isa via `dlsym(RTLD_DEFAULT)`" and `device_runner_base.cpp` fetches `pto_sim_register_hooks` by `dlsym`, so a rename produces **no compile error** — just a hook that is never found at run time. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
 
     An environment variable is the worst case in Tier C and the reason it
     exists: an unrecognised name is *ignored*, so the rename fails silently
@@ -172,9 +183,11 @@
       tensormap_and_ringbuffer}/` trees are near-duplicates, so a Tier-B
       rename in one of them must land in its siblings in the same commit.
       Verify with the grep above returning zero hits for that identifier.
-    - **The count only goes down.** Introducing a new `PTO2`/`PTO Runtime`
-      spelling anywhere — including by copying an existing `pto_*.h` to a
-      new arch — is a defect, not neutral. Rule 9 makes this unconditional.
+    - **The count only goes down**, and for the brand spellings
+      `tests/lint/check_retired_names.py` enforces it. Introducing a new
+      `PTO2`/`PTO Runtime` spelling anywhere — including by copying an existing
+      `pto_*.h` to a new arch — is a defect, not neutral. Rule 9 makes this
+      unconditional.
     - **Check the target name against three things, not one.** The bare name
       may be taken by the host orchestrator under `src/common/hierarchical/`
       (`TensorMap`, `ReadyQueue`, `TaskState`, `HeapRing`, `MAX_SCOPE_DEPTH`

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Scheduler Implementation
+ * host_build_graph scheduler implementation
  *
  * Implements scheduler state management, ready queues, and task lifecycle.
  *

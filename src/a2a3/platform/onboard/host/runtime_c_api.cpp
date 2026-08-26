@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime C API — a2a3 arch-specific entries
+ * simpler host-runtime C API — a2a3 arch-specific entries
  *
  * The shared c_api glue (simpler_init / simpler_register_callable / simpler_run /
  * device_*_ctx / etc.) lives in

@@ -14,7 +14,7 @@ This is the headline use case for ``CallConfig.runtime_env``: an L3 fans out
 several heterogeneous L2 tasks in one launch, and each L2 needs a different
 ring footprint (a heavy task wants a big heap / wide window; a light one is
 fine with the default). Before this knob, all L2 tasks in one L3 launch shared
-the process-wide ``PTO2_RING_*`` env, since retired, and could not be sized independently.
+one process-wide ring sizing and could not be sized independently.
 
 The demo dispatches three L2 tasks: two use the scalar form (one ring value
 broadcast to every ring), and a third passes 4-entry lists for

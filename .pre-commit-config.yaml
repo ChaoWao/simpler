@@ -32,6 +32,13 @@ repos:
           language_version: python3
           files: ^(examples|tests/st)/(.*/)?test_[^/]*\.py$
 
+        - id: check-retired-names
+          name: check-retired-names
+          entry: python tests/lint/check_retired_names.py
+          language: python
+          language_version: python3
+          exclude: ^3rdparty/|vendor/
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
