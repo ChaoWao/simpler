@@ -24,35 +24,41 @@ MARK="outputs/.bind_start"; : >"$MARK"   # fixed mtime; "$LOG" keeps being appen
 
 ENVS="SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_LOG_LEVEL=TIMING \
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 SIMPLER_SKIP_DEVICE_RUN=1"          # + mode delta
-CASE="examples/.../test_<case>.py -p a2a3 \
---case <Class>:: --skip-golden"                       # + manual mode and level, per case
+CASE="examples/.../<entry>.py -p a2a3"                # exactly as the case table gives it
 TAIL="--rounds 6"                                                    # per mode
 
 .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
 echo "[stamp] $HEAD_SHA env $ENVS python $CASE $TAIL" >"$LOG"
 task-submit --device auto --device-num <N> --timeout 3600 --max-time 3600 \
   --run "env $ENVS python $CASE $TAIL -d \$TASK_DEVICE" >>"$LOG" 2>&1
-grep -c 'bind phase=' "$LOG"          # must be > 0
+grep -c 'bind phase=' "$LOG"          # numbers mode: must be > 0
 ```
 
 `env` prefixes the assignments so they survive coming from a variable, and the
 `[stamp]` line is the same string that runs — which is what makes two logs
 comparable. Never hand-edit one arm's command without the other's.
 
+**In timeline mode that last check reports 0 on a run that worked.** A diagnostic
+flag makes `CallConfig.output_prefix` non-empty, and a non-empty prefix moves
+every host-log record — `bind phase=` lines and `[STRACE]` spans alike — out of
+`$LOG` into `outputs/<case>_<ts>/host.<pid>.log`, one file per process. Grep those
+instead, and feed the finisher both (see the timeline command below).
+
 ## The two cases
 
 | Property | dsv4 FLASH decode | qwen3-14b decode |
 | -------- | ----------------- | ---------------- |
 | `--device-num` | 2 | 1 |
-| `CASE` example | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py` | `examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py` |
-| `--case` | `TestDeepseekV4FlashDecodeHostBuildGraph::` | `TestQwen314BDecodeHostBuildGraph::` |
-| manual mode | none | **add** `--manual only` |
-| level | `level=3`, so **add** `--runtime host_build_graph --level 3` | `level=2`, add nothing |
+| entry point | standalone driver — it owns its `Worker`, so no `--case` / `--manual` / `--level` and no module runner | `SceneTestCase` at `level=2`, driven through the module runner |
+| `CASE` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/main.py -p a2a3 --skip-golden` | `examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py -p a2a3 --case TestQwen314BDecodeHostBuildGraph:: --skip-golden --manual only` |
+| parameters | child memory; **`--skip-golden` is not optional here** — without it the driver first streams a 42.6 GiB-per-rank fixture you are not measuring | host fixture (~38 GiB), built per run |
 | timeout | 3600 (cold compile is minutes) | 2400 |
 
-The `--level 3` addition is not optional for dsv4: without it the module runner
-captures the child's stdout and the log ends up with zero `bind phase=` lines
-while the run still passes.
+dsv4 needs no `--level 3` any more: the driver runs the L3 `Worker` in this
+process, so its chip children write straight to the log the `task-submit --run`
+command is redirected into. (Under the scene-test module runner they did not: it
+captured the child's stdout and the log ended up with zero `bind phase=` lines
+while the run still passed.)
 
 ## The two modes
 
@@ -69,20 +75,27 @@ per-event artifact a directory; `--enable-chip-swimlane` raises
 `NotImplementedError` at level 3.
 
 ```bash
-# numbers
+# numbers — the bind lines are in $LOG, since no diagnostic flag is on
 python -m simpler_setup.tools.hbg_bind_phases "$LOG" --rounds 6
 
 # timeline — only an artifact newer than this run's own marker counts
 RECORDS=$(find outputs -name host_phase_records.jsonl -newer "$MARK")
 echo "$RECORDS"          # must name exactly one file; empty ⇒ this run wrote none,
                          # so stop rather than reading a previous run's artifact
-python -m simpler_setup.tools.strace_timing "$LOG" --host-phase-records "$RECORDS" \
-  --swimlane "$(dirname "$RECORDS")/host_swimlane.json"      # load in ui.perfetto.dev
+D=$(dirname "$RECORDS")
+grep -c 'bind phase=' "$D"/host.*.log    # must be > 0; $LOG has none in this mode
+# The clock anchors are split — the invoking process wrote its own to $LOG, each
+# chip child wrote its own under $D — so parse the concatenation, not either half.
+cat "$LOG" "$D"/host.*.log > "$D/bind_timeline.log"
+python -m simpler_setup.tools.strace_timing "$D/bind_timeline.log" \
+  --host-phase-records "$RECORDS" \
+  --swimlane "$D/host_swimlane.json"                          # load in ui.perfetto.dev
 ```
 
 ## Before reporting a number
 
-- `grep -c 'bind phase='` was `> 0`, and the table shows a `[stamp]` line.
+- `grep -c 'bind phase='` was `> 0` — in `$LOG` for numbers mode, in
+  `$D/host.*.log` for timeline mode — and the table shows a `[stamp]` line.
 - Quote the stamp with the number. A number without the command and commit that
   produced it cannot be compared to anything.
 - Comparing two branches has three more rules, all of them learned the hard way —

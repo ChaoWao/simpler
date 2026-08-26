@@ -61,7 +61,7 @@ _ORCH_SIG = [D.IN, D.IN, D.OUT]
 def _build_vector_callable(platform: str, *, extra_unused_child: bool = False) -> ChipCallable:
     """Compile the vector_example orchestration + 3 AIV kernels.
 
-    Mirrors how SceneTestCase._compile_chip_callable_from_spec assembles
+    Mirrors how scene_test.compile_chip_callable_spec assembles
     a ChipCallable, but inline so the test can call register_callable() on it both
     before and after init().
     """

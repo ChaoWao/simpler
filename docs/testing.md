@@ -110,6 +110,13 @@ multiply the number of active compilers within one process.
 simpler's two onboard CI jobs (a2a3, a5) explicitly use eight; the sim jobs have
 no warm-up step and use the same automatic token pool during cold pytest runs.
 
+The tool walks `SceneTestCase` classes, so it does not reach a standalone case
+that owns its own `Worker`. Such a case warms the same cache itself: the
+DeepSeek smokes are compiled by
+`examples/a2a3/<runtime>/deepseek_v4_flash_decode/main.py --compile-only`,
+which calls the same `scene_test.compile_chip_callable_spec` and takes the same
+`--compile-workers`.
+
 The persistent cache has two levels. An unchanged callable loads its complete
 `callable.bin` directly. When that entry misses, each incore kernel loads an
 independent artifact from `build/cache/kernels/incore/`; only missing or changed

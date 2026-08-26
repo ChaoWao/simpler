@@ -21,13 +21,13 @@ from simpler_setup import parallel_scheduler
 from simpler_setup.scene_test import (
     SceneTestCase,
     _dispatch_test_phases_standalone,
-    _effective_diagnostic_options,
+    effective_diagnostic_options,
     run_class_cases,
 )
 
 
 def test_multi_rounds_disable_every_diagnostic() -> None:
-    options = _effective_diagnostic_options(
+    options = effective_diagnostic_options(
         2,
         chip_swimlane=4,
         dump_args=3,
@@ -42,7 +42,7 @@ def test_multi_rounds_disable_every_diagnostic() -> None:
 
 def test_swimlane_overhead_requires_chip_swimlane() -> None:
     with pytest.raises(ValueError, match="requires --enable-chip-swimlane"):
-        _effective_diagnostic_options(
+        effective_diagnostic_options(
             1,
             chip_swimlane=0,
             dump_args=0,
@@ -78,7 +78,7 @@ def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> 
         def _run_and_validate(self, *_args, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(scene_test_module, "_build_output_prefix", lambda _case_label: output_prefix)
+    monkeypatch.setattr(scene_test_module, "build_output_prefix", lambda _case_label: output_prefix)
 
     run_class_cases(
         object(),

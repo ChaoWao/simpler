@@ -69,16 +69,17 @@ device lock for the whole job (see
 | Property | qwen3-14b decode | DeepSeek-V4 FLASH decode |
 | -------- | ---------------- | ------------------------ |
 | Path | `examples/a2a3/host_build_graph/qwen3_14b_decode/` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/` |
+| Entry point | `SceneTestCase` at level 2, run through the module runner | standalone `main.py`, which owns its L3 `Worker` |
 | Devices | 1 | 2 (EP2/TP2) |
-| Level | 2 | 3 |
 | Host tasks | 47 | 1131 |
 | Graph replays | 40, of a 277-node Definition | 20, of a 743-node Definition |
 | Graph boundary | 26 tensors | 118 tensors, 31 scalars |
 | First-run compile | seconds | **minutes** (369 kernel sources + an 11.6k-line orchestration) |
-| Marked | `manual` | `skip_golden` |
+| Parameters | host fixture per run | child memory, and `--skip-golden` leaves it uninitialized |
+| Marked | `manual` | `manual`, and it has no golden |
 
-The level decides how a case's output is captured, which is what the recipe below
-has to work around.
+The entry point decides how a case's output is captured, which is what the recipe
+below has to work around.
 
 ## Recipe A — stable numbers, many rounds
 
@@ -103,18 +104,20 @@ Four switches and one flag make the measurement, and each is load-bearing:
 | `SIMPLER_LOG_LEVEL=TIMING` | the level they are emitted at |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | otherwise `torch_npu` grabs a device on import, which a host-only measurement does not want — and nothing in the log records whether it was set |
 | `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
-| `--skip-golden` | with the device skipped the outputs a golden check compares are never produced, so a checking case such as qwen otherwise fails at validation with the whole measurement already complete in the log |
+| `--skip-golden` | with the device skipped the outputs a golden check compares are never produced, so a checking case such as qwen otherwise fails at validation with the whole measurement already complete in the log. On dsv4 it also skips the fixture upload its driver does by default, which is 42.6 GiB per rank of H2D you are not measuring |
 
 **`SIMPLER_SKIP_DEVICE_RUN` is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still
 skips; `unset` it. It is a temporary handle from the dsv4 bring-up and is deleted
 once that case's device execution works.
 
-**A multi-device case must be invoked as its own L3 child command**
-(`--runtime host_build_graph --level 3`). A case whose `device_count > 1` is
-otherwise dispatched by the module runner as one subprocess per class, and
+**A case driven through the module runner as an L3 child needs
+`--runtime host_build_graph --level 3`.** A `SceneTestCase` whose
+`device_count > 1` is otherwise dispatched as one subprocess per class, and
 `run_jobs` captures that subprocess's stdout and prints it only on failure — so a
-passing run yields a log with **no** `bind phase=` lines at all. qwen is
-`level=2` and needs no child command.
+passing run yields a log with **no** `bind phase=` lines at all. Neither of the
+two cases here needs it any more: qwen is `level=2`, and dsv4's `main.py` runs the
+L3 `Worker` in the invoked process, so its chip children write to the log
+directly.
 
 A 2-rank case emits one bind per rank per round, so six rounds is twelve binds.
 Pass `--rounds` to the parser so it infers the rank count and drops one cold bind
@@ -260,12 +263,27 @@ execution does not complete still yield its prepare timing — and it is why a
 swimlane for a case that hangs on device is cheaper to take with the variable set
 than to take by waiting out the stall.
 
+**The flag that satisfies condition 2 also moves the log.** A non-empty
+`CallConfig.output_prefix` redirects every host-log record — `bind phase=` lines
+and `[STRACE]` spans alike — from stderr into `outputs/<case>_<ts>/host.<pid>.log`,
+one file per process ([`python/simpler/worker.py`](../../python/simpler/worker.py)
+sets the directory on the L3 submit path and in the forked chip child;
+[`src/common/log/host_log.cpp`](../../src/common/log/host_log.cpp) opens the file).
+So Recipe A's `grep -c 'bind phase=' "$LOG"` reports **0** for a Recipe B run that
+worked perfectly, and the finisher must read the prefix's own logs. Measured on a
+2-rank dsv4 run: `$LOG` alone yields `No [STRACE] markers found` and drops every
+phase record, while `$LOG` plus the prefix's logs attaches all 4186 of them.
+
 The skill's timeline mode is this recipe; it finishes with
 
 ```bash
-python -m simpler_setup.tools.strace_timing <log> \
-    --host-phase-records outputs/<case>_<ts>/host_phase_records.jsonl \
-    --swimlane host_swimlane.json
+D=outputs/<case>_<ts>
+# The clock anchors are split: the invoking process wrote its own to $LOG, each
+# chip child wrote its own under $D. Concatenating keeps every pid alignable.
+cat "$LOG" "$D"/host.*.log > "$D/bind_timeline.log"
+python -m simpler_setup.tools.strace_timing "$D/bind_timeline.log" \
+    --host-phase-records "$D/host_phase_records.jsonl" \
+    --swimlane "$D/host_swimlane.json"
 ```
 
 Load the JSON in [Perfetto](https://ui.perfetto.dev) or `chrome://tracing`. Each
@@ -301,7 +319,8 @@ signal than any duration on a shared box.
 
 | Trap | Symptom | What to do |
 | ---- | ------- | ---------- |
-| dsv4 run through the module runner's L3 phase | log has zero `bind phase=` lines, test passes | run the L3 child command directly (Recipe A) |
+| Any diagnostic flag on (so, every Recipe B run) | `$LOG` has zero `bind phase=` lines and no `[STRACE]` markers, run passes | the non-empty `output_prefix` moved the host log to `outputs/<case>_<ts>/host.<pid>.log`; grep and parse those too |
+| A `SceneTestCase` with `device_count > 1` run through the module runner | log has zero `bind phase=` lines, test passes | give the child command `--runtime <rt> --level 3`; a standalone `main.py` case needs nothing |
 | `SIMPLER_SKIP_DEVICE_RUN=0` | run still skips the device, "PASSED" means nothing ran | `unset` the variable |
 | `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts, plus a `disabled: --rounds > 1` warning | one round for artifacts, many rounds for numbers |
 | Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
@@ -350,13 +369,26 @@ objects in `graph_upload`, carries no submission block at all, and ships both
 remaining regions in `arena_h2d` — so the same case reports different figures for
 the same work.
 
+**dsv4's `args` and `host_view_close` rows no longer describe that case at this
+scale.** Both are per-byte costs over what a bind stages, and dsv4's parameters
+now live in child memory: allocated once before the first round, and passed
+through without malloc, H2D or a host view. What still crosses is
+`num_tokens_per_owner`, the one caller tensor the host orchestrator has to read —
+so a bind stages **1 of its 92 tensors, 8 bytes**, and closes one host view over
+the same 8 bytes. Measured with the same recipe on `f830f13c3` plus that change,
+6 rounds on two dies: `args` 0.045–0.074 ms and `host_view_close`
+0.014–0.028 ms, against 1.48 s and 0.28 s over 45.8 GB above. qwen still stages
+its fixture and its two rows still read as in the table.
+
 Three of these deserve reading together. `host_orch` is the whole story on dsv4 —
 839 `submit_task`, 743 `record_node` and 272 `alloc_tensors` per bind against qwen's
 5, 277 and 2 — and its 2.3 ms of scatter is why a claim about it needs a
 sub-counter rather than a stopwatch. `args` plus `host_view_close` are two orders of
 magnitude above everything else while being excluded from the control plane: they
-are per-byte costs over the ~41–46 GB of weights each case stages, so they belong
-to getting the weights resident, not to dispatching a graph. And dsv4's device wall
-is absent because the case does not complete on device on this commit — it is a
-`skip_golden` completion case whose host path is what these numbers describe, which
-is also why `SIMPLER_SKIP_DEVICE_RUN` appears in its recipe.
+are per-byte costs over the ~41–46 GB of weights each case staged at that commit,
+so they belong to getting the weights resident, not to dispatching a graph —
+which is why moving dsv4's parameters to child memory left its bind staging one
+8-byte tensor rather than 45.8 GB. And dsv4's device wall is absent because the
+case did not complete on device on that commit — it is a completion case with no
+golden whose host path is what these numbers describe, which is also why
+`SIMPLER_SKIP_DEVICE_RUN` appears in its recipe.

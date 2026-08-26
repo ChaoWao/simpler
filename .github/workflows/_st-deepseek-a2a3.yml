@@ -55,16 +55,16 @@ jobs:
           system-site-packages: "true"
           source-cann: "true"
 
-      - name: Compile DeepSeek scene-test kernels (a2a3)
+      - name: Compile DeepSeek kernels (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          .venv/bin/python -m simpler_setup.tools.scene_test_compile \
-            examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
-            examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode \
-            --platform a2a3 --require-pto-isa --compile-workers 8 -q --manual only
+          for family in tensormap_and_ringbuffer host_build_graph; do
+            .venv/bin/python "examples/a2a3/$family/deepseek_v4_flash_decode/main.py" \
+              --platform a2a3 --compile-only --compile-workers 8
+          done
 
-      # The DS cases are the only manual cases under these two directories, so
-      # --manual only selects exactly the two smoke classes. They stay manual:
+      # The DS cases are the only manual tests under these two directories, so
+      # --manual only selects exactly the two smoke tests. They stay manual:
       # the main sweep runs --manual exclude and must not adopt them back.
       # Each case needs 2 devices (EP world size); 4 devices let both run
       # concurrently.
