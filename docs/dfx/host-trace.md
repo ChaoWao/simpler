@@ -196,10 +196,28 @@ which every one of those levels runs on:
 | `<level>.activate` | prepared-frame activation |
 | `<level>.complete` | terminal child progress handling |
 | `<level>.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
+| `<level>.scheduler_loop` | one scheduler-loop iteration that drained a completion or dispatched a task |
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
 `worker_id`, `dispatch_id`, endpoint kind, and the dispatch's pipeline lease
 (`slot_id` / `generation`).
+
+`<level>.scheduler_loop` is the exception to that list and to the tree below: a
+loop iteration serves whichever runs were ready, so it belongs to no run and
+carries no key at all. Its own attributes are the counts:
+
+| Attribute | Meaning |
+| --------- | ------- |
+| `drained` `dispatched` | completions handled and tasks handed to a worker in this iteration |
+| `drain_ns` | how much of the span was phase 1, so the two phases are separable from one record |
+| `spins` | iterations since the previous span that did neither |
+
+**An iteration that neither drained nor dispatched emits nothing.** The loop
+skips its condition-variable wait entirely whenever any worker is busy, so its
+iteration count is bounded by CPU speed rather than by work — one span per
+iteration would be unbounded, and the ratio that matters is recoverable without
+them: the gap between two spans on the scheduler lane is the wait, and `spins`
+reports how many empty iterations the gap contained.
 
 The word is resolved once per process, from its Worker's level, and the **first
 binding wins**: a `SpanScope` keeps the name pointer it was handed, so a process
@@ -210,7 +228,7 @@ one vocabulary — which is what makes an L4 run readable, since its own spans s
 
 One process contributes at most two host lanes, because the scheduler runs on
 one thread: the facade thread emits `<level>.graph_build` and `<level>.submit`,
-and the scheduler thread emits the other four. `role=worker` on
+and the scheduler thread emits the other five. `role=worker` on
 `<level>.frame_submit`, `<level>.activate` and `<level>.complete` names the
 worker a dispatch targets, not the thread that ran it.
 

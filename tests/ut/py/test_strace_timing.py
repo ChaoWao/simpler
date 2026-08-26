@@ -351,6 +351,45 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
     assert thread_names == {(41, 411): "scheduler"}
 
 
+def test_a_scheduler_loop_span_lands_on_the_scheduler_lane_and_no_invocation():
+    """It is the one host span that belongs to no run, and both views must cope.
+
+    A loop iteration drains completions and dispatches tasks belonging to
+    whichever runs happened to be ready, so it carries no `run_id` and its `inv`
+    is 0 rather than a run epoch. The swimlane still has to place it — `role`
+    names the lane, which is why the attribute is there and not inferred from the
+    name — and the invocation-keyed views still have to leave it out, or every
+    one of them gains a forged invocation 0.
+    """
+    lines = [
+        _span_record(
+            pid=41,
+            tid=411,
+            inv=0,
+            name="node.scheduler_loop",
+            ts=1_400,
+            dur=120,
+            attrs="role=scheduler drained=2 dispatched=1 drain_ns=40 spins=917",
+        )
+    ]
+    spans = list(parse_spans(lines))
+
+    assert invocation_spans(spans) == []
+
+    trace = to_host_swimlane(spans)
+    thread_names = {
+        (event["pid"], event["tid"]): event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+    assert thread_names == {(41, 411): "scheduler"}
+
+    slices = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+    assert [event["name"] for event in slices] == ["node.scheduler_loop"]
+    assert slices[0]["args"]["spins"] == 917
+    assert slices[0]["args"]["drained"] == 2
+
+
 def test_parse_spans_decodes_percent_escaped_name_and_attribute_values():
     """`encode_host_span_field` escapes whatever would otherwise be record grammar."""
     lines = [
