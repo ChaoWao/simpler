@@ -141,10 +141,36 @@ outer GRAPH task's packed output buffer, so it can come from the same
 start converge with steady state. That is a separate change; this amendment only
 records why it, and not batching, is the one that moves the 12 ms.
 
+## Amendment — the integrity hash the verify gate existed for is gone
+
+The one-time verify gate described above no longer hashes anything. A Definition
+image was walked three times per bind for it — zero-filled and hashed on the
+recorder thread, then hashed again on the AICPU at the object's first execution,
+~1 MB per dsv4 bind each time — and none of those passes was what bounded a
+device-side read. `graph_definition_array` checks every section's offset,
+alignment and extent against `total_bytes`, and `bind_graph_topology` walks the
+whole edge list; both are independent of the hash and both stay.
+
+So `content_hash` is removed from `GraphDefinition` and from the object header,
+along with `verify_state` and its spin-wait. What the device checks before it
+reads a section offset is now O(1) framing: `magic`, `definition_bytes` against
+the image's own `total_bytes`, and the header's `full_key` against the image's.
+The whole-image zero-fill went with it — every section is written in full by the
+fill except `fanout_offsets`, which is accumulated and is now explicitly zeroed
+on its own.
+
+Two things this gives up, both deliberately: a stale or mis-packed byte in the
+retained staging block, and "same `full_key`, different bytes", are no longer
+detected at run time. The first is covered instead by
+`GraphDefinitionObject.RejectsHeaderFramingAnotherGraph` in
+`tests/ut/cpp/common/test_hbg_graph_cache.cpp`, which pins that a header framing
+an image of another Graph is refused.
+
 ## Notes
 
 - The first-cut device verify gate returned "busy-looking" nulls to peer
-  submissions and surfaced as `sched_error_code=5 INVALID_ARGS`; the fix is
-  the spin-wait on `verify_state` (dispatch-path legal: spin, no sleep).
+  submissions and surfaced as `sched_error_code=5 INVALID_ARGS`; the fix was
+  the spin-wait on `verify_state` (dispatch-path legal: spin, no sleep). Both the
+  gate and the spin are gone — see the amendment above.
 - `graph record` (245–687 µs) remains per-run and untouched — the per-run
   Definition cache discard is a separate, still-open item (KNOWN_ISSUES).

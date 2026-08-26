@@ -406,18 +406,15 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
             std::byte *base = staging + object.object_offset;
             std::byte *image = base + sizeof(GraphDefinitionHeader);
             if (object.copy != nullptr) std::memcpy(image, object.copy, object.image_bytes);
-            // The five header fields cover its every byte, so the object's framing
-            // is fully defined by these writes rather than by what the retained
-            // staging held before them.
+            // Built value-initialized and copied over the whole header, so every byte
+            // of the object's framing — padding included — is defined by this write
+            // rather than by what the retained staging held before it.
             const auto *definition = reinterpret_cast<const GraphDefinition *>(image);
-            auto *header = reinterpret_cast<GraphDefinitionHeader *>(base);
-            header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-            header->verify_state.store(
-                static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
-            );
-            header->definition_bytes = definition->total_bytes;
-            header->content_hash = definition->content_hash;
-            header->full_key = definition->full_key;
+            GraphDefinitionHeader framing{};
+            framing.magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+            framing.full_key = definition->full_key;
+            framing.definition_bytes = definition->total_bytes;
+            std::memcpy(base, &framing, sizeof(framing));
             const size_t object_bytes = sizeof(GraphDefinitionHeader) + object.image_bytes;
             const size_t padded = align_up(object_bytes);
             std::memset(base + object_bytes, 0, padded - object_bytes);
@@ -447,8 +444,7 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
         const auto *definition = reinterpret_cast<const GraphDefinition *>(
             staging + object_it->second.object_offset + sizeof(GraphDefinitionHeader)
         );
-        if (definition->total_bytes != object_it->second.image_bytes ||
-            definition->content_hash != upload->definition_hash) {
+        if (definition->total_bytes != object_it->second.image_bytes) {
             LOG_ERROR("host-orch: Graph task has no matching uploaded Definition object");
             return false;
         }

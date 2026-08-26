@@ -482,7 +482,6 @@ struct GraphRecording {
 struct GraphPendingUpload {
     ChipTaskSlotState *outer_slot{nullptr};
     uint64_t full_key{0};
-    uint64_t definition_hash{0};
     bool deferred_heap{false};
 };
 
@@ -913,8 +912,8 @@ T *graph_image_section(std::byte *image, uint32_t offset) {
 
 // Counts, section offsets and total_bytes for the image this recording produces,
 // settled without writing any of it so the destination can be claimed at the
-// exact size. required_heap and content_hash come from the fill, which is the
-// pass that walks the nodes in order.
+// exact size. required_heap comes from the fill, which is the pass that walks the
+// nodes in order.
 std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &recording) {
     if (recording.unsupported || recording.node_count == 0 || recording.node_count > GRAPH_MAX_NODES ||
         recording.boundary_tensors().empty() || recording.boundary_tensors().size() > UINT16_MAX ||
@@ -996,21 +995,18 @@ std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &rec
 
 // Write the image of `recording` at `image`, which must be graph_layout_definition's
 // total_bytes and aligned for every section type it laid out. `definition` is that
-// layout; the fill settles required_heap and content_hash and writes the header.
+// layout; the fill settles required_heap and writes the header.
 //
-// Zero-filled first, not merely sized: the alignment slack between sections is
-// inside the hashed range, so the content hash identifies two structurally
-// identical Definitions only while that slack is a fixed value. Reusing a region
-// a previous run wrote, or filling one left uninitialized, would still verify on
-// the device — same bytes, same hash — while giving equal Definitions unequal
-// hashes.
+// Every section is written in full here, so the destination's prior content does not
+// reach the device — with one exception, `fanout_offsets`, which is accumulated
+// rather than assigned and is therefore zeroed below before its first increment.
+// The alignment slack between sections is written by nobody and read by nobody.
 bool graph_fill_definition(const GraphRecording &recording, GraphDefinition definition, std::byte *image) {
     if (image == nullptr) return false;
     always_assert(
         reinterpret_cast<uintptr_t>(image) % GRAPH_DEFINITION_OBJECT_ALIGN == 0 &&
         "a Definition image base must carry the alignment its section offsets assume"
     );
-    std::memset(image, 0, definition.total_bytes);
     const size_t total_tensors = definition.tensor_arg_count;
     const size_t total_scalars = definition.scalar_arg_count;
     const size_t total_fanins = definition.edge_count;
@@ -1035,6 +1031,10 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
     size_t fanin_cursor = 0;
     size_t root_cursor = 0;
     size_t predicate_cursor = 0;
+    // A producer's fanout count is accumulated across the consumer walk below and then
+    // prefix-summed in place, so every entry has to start at zero — including [0],
+    // which nothing else writes and which the device checks is zero.
+    std::fill_n(fanout_offsets, recording.node_count + 1, 0U);
     fanin_offsets[0] = 0;
     for (size_t i = 0; i < recording.node_count; ++i) {
         const GraphRecordedNode &source = recording.nodes[i];
@@ -1075,13 +1075,14 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
             const GraphRecordedPredicate &recorded = recording.predicates[source.predicate_index];
             std::optional<GraphTensorSourceRef> packed_source = graph_pack_tensor_source(recorded.source);
             if (!packed_source.has_value() || recorded.operand.ndims > MAX_TENSOR_DIMS) return false;
-            GraphPredicate &packed = predicates[predicate_cursor];
+            GraphPredicate packed{};
             packed.operand = graph_tensor_pack(recorded.operand);
             packed.operand_source = *packed_source;
             packed.elem_offset = recorded.elem_offset;
             packed.target = recorded.target;
             packed.elem_size = recorded.elem_size;
             packed.op = static_cast<uint8_t>(recorded.op);
+            predicates[predicate_cursor] = packed;
             node.predicate_slot = static_cast<uint16_t>(++predicate_cursor);
         }
         const simpler::hbg::Tensor *source_tensors = recording.node_tensors(source);
@@ -1136,8 +1137,6 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
         signatures[i] = graph_boundary_signature(tensor, recording.boundary_types()[i], alias_rep);
     }
     std::memcpy(image, &definition, sizeof(definition));
-    definition.content_hash = graph_definition_content_hash(image, definition.total_bytes);
-    std::memcpy(image, &definition, sizeof(definition));
     return true;
 }
 
@@ -1174,7 +1173,7 @@ std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t i
     if (index >= state.pending_uploads.size()) return std::nullopt;
     GraphPendingUpload &upload = state.pending_uploads[index];
     if (upload.outer_slot == nullptr) return std::nullopt;
-    return GraphHostUpload{upload.outer_slot, upload.full_key, upload.definition_hash};
+    return GraphHostUpload{upload.outer_slot, upload.full_key};
 }
 
 size_t graph_host_arena_used(const GraphHostState &state) { return state.arena_cursor.load(std::memory_order_acquire); }
@@ -1837,8 +1836,8 @@ void graph_reset_outer_payload(TaskPayload &payload) {
 }
 
 bool graph_submit_outer(
-    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
-    bool defer_heap, const GraphTaskArgs &args, TaskId *submitted_id
+    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, int32_t owned_heap, bool defer_heap,
+    const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
     auto &allocator = orch->task_allocator;
@@ -1868,7 +1867,6 @@ bool graph_submit_outer(
 
     GraphPendingUpload pending;
     pending.full_key = full_key;
-    pending.definition_hash = definition_hash;
     pending.deferred_heap = defer_heap;
 
     DepInputs boundary_inputs{
@@ -1992,15 +1990,14 @@ bool graph_submit_definition(
     const uint64_t owned_heap = definition->required_heap + definition->execution_storage_bytes;
     if (owned_heap > static_cast<uint64_t>(INT32_MAX)) return false;
     return graph_submit_outer(
-        orch, state, definition->full_key, definition->content_hash, static_cast<int32_t>(owned_heap), false, args,
-        submitted_id
+        orch, state, definition->full_key, static_cast<int32_t>(owned_heap), false, args, submitted_id
     );
 }
 
 bool graph_submit_pending_definition(
     OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
-    return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
+    return graph_submit_outer(orch, state, full_key, 0, true, args, submitted_id);
 }
 
 bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
@@ -2030,7 +2027,6 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
         }
         pending.outer_slot->task->packed_buffer_base = packed_base;
         pending.outer_slot->task->packed_buffer_end = packed_end;
-        pending.definition_hash = definition->content_hash;
         pending.deferred_heap = false;
     }
     return true;

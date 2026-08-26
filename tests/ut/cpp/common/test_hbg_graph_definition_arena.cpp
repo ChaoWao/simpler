@@ -148,7 +148,7 @@ TEST_F(HbgGraphDefinitionArenaTest, ObjectsAreBuiltInTheArenaAtAlignedDisjointOf
         const GraphDefinition *image = definition_image(entry);
         EXPECT_EQ(image->full_key, entry.full_key);
         EXPECT_EQ(image->total_bytes, entry.bytes);
-        EXPECT_NE(image->content_hash, 0u);
+        EXPECT_GT(image->task_count, 0u) << "the object holds a filled image, not just claimed bytes";
         EXPECT_EQ(reinterpret_cast<uintptr_t>(image) % GRAPH_DEFINITION_OBJECT_ALIGN, 0u)
             << "the image base carries the alignment its section offsets assume";
     }
@@ -163,18 +163,19 @@ TEST_F(HbgGraphDefinitionArenaTest, ObjectsAreBuiltInTheArenaAtAlignedDisjointOf
     EXPECT_TRUE(first_end <= second.object_offset || second_end <= first.object_offset)
         << "two objects must not share arena bytes";
 
-    // The recorders' images are what the tasks were submitted against, which is
-    // what lets the upload validate the bytes it ships rather than a copy.
+    // Every shell resolves to exactly one published Definition, by the only name it
+    // carries: an upload record that matched two entries, or none, would have the
+    // upload validate a different image than the one the task was submitted against.
     for (size_t i = 0; i < graph_host_upload_count(*graph_state); ++i) {
         const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
         ASSERT_TRUE(upload.has_value());
-        bool matched = false;
+        size_t matches = 0;
         for (const GraphHostDefinition &entry : definitions.entries) {
             if (entry.full_key != upload->full_key) continue;
-            EXPECT_EQ(definition_image(entry)->content_hash, upload->definition_hash) << "shell " << i;
-            matched = true;
+            EXPECT_EQ(definition_image(entry)->total_bytes, entry.bytes) << "shell " << i;
+            matches++;
         }
-        EXPECT_TRUE(matched) << "shell " << i << " has no published Definition";
+        EXPECT_EQ(matches, 1u) << "shell " << i << " must name exactly one published Definition";
     }
 }
 
@@ -201,11 +202,11 @@ TEST_F(HbgGraphDefinitionArenaTest, AnArenaWithNoRoomSpillsAndStillPublishesTheI
     const GraphDefinition *image = definition_image(entry);
     EXPECT_EQ(image->full_key, entry.full_key);
     EXPECT_EQ(image->total_bytes, entry.bytes);
-    EXPECT_NE(image->content_hash, 0u);
+    EXPECT_GT(image->task_count, 0u) << "the spill holds a filled image, not just sized bytes";
 
     const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, 0);
     ASSERT_TRUE(upload.has_value());
-    EXPECT_EQ(upload->definition_hash, image->content_hash);
+    EXPECT_EQ(upload->full_key, image->full_key);
 }
 
 TEST_F(HbgGraphDefinitionArenaTest, AnArenaTooSmallForAnObjectSpillsIt) {

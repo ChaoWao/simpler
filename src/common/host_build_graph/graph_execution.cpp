@@ -149,59 +149,22 @@ bool bind_graph_topology(GraphExecution &execution) {
     return true;
 }
 
-bool graph_definition_hash_matches(const GraphDefinition &definition, uint32_t definition_bytes) {
-    if (definition_bytes < sizeof(GraphDefinition) || definition.total_bytes != definition_bytes ||
-        definition.content_hash == 0) {
-        return false;
-    }
-    return graph_definition_content_hash(&definition, definition_bytes) == definition.content_hash;
-}
-
-// One-time integrity gate for a shared Definition object. The first execution
-// wins the UPLOADED->VERIFYING CAS, hashes the image once, and publishes
-// VERIFIED/INVALID. Other executions sharing this object
-// spin on the state word — never re-hashing, never failing while a peer is
-// mid-verify (the verify is bounded by the image size, so the spin is short).
-GraphDefinition *graph_definition_object_verified(GraphDefinitionHeader &header) {
+// Framing gate for a shared Definition object: the header must agree with the image
+// behind it before any of the image's section offsets is read. Framing, not
+// integrity — every section is fetched through graph_definition_array, which bounds
+// its offset, alignment and extent against total_bytes, and bind_graph_topology
+// below walks the whole edge list; neither trusts a field this returns.
+//
+// definition_bytes is what the upload recorded for this object, so comparing it
+// against the image's own total_bytes is what rejects a header framing a region
+// that does not hold the Definition it claims.
+GraphDefinition *graph_definition_object_framed(GraphDefinitionHeader &header) {
     if (header.magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
-    if (header.definition_bytes < sizeof(GraphDefinition)) {
-        header.verify_state.store(
-            static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID), std::memory_order_release
-        );
-        return nullptr;
-    }
+    if (header.definition_bytes < sizeof(GraphDefinition)) return nullptr;
     auto *definition = reinterpret_cast<GraphDefinition *>(&header + 1);
-    uint32_t observed = header.verify_state.load(std::memory_order_acquire);
-    if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFIED)) {
-        return definition;
-    }
-    if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID)) return nullptr;
-    uint32_t expected = static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED);
-    if (!header.verify_state.compare_exchange_strong(
-            expected, static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFYING), std::memory_order_acq_rel,
-            std::memory_order_acquire
-        )) {
-        // A peer is verifying; wait for its verdict rather than racing it.
-        while (true) {
-            observed = header.verify_state.load(std::memory_order_acquire);
-            if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFIED)) {
-                return definition;
-            }
-            if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID)) return nullptr;
-#if defined(__aarch64__)
-            __asm__ volatile("yield");
-#elif defined(__x86_64__)
-            __builtin_ia32_pause();
-#endif
-        }
-    }
-    const bool matched = header.content_hash == definition->content_hash && header.full_key == definition->full_key &&
-                         graph_definition_hash_matches(*definition, header.definition_bytes);
-    header.verify_state.store(
-        static_cast<uint32_t>(matched ? GraphDefinitionVerifyState::VERIFIED : GraphDefinitionVerifyState::INVALID),
-        std::memory_order_release
-    );
-    return matched ? definition : nullptr;
+    if (definition->total_bytes != header.definition_bytes) return nullptr;
+    if (definition->full_key != header.full_key) return nullptr;
+    return definition;
 }
 
 // Rebind one Definition tensor template onto this execution. A BOUNDARY_* ref
@@ -313,7 +276,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     }
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(definition_addr - sizeof(GraphDefinitionHeader));
-    const GraphDefinition *definition = graph_definition_object_verified(*definition_header);
+    const GraphDefinition *definition = graph_definition_object_framed(*definition_header);
     TaskPayload &payload = *outer_slot.payload;
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
         definition->task_count > GRAPH_MAX_NODES ||
