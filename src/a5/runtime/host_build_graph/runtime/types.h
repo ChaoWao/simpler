@@ -40,6 +40,7 @@
 #include "aicpu/dump_arg_selection.h"
 #include "common/device_phase.h"
 #include "data_type.h"
+#include "host_build_graph/entry_args.h"  // EntryArgsStorage
 #include "profiling_config.h"
 #include "submit_types.h"
 #include "task_args.h"

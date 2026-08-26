@@ -37,6 +37,15 @@ forget it on.
 the address is resolved on the consuming endpoint, and the C++ orchestration on
 the chip receives the resolved form.
 
+**A kernel translation unit sees only the last two rows.** A `#include "tensor.h"`
+on a runtime's include path supplies `ChipTensor` and that runtime's `Tensor`
+(aliased `TaskTensor`), and reaches neither `task_interface/task_args.h` nor the
+wire `Tensor` in `task_interface/buffer.h`. The runtime's own entry-arg storage,
+which does need both, sits in `entry_args.h` beside it rather than in `tensor.h`.
+Since the wire type and the runtime type are both spelled `Tensor` — one at global
+scope, one in `simpler::{hbg,tmr}` — an include that reintroduces that edge makes
+the two names collide inside every kernel that picks up the header.
+
 > **Status.** `TaskArgs.add_tensor` takes a `Tensor`, and `simpler.task_interface`
 > re-exports it: the public submit surface names the type its own submit call accepts.
 > The Scope / status section at the end of this page says what is and is not connected.

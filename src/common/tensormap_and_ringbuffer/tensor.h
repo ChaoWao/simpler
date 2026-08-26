@@ -28,7 +28,6 @@
 #include "data_type.h"
 #include "task_id.h"
 #include "task_interface/arg_direction.h"
-#include "task_interface/task_args.h"
 #include "task_interface/tensor.h"
 
 namespace simpler::tmr {
@@ -573,10 +572,5 @@ inline Tensor make_tensor_strided(
     t.buffer.size = t.extent_elem_cache * get_element_size(dtype);
     return t;
 }
-
-// The runtime's entry-arg storage. `Runtime::set_orch_args` adopts the boundary
-// ChipStorageTaskArgs into this once, on the host, before orchestration runs; from
-// there inward nothing holds a bare ChipTensor.
-using EntryArgsStorage = TaskArgsTpl<Tensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
 
 }  // namespace simpler::tmr
