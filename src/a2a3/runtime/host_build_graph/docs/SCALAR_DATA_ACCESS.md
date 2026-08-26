@@ -70,7 +70,9 @@ it derives for itself, from a heap block whose prior contents it never reads.
 
 Before a wait slot is used, the runtime verifies:
 
-- the task ID is valid and carries ring 0, the only ring HBG places tasks on;
+- the task ID is valid and lies in the `RING` id space — a `GRAPH_NODE` id packs
+  its outer task and node index into the low bits, so it indexes no task table
+  slot (see `src/common/host_build_graph/task_id_encoding.h`);
 - the task table slot that ID indexes has a bound task descriptor; and
 - the descriptor's full task ID matches the tensor's owner/producer ID.
 

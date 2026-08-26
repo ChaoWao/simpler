@@ -124,8 +124,9 @@ scalar `rt_orchestration_done` publishes into the runtime header.
 
 **Why the scheduler state is device-written.** `SchedulerState` holds no
 per-run content: `sm_header` and the task-header pointer derive from a pooled SM base,
-queue capacities are compile-time constants, hbg never advances
-`last_task_alive`, and it has no host-side entry point at all. So the host would
+queue capacities are compile-time constants, polling reserves no wiring or
+dependency pool (readiness comes from the task table's `completion_flags`, which
+the task header owns), and it has no host-side entry point at all. So the host would
 only be writing an initialization pattern — 203,392 bytes
 of it, dominated by `AsyncWaitList::entries` — for the device to receive and never
 read. `RuntimeContext` therefore holds a *pointer* to it, wired from
