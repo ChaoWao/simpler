@@ -44,9 +44,9 @@
  * away.
  *
  * Performance: Emit and Annotate are template parameters, not std::function. The
- * runtime lambda (capturing fanin_builder + sm_header) instantiates at the call site
- * and inlines through. Do NOT replace with std::function — it would break the
- * inlining and add ~5 ns/call to the orch hot path.
+ * runtime lambda (capturing the consumer's fanin region + count) instantiates at the
+ * call site and inlines through. Do NOT replace with std::function — it would break
+ * the inlining and add ~5 ns/call to the orch hot path.
  */
 
 #ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_

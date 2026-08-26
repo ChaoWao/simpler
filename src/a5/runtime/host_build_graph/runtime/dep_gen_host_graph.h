@@ -43,10 +43,10 @@
  * progress loop satisfies this by being single-threaded; emit returns -3 if the
  * invariant is ever broken.
  *
- * Per-task producer dedup mirrors FaninBuilder, which keys on (ring, slot);
- * this keys on producer task id. The two agree only because host_build_graph is
- * whole-graph-resident and never reuses a task slot at build time (see
- * append_fanin_or_fail in orchestrator.cpp). A runtime that recycles slots
+ * Per-task producer dedup mirrors append_fanin_or_fail, which keys on the producer's
+ * local id; this keys on producer task id. The two agree only because
+ * host_build_graph is whole-graph-resident and never reuses a task slot at build time
+ * (see append_fanin_or_fail in orchestrator.cpp). A runtime that recycles slots
  * mid-build would need this key revisited.
  *
  * Output is `deps.json` in the schema documented in docs/dfx/dep-gen.md — the
