@@ -448,6 +448,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         // The device/sync error remains authoritative over teardown errors.
         return rc;
     }
+    reset_run_completion_events(prepared.pipeline_slot);
 
     // A proven-complete stream is reusable until a code publication marks it
     // stale. Publish retirement so cleanup does not replace it with an
@@ -455,7 +456,6 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     prepared.aicore_retirement_attempted = true;
     rc = retire_run_aicore_stream(&prepared, RunStreamPair::CompletionStatus::Complete);
     if (rc != 0) return rc;
-    reset_run_completion_events(prepared.pipeline_slot);
 
     // Reads device memory, so it must precede KernelArgs/runtime cleanup.
     print_handshake_results(prepared.kernel_args);
@@ -632,6 +632,11 @@ int DeviceRunner::wait_run_completion_events(const PreparedExecution &prepared) 
             return static_cast<int>(rc);
         }
     }
+    // Event completion does not propagate a failed predecessor task. A stream
+    // query preserves that sticky error while NOT_READY remains valid when a
+    // healthy successor is queued after this run's event.
+    const int stream_status = query_stream_pair_nonblocking(run_streams_.aicpu(), run_streams_.aicore());
+    if (stream_status == SIMPLER_NATIVE_RUN_POLL_ERROR) return PTO_RUNTIME_ERR_INTERNAL;
     return 0;
 }
 

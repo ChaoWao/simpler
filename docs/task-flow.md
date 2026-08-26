@@ -415,10 +415,13 @@ Backend and per-run capabilities, rather than the mailbox protocol, select
 between these meanings.
 
 An HBG successor's prepared token remains unlaunched and unaccepted until
-`ACTIVATE`, and activation still cannot launch it until the predecessor has
-polled complete and finalized. The sticky acceptance word therefore remains
-zero throughout preparation. Shutdown, stale activation, and pre-launch
-failure finalize the token exactly once before the frame becomes terminal.
+`ACTIVATE`. On a queued-launch-capable a2a3 backend, activation may submit it
+behind the predecessor before that predecessor finalizes; per-slot events keep
+completion and finalization FIFO. Diagnostic, incompatible, and unsupported
+paths still wait for predecessor finalization. The sticky acceptance word
+therefore remains zero throughout preparation and changes only after launch.
+Shutdown, stale activation, and pre-launch failure finalize the token exactly
+once before the frame becomes terminal.
 
 The scheduler stages only the first eligible single NEXT_LEVEL task from the
 prepared FIFO successor. Tasks from the active run use only the active lane, so
