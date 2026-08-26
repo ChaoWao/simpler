@@ -25,6 +25,16 @@ again.
 
 ## Answer
 
+> **Two of this answer's three claims are superseded — read the last amendment
+> before acting on it.** What holds is the *exclusion*: a writer of `mmap_lock`
+> excludes every faulting thread in the address space, which is what makes a fault
+> here cost 14–33 µs against ~1.7 µs on an idle box. What does not hold is the
+> framing of the tail as *count × price* — two arms settle that in opposite
+> directions, one removing 86% of the faults for no time and one removing 6% for
+> 29–43% — nor `mmap`/`munmap` as the writer, which names what the off-tree
+> reproducer below used. **In tree that writer is `mprotect`**, from glibc opening a
+> non-main arena.
+
 **The tail is minor page faults on freshly allocated memory, and a fault here costs
 14–33 µs instead of the ~1.7 µs it costs on an idle box — because the process's own
 `mmap`/`munmap` traffic holds `mmap_lock` for write and excludes every faulting
@@ -374,6 +384,110 @@ Two rules fall out, and both cost a wrong PR to learn:
 - **A reservation that is not packed can cost more than no reservation.** Per-object
   buffers rounded up to a cap turn into a page each; the fault count follows the
   number of *pages touched*, not the bytes reserved.
+
+## Amendment 2026-08-25 (last) — the count is not the lever; the price is
+
+Two arms measured after every item of "Where a fix would go" had shipped point in
+opposite directions, and together they refute the *count × price* framing above.
+
+| arm | faults | control-plane duration |
+| --- | ------ | ---------------------- |
+| glibc keeps freed memory (`MALLOC_MMAP_THRESHOLD_` and `MALLOC_TRIM_THRESHOLD_` at 1 GiB, `MALLOC_TOP_PAD_` at 256 MiB; glibc 2.36) | 1019 → 140, **−86%** | **unchanged** |
+| #2015, one flat tensor region per recorder thread | median 1078 → 1010, **−6%** | median 1.157/1.454 → 0.824 ms, **−29…−43%** |
+
+An arm that removes 86% of the faults buys no time; an arm that removes 6% buys a
+third of the phase. **The fault count is not a lever. Only the price is** — which is
+the half of the Answer that survives.
+
+The tunable arm is not new evidence; it is the one already recorded under "Removing
+the return-to-kernel behaviour removes the faults". What was new was reading its flat
+duration as *"the tunables are not a fix"* instead of *"the count does not buy time"*.
+The datum sat here through three rounds of work with the wrong conclusion attached.
+
+### The in-tree `mmap_lock` writer is `mprotect`, and it was never traced
+
+glibc reserves a non-main arena with `mmap(PROT_NONE)` and opens it up with
+**`mprotect`** (`grow_heap`), so a recorder thread whose arrays grow issues one — and
+`mprotect` takes `mmap_lock` for write, excluding every faulting thread in the address
+space exactly as `munmap` does.
+
+Every strace in this investigation traced `madvise`, `mmap`, `munmap` and `brk`.
+**None traced `mprotect`.** One `strace -ff -e trace=mprotect,madvise,brk` over three
+rounds, in the non-main-arena band `0xfff0…0xfff4`:
+
+| syscall, in that band | over 6 binds |
+| --------------------- | ------------ |
+| `mprotect(PROT_READ\|PROT_WRITE)` | **157 calls — 26 per bind**, 85.2 MB |
+| `madvise(MADV_DONTNEED)` | **0** (3300 calls / 26 GB elsewhere, none of it arena) |
+
+Those arenas only grow; nothing shrinks them back. That is why #2015 — which sizes
+every recorder array from its contract at thread stand-up and never grows one again —
+removes the writer, and why it is the first change here to buy time.
+
+### The residual faults are not a performance item
+
+`standups=0` and `slots_created=0` on a warm bind, and still roughly 10 MB of resident
+pages re-faulting per bind, mechanism undetermined: it survived #1981, #1988, #2013 and
+ #2015. **The tunable arm removed 86% of them and showed no measurable latency change**,
+which is the strongest statement the measurement supports — not that those faults cannot
+cost time in another workload or allocator state, but that nothing here has been able to
+price them.
+
+Stated plainly because it has been chased as a latency problem three times: **the
+residual fault count is not currently established as a performance defect**, so an
+argument for working on it has to come from memory residency or determinism, or from a
+measurement that prices it. Userspace tools are exhausted
+— `mincore` reports presence, not writability; pagemap's bit 56 is `mapcount == 1`, also
+not writability; no interface exposes a PTE's write bit — so any next step is `bpftrace`
+on `handle_mm_fault` under root.
+
+### What the per-site attribution produced, and its shelf life
+
+`perf record -e page-faults -c 1 -k mono --call-graph fp`, filtered to the worker
+processes and to the `host_orch` windows, names every site. Per warm bind at
+`87deeab42`, before #2019:
+
+| site | per bind |
+| ---- | -------- |
+| `graph_end` → `memset(image, 0, total_bytes)` — **deleted by #2019** | 245 |
+| `_M_fill_assign` — the per-node tensor buffers, **replaced by #2015** | 199 |
+| `graph_record_submit_node` | 133 |
+| the two orchestration `.so`s | 79 |
+| flat arrays (`_M_default_append`) | 58 |
+| `ChipTensorMap::reset`, `operator new`, others | ~140 |
+| the SM mirror (`prepare_task` + `submit_task_common`, ~6 THP faults) | 6 |
+
+Two of the top three are gone, which is the point: **a per-site fault table dates
+quickly, and none of the entries it drove were worth what they measured.** Keep the
+method, not the numbers.
+
+Also refuted while attributing them, each with a direct measurement: `MADV_DONTNEED`
+(0 calls in that band), fork-COW (every `clone` carries `CLONE_VM`), KSM (`run=0`),
+AutoNUMA hinting (one rank's `total_numa_faults` never moves while its minflt stays
+~1000), THP (`PR_SET_THP_DISABLE` leaves the memset's faults at 0.97/page, unchanged),
+writing bytes never written before (per-slot high-water counter: 0 such assigns in the
+steady state), and the shape of the allocation (moving the Definition staging from a
+heap vector to its own anonymous mapping: 1960 → 1969 faults). The measurement itself
+was controlled with an empty `getrusage` window, which never counts a fault.
+
+Three traps in the tooling, each of which produced a wrong conclusion first:
+
+- **`perf record` without `-k mono`** stamps samples with a clock that is not the
+  `CLOCK_MONOTONIC` a phase window is expressed in. The offset is small enough that
+  "is `start_ns` between the first and last sample" still passes, and a
+  millisecond-wide window still lands on the wrong stretch: the first attempt put
+  99.9% of `host_orch`'s faults in `libtorch_cpu.so`, on a thread belonging to the
+  *parent* process, whose faults never enter a worker's `getrusage`.
+- **`--no-buildid-cache`** leaves the data depending on the `.so` at its recorded
+  path, so rebuilding it turns every symbol in an already-recorded run into `[unknown]`.
+- **Neither `mincore` nor pagemap reports write permission**, so neither can establish
+  that a page "was handed back". Both were used to argue exactly that.
+
+### What is closed
+
+"Where a fix would go" is fully implemented: items 1–3 by #1981, item 4 by #1988 plus
+ #2013, and the flat-region form of item 3 by #2015. No untried item remains, and the
+one that bought time did so by removing a **syscall**, not by removing allocations.
 
 ## References
 

@@ -281,7 +281,7 @@ host_phase_record(uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64_t pa
     append_record(s, start_ns, end_ns, kind, payload, index);
 }
 
-void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload) {
+void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload, uint64_t end_ns) {
     TraceState &s = state();
     if (!s.active.load(std::memory_order_acquire) || !is_bind_kind(kind)) {
         return;
@@ -299,12 +299,15 @@ void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs,
     if (s.generation.load(std::memory_order_acquire) != claimed_generation) {
         return;
     }
-    const uint64_t end_ns = static_cast<uint64_t>(simpler::log::monotonic_now_ns());
+    // Four early returns sit above this point, so a caller that reads counters at the
+    // top of its own wrapper and lets the clock be taken here would span more than they
+    // do. One that passes its own instant gets both over the same interval.
+    const uint64_t end = end_ns != 0 ? end_ns : static_cast<uint64_t>(simpler::log::monotonic_now_ns());
     if (attrs != nullptr) {
         snprintf(s.bind_attrs[kind].data(), kBindAttrsCapacity, "%s", attrs);
     }
-    record_counter(*lane, start_ns, end_ns, kind, payload);
-    append_record(s, start_ns, end_ns, kind, payload, 0);
+    record_counter(*lane, start_ns, end, kind, payload);
+    append_record(s, start_ns, end, kind, payload, 0);
 }
 
 void host_phase_trace_begin(const void *host_api) {

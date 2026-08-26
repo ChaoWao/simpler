@@ -157,11 +157,24 @@ static BindKernelCounters bind_kernel_counters() {
     };
 }
 
-// A phase's own count is the delta since the previous marker, because the markers
-// partition the bind span. Process-wide, so a phase that runs while the Graph
-// recorders are working is charged their faults too — which is the intent: it is the
-// bind's total page-table cost that is being attributed, not one thread's.
+// A phase's own counts are the delta since its own start, so they cover the same
+// span its duration does. The markers do not partition the bind: the stretches
+// between one phase's close and the next one's open belong to neither, in counts
+// exactly as in time. Process-wide, so a phase that runs while the Graph recorders
+// are working is charged their faults too — which is the intent: it is the bind's
+// total page-table cost that is being attributed, not one thread's.
 static BindKernelCounters g_bind_counter_mark{};
+
+// Open one segment: the instant its duration measures from, and the counter mark
+// its faults measure from. Every phase start comes from here, so a phase's two
+// spans cannot drift apart — a fault count taken over a wider span than the clock
+// describes work the phase does not contain.
+static int64_t bind_phase_begin() {
+    if (host_phase_breakdown_enabled()) {
+        g_bind_counter_mark = bind_kernel_counters();
+    }
+    return bind_now_ns();
+}
 
 static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *attrs = "", uint64_t payload = 0) {
     if (!host_phase_breakdown_enabled()) {
@@ -169,6 +182,12 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
         return;
     }
     const BindKernelCounters now = bind_kernel_counters();
+    // Closes both spans at the same instant. The counters have to be read before the
+    // attribute string can be formatted, and the record path takes four early returns
+    // before it would reach a clock of its own, so leaving the end timestamp to it
+    // would let the duration cover work the counts do not. Both ends of the phase now
+    // read counters and then the clock, one call apart.
+    const int64_t end_ns = bind_now_ns();
     auto since = [](uint64_t current, uint64_t mark) {
         return current >= mark ? current - mark : 0;
     };
@@ -178,8 +197,10 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
         *attrs == '\0' ? "" : " ", since(now.minflt, g_bind_counter_mark.minflt),
         since(now.nivcsw, g_bind_counter_mark.nivcsw), since(now.nvcsw, g_bind_counter_mark.nvcsw)
     );
-    g_bind_counter_mark = now;
-    host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload);
+    host_phase_record_bind(
+        static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload,
+        static_cast<uint64_t>(end_ns)
+    );
 }
 
 // The ring sizes were once settable process-wide through PTO2_RING_TASK_WINDOW /
@@ -603,7 +624,7 @@ int32_t run_host_orchestration(
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
-    const int64_t t_orch_ns = bind_now_ns();
+    const int64_t t_orch_ns = bind_phase_begin();
     rt_scope_begin(rt);
     entry_points->entry(orch_l2);
     rt_scope_end(rt);
@@ -664,7 +685,7 @@ int32_t run_host_orchestration(
     // Upload each distinct Definition as its own retained device object and bind
     // every outer Graph task to it. Per-invocation data already lives in that
     // task's payload regions and is copied with the shared-memory image below.
-    const int64_t t_graph_ns = bind_now_ns();
+    const int64_t t_graph_ns = bind_phase_begin();
     DefinitionUploads definition_uploads{};
     if (!bind_graph_definitions(api, *graph_state, &definition_uploads)) {
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -728,7 +749,7 @@ int32_t run_host_orchestration(
     // region and short-circuits a request an existing one already covers, so a
     // repeated workload pays for neither twice and the heap is grow-only across a
     // Worker's binds.
-    const int64_t t_static_arena_ns = bind_now_ns();
+    const int64_t t_static_arena_ns = bind_phase_begin();
     // The compact shared-memory image is the only per-run tail in the device
     // arena. GraphExecution is initialized later in each outer Graph heap.
     const uint64_t device_arena_bytes = layout.off_copied_end + image_bytes;
@@ -758,7 +779,7 @@ int32_t run_host_orchestration(
         record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
     }
 
-    const int64_t t_sm_ns = bind_now_ns();
+    const int64_t t_sm_ns = bind_phase_begin();
     void *device_arena = api->acquire_pooled_runtime_arena();
     if (device_arena == nullptr) {
         LOG_ERROR("%s", "host-orch: failed to acquire the pooled runtime arena");
@@ -773,7 +794,7 @@ int32_t run_host_orchestration(
         record_bind_phase(HostPhaseKind::BindSharedMem, t_sm_ns, attrs, image_bytes);
     }
 
-    const int64_t t_heap_ns = bind_now_ns();
+    const int64_t t_heap_ns = bind_phase_begin();
     void *gm_heap = api->acquire_pooled_gm_heap();
     record_bind_phase(HostPhaseKind::BindGmHeap, t_heap_ns);
     if (gm_heap == nullptr) {
@@ -825,7 +846,7 @@ int32_t run_host_orchestration(
     );
     always_assert(compacted == image_bytes);
 
-    const int64_t t_h2d_ns = bind_now_ns();
+    const int64_t t_h2d_ns = bind_phase_begin();
     if (api->copy_to_device(arena_dev + layout.off_copied_begin, upload_base, upload_bytes) != 0) {
         LOG_ERROR("host-orch: H2D of the runtime image failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -1039,7 +1060,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // the point at which a task could make it stale.
     HostTensorAccessor tensor_access(api);
 
-    const int64_t t_args_ns = bind_now_ns();
+    const int64_t t_args_ns = bind_phase_begin();
     uint64_t staged_bytes = 0;
     int staged_tensors = 0;
     for (int i = 0; i < tensor_count; i++) {
@@ -1128,7 +1149,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // the reserve sequence on a host-side arena.
     uint64_t sm_size = SharedMemoryHandle::calculate_size(task_capacity);
 
-    const int64_t t_arena_build_ns = bind_now_ns();
+    const int64_t t_arena_build_ns = bind_phase_begin();
     DeviceArena host_arena;
     RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, task_capacity);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
@@ -1159,7 +1180,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // boot becomes attach + wire (cheap pointer fixup) + sm_handle->init (SM
     // reset) + a handful of device-only field fixups.
     // -------------------------------------------------------------------------
-    const int64_t t_runtime_init_ns = bind_now_ns();
+    const int64_t t_runtime_init_ns = bind_phase_begin();
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
     RuntimeContext *rt =
@@ -1199,7 +1220,7 @@ extern "C" int bind_callable_to_runtime_impl(
         // owns these buffers, so drop the window on both exits.
         const size_t view_count = tensor_access.mapping_count();
         const uint64_t view_bytes = tensor_access.mapped_bytes();
-        const int64_t t_view_close_ns = bind_now_ns();
+        const int64_t t_view_close_ns = bind_phase_begin();
         tensor_access.close();
         {
             char attrs[96];
