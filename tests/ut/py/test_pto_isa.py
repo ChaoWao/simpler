@@ -53,6 +53,7 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
     calls = []
 
+    monkeypatch.delenv(pto_isa.PTO_ISA_CLONE_URL_ENV, raising=False)
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):

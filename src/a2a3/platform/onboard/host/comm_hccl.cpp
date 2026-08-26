@@ -48,7 +48,7 @@
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-#include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
+#include "pto/comm/workspace.hpp"
 #endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
@@ -1780,6 +1780,7 @@ extern "C" int comm_destroy(CommHandle h) try {
             if (rc == 0) rc = -1;
         }
     }
+    destroy_sdma_workspace(h);
 
     // NOTE: we do NOT destroy h->stream — it is caller-owned.
     // We also do NOT call aclrtResetDevice / aclFinalize here.  Device/ACL
@@ -1809,10 +1810,12 @@ extern "C" int comm_destroy(CommHandle h) try {
     return rc;
 } catch (const std::exception &e) {
     LOG_ERROR("[comm] comm_destroy: exception: %s", e.what());
+    abandon_sdma_workspace(h);
     if (h) delete h;
     return -1;
 } catch (...) {
     LOG_ERROR("[comm] comm_destroy: unknown exception");
+    abandon_sdma_workspace(h);
     if (h) delete h;
     return -1;
 }

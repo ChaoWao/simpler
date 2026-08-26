@@ -9,12 +9,15 @@
 """PTO-ISA dependency management: resolve the pinned managed checkout.
 
 ``pto_isa.pin`` is the single source of truth for the PTO-ISA revision.
-``ensure_pto_isa_root()`` always manages ``PROJECT_ROOT/build/pto-isa``:
+``ensure_pto_isa_root()`` resolves ``PROJECT_ROOT/build/pto-isa``:
 
 1. Read the required commit from ``pto_isa.pin``.
-2. If a managed checkout already exists **clean and at exactly the pin**, use it
+2. If a sibling ``../pto-isa`` checkout exists at exactly the pin, link
+   ``build/pto-isa`` to it and use that tree. This keeps paired simpler +
+   pto-isa workspaces on the same local revision during cross-repo migrations.
+3. If a managed checkout already exists **clean and at exactly the pin**, use it
    as-is — it already *is* the pinned ISA, so no checkout and no network.
-3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
+4. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
    over HTTPS (``--no-checkout`` so the default branch is never materialized)
    and force-check-out the pin. GitHub is attempted three times; if it cannot
    provide the complete pinned checkout, fall back to the GitCode mirror.
@@ -41,6 +44,7 @@ Lock file under build/ serializes concurrent clones from parallel processes.
 import fcntl
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -234,6 +238,17 @@ def get_pto_isa_clone_path() -> Path:
     return PROJECT_ROOT / "build" / "pto-isa"
 
 
+def get_pto_isa_clone_url() -> str:
+    """Clone URL for managed PTO-ISA checkouts."""
+    return os.environ.get(PTO_ISA_CLONE_URL_ENV, _PTO_ISA_HTTPS).strip() or _PTO_ISA_HTTPS
+
+
+def get_sibling_pto_isa_checkout_path(clone_path: Optional[Path] = None) -> Path:
+    """Sibling PTO-ISA checkout used by paired local simpler/pto-isa worktrees."""
+    managed = clone_path or get_pto_isa_clone_path()
+    return managed.parent.parent.parent / "pto-isa"
+
+
 def _is_cloned(path: Path) -> bool:
     """Return True if `path` looks like a valid PTO-ISA clone (has include/)."""
     return (path / "include").is_dir()
@@ -310,6 +325,64 @@ def _remove_clone(target: Path, verbose: bool) -> None:
         shutil.rmtree(target, ignore_errors=True)
     else:
         target.unlink(missing_ok=True)
+
+
+def _can_replace_with_sibling_link(target: Path, verbose: bool) -> bool:
+    """Return true when replacing target cannot discard local changes."""
+    if not (target.exists() or target.is_symlink()):
+        return True
+    if target.is_symlink():
+        return True
+    if not _is_cloned(target):
+        return True
+
+    current_head = get_pto_isa_head(str(target))
+    if current_head and _is_pristine_at_commit(target, current_head, verbose=verbose):
+        return True
+
+    if verbose:
+        logger.warning(
+            f"Refusing to replace non-pristine pto-isa checkout at {target}; "
+            "move it aside before linking the sibling checkout."
+        )
+    return False
+
+
+def _link_sibling_checkout_if_pinned(clone_path: Path, required_commit: str, verbose: bool) -> Optional[str]:
+    """Point build/pto-isa at sibling ../pto-isa when it exactly matches the pin."""
+    sibling = get_sibling_pto_isa_checkout_path(clone_path)
+    if sibling.resolve() == clone_path.resolve():
+        return None
+    if not _is_cloned(sibling):
+        return None
+
+    actual_commit = get_pto_isa_head(str(sibling))
+    if actual_commit != required_commit:
+        if verbose:
+            logger.warning(
+                f"Ignoring sibling pto-isa checkout at {sibling}: "
+                f"expected {required_commit}, got {actual_commit or '<unknown>'}"
+            )
+        return None
+
+    if clone_path.exists() or clone_path.is_symlink():
+        if clone_path.resolve() == sibling.resolve():
+            return str(clone_path.resolve())
+        if not _can_replace_with_sibling_link(clone_path, verbose):
+            return None
+        _remove_clone(clone_path, verbose)
+
+    try:
+        clone_path.parent.mkdir(parents=True, exist_ok=True)
+        clone_path.symlink_to(sibling.resolve(), target_is_directory=True)
+    except OSError as e:
+        if verbose:
+            logger.warning(f"Failed to link sibling pto-isa checkout {sibling} -> {clone_path}: {e}")
+        return None
+
+    if verbose:
+        logger.info(f"Using sibling pto-isa checkout at {sibling} via {clone_path}")
+    return str(clone_path.resolve())
 
 
 def _land_on_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
@@ -477,6 +550,7 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
         resolved = _ensure_locked(clone_path, required_commit=required_commit, verbose=verbose)
 
     if resolved is None:
+        clone_url = get_pto_isa_clone_url()
         raise OSError(
             f"PTO-ISA not available.\n"
             f"  The managed checkout must live at {clone_path} and match {PROJECT_ROOT / PTO_ISA_PIN_FILE}.\n"
@@ -490,6 +564,10 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
 
 def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Optional[str]:
     """Inner logic executed while holding the file lock."""
+    sibling_checkout = _link_sibling_checkout_if_pinned(clone_path, required_commit, verbose=verbose)
+    if sibling_checkout is not None:
+        return sibling_checkout
+
     # Reuse an existing checkout ONLY when it is already exactly the pin: a clean
     # working tree at HEAD == pin already *is* the pinned ISA (git objects are
     # content-addressed), so use it as-is — no checkout, no network. This is the

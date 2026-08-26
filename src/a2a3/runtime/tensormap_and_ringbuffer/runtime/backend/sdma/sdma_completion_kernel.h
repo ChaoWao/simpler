@@ -108,6 +108,14 @@ register_pto_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsy
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return;
     }
+
+    ::pto::comm::sdma::SdmaSession sdma_session;
+    ::pto::comm::sdma::detail::LoadSdmaSession(session, sdma_session);
+    if (!sdma_session.valid || sdma_session.runtimeCtx.postDoneBase == nullptr) {
+        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return;
+    }
+
     for (uint32_t queue_id = 0; queue_id < queue_num; ++queue_id) {
         register_sdma_post_done_record(
             ctx, ::pto::comm::sdma::detail::GetPostDoneRecordAddr(post_done_base, queue_id), post_id

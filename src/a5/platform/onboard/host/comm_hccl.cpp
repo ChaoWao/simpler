@@ -47,7 +47,7 @@
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-#include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
+#include "pto/comm/workspace.hpp"
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 #include "pto/comm/async/urma/urma_workspace_manager.hpp"
@@ -105,7 +105,7 @@ struct CommHandle_ {
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> sdma_workspace;
+    pto::comm::Workspace sdma_workspace{};
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
@@ -750,6 +750,9 @@ static void ensure_sdma_workspace(CommHandle h) {
         // The system gracefully degrades to non-SDMA mode when this occurs.
         h->sdma_workspace.reset();
     }
+    pto::comm::AbandonWorkspace(&h->sdma_workspace);
+    h->host_ctx.workSpace = 0;
+    h->host_ctx.workSpaceSize = 0;
 #else
     (void)h;
 #endif
@@ -1036,9 +1039,9 @@ static int domain_alloc_via_ipc(
     uint64_t domain_workspace_addr = 0;
     uint64_t domain_workspace_size = 0;
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) {
-        domain_workspace_addr = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        domain_workspace_size = 16 * 1024;
+    if (h->sdma_workspace.addr != nullptr || h->sdma_workspace.impl != nullptr) {
+        domain_workspace_addr = reinterpret_cast<uint64_t>(h->sdma_workspace.addr);
+        domain_workspace_size = h->sdma_workspace.bytes;
     }
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
