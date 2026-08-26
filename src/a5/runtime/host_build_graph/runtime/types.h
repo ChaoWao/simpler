@@ -13,7 +13,7 @@
  *
  * Standalone header defining orchestration-specific types for:
  * - TaskOutputTensors: Return value from submit containing materialized output ChipTensors
- * - Arg: Aggregated argument container for pto_submit_task API
+ * - Arg: Aggregated argument container for rt_submit_task API
  *
  * simpler::hbg::Tensor descriptor types (simpler::hbg::Tensor, PTOBufferHandle, TensorCreateInfo) are
  * defined in tensor.h.
@@ -137,7 +137,7 @@ private:
 using TaskSubmitResult = TaskOutputTensors;
 
 // =============================================================================
-// Argument Types (for pto_submit_task API)
+// Argument Types (for rt_submit_task API)
 // =============================================================================
 
 // TensorArgType is defined in tensor.h (included via task_args.h above)
@@ -182,7 +182,7 @@ public:
 };
 
 /**
- * Aggregated argument container for pto_submit_task
+ * Aggregated argument container for rt_submit_task
  *
  * Inherits storage from TaskArgsTpl<TensorRef, uint64_t, MAX_TENSOR_ARGS, MAX_SCALAR_ARGS, TensorArgType>.
  * Each tensor slot stores a TensorRef union (simpler::hbg::Tensor* or TensorCreateInfo)

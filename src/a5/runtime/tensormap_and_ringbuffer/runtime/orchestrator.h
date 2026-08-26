@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Orchestrator Interface
+ * tensormap_and_ringbuffer orchestrator interface
  *
  * The Orchestrator is responsible for:
  * 1. Executing the orchestration function (Turing-complete control flow)

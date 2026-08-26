@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Shared `pto_runtime_c_api` glue — the byte-identical part of every arch's
+ * Shared `runtime_c_api` glue — the byte-identical part of every arch's
  * onboard `runtime_c_api.cpp`. Linked into each arch's
  * `libhost_runtime.so` directly (not as a separate library) so all C ABI
  * symbols are exported from each `.so` for ChipWorker's `dlsym`.

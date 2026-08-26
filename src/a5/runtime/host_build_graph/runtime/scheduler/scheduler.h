@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Scheduler Interface
+ * host_build_graph scheduler interface
  *
  * The Scheduler is responsible for:
  * 1. Maintaining per-resource-shape ready queues

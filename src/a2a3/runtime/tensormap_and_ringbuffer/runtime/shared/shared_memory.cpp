@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Shared Memory Implementation
+ * tensormap_and_ringbuffer shared-memory implementation
  *
  * Implements shared memory allocation, initialization, and management
  * for Orchestrator-Scheduler communication.

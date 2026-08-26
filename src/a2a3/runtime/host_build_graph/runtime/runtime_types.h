@@ -10,9 +10,9 @@
  */
 
 /**
- * PTO Runtime2 - Core Type Definitions
+ * host_build_graph core type definitions
  *
- * This header defines all fundamental types used by the PTO Runtime2 system:
+ * This header defines all fundamental types used by the host_build_graph runtime:
  * - Configuration constants
  * - Worker types and task states
  * - simpler::hbg::Tensor regions and task parameters

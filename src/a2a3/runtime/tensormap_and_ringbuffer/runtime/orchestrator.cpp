@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Orchestrator Implementation
+ * tensormap_and_ringbuffer orchestrator implementation
  *
  * Implements orchestrator state management, scope handling, and task submission.
  *

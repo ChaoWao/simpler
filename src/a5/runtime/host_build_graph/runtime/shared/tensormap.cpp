@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - TensorMap Implementation
+ * host_build_graph TensorMap implementation
  *
  * Implements TensorMap with a fixed-capacity entry pool. Task completion does
  * not invalidate entries; dependency computation explicitly removes only

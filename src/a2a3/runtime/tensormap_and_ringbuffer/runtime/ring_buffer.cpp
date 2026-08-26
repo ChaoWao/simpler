@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Ring Buffer Implementation
+ * tensormap_and_ringbuffer ring buffer implementation
  *
  * Implements DepListPool ring buffer for zero-overhead dependency management.
  * TaskAllocator methods are defined inline in ring_buffer.h.
