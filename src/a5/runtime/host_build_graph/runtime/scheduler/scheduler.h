@@ -689,11 +689,11 @@ struct SchedulerState {
     EarlyDispatchDoorbell early_dispatch_doorbell_table[EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
 
     // Cross-thread early-dispatch work queues, one ChipReadyQueue MPMC instance per
-    // resource shape (AIC/AIV/MIX) — arena-backed, reserved/wired in pto_runtime2_init
-    // alongside the per-shape ready queues, and indexed the same way. A candidate is
-    // pushed to the queue for its own shape (active_mask.to_shape()) so the drain can
-    // pop per shape and size the pop to that shape's free cores, exactly as normal
-    // dispatch pops ready_queues[shape].
+    // resource shape (AIC/AIV/MIX) — arena-backed, reserved and wired by
+    // SchedulerState::init_data_from_layout alongside the per-shape ready queues, and
+    // indexed the same way. A candidate is pushed to the queue for its own shape
+    // (active_mask.to_shape()) so the drain can pop per shape and size the pop to that
+    // shape's free cores, exactly as normal dispatch pops ready_queues[shape].
     //
     // A consumer's SPMD blocks span cores owned by several AICPU threads, but only a
     // thread RUNNING the consumer's producer discovers it (via the producer's
