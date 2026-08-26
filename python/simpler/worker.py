@@ -146,6 +146,22 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
+from .comm_delegated_region_control import (
+    REQUEST_HEADER_BYTES,
+    RELEASE_REPLY_BYTES,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedReleaseRequest,
+    DelegatedReleaseReplyTag,
+    ProviderTransactionTable,
+    _hop_staging_copy,
+    _inspect_delegated_route,
+    encode_request,
+    handle_terminal_delegated_region,
+    parse_reply,
+    parse_request,
+    publish_reply,
+)
 from .comm_endpoints import (
     DEVICE_AICORE,
     DEVICE_AICPU,
@@ -176,6 +192,8 @@ from .comm_provider import (
     ProviderReleaseStatus,
     RegionAllocationContext,
     RegionAllocationSpec,
+    RegionControlError,
+    RegionControlErrorKind,
     RegionEnvironmentKind,
     RegionPartExportDescriptor,
     RegionPartKind,
@@ -614,8 +632,10 @@ _CTRL_COMMITTED_DEVICE_MEMORY = 18
 _CTRL_GLOBAL_DOMAIN_NODE = 24
 _CTRL_DEVICE_MEMORY_INFO = 25
 _CTRL_OP_NAMES[_CTRL_DEVICE_MEMORY_INFO] = "device_memory_info"
+_CTRL_DELEGATED_REGION = 26
 _LOCAL_GLOBAL_CONTROL_HEADER = struct.Struct("<IIQ")
 _CTRL_OP_NAMES[_CTRL_GLOBAL_DOMAIN_NODE] = "global_domain"
+_CTRL_OP_NAMES[_CTRL_DELEGATED_REGION] = "delegated_region"
 
 # Layout of the CTRL_COMM_INIT request shm.
 _COMM_INIT_HEADER = struct.Struct("<II")  # rank (u32), nranks (u32)
@@ -2421,17 +2441,100 @@ def _handle_ctrl_region_release(buf: memoryview, store: ProviderRegionStore) -> 
         _close_attached_control_shm(reply_shm, pending)
 
 
-def _open_global_domain_payload(buf: memoryview) -> tuple[SharedMemory, memoryview, int]:
+def _open_ctrl_payload(buf: memoryview, *, what: str) -> tuple[SharedMemory, memoryview, int]:
     payload_size = int(struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0])
     if payload_size <= 0:
-        raise RuntimeError("Global CommDomain control payload must be non-empty")
+        raise RuntimeError(f"{what} control payload must be non-empty")
     staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
     staged_buf = cast(memoryview, staged.buf)
     if payload_size > staged.size:
         staged_buf.release()
         staged.close()
-        raise RuntimeError("Global CommDomain control payload exceeds staged shm")
+        raise RuntimeError(f"{what} control payload exceeds staged shm")
     return staged, staged_buf, payload_size
+
+
+def _open_global_domain_payload(buf: memoryview) -> tuple[SharedMemory, memoryview, int]:
+    return _open_ctrl_payload(buf, what="Global CommDomain")
+
+
+def _delegated_next_child_id(current_path: str, provider_path: bytes, worker: Worker) -> int:
+    hop = _inspect_delegated_route(current_path, provider_path)
+    child_id = int(hop.child_id)
+    if int(hop.child_level) == 2:
+        device_ids = list(worker._config.get("device_ids", []))
+        if child_id < 0 or child_id >= len(device_ids):
+            raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "next L2 child does not exist")
+        return child_id
+    if child_id in tuple(int(worker_id) for worker_id in getattr(worker, "_remote_worker_ids", ())):
+        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "remote child is not supported")
+    known = tuple(int(worker_id) for worker_id in getattr(worker, "_next_level_worker_ids", ()))
+    if child_id not in known:
+        raise RegionControlError(RegionControlErrorKind.INVALID_FIELD_VALUE, "next child does not exist")
+    return child_id
+
+
+def _forward_delegated_region(worker: Worker, current_path: str, staged: memoryview) -> None:
+    envelope = parse_request(staged)
+    child_id = _delegated_next_child_id(current_path, envelope.provider_path, worker)
+    native = worker._worker
+    if native is None:
+        raise RuntimeError("delegated region control requires an initialized Worker")
+    hop = _hop_staging_copy(envelope)
+    reply = bytes(
+        native.control_payload(
+            WorkerType.NEXT_LEVEL,
+            int(child_id),
+            _CTRL_DELEGATED_REGION,
+            hop,
+            getattr(worker, "_py_control_timeout_s", _PY_CONTROL_TIMEOUT_S),
+        )
+    )
+    reply_envelope = parse_reply(reply)
+    if (
+        reply_envelope.operation is not envelope.operation
+        or reply_envelope.session_instance_id != envelope.session_instance_id
+        or int(reply_envelope.transaction_id) != int(envelope.transaction_id)
+    ):
+        raise RegionControlError(
+            RegionControlErrorKind.INVALID_FIELD_VALUE,
+            "delegated region reply identity mismatch",
+        )
+    publish_reply(staged, reply_envelope.frame)
+
+
+def _handle_ctrl_delegated_region_hop(buf: memoryview, inner_worker: Worker, current_path: str) -> None:
+    staged, payload, payload_size = _open_ctrl_payload(buf, what="delegated region")
+    try:
+        _forward_delegated_region(inner_worker, current_path, payload[:payload_size])
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _handle_ctrl_delegated_region_terminal(
+    buf: memoryview, table: ProviderTransactionTable, store: ProviderRegionStore
+) -> None:
+    staged, payload, payload_size = _open_ctrl_payload(buf, what="delegated region")
+    try:
+        handle_terminal_delegated_region(payload[:payload_size], table, store)
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _delegated_allocate_outcome_is_fatal(outcome: DelegatedAllocateReply) -> bool:
+    if outcome.tag is DelegatedAllocateReplyTag.ALLOCATED:
+        return False
+    return not (
+        outcome.tag is DelegatedAllocateReplyTag.ERROR
+        and outcome.error_kind is RegionControlErrorKind.BACKEND_FAILURE
+        and not bool(outcome.cleanup_debt_remaining)
+    )
+
+
+def _delegated_release_outcome_is_fatal(tag: DelegatedReleaseReplyTag) -> bool:
+    return tag not in (DelegatedReleaseReplyTag.RELEASED, DelegatedReleaseReplyTag.ALREADY_GONE)
 
 
 def _validate_local_global_header(
@@ -2773,6 +2876,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             target=DeviceAllocationTarget(int(device_id)),
         )
     )
+    provider_transaction_table = ProviderTransactionTable()
     import_registry = ImportRegistry(
         ImportContext(
             deployment=DEVICE_AICPU,
@@ -2945,6 +3049,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_region_allocate(buf, provider_region_store)
             elif sub_cmd == _CTRL_REGION_RELEASE:
                 _handle_ctrl_region_release(buf, provider_region_store)
+            elif sub_cmd == _CTRL_DELEGATED_REGION:
+                _handle_ctrl_delegated_region_terminal(buf, provider_transaction_table, provider_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
             elif sub_cmd == _CTRL_DEVICE_MEMORY_INFO:
@@ -3455,6 +3561,7 @@ def _child_worker_loop(
     identity_refs: dict[bytes, int],
     inner_worker: Worker,
     global_node: _GlobalNodeRuntime | None = None,
+    control_path: str | None = None,
 ) -> None:
     """Runs in forked child process. Any-level Worker as child of its parent.
 
@@ -3485,7 +3592,7 @@ def _child_worker_loop(
             return 1, _format_exc(f"child_worker level={inner_worker.level}", e)
         return 0, ""
 
-    def handle_control(sub_cmd: int) -> tuple[int, str]:
+    def handle_control(sub_cmd: int) -> tuple[int, str]:  # noqa: PLR0912
         try:
             if sub_cmd == _CTRL_REGISTER:
                 digest = _read_control_digest(buf)
@@ -3557,6 +3664,10 @@ def _child_worker_loop(
                 finally:
                     payload.release()
                     staged.close()
+            elif sub_cmd == _CTRL_DELEGATED_REGION:
+                if not control_path:
+                    raise RuntimeError("delegated region hop requires the parent-registry control path")
+                _handle_ctrl_delegated_region_hop(buf, inner_worker, control_path)
             else:
                 raise RuntimeError(f"unknown control sub-command {sub_cmd}")
         except Exception as e:  # noqa: BLE001
@@ -4208,7 +4319,14 @@ class RunHandle:
             published_error = self._recover_and_publish_terminal(preferred_error)
 
         if published_error is not None:
+            self._teardown_delegated_fatal_after_wait()
             raise published_error
+        self._teardown_delegated_fatal_after_wait()
+
+    def _teardown_delegated_fatal_after_wait(self) -> None:
+        teardown = getattr(self._worker, "_teardown_delegated_fatal_if_safe", None)
+        if callable(teardown):
+            teardown()
 
     def result(self, timeout: float | None = None) -> None:
         """Alias for :meth:`wait`; successful runs have no return value."""
@@ -4368,6 +4486,8 @@ class Worker:
         **config,
     ) -> None:
         self.level = level
+        self._delegated_control_path = _format_worker_path(int(level))
+        self._delegated_session_fatal: BaseException | None = None
         # Rebound from the level in `init()`; the default matches the C++ table's
         # so a span emitted before init names L3 rather than nothing.
         self._host_span_prefix = _span_prefix(WorkerLevel.node)
@@ -4410,6 +4530,9 @@ class Worker:
         # such a reentrant call (e.g. worker.close() from inside an orch fn).
         # Guarded by _hierarchical_start_cv.
         self._lease_depth: dict[int, int] = {}
+        # Per-thread run-finalization depth. Delegated release during the one-shot
+        # cleanup cursor must latch fatal without re-entering Worker.close().
+        self._run_finalization_depth: dict[int, int] = {}
         # Thread that claimed the current startup epoch (set at NEW->INITIALIZING).
         # Native objects (ChipWorker / _Worker) bind the device to the calling
         # thread (aclrtSetDevice) and are same-thread-only, so their teardown must
@@ -6285,6 +6408,11 @@ class Worker:
                     f"Worker.{api}: a prior run's ordered cleanup failed, so this worker's device state is "
                     "unreclaimed and no further work is admitted; close() it"
                 ) from self._ordered_cleanup_error
+            if self._delegated_session_fatal is not None:
+                raise RuntimeError(
+                    f"Worker.{api}: delegated-region session is fatal and no further work is admitted; "
+                    "close this Worker"
+                ) from self._delegated_session_fatal
             self._active_ops += 1
             self._lease_depth[tid] = self._lease_depth.get(tid, 0) + 1
         try:
@@ -7919,6 +8047,12 @@ class Worker:
         for idx, inner_worker in enumerate(self._next_level_workers):
             worker_id = self._next_level_worker_ids[idx]
             global_node = global_nodes.get(worker_id)
+            child_path = _format_worker_path(
+                int(inner_worker.level),
+                parent_path=self._delegated_control_path,
+                index=int(worker_id),
+            )
+            inner_worker._delegated_control_path = child_path
             pid = os.fork()
             if pid == 0:
                 buf = self._next_level_shms[idx].buf
@@ -7950,11 +8084,12 @@ class Worker:
                     buf,
                     f"next_level worker {idx}",
                     _setup,
-                    lambda tables, b=buf, inner=inner_worker, node=global_node: _child_worker_loop(
+                    lambda tables, b=buf, inner=inner_worker, node=global_node, path=child_path: _child_worker_loop(
                         b,
                         *tables,
                         inner,
                         node,
+                        path,
                     ),
                     make_group_leader=self._is_startup_root,
                 )
@@ -8451,6 +8586,88 @@ class Worker:
 
     def _sweep_region_instances(self) -> None:
         self._region_instance_registry.sweep()
+
+    def _unsafe_to_close_now(self) -> bool:
+        tid = threading.get_ident()
+        if tid in self._lease_depth or tid in self._run_finalization_depth:
+            return True
+        if id(self) in _held_control_reservations():
+            return True
+        if _callback_frame_for(self) is not None:
+            return True
+        return self._close_completion is not None
+
+    def _latch_delegated_session_fatal(self, error: BaseException) -> None:
+        cause = error if isinstance(error, BaseException) else RuntimeError(str(error))
+        with self._hierarchical_start_cv:
+            if self._delegated_session_fatal is None:
+                self._delegated_session_fatal = cause
+        self._region_instance_registry.close_delegated_admission()
+
+    def _require_no_delegated_session_fatal(self, api: str) -> None:
+        with self._hierarchical_start_cv:
+            error = self._delegated_session_fatal
+        if error is not None:
+            raise RuntimeError(
+                f"Worker.{api}: delegated-region session is fatal and no further work is admitted; close this Worker"
+            ) from error
+
+    def _teardown_delegated_fatal_if_safe(self) -> None:
+        if self._delegated_session_fatal is None:
+            return
+        if self._unsafe_to_close_now():
+            return
+        self.close()
+
+    def _exchange_delegated_region(self, staged: memoryview) -> None:
+        _forward_delegated_region(self, self._delegated_control_path, staged)
+
+    def _dispatch_delegated_allocate(self, staged) -> bytes:
+        view = staged if isinstance(staged, memoryview) else memoryview(staged)
+        try:
+            self._exchange_delegated_region(view)
+            outcome = parse_reply(view).decode_outcome()
+        except BaseException as exc:
+            self._latch_delegated_session_fatal(exc)
+            self._teardown_delegated_fatal_if_safe()
+            raise
+        if not isinstance(outcome, DelegatedAllocateReply):
+            mismatch = RuntimeError("delegated allocate reply operation mismatch")
+            self._latch_delegated_session_fatal(mismatch)
+            self._teardown_delegated_fatal_if_safe()
+            raise mismatch
+        if _delegated_allocate_outcome_is_fatal(outcome):
+            self._latch_delegated_session_fatal(
+                RuntimeError("delegated allocate returned a terminal session-fatal outcome")
+            )
+            self._teardown_delegated_fatal_if_safe()
+        return view.tobytes()
+
+    def _dispatch_delegated_release(self, *, session_instance_id, transaction_id, provider_path):
+        request = DelegatedReleaseRequest(
+            session_instance_id=bytes(session_instance_id),
+            transaction_id=int(transaction_id),
+            provider_path=bytes(provider_path),
+        )
+        staged = encode_request(
+            request,
+            staged_capacity=max(REQUEST_HEADER_BYTES + len(request.provider_path), RELEASE_REPLY_BYTES),
+        )
+        view = memoryview(staged)
+        try:
+            self._exchange_delegated_region(view)
+            outcome = parse_reply(view).decode_outcome()
+        except BaseException as exc:
+            self._latch_delegated_session_fatal(exc)
+            self._teardown_delegated_fatal_if_safe()
+            raise
+        if _delegated_release_outcome_is_fatal(outcome.tag):
+            self._latch_delegated_session_fatal(
+                RuntimeError("delegated release returned a terminal session-fatal outcome")
+            )
+            self._teardown_delegated_fatal_if_safe()
+        result = getattr(outcome, "result", None)
+        return result if result is not None else outcome
 
     def _close_worker_chip_orch_comm(self) -> None:
         self._worker_chip_orch_comm_host_buffers.clear()
@@ -10798,8 +11015,11 @@ class Worker:
         would deadlock on a depth-one backend. Completion and cleanup stay
         attached to each handle.
         """
-        with self._operation_lease("submit"):
-            return self._submit_locked(callable, args, config)
+        try:
+            with self._operation_lease("submit"):
+                return self._submit_locked(callable, args, config)
+        finally:
+            self._teardown_delegated_fatal_if_safe()
 
     def run(self, callable, args=None, config=None) -> None:
         """Execute one task or DAG synchronously as ``submit(...).wait()``.
@@ -10929,6 +11149,7 @@ class Worker:
 
     def _require_no_ordered_cleanup_failure(self, api: str) -> None:
         """Refuse if a prior run's ordered cleanup failed."""
+        self._require_no_delegated_session_fatal(api)
         with self._hierarchical_start_cv:
             if self._ordered_cleanup_error is not None:
                 raise RuntimeError(
@@ -11004,6 +11225,10 @@ class Worker:
                         f"{api}: a prior run's ordered cleanup failed, so this worker's device state is "
                         "unreclaimed and no further work is admitted; close() it"
                     ) from self._ordered_cleanup_error
+                if self._delegated_session_fatal is not None:
+                    raise RuntimeError(
+                        f"{api}: delegated-region session is fatal and no further work is admitted; close this Worker"
+                    ) from self._delegated_session_fatal
                 live = [h for h in self._accepted_run_handles if not h._cleanup_published]
                 if live:
                     raise RuntimeError(
@@ -11109,6 +11334,10 @@ class Worker:
                         )
                 else:
                     callable(self._orch, args, cfg)
+            if self._delegated_session_fatal is not None:
+                raise RuntimeError(
+                    "Worker.submit: delegated-region session is fatal and no further work is admitted"
+                ) from self._delegated_session_fatal
             scope_open = False
             self._orch._scope_end()
             self._orch._close_run_submission(run_id)
@@ -11171,7 +11400,7 @@ class Worker:
         assert self._orch is not None
         self._orch._wait_run_accepted(run_id)
 
-    def _finalize_run_handle(  # noqa: PLR0912 -- one extra branch for the L2 pop-under-lock guard
+    def _finalize_run_handle(
         self,
         handle: RunHandle,
         run_id: int,
@@ -11180,6 +11409,27 @@ class Worker:
         _after_step: Any | None = None,
     ) -> BaseException | None:
         """Run fence-owned cleanup exactly once and return the cached result."""
+        tid = threading.get_ident()
+        self._run_finalization_depth[tid] = self._run_finalization_depth.get(tid, 0) + 1
+        try:
+            return self._finalize_run_handle_unlocked(
+                handle, run_id, native_error, _after_step=_after_step
+            )
+        finally:
+            depth = self._run_finalization_depth.get(tid, 0) - 1
+            if depth <= 0:
+                self._run_finalization_depth.pop(tid, None)
+            else:
+                self._run_finalization_depth[tid] = depth
+
+    def _finalize_run_handle_unlocked(  # noqa: PLR0912 -- one extra branch for the L2 pop-under-lock guard
+        self,
+        handle: RunHandle,
+        run_id: int,
+        native_error: BaseException | None,
+        *,
+        _after_step: Any | None = None,
+    ) -> BaseException | None:
         # A direct-chip run owns no orchestration state: the lane finalized the
         # native run as part of reaching terminal, and this worker built no
         # domains, remote slots or chip regions for it. Retiring the lane entry
@@ -11491,6 +11741,10 @@ class Worker:
                     raise RuntimeError(
                         "Worker.close(): cannot be called from within a run() / submit() / create_buffer() / "
                         "register() / unregister() or other leased Worker operation on this thread"
+                    )
+                if threading.get_ident() in self._run_finalization_depth:
+                    raise RuntimeError(
+                        "Worker.close(): cannot be called from within run finalization on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
                     if self._init_owner_thread is threading.current_thread():

@@ -23,8 +23,20 @@ from typing import cast
 
 import pytest
 from simpler.buffer import AddressSpace
-from simpler.comm_endpoints import AdapterKind, AdapterProfile, AttachmentRole
+from simpler.comm_endpoints import (
+    AdapterKind,
+    AdapterProfile,
+    AttachmentRole,
+    _ADAPTER_KIND_IDS,
+    _ADAPTER_PROFILE_IDS,
+    _adapter_kind_id,
+    _adapter_profile_id,
+)
 from simpler.global_comm_domain import (
+    _ADAPTER_KIND_IDS as _DOMAIN_ADAPTER_KIND_IDS,
+    _ADAPTER_PROFILE_IDS as _DOMAIN_ADAPTER_PROFILE_IDS,
+    _adapter_kind_id as _domain_adapter_kind_id,
+    _adapter_profile_id as _domain_adapter_profile_id,
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
     CTRL_GLOBAL_DOMAIN_IMPORT,
@@ -312,6 +324,32 @@ def test_global_domain_attachment_names_every_unknown_enum_field():
     # A None pair stays legal; only a half-set pair is rejected, and by its own message.
     with pytest.raises(ValueError, match="must be paired"):
         encode_domain_command(make_command(replace(good, adapter_profile=None)))
+
+
+def test_adapter_numeric_authority_is_shared_with_comm_endpoints():
+    from tests.ut.py.test_worker.w5a_migration_baseline import (
+        FROZEN_ADAPTER_KIND_LE_U32,
+        FROZEN_ADAPTER_KIND_U32,
+        FROZEN_ADAPTER_PROFILE_LE_U32,
+        FROZEN_ADAPTER_PROFILE_U32,
+    )
+
+    assert _DOMAIN_ADAPTER_KIND_IDS is _ADAPTER_KIND_IDS
+    assert _DOMAIN_ADAPTER_PROFILE_IDS is _ADAPTER_PROFILE_IDS
+    live_kinds = {None: 0, **{kind.name: value for kind, value in _ADAPTER_KIND_IDS.items()}}
+    live_profiles = {None: 0, **{profile.name: value for profile, value in _ADAPTER_PROFILE_IDS.items()}}
+    assert live_kinds == FROZEN_ADAPTER_KIND_U32
+    assert live_profiles == FROZEN_ADAPTER_PROFILE_U32
+    for kind in AdapterKind:
+        value = FROZEN_ADAPTER_KIND_U32[kind.name]
+        assert _adapter_kind_id(kind) == value
+        assert _domain_adapter_kind_id(kind) == value
+        assert value.to_bytes(4, "little") == FROZEN_ADAPTER_KIND_LE_U32[kind.name]
+    for profile in AdapterProfile:
+        value = FROZEN_ADAPTER_PROFILE_U32[profile.name]
+        assert _adapter_profile_id(profile) == value
+        assert _domain_adapter_profile_id(profile) == value
+        assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]
 
 
 def test_release_and_copy_commands_round_trip_and_reject_a_missized_release():

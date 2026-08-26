@@ -11,14 +11,23 @@
 
 import dataclasses
 import struct
+import threading
 from multiprocessing.shared_memory import SharedMemory
+from types import SimpleNamespace
 from typing import Any, Optional, Union
 
 import pytest
 from simpler import comm_endpoints as ce
-from simpler.comm_provider import RegionAllocationSpec, RegionPartAllocationSpec, RegionPartKind
+from simpler.comm_provider import (
+    ProviderReleaseResult,
+    ProviderReleaseStatus,
+    RegionAllocationSpec,
+    RegionPartAllocationSpec,
+    RegionPartKind,
+)
 from simpler.comm_region import (
     CounterPart,
+    DelegatedSingleOwnerRegionShape,
     HostVmmCopyAccess,
     MaterializationContext,
     MaterializationError,
@@ -33,7 +42,9 @@ from simpler.comm_region import (
     RegionPartSpan,
     SignalTestResult,
     WaitCmp,
+    materialize_delegated_region_instance,
     project_region_allocation_spec,
+    validate_delegated_single_owner_region_shape,
     validate_single_owner_region_shape,
 )
 from simpler.orchestrator import _callback_frame_for, _callback_run
@@ -1724,3 +1735,339 @@ def test_store_lifecycle_allocate_is_terminal_ambiguity(monkeypatch):
     _assert_poisoned(worker, cause=exc_info.value)
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         _materialize_default_region(worker)
+
+
+_DELEGATED_SESSION_A = b"\x10\x11\x12\x13\x14\x15\x16\x17"
+_DELEGATED_SESSION_B = b"\x20\x21\x22\x23\x24\x25\x26\x27"
+
+
+def _endpoint_session(session: bytes = _DELEGATED_SESSION_A, epoch: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(session_instance_id=session, registry_epoch=epoch)
+
+
+class _RecordingLease:
+    def __init__(self, name: str, calls: list[str], fail: BaseException | None = None) -> None:
+        self.name = name
+        self.calls = calls
+        self.fail = fail
+
+    def close(self) -> None:
+        self.calls.append(self.name)
+        if self.fail is not None:
+            raise self.fail
+
+
+def test_delegated_allocate_dispatch_is_serialized_and_burns_ids():
+    registry = RegionInstanceRegistry()
+    endpoints = _endpoint_session()
+    holding = threading.Event()
+    second_entered = threading.Event()
+    order: list[tuple[str, int]] = []
+
+    def first() -> None:
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            order.append(("first", ident[1]))
+            holding.set()
+            assert not second_entered.wait(timeout=0.2)
+        order.append(("first_done", ident[1]))
+
+    def second() -> None:
+        holding.wait(timeout=2)
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            second_entered.set()
+            order.append(("second", ident[1]))
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    t2.start()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+    assert order == [("first", 1), ("first_done", 1), ("second", 2)]
+    assert registry._next_delegated_transaction_id == 3
+    assert registry._delegated_session_instance_id == _DELEGATED_SESSION_A
+
+
+def test_delegated_allocate_dispatch_burns_id_when_encode_or_dispatch_fails():
+    registry = RegionInstanceRegistry()
+    endpoints = _endpoint_session()
+    with pytest.raises(RuntimeError, match="encode failed"):
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            assert ident == (_DELEGATED_SESSION_A, 1)
+            raise RuntimeError("encode failed")
+    with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+        assert ident == (_DELEGATED_SESSION_A, 2)
+
+
+def test_delegated_allocate_dispatch_rejects_session_and_epoch_mismatch_before_side_effect():
+    registry = RegionInstanceRegistry()
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 1
+    with pytest.raises(MaterializationRefusal) as session_exc:
+        with registry._delegated_allocate_dispatch(
+            registry=_endpoint_session(_DELEGATED_SESSION_B), expected_registry_epoch=3
+        ):
+            raise AssertionError("mismatch must fail before yield")
+    assert session_exc.value.reason is RefusalReason.REGISTRY_MISMATCH
+    with pytest.raises(MaterializationRefusal) as epoch_exc:
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(epoch=4), expected_registry_epoch=3):
+            raise AssertionError("epoch mismatch must fail before yield")
+    assert epoch_exc.value.reason is RefusalReason.REGISTRY_MISMATCH
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 2
+
+
+def test_delegated_allocate_dispatch_closes_admission_at_uint64_limit():
+    registry = RegionInstanceRegistry()
+    registry._next_delegated_transaction_id = (1 << 64) - 1
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == (1 << 64) - 1
+    with pytest.raises(MaterializationError, match="exhausted"):
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3):
+            raise AssertionError("must not wrap")
+    registry._next_delegated_transaction_id = 0
+    registry._delegated_admission_closed = False
+    with pytest.raises(MaterializationError, match="0 is illegal"):
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3):
+            raise AssertionError("must not recycle 0")
+
+
+def test_clean_retirement_keeps_allocator_and_has_no_lookup_api():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    registry = ctx.worker._region_instance_registry
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 1
+    registry.track(instance, None)
+    registry._retire(id(instance))
+    assert id(instance) not in registry._instances
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 2
+    assert not hasattr(RegionInstanceRegistry, "get")
+    assert not hasattr(RegionInstanceRegistry, "find")
+    assert not hasattr(RegionInstanceRegistry, "__getitem__")
+
+
+def test_delegated_identity_requires_track_and_skips_uncertainty_release():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    releases: list[tuple[bytes, int, bytes]] = []
+
+    def _dispatch(*, session_instance_id, transaction_id, provider_path):
+        releases.append((session_instance_id, transaction_id, provider_path))
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._dispatch_delegated_release = _dispatch
+    with pytest.raises(MaterializationError, match="tracked"):
+        instance._bind_delegated_identity(_DELEGATED_SESSION_A, 1, b"L3/L2[1]")
+    ctx.worker._region_instance_registry.track(instance, None)
+    instance._bind_delegated_identity(_DELEGATED_SESSION_A, 1, b"L3/L2[1]")
+    instance._state = RegionInstanceState.LIVE
+    mapping_calls: list[str] = []
+    instance._payload_mapping = _RecordingLease("payload", mapping_calls)
+    instance._counter_mapping = _RecordingLease("counter", mapping_calls)
+    instance._close_owned(poison_on_error=False)
+    assert releases == []
+    assert mapping_calls == ["payload", "counter"]
+    assert instance._delegated_release_edge is False
+    assert instance._provider_resource_id == 0
+
+
+def test_committed_allocated_installs_release_edge_and_close_sends_once():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    ctx.worker._region_instance_registry.track(instance, None)
+    instance._bind_delegated_identity(_DELEGATED_SESSION_A, 4, b"L3/L2[1]")
+    instance._commit_delegated_allocation(11)
+    assert instance.provider_resource_id == 11
+    assert instance._delegated_allocation_committed is True
+    assert instance._delegated_release_edge is True
+    releases: list[dict[str, object]] = []
+
+    def _dispatch(**kwargs):
+        releases.append(kwargs)
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._dispatch_delegated_release = _dispatch
+    mapping_calls: list[str] = []
+    payload_error = RuntimeError("payload mapping close failed")
+    instance._state = RegionInstanceState.LIVE
+    instance._payload_mapping = _RecordingLease("payload", mapping_calls, fail=payload_error)
+    instance._counter_mapping = _RecordingLease("counter", mapping_calls)
+    with pytest.raises(RuntimeError, match="payload mapping close failed"):
+        instance._close_owned(poison_on_error=False)
+    assert mapping_calls == ["payload", "counter"]
+    assert releases == [
+        {
+            "session_instance_id": _DELEGATED_SESSION_A,
+            "transaction_id": 4,
+            "provider_path": b"L3/L2[1]",
+        }
+    ]
+    with pytest.raises(RuntimeError, match="payload mapping close failed"):
+        instance._close_owned(poison_on_error=False)
+    assert len(releases) == 1
+
+
+def test_delegated_shape_accepts_l3_and_l4_and_keeps_old_l4_refusal():
+    l3_ctx = _accepted_context()
+    l3_shape = validate_delegated_single_owner_region_shape(l3_ctx)
+    assert isinstance(l3_shape, DelegatedSingleOwnerRegionShape)
+    assert l3_shape.consumer.path == "L3"
+    assert l3_shape.provider.path == "L3/L2[1]"
+    assert l3_shape.initiator_path == b"L3"
+    assert l3_shape.provider_path == b"L3/L2[1]"
+    assert l3_shape.first_hop_child_id == 1
+    assert l3_shape.provider_device_id == 9
+
+    l4_worker = _l4_with_local_l3(device_ids=[4])
+    l4_ctx = _context(
+        l4_worker,
+        [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)),
+    )
+    l4_shape = validate_delegated_single_owner_region_shape(l4_ctx)
+    assert l4_shape.consumer.path == "L4"
+    assert l4_shape.provider.path == "L4/L3[0]/L2[0]"
+    assert l4_shape.first_hop_child_id == 0
+    assert l4_shape.provider_device_id == 4
+    _assert_refusal(l4_ctx, RefusalReason.NEEDS_DELEGATION)
+
+
+def test_delegated_shape_refuses_aicore_without_dispatch():
+    worker = _l3(device_ids=[0])
+    ctx = _context(
+        worker,
+        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[0]", ce.DEVICE_AICORE)],
+        ce.SingleOwner(provider=ce.at("L3/L2[0]", ce.DEVICE_AICORE)),
+    )
+    worker._dispatch_delegated_allocate = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no wire"))
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        validate_delegated_single_owner_region_shape(ctx)
+    assert excinfo.value.reason is RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT
+    with pytest.raises(MaterializationRefusal) as core:
+        materialize_delegated_region_instance(ctx)
+    assert core.value.reason is RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT
+
+
+def _posix_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
+    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+    from simpler.comm_provider import (
+        PosixShmImport,
+        RegionAllocationResult,
+        RegionExportDescriptor,
+        RegionPartExportDescriptor,
+        RegionPartKind,
+        RegionPartLocalView,
+    )
+
+    result = RegionAllocationResult(
+        provider_resource_id=11,
+        export_descriptor=RegionExportDescriptor(
+            payload=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=payload_bytes,
+                mapping_bytes=payload_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_payload_a"),
+            ),
+            counter=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=counter_bytes,
+                mapping_bytes=counter_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_counter_a"),
+            ),
+        ),
+    )
+    payload = RegionPartLocalView(part=RegionPartKind.PAYLOAD, local_base=0x1000, logical_bytes=payload_bytes)
+    counter = RegionPartLocalView(part=RegionPartKind.COUNTER, local_base=0x2000, logical_bytes=counter_bytes)
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ALLOCATED,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            result=result,
+            payload_view=payload,
+            counter_view=counter,
+        )
+    )
+
+
+def _install_delegated_dispatch(worker: Worker, dispatches: list[bytes]) -> None:
+    from simpler.comm_delegated_region_control import parse_request
+    from simpler.comm_provider import PosixShmImport
+
+    def _dispatch(staged):
+        envelope = parse_request(staged)
+        request = envelope.decode_terminal()
+        dispatches.append(bytes(envelope.frame))
+        return _posix_allocated_reply(
+            request.session_instance_id,
+            request.transaction_id,
+            payload_bytes=int(request.payload_logical_bytes),
+            counter_bytes=int(request.counter_logical_bytes),
+        )
+
+    worker._dispatch_delegated_allocate = _dispatch
+    worker._import_region_part_lease = lambda *_args, **_kwargs: SimpleNamespace(handle=1)
+    worker._provider_import_capability_type = lambda: PosixShmImport
+
+
+def test_l3_and_l4_plans_use_the_same_delegated_materializer_core():
+    l3_dispatches: list[bytes] = []
+    l3_ctx = _accepted_context()
+    _install_delegated_dispatch(l3_ctx.worker, l3_dispatches)
+    l3_instance = materialize_delegated_region_instance(l3_ctx)
+    assert l3_instance.state is RegionInstanceState.LIVE
+    assert l3_instance.provider_resource_id == 11
+    assert l3_instance._delegated_release_edge is True
+    assert len(l3_dispatches) == 1
+
+    l4_dispatches: list[bytes] = []
+    l4_worker = _l4_with_local_l3(device_ids=[4])
+    l4_ctx = _context(
+        l4_worker,
+        [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)),
+    )
+    _install_delegated_dispatch(l4_worker, l4_dispatches)
+    l4_instance = materialize_delegated_region_instance(l4_ctx)
+    assert l4_instance.state is RegionInstanceState.LIVE
+    assert l4_instance._delegated_provider_path == b"L4/L3[0]/L2[0]"
+    assert len(l4_dispatches) == 1
+    from simpler.comm_delegated_region_control import parse_request
+
+    l3_req = parse_request(l3_dispatches[0]).decode_terminal()
+    l4_req = parse_request(l4_dispatches[0]).decode_terminal()
+    assert type(l3_req) is type(l4_req)
+    assert l3_req.provider_path == b"L3/L2[1]"
+    assert l4_req.provider_path == b"L4/L3[0]/L2[0]"
+
+
+def test_delegated_partial_import_failure_sends_one_release():
+    ctx = _accepted_context()
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    _install_delegated_dispatch(ctx.worker, dispatches)
+    imports = {"count": 0}
+
+    def _import(*_args, **_kwargs):
+        imports["count"] += 1
+        if imports["count"] == 2:
+            raise RuntimeError("counter import failed")
+        return SimpleNamespace(handle=1)
+
+    def _release(**kwargs):
+        releases.append(kwargs)
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._import_region_part_lease = _import
+    ctx.worker._dispatch_delegated_release = _release
+    with pytest.raises(RuntimeError, match="counter import failed"):
+        materialize_delegated_region_instance(ctx)
+    assert imports["count"] == 2
+    assert len(dispatches) == 1
+    assert len(releases) == 1
+    assert releases[0]["transaction_id"] == 1

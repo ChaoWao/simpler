@@ -24,6 +24,12 @@ from .comm_endpoints import (
     EndpointDeployment,
     EndpointIdentity,
     EndpointRecord,
+    _ADAPTER_KIND_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
+    _ADAPTER_PROFILE_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
+    _adapter_kind_from_id as _neutral_adapter_kind_from_id,
+    _adapter_kind_id as _neutral_adapter_kind_id,
+    _adapter_profile_from_id as _neutral_adapter_profile_from_id,
+    _adapter_profile_id as _neutral_adapter_profile_id,
     _backend_kind_for_provider,
     buffer_adapter_candidates,
 )
@@ -324,34 +330,14 @@ def validate_member_table(members: tuple[GlobalDomainMember, ...]) -> None:
         raise ValueError("global domain members require unique non-negative global device ranks")
 
 
-# Wire ids for the three ``comm_endpoints`` enums this command carries. They are string enums, so
-# the wire needs its own numbering, and these numbers are part of the version-2 command format: a
-# value's id is fixed for the life of the version, and 0 is reserved for "no adapter". Adding an
-# enumerator means adding an id here; renaming or renumbering one is a wire break. Encoding and
-# decoding both reject an id this table does not name, so an enumerator that is added upstream and
-# not mirrored here fails closed rather than travelling as a wrong value.
+# AttachmentRole remains a Global CommDomain-only wire id. Adapter kind/profile numeric
+# authority lives in comm_endpoints; this module only wraps those helpers with domain-local
+# error text. 0 stays reserved for "no adapter".
 _ATTACHMENT_ROLE_IDS = {
     AttachmentRole.PROVIDER: 1,
     AttachmentRole.CONSUMER: 2,
 }
 _ATTACHMENT_ROLE_BY_ID = {value: key for key, value in _ATTACHMENT_ROLE_IDS.items()}
-_ADAPTER_KIND_IDS = {
-    AdapterKind.DIRECT_MAP: 1,
-    AdapterKind.DEVICE_PEER: 2,
-    AdapterKind.OWNER_DELEGATED_COPY: 3,
-    AdapterKind.EXPLICIT_TRANSFER: 4,
-    AdapterKind.COLLECTIVE: 5,
-}
-_ADAPTER_KIND_BY_ID = {value: key for key, value in _ADAPTER_KIND_IDS.items()}
-_ADAPTER_PROFILE_IDS = {
-    AdapterProfile.HOST_SVM_MAP: 1,
-    AdapterProfile.HOST_VMM_COPY: 2,
-    AdapterProfile.DEVICE_VMM_PEER_IMPORT: 3,
-    AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT: 4,
-    AdapterProfile.HOST_SHM_MAP: 5,
-    AdapterProfile.REMOTE_COPY: 6,
-}
-_ADAPTER_PROFILE_BY_ID = {value: key for key, value in _ADAPTER_PROFILE_IDS.items()}
 
 
 def _assert_every_plannable_profile_is_numbered() -> None:
@@ -414,38 +400,30 @@ def _attachment_role_from_id(value: int) -> AttachmentRole:
 
 
 def _adapter_kind_id(kind: AdapterKind | None) -> int:
-    if kind is None:
-        return 0
     try:
-        return _ADAPTER_KIND_IDS[AdapterKind(kind)]
-    except (KeyError, ValueError) as exc:
+        return _neutral_adapter_kind_id(kind)
+    except ValueError as exc:
         raise ValueError(f"global domain attachment adapter_kind is unknown: {kind!r}") from exc
 
 
 def _adapter_kind_from_id(value: int) -> AdapterKind | None:
-    if value == 0:
-        return None
     try:
-        return _ADAPTER_KIND_BY_ID[int(value)]
-    except KeyError as exc:
+        return _neutral_adapter_kind_from_id(value)
+    except ValueError as exc:
         raise ValueError(f"global domain attachment adapter_kind id is unknown: {value}") from exc
 
 
 def _adapter_profile_id(profile: AdapterProfile | None) -> int:
-    if profile is None:
-        return 0
     try:
-        return _ADAPTER_PROFILE_IDS[AdapterProfile(profile)]
-    except (KeyError, ValueError) as exc:
+        return _neutral_adapter_profile_id(profile)
+    except ValueError as exc:
         raise ValueError(f"global domain attachment adapter_profile is unknown: {profile!r}") from exc
 
 
 def _adapter_profile_from_id(value: int) -> AdapterProfile | None:
-    if value == 0:
-        return None
     try:
-        return _ADAPTER_PROFILE_BY_ID[int(value)]
-    except KeyError as exc:
+        return _neutral_adapter_profile_from_id(value)
+    except ValueError as exc:
         raise ValueError(f"global domain attachment adapter_profile id is unknown: {value}") from exc
 
 

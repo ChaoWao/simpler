@@ -18,8 +18,11 @@ only, and the chip-callable cascade gives them a fake chip (``_harness``).
 
 from __future__ import annotations
 
+import ast
 import struct
+import threading
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 
 import pytest
 from _task_interface import DataType
@@ -556,3 +559,251 @@ class TestGeneralised_Worker:
         for level in (3, 4, 5):
             dw = _Worker(level)
             dw.close()
+
+
+# ---------------------------------------------------------------------------
+# W5a A7/A8/A9: delegated-region routing, fatal latch, migration coexistence
+# ---------------------------------------------------------------------------
+
+
+_SESSION = b"\x11\x22\x33\x44\x55\x66\x77\x88"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_WORKER_PY = _REPO_ROOT / "python" / "simpler" / "worker.py"
+
+
+class _RecordingNative:
+    def __init__(self, replies):
+        self.calls: list[tuple[int, int, bytes]] = []
+        self._replies = replies
+
+    def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+        payload_bytes = bytes(payload)
+        self.calls.append((int(worker_id), int(sub_cmd), payload_bytes))
+        return self._replies(payload_bytes)
+
+
+def _allocate_request(*, initiator_path: bytes, provider_path: bytes, transaction_id: int = 1):
+    from simpler.comm_delegated_region_control import DelegatedAllocateRequest  # noqa: PLC0415
+
+    return DelegatedAllocateRequest(
+        session_instance_id=_SESSION,
+        transaction_id=transaction_id,
+        initiator_path=initiator_path,
+        provider_path=provider_path,
+        payload_logical_bytes=64,
+        counter_logical_bytes=8,
+    )
+
+
+def _backend_error_reply(payload: bytes) -> bytes:
+    from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+        DelegatedAllocateReply,
+        DelegatedAllocateReplyTag,
+        encode_reply,
+        parse_request,
+        publish_reply,
+    )
+    from simpler.comm_provider import RegionControlErrorKind  # noqa: PLC0415
+
+    envelope = parse_request(payload)
+    committed = encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ERROR,
+            session_instance_id=envelope.session_instance_id,
+            transaction_id=envelope.transaction_id,
+            error_kind=RegionControlErrorKind.INVALID_FIELD_VALUE,
+        )
+    )
+    staged = bytearray(len(payload))
+    publish_reply(memoryview(staged), committed)
+    return bytes(staged)
+
+
+class TestW5aDelegatedRouting:
+    def test_l3_to_l2_forwards_unchanged_active_bytes(self):
+        from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+            ALLOCATE_REPLY_BYTES,
+            encode_request,
+            parse_request,
+        )
+        from simpler.worker import _CTRL_DELEGATED_REGION, _forward_delegated_region  # noqa: PLC0415
+
+        native = _RecordingNative(_backend_error_reply)
+        worker = Worker(level=3, device_ids=[8, 9], num_sub_workers=0)
+        worker._worker = native
+        request = encode_request(
+            _allocate_request(initiator_path=b"L3", provider_path=b"L3/L2[1]"),
+            staged_capacity=256,
+        )
+        envelope = parse_request(request)
+        _forward_delegated_region(worker, "L3", memoryview(request))
+        assert len(native.calls) == 1
+        child_id, sub_cmd, hop = native.calls[0]
+        assert child_id == 1
+        assert sub_cmd == _CTRL_DELEGATED_REGION
+        assert hop[: envelope.request_bytes] == envelope.frame
+        assert len(hop) == max(envelope.request_bytes, ALLOCATE_REPLY_BYTES)
+        assert not any(hop[envelope.request_bytes :])
+
+    def test_l4_to_l3_to_l2_keeps_request_bytes_and_creates_no_table(self):
+        from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+            ProviderTransactionTable,
+            encode_request,
+            parse_request,
+        )
+        from simpler.worker import _CTRL_DELEGATED_REGION, _forward_delegated_region  # noqa: PLC0415
+
+        created = []
+        original_init = ProviderTransactionTable.__init__
+
+        def _spy_init(self, *args, **kwargs):
+            created.append(True)
+            return original_init(self, *args, **kwargs)
+
+        ProviderTransactionTable.__init__ = _spy_init
+        try:
+            l3_native = _RecordingNative(_backend_error_reply)
+            l3 = Worker(level=3, device_ids=[4], num_sub_workers=0)
+            l3._worker = l3_native
+            l3._delegated_control_path = "L4/L3[0]"
+
+            def _l4_replies(payload: bytes) -> bytes:
+                staged = bytearray(payload)
+                _forward_delegated_region(l3, "L4/L3[0]", memoryview(staged))
+                return bytes(staged)
+
+            l4_native = _RecordingNative(_l4_replies)
+            l4 = Worker(level=4, num_sub_workers=0)
+            l4._worker = l4_native
+            l4._next_level_worker_ids = [0]
+            l4._next_level_workers = [l3]
+            l4._delegated_control_path = "L4"
+            request = encode_request(
+                _allocate_request(initiator_path=b"L4", provider_path=b"L4/L3[0]/L2[0]"),
+                staged_capacity=256,
+            )
+            envelope = parse_request(request)
+            _forward_delegated_region(l4, "L4", memoryview(request))
+            assert [call[0] for call in l4_native.calls] == [0]
+            assert [call[0] for call in l3_native.calls] == [0]
+            assert l4_native.calls[0][1] == _CTRL_DELEGATED_REGION
+            assert l3_native.calls[0][1] == _CTRL_DELEGATED_REGION
+            assert l4_native.calls[0][2][: envelope.request_bytes] == envelope.frame
+            assert l3_native.calls[0][2][: envelope.request_bytes] == envelope.frame
+            assert created == []
+        finally:
+            ProviderTransactionTable.__init__ = original_init
+
+    def test_routing_rejects_before_control_payload(self):
+        from simpler.comm_delegated_region_control import encode_request  # noqa: PLC0415
+        from simpler.comm_provider import RegionControlError  # noqa: PLC0415
+        from simpler.worker import _forward_delegated_region  # noqa: PLC0415
+
+        native = _RecordingNative(_backend_error_reply)
+        missing = Worker(level=3, device_ids=[8], num_sub_workers=0)
+        missing._worker = native
+        staged = encode_request(
+            _allocate_request(initiator_path=b"L3", provider_path=b"L3/L2[1]"),
+            staged_capacity=256,
+        )
+        with pytest.raises(RegionControlError, match="next L2 child does not exist"):
+            _forward_delegated_region(missing, "L3", memoryview(staged))
+        remote = Worker(level=4, num_sub_workers=0)
+        remote._worker = native
+        remote._remote_worker_ids = [0]
+        remote._next_level_worker_ids = [0]
+        with pytest.raises(RegionControlError, match="remote child is not supported"):
+            _forward_delegated_region(
+                remote,
+                "L4",
+                memoryview(
+                    encode_request(
+                        _allocate_request(initiator_path=b"L4", provider_path=b"L4/L3[0]/L2[0]"),
+                        staged_capacity=256,
+                    )
+                ),
+            )
+        assert native.calls == []
+
+
+class TestW5aFatalBoundary:
+    def test_fatal_latch_is_first_wins_and_does_not_close_inside_lease(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        first = RuntimeError("first-fatal")
+        worker._latch_delegated_session_fatal(first)
+        worker._latch_delegated_session_fatal(RuntimeError("second-fatal"))
+        assert worker._delegated_session_fatal is first
+        assert worker._region_instance_registry._delegated_admission_closed is True
+        closes: list[str] = []
+        worker.close = lambda: closes.append("close")
+        worker._lease_depth[threading.get_ident()] = 1
+        worker._teardown_delegated_fatal_if_safe()
+        assert closes == []
+        worker._lease_depth.clear()
+        worker._run_finalization_depth[threading.get_ident()] = 1
+        worker._teardown_delegated_fatal_if_safe()
+        assert closes == []
+        worker._run_finalization_depth.clear()
+        worker._close_completion = object()
+        worker._teardown_delegated_fatal_if_safe()
+        assert closes == []
+        worker._close_completion = None
+        worker._teardown_delegated_fatal_if_safe()
+        assert closes == ["close"]
+
+    def test_chip_teardown_only_sweeps_store(self):
+        source = _WORKER_PY.read_text(encoding="utf-8")
+        assert "provider_transaction_table = ProviderTransactionTable()" in source
+        terminal = "_handle_ctrl_delegated_region_terminal(buf, provider_transaction_table, provider_region_store)"
+        assert terminal in source
+        teardown = source.split("def _teardown_chip_process_resources(")[1].split("\ndef ")[0]
+        assert "provider_region_store.sweep()" in teardown
+        assert "ProviderTransactionTable" not in teardown
+        assert "table.execute" not in teardown
+
+
+class TestW5aPhaseAIntegration:
+    def test_w5a_module_does_not_import_old_codec(self):
+        path = _REPO_ROOT / "python" / "simpler" / "comm_delegated_region_control.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and "comm_provider_control" in node.module:
+                raise AssertionError("W5a control module must not import comm_provider_control")
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "comm_provider_control" not in alias.name
+
+    def test_compatibility_entry_still_uses_w4_5_materializer(self):
+        tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
+        create = None
+        materialize = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "Worker":
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef) and item.name == "_create_worker_chip_region":
+                        create = item
+                    if isinstance(item, ast.FunctionDef) and item.name == "_materialize_region_instance":
+                        materialize = item
+        assert create is not None and materialize is not None
+        create_names = {n.id for n in ast.walk(create) if isinstance(n, ast.Name)}
+        materialize_names = {n.id for n in ast.walk(materialize) if isinstance(n, ast.Name)}
+        assert "materialize_region_instance" in create_names
+        assert "materialize_delegated_region_instance" not in create_names
+        assert "materialize_delegated_region_instance" not in materialize_names
+        assert callable(Worker._dispatch_delegated_allocate)
+        assert callable(Worker._dispatch_delegated_release)
+
+    def test_w5a_runtime_helpers_do_not_call_old_codec(self):
+        tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
+        names = {
+            "_forward_delegated_region",
+            "_handle_ctrl_delegated_region_hop",
+            "_handle_ctrl_delegated_region_terminal",
+            "_dispatch_delegated_allocate",
+            "_dispatch_delegated_release",
+        }
+        forbidden = {"handle_ctrl_region_allocate", "handle_ctrl_region_release"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in names:
+                used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+                assert not (used & forbidden), node.name
