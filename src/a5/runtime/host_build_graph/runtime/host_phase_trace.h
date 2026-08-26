@@ -92,7 +92,12 @@ void host_phase_record(uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64
  *                 cannot parse the attribute text — byte count on a transfer
  *                 segment, 0 where the segment moves nothing
  */
-void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload = 0);
+// `end_ns` closes the span. A caller that also reports counters over the same span
+// passes the instant it read them, so the two describe one interval; 0 means take
+// the clock here, which is what a caller with nothing to align against wants.
+void host_phase_record_bind(
+    uint32_t kind, uint64_t start_ns, const char *attrs, uint64_t payload = 0, uint64_t end_ns = 0
+);
 
 /**
  * Arm a bind: take the pool the runner offers, and clear the counters.
