@@ -35,19 +35,16 @@ using GraphSubmitResult = GraphScopeResult;
 
 constexpr uint64_t graph_hash_byte(uint64_t h, uint8_t b) { return (h ^ static_cast<uint64_t>(b)) * 1099511628211ULL; }
 
-// FNV-1a, mixing eight bytes per multiply instead of one. The multiply is a
-// serial dependency, so a byte-at-a-time pass over a Definition image costs one
-// multiply latency per byte — 130 KB of it measured as essentially all of
-// graph_build_definition, and the AICPU pays the same pass again to verify the
-// uploaded object.
+// FNV-1a, mixing eight bytes per multiply instead of one. The only thing hashed
+// with it is a Graph's `full_key` — a callable hash, a graph id, a config-value
+// count and the config values themselves, a few bytes per call.
 //
-// Streaming: callers may update across several calls, and the word split makes
-// the result depend on where they split. Every chunk boundary in this codebase
-// falls on a multiple of eight (see the static_assert beside
-// graph_definition_hash_matches), so a chunked update and a single update over
-// the concatenation agree. The value is recomputed from this header on both
-// sides of every run and is never persisted, so it carries no cross-version
-// contract.
+// Streaming: callers chain several calls (see rt_graph_make_key below) and the word
+// split makes the result depend on where they split, so two different chainings of
+// the same bytes disagree. That is harmless here because a key is only ever produced
+// by this one call sequence and never compared against a differently-split digest.
+// The value is recomputed on both sides of every run and is never persisted, so it
+// carries no cross-version contract.
 inline uint64_t graph_hash_bytes(uint64_t h, const void *data, size_t bytes) {
     const auto *p = static_cast<const uint8_t *>(data);
     size_t i = 0;

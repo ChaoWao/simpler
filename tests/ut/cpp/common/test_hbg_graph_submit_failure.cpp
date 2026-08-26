@@ -128,8 +128,8 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     const std::optional<GraphHostUpload> second_upload = graph_host_upload(*graph_state, 1);
     ASSERT_TRUE(first_upload.has_value());
     ASSERT_TRUE(second_upload.has_value());
-    EXPECT_NE(first_upload->definition_hash, 0u);
-    EXPECT_EQ(second_upload->definition_hash, first_upload->definition_hash);
+    EXPECT_NE(first_upload->full_key, 0u);
+    EXPECT_EQ(second_upload->full_key, first_upload->full_key) << "both shells replay one Graph";
     // Distinct bases alone would still pass if finalization handed out a wrong
     // extent, so pin the length the Definition asks for and the disjointness two
     // shells of one Graph must have.
@@ -257,7 +257,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     for (size_t i = 0; i < 3; ++i) {
         const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
         ASSERT_TRUE(upload.has_value());
-        EXPECT_EQ(upload->definition_hash, definition->content_hash) << "shell " << i;
+        EXPECT_EQ(upload->full_key, definition->full_key) << "shell " << i;
         const auto *base = static_cast<const char *>(upload->outer_slot->task->packed_buffer_base);
         const auto *end = static_cast<const char *>(upload->outer_slot->task->packed_buffer_end);
         EXPECT_EQ(static_cast<uint64_t>(end - base), expected_extent) << "shell " << i;
@@ -643,7 +643,7 @@ TEST_F(HbgGraphSubmitFailureTest, ConcurrentDefinitionsFinalizeInSubmissionOrder
     for (size_t i = 0; i < kGraphCount; ++i) {
         const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
         ASSERT_TRUE(upload.has_value()) << "Graph " << i;
-        EXPECT_NE(upload->definition_hash, 0u) << "Graph " << i;
+        EXPECT_NE(upload->full_key, 0u) << "Graph " << i;
         const auto *base = static_cast<const char *>(upload->outer_slot->task->packed_buffer_base);
         const auto *end = static_cast<const char *>(upload->outer_slot->task->packed_buffer_end);
         ASSERT_NE(base, nullptr) << "Graph " << i;
@@ -766,9 +766,9 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
 // The Definition describes a boundary by its shape, strides, buffer size and type
 // and never by its address, so the same body over a heap-resident boundary must
 // describe it exactly as one over a caller-owned boundary of the same shape. That
-// is checked on the boundary signatures rather than on content_hash: full_key is
-// written into the image before the hash covers it, so two recordings under
-// different graph_keys never hash alike no matter what their boundaries are.
+// is checked on the boundary signatures, which are the bytes the device rebinds
+// against; comparing whole images would also fold in full_key, which differs
+// between two recordings under different graph_keys whatever their boundaries are.
 struct BoundaryRecording {
     uint64_t full_key;
     GraphBoundarySignature signature;
@@ -857,6 +857,15 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
     // Two distinct Definitions, so the comparison below is between two recordings
     // rather than one Definition against itself.
     EXPECT_NE(heap_recording->full_key, caller_recording->full_key);
+    // The comparison is byte-wise, and the fill assigns each signature from a
+    // value-initialized struct rather than zeroing the image around it, so a
+    // signature layout with padding would leave those bytes to the destination's
+    // prior content and make this flake.
+    static_assert(
+        sizeof(GraphBoundarySignature) ==
+            sizeof(uint64_t) + 10 * sizeof(uint32_t) + sizeof(uint16_t) + 6 * sizeof(uint8_t),
+        "GraphBoundarySignature must have no padding for a byte-wise comparison to be stable"
+    );
     EXPECT_EQ(std::memcmp(&heap_recording->signature, &caller_recording->signature, sizeof(GraphBoundarySignature)), 0)
         << "a boundary's Definition signature must not depend on where its buffer lives";
     // The address the recording saw stayed in the heap window, i.e. the test really
