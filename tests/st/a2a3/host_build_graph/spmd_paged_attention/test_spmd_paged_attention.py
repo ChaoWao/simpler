@@ -20,9 +20,13 @@ from tests.st.a2a3.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestSpmdPagedAttentionHbgA2A3(_TmrBase):
+    # Orchestration names one runtime's `Tensor` and builds tensors through that
+    # runtime's factory, so it cannot be compiled under both — this runtime has
+    # its own copy under `kernels/`. The MIX kernel names `TaskTensor`, the
+    # per-translation-unit alias each runtime exports, and is shared.
     _SHARED_DIR = Path(__file__).resolve().parents[2] / "tensormap_and_ringbuffer/spmd_paged_attention"
     CALLABLE = deepcopy(_TmrBase.CALLABLE)
-    CALLABLE["orchestration"]["source"] = str(_SHARED_DIR / "kernels/orchestration/spmd_paged_attention_orch.cpp")
+    CALLABLE["orchestration"]["source"] = "kernels/orchestration/spmd_paged_attention_orch.cpp"
     for _incore in CALLABLE["incores"]:
         _incore["source"] = str(_SHARED_DIR / "kernels/mix/paged_attention_parallel.cpp")
 
