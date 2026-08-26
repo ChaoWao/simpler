@@ -55,11 +55,15 @@ class HbgTensorMapTest : public ::testing::Test {
 protected:
     static constexpr int32_t NUM_BUCKETS = 16;
     static constexpr int32_t POOL_SIZE = 64;
-    static constexpr int32_t WINDOW_SIZE = 32;
+    // Task chains this map is dimensioned for. A local id is its own chain index
+    // here, so it is also the exclusive upper bound on a producer id these tests
+    // may insert under.
+    static constexpr int32_t MAX_TASKS = 64;
+    static constexpr int32_t LAST_TASK = MAX_TASKS - 1;
 
     ChipTensorMap tmap{};
 
-    void SetUp() override { ASSERT_TRUE(tmap.init(NUM_BUCKETS, POOL_SIZE, WINDOW_SIZE)); }
+    void SetUp() override { ASSERT_TRUE(tmap.init(NUM_BUCKETS, POOL_SIZE, MAX_TASKS)); }
 };
 
 // Completion progress alone cannot make an older producer disappear. Direct
@@ -83,13 +87,13 @@ TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
     EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_ring_task(2)), producers.end());
 }
 
-// Two tasks whose local ids alias to the same task slot both keep their entries;
-// slot reuse is not retirement.
-TEST_F(HbgTensorMapTest, SlotAliasingTasksBothKeepTheirEntries) {
+// A local id is its own task chain index -- nothing masks with the chain count -- so
+// two distinct producers never share a chain, and the highest id the map is
+// dimensioned for reaches its own chain rather than folding onto a lower one.
+TEST_F(HbgTensorMapTest, DistinctLocalIdsGetDistinctTaskChains) {
     simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
-    // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
     tmap.insert(t, simpler::hbg::make_ring_task(0));
-    tmap.insert(t, simpler::hbg::make_ring_task(WINDOW_SIZE));
+    tmap.insert(t, simpler::hbg::make_ring_task(LAST_TASK));
 
     EXPECT_EQ(tmap.valid_count(), 2);
     TestLookupResult result;
@@ -100,9 +104,12 @@ TEST_F(HbgTensorMapTest, SlotAliasingTasksBothKeepTheirEntries) {
         producers.push_back(e.entry->producer_task_id);
     }
     EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_ring_task(0)), producers.end());
-    EXPECT_NE(
-        std::find(producers.begin(), producers.end(), simpler::hbg::make_ring_task(WINDOW_SIZE)), producers.end()
-    );
+    EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_ring_task(LAST_TASK)), producers.end());
+
+    // Unlinking the head of one chain leaves the other chain's entry alone, which it
+    // could not if the two ids had folded onto one chain.
+    tmap.remove_entry(*result.entries[0].entry);
+    EXPECT_EQ(tmap.valid_count(), 1);
 }
 
 // Without an explicit semantic removal, direct inserts consume one pool entry
@@ -153,21 +160,21 @@ TEST_F(HbgTensorMapTest, ResetLeavesTheMapAsFreshlyInitialized) {
 }
 
 // Reset is reachable any number of times, including on a map that was never inserted
-// into, and does not depend on the task window having been narrowed or widened -- it
-// keeps the sizes init() reserved.
+// into, and does not depend on how many task chains it reserved -- it keeps the sizes
+// init() reserved.
 TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
     tmap.reset();
     tmap.reset();
     EXPECT_EQ(tmap.pool_capacity(), POOL_SIZE);
     EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
 
-    // A task id that aliases slot 0 still lands in a working chain after two resets.
+    // The last reserved chain is still a working chain after two resets.
     simpler::hbg::Tensor t = make_test_tensor(0x2000, 128);
-    tmap.insert(t, simpler::hbg::make_ring_task(WINDOW_SIZE));
+    tmap.insert(t, simpler::hbg::make_ring_task(LAST_TASK));
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, simpler::hbg::make_ring_task(WINDOW_SIZE));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, simpler::hbg::make_ring_task(LAST_TASK));
 }
 
 // Filling the pool drives free_entries() to zero. No device-completion watermark
@@ -175,7 +182,7 @@ TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
 // waiting for asynchronous reclaim that HBG does not have.
 TEST_F(HbgTensorMapTest, ExhaustedPoolStaysExhausted) {
     for (int32_t i = 0; i < POOL_SIZE; i++) {
-        tmap.insert(make_test_tensor(0x10000 + 0x100 * i, 64), simpler::hbg::make_ring_task(i % WINDOW_SIZE));
+        tmap.insert(make_test_tensor(0x10000 + 0x100 * i, 64), simpler::hbg::make_ring_task(i % MAX_TASKS));
     }
     EXPECT_EQ(tmap.current_used(), POOL_SIZE);
     EXPECT_EQ(tmap.free_entries(), 0);

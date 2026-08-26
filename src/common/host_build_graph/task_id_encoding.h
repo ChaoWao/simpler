@@ -30,10 +30,19 @@ namespace simpler::hbg {
  *
  *   RING       — a task placed on the shared-memory ring. Its low bits are the
  *                task allocator's local id, resolvable via get_slot_by_task_id().
- *   GRAPH_NODE — a node materialized inside a Graph execution. It lives in that
- *                execution's GraphNodeStorage, not on the ring, so its low bits
- *                are the packed pair below and must never be resolved against a
- *                ring slot.
+ *   GRAPH_NODE — a node of a Graph body. It lives in that Graph's own storage,
+ *                not on the ring, so its low bits are the packed pair below and
+ *                must never be resolved against a ring slot.
+ *
+ * A GRAPH_NODE id is minted twice for the same node, in two disjoint scopes. The
+ * recorder mints one per node it records, with `outer_local_id` fixed at 0: a
+ * Definition is shared by every shell that replays it, so record time has no
+ * single outer task to name, and the low field is then the node index alone —
+ * which is what keeps it inside the task chains the recording's hazard map is
+ * dimensioned for. Materialize mints the other, with the replaying shell's real
+ * local id. The two never meet: a recorded id lives only in the recorder thread's
+ * private map and the body's own locals, and a materialized node is addressed by
+ * index rather than looked up by id.
  */
 enum class TaskIdSpace : uint32_t { RING = 0, GRAPH_NODE = 1 };
 
