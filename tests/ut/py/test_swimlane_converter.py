@@ -841,6 +841,71 @@ def test_complete_phase_preserves_runtime_fin_count(tmp_path):
     assert complete["args"]["finish_rows_attributed"] == 2
 
 
+def test_hbg_resolution_thread_uses_one_lane_and_exports_queue_depths(tmp_path):
+    out = tmp_path / "trace.json"
+    scheduler_phases = [
+        [],
+        [
+            {
+                "phase": "resolve",
+                "start_time_us": 1.0,
+                "end_time_us": 2.0,
+                "tasks_processed": 1,
+                "shared_at_start": [1, 2, 3],
+                "shared_at_end": [4, 5, 6],
+            },
+            {
+                "phase": "async_poll",
+                "start_time_us": 2.0,
+                "end_time_us": 3.0,
+                "shared_at_start": [4, 5, 6],
+                "shared_at_end": [7, 8, 9],
+            },
+            {
+                "phase": "dummy",
+                "start_time_us": 3.0,
+                "end_time_us": 4.0,
+                "shared_at_start": [7, 8, 9],
+                "shared_at_end": [10, 11, 12],
+            },
+        ],
+    ]
+
+    sc.generate_chrome_trace_json([], str(out), scheduler_phases=scheduler_phases, core_to_thread=[0])
+
+    events = json.loads(out.read_text())["traceEvents"]
+    p_phases = [event for event in events if event.get("cat") == "scheduler" and event.get("tid") // 10 == 3001]
+    assert [(event["name"], event["tid"]) for event in p_phases] == [
+        ("resolve(1)", 30010),
+        ("async_poll(0)", 30010),
+        ("dummy(0)", 30010),
+    ]
+    queue_samples = [event for event in events if event.get("name") == "shared_ready_queue"]
+    assert [(event["ts"], event["args"]) for event in queue_samples] == [
+        (2.0, {"AIC": 4, "AIV": 5, "MIX": 6}),
+        (3.0, {"AIC": 7, "AIV": 8, "MIX": 9}),
+        (4.0, {"AIC": 10, "AIV": 11, "MIX": 12}),
+    ]
+
+
+def test_tmr_nested_resolve_stays_on_scheduler_sublane(tmp_path):
+    out = tmp_path / "trace.json"
+    scheduler_phases = [
+        [
+            {"phase": "complete", "start_time_us": 1.0, "end_time_us": 4.0},
+            {"phase": "resolve", "start_time_us": 2.0, "end_time_us": 3.0},
+        ]
+    ]
+
+    sc.generate_chrome_trace_json([], str(out), scheduler_phases=scheduler_phases, core_to_thread=[0])
+
+    events = json.loads(out.read_text())["traceEvents"]
+    complete = next(event for event in events if event.get("name") == "complete(0)")
+    resolve = next(event for event in events if event.get("name") == "resolve(0)")
+    assert complete["tid"] == 30000
+    assert resolve["tid"] == 30001
+
+
 def test_complete_flow_worker_view_only_without_scheduler_phases(tmp_path):
     # Without scheduler_phases the complete-flow block is skipped entirely:
     # neither view gets a complete arrow (regression guard on the gate).

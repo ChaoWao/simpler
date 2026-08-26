@@ -95,6 +95,14 @@ def test_thin_pytest_wrapper_forwards_the_shared_cli_contract() -> None:
     }
 
 
+@pytest.mark.parametrize(("rounds", "expected"), [(1, 3), (2, 0)])
+def test_chip_swimlane_extension_hook_uses_the_shared_multi_round_gate(rounds, expected) -> None:
+    options = {"--rounds": rounds, "--enable-chip-swimlane": 3}
+    request = SimpleNamespace(config=SimpleNamespace(getoption=lambda name, default=None: options.get(name, default)))
+
+    assert SceneTestCase._effective_enable_chip_swimlane(request) == expected
+
+
 def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> None:
     scene_test_module = importlib.import_module("simpler_setup.scene_test")
     output_prefix = scene_test_module.Path("diagnostic-output")

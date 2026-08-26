@@ -1906,6 +1906,20 @@ class SceneTestCase:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _effective_enable_chip_swimlane(request) -> int:
+        """Return the multi-round-safe chip-swimlane level for extension hooks."""
+        return effective_diagnostic_options(
+            request.config.getoption("--rounds", default=1),
+            chip_swimlane=request.config.getoption("--enable-chip-swimlane", default=0),
+            dump_args=0,
+            pmu=0,
+            dep_gen=False,
+            scope_stats=False,
+            swimlane_overhead=False,
+            warn=False,
+        ).chip_swimlane
+
+    @staticmethod
     def _effective_enable_dep_gen(request) -> bool:
         """Return the multi-round-safe dep-gen setting for extension hooks.
 

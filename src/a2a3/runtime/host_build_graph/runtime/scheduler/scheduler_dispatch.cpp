@@ -22,6 +22,7 @@
 #include "aicpu/platform_regs.h"
 #include "callable.h"
 #include "common/chip_swimlane_profiling.h"
+#include "host_build_graph/async_poll_phase_accumulator.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "host_build_graph/runtime_core.h"
@@ -901,6 +902,38 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
     chip_swimlane.reset();
     chip_swimlane.chip_swimlane_enabled = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
+
+    const bool record_sched_phases = chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES;
+    auto capture_shared_depth = [&](int16_t shared_depth[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
+        constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
+        for (int shape = 0; shape < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; shape++) {
+            const size_t depth = sched_->ready_queues[shape].size() + sched_->ready_sync_queues[shape].size();
+            shared_depth[shape] = static_cast<int16_t>(std::min(depth, kMax));
+        }
+    };
+    auto record_p_phase = [&](ChipSwimlaneSchedPhaseKind kind, uint64_t start_time, uint64_t end_time,
+                              uint32_t tasks_processed, const int16_t shared_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
+        int16_t shared_at_end[CHIP_SWIMLANE_NUM_QUEUE_SHAPES];
+        capture_shared_depth(shared_at_end);
+        chip_swimlane_aicpu_record_sched_phase(
+            thread_idx, kind, start_time, end_time, chip_swimlane.sched_loop_count, tasks_processed,
+            /*pop_hit=*/0, /*pop_miss=*/0, shared_at_start, shared_at_end
+        );
+    };
+    simpler::hbg::AsyncPollPhaseAccumulator async_poll_phase;
+    int16_t async_poll_shared_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES] = {0};
+    auto flush_async_poll = [&](uint64_t end_time) {
+        if (!async_poll_phase.active()) return;
+        // Consecutive empty polls are compacted into one bar whose duration is
+        // their exact summed CPU time. Anchoring the compact bar at the flush
+        // point preserves phase accounting without exporting one record per
+        // spin iteration.
+        const simpler::hbg::AsyncPollPhaseSummary summary = async_poll_phase.flush(end_time);
+        record_p_phase(
+            ChipSwimlaneSchedPhaseKind::AsyncPoll, summary.start_time, summary.end_time, summary.resolved,
+            async_poll_shared_at_start
+        );
+    };
 #endif
 
     uint64_t last_progress_ts = get_sys_cnt_aicpu();
@@ -914,15 +947,31 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     while (true) {
         if (completed_.load(std::memory_order_acquire)) break;
 
+#if SIMPLER_DFX
+        chip_swimlane.sched_loop_count++;
+#endif
+
         int32_t published_task_count = 0;
         if (handle_orchestrator_exit(thread_idx, header, runtime, published_task_count) == LoopAction::BREAK_LOOP)
             break;
 
         int32_t resolved_this_pass = 0;
         bool resolved_any = false;
+#if SIMPLER_DFX
+        uint64_t resolve_t0 = 0;
+        int16_t resolve_shared_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES] = {0};
+        uint32_t resolve_count = 0;
+#endif
         for (int32_t s = 0; s < active_sched_threads_ && !completed_.load(std::memory_order_acquire); s++) {
             ChipTaskSlotState *slot;
             while ((slot = sp_queues_[s].pop()) != nullptr) {
+#if SIMPLER_DFX
+                if (record_sched_phases && resolve_t0 == 0) {
+                    resolve_t0 = get_sys_cnt_aicpu();
+                    flush_async_poll(resolve_t0);
+                    capture_shared_depth(resolve_shared_at_start);
+                }
+#endif
 #if SIMPLER_SCHED_PROFILING
                 SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*slot, thread_idx);
 #else
@@ -934,8 +983,19 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                 }
                 resolved_this_pass += outcome.stream_tasks_completed;
                 resolved_any = true;
+#if SIMPLER_DFX
+                resolve_count++;
+#endif
             }
         }
+#if SIMPLER_DFX
+        if (resolve_t0 != 0) {
+            record_p_phase(
+                ChipSwimlaneSchedPhaseKind::Resolve, resolve_t0, get_sys_cnt_aicpu(), resolve_count,
+                resolve_shared_at_start
+            );
+        }
+#endif
         if (completed_.load(std::memory_order_acquire)) break;
 
         // Async deferred completions, moved off the scheduler threads. Every
@@ -944,6 +1004,16 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         // through P alone.
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
+#if SIMPLER_DFX
+            uint64_t async_poll_t0 = 0;
+            if (record_sched_phases) {
+                if (!async_poll_phase.active()) {
+                    capture_shared_depth(async_poll_shared_at_start);
+                    async_poll_phase.begin();
+                }
+                async_poll_t0 = get_sys_cnt_aicpu();
+            }
+#endif
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
                 rt_->aicore_mailbox, sched_
 #if SIMPLER_SCHED_PROFILING
@@ -951,6 +1021,18 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                 thread_idx
 #endif
             );
+#if SIMPLER_DFX
+            if (async_poll_t0 != 0) {
+                const uint64_t async_poll_t1 = get_sys_cnt_aicpu();
+                const bool flush_poll_phase = async_poll_phase.add_poll(
+                    async_poll_t0, async_poll_t1, static_cast<uint32_t>(poll_result.resolved),
+                    poll_result.error_code != SIMPLER_ERROR_NONE
+                );
+                if (flush_poll_phase) {
+                    flush_async_poll(async_poll_t1);
+                }
+            }
+#endif
             if (poll_result.error_code != SIMPLER_ERROR_NONE) {
                 fail_scheduler(runtime, thread_idx, poll_result.error_code);
                 break;
@@ -967,7 +1049,19 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
             constexpr int DUMMY_DRAIN_BATCH = 8;
             ChipTaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
             int dummy_got;
+#if SIMPLER_DFX
+            uint64_t dummy_t0 = 0;
+            int16_t dummy_shared_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES] = {0};
+            uint32_t dummy_count = 0;
+#endif
             while ((dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH)) > 0) {
+#if SIMPLER_DFX
+                if (record_sched_phases && dummy_t0 == 0) {
+                    dummy_t0 = get_sys_cnt_aicpu();
+                    flush_async_poll(dummy_t0);
+                    capture_shared_depth(dummy_shared_at_start);
+                }
+#endif
                 for (int di = 0; di < dummy_got; di++) {
 #if SIMPLER_SCHED_PROFILING
                     SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*dummy_batch[di], thread_idx);
@@ -980,9 +1074,19 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                     }
                     resolved_this_pass += outcome.stream_tasks_completed;
                     resolved_any = true;
+#if SIMPLER_DFX
+                    dummy_count++;
+#endif
                 }
                 if (completed_.load(std::memory_order_acquire)) break;
             }
+#if SIMPLER_DFX
+            if (dummy_t0 != 0) {
+                record_p_phase(
+                    ChipSwimlaneSchedPhaseKind::Dummy, dummy_t0, get_sys_cnt_aicpu(), dummy_count, dummy_shared_at_start
+                );
+            }
+#endif
         }
         if (completed_.load(std::memory_order_acquire)) break;
 
@@ -1030,6 +1134,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     }
 
 #if SIMPLER_DFX
+    flush_async_poll(get_sys_cnt_aicpu());
     // P owns no cores, so the AICore-keyed flushes below iterate an empty core
     // list; the sched-phase-buffer flush is the one that matters — it drains any
     // per-thread records P wrote (e.g. under SCHED_PROFILING) so they are not lost.

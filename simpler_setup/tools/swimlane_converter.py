@@ -139,6 +139,28 @@ def _decode_in_graph_task_id(task_id):
     return local >> 10, local & 0x3FF
 
 
+def _nested_resolve_record_ids(records):
+    """Return Resolve records contained by a Complete or Dummy parent."""
+    parents = sorted(
+        (
+            (record.get("start_time_us", 0), record.get("end_time_us", 0))
+            for record in records
+            if record.get("phase") in ("complete", "dummy")
+        ),
+        key=lambda interval: interval[0],
+    )
+    parent_starts = [interval[0] for interval in parents]
+    nested = set()
+    for record in records:
+        if record.get("phase") != "resolve":
+            continue
+        start_us = record.get("start_time_us", 0)
+        parent_idx = bisect.bisect_right(parent_starts, start_us) - 1
+        if parent_idx >= 0 and record.get("end_time_us", 0) <= parents[parent_idx][1]:
+            nested.add(id(record))
+    return nested
+
+
 def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR0912
     """Join in-graph task rows to their outer GraphPrepare records."""
     prepare_by_outer = defaultdict(list)
@@ -1729,7 +1751,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             "dispatch": "terrible",  # red
             "async_poll": "yellow",  # async-wait completion polling (split from complete)
             "release": "olive",  # deferred-release drain (on_task_release work)
-            "dummy": "grey",  # dummy_drain pass (Resolve nests inside)
+            "dummy": "grey",  # dummy_drain pass (TMR Resolve nests inside; HBG P bar is standalone)
             "early_dispatch": "rail_animation",  # speculative early-dispatch staging
             # sync_start stop-the-world drain: outer bar time-contains the two
             # inner staging passes, so Perfetto nests them by depth on the track.
@@ -1737,7 +1759,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             "drain_prepare": "cq_build_attempt_runnable",  # inner: cluster scan + build_payload
             "drain_publish": "cq_build_attempt_passed",  # inner: MMIO write_reg per subtask (the cohort launch)
             "graph_prepare": "rail_animation",  # bounded Scheduler-side Definition expansion
-            # Inner phase — nests inside Complete or Dummy via time containment
+            # Inner in TMR; standalone on HBG's dedicated P thread.
             "resolve": "vsync_highlight_color",  # on_task_complete: walk consumer list
             # Separate-lane (Worker View AICPU_N) — fallback color if it ever lands on Sched
             "dummy_task": "grey",
@@ -1797,9 +1819,24 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         # as a 0.02 us sliver so Perfetto does not collapse it to a hairline.
         AICPU_WORKER_MARKER_MIN_DUR_US = 0.02  # noqa: N806
 
+        assigned_thread_indices = {
+            assigned for assigned in (core_to_thread or []) if isinstance(assigned, int) and assigned >= 0
+        }
         for thread_idx, thread_records in enumerate(scheduler_phases):
             tid = sched_lane_tid(thread_idx, 0)
             resolve_tid = sched_lane_tid(thread_idx, 1)
+            nested_resolve_ids = _nested_resolve_record_ids(thread_records)
+            thread_phase_names = {record.get("phase") for record in thread_records}
+            scheduler_only_phases = {"complete", "dispatch", "release", "early_dispatch", "drain", "graph_prepare"}
+            has_scheduler_work = bool(thread_phase_names & scheduler_only_phases)
+            has_resolution_work = bool(thread_phase_names & {"resolve", "async_poll", "dummy"})
+            is_unassigned_thread = bool(assigned_thread_indices) and thread_idx not in assigned_thread_indices
+            has_standalone_resolve = any(
+                record.get("phase") == "resolve" and id(record) not in nested_resolve_ids for record in thread_records
+            )
+            is_resolution_thread = (
+                has_resolution_work and not has_scheduler_work and (has_standalone_resolve or is_unassigned_thread)
+            )
 
             # Thread name metadata
             events.append(
@@ -1812,7 +1849,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     "tid": tid,
                 }
             )
-            if any(record.get("phase") == "resolve" for record in thread_records):
+            if nested_resolve_ids:
                 events.append(
                     {
                         "args": {"name": f"Sched_{thread_idx}"},
@@ -1949,7 +1986,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         tasks_processed = matched_finish_rows
                         phase_args["tasks_processed"] = tasks_processed
                 display_name = f"{phase}({tasks_processed})"
-                event_tid = resolve_tid if phase == "resolve" else tid
+                event_tid = resolve_tid if phase == "resolve" and id(record) in nested_resolve_ids else tid
                 events.append(
                     {
                         "args": phase_args,
@@ -1969,10 +2006,12 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 # start, so emitting both is redundant. Two samples at the
                 # SAME ts (e.g. final-drain emit where start_time==end_time)
                 # also breaks Perfetto's rate calc (divide-by-zero → NULL).
-                # Only complete/dispatch carry real queue depths; release/
-                # resolve/early_dispatch zero-fill them, so skip their counter
-                # samples to avoid spurious 0 dips.
-                if phase not in ("complete", "dispatch"):
+                # Complete/Dispatch and every HBG P-thread phase carry live
+                # shared-queue snapshots. Other runtime phases zero-fill them.
+                phase_has_live_depths = phase in ("complete", "dispatch") or (
+                    is_resolution_thread and phase in ("resolve", "async_poll", "dummy")
+                )
+                if not phase_has_live_depths:
                     continue
                 if not depths_valid:
                     continue

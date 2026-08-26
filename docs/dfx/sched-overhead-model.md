@@ -103,10 +103,23 @@ python -m simpler_setup.tools.swimlane_converter <perf>.json \
 | 1 | Overhead verdict — per-engine + system `all`/`has` overhead (% of makespan) |
 | 2 | aicore switch — per-core min/mean/max, overhead-vs-independent split, makespan bound |
 | 3 / 4 | Head OH / Tail OH distributions |
-| 5 | AICPU scheduler-loop budget — ns/loop, phase split, pop hit-rate, fanout/fanin |
+| 5 | AICPU scheduler-loop budget — separate S/P ns/loop, all mutually exclusive outer phases, standalone HBG P-thread Resolve, pop hit-rate, fanout/fanin |
 | 6 | Critical-path attribution — compute vs scheduler-injected µs on the makespan path |
 
 ```bash
 python -m simpler_setup.tools.sched_overhead_analysis \
     --chip-swimlane-records-json <perf>.json --deps-json <deps>.json
 ```
+
+For TMR captures, Resolve is nested in Complete or Dummy and is excluded from
+the phase total to avoid double counting. For HBG captures, Resolve is
+standalone work on the P thread and is included. Empty HBG async polling is
+reported as compact `AsyncPoll(0)` bars, so its measured CPU cost contributes
+to the scheduler budget instead of being reconstructed as idle. HBG's S
+threads detect AICore FIN and dispatch work, while its P thread resolves
+completion state and dependencies. Part 5 reports their loop rates separately;
+the Tail-OH-to-loop comparison uses only S-thread loops because Tail OH ends at
+FIN detection, before P-thread resolution begins. Phase totals still sum all
+threads and therefore include P-thread CPU cost. The phase table lists only
+phases represented by the capture, so runtime-specific absent phases do not
+appear as synthetic zero rows.
