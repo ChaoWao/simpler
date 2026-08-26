@@ -66,6 +66,7 @@ extern "C" {
  * =========================================================================== */
 int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
+__attribute__((weak)) int completed_runtime_status_impl(Runtime * /*runtime*/, const HostApi * /*api*/) { return 0; }
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
 __attribute__((weak)) int prepared_run_config_compatible_impl(
     const HostApi * /*api*/, const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
@@ -643,6 +644,14 @@ static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
     state->runner_trace_start_ns = 0;
 }
 
+static int completed_execution_rc(OnboardNativeRunContext *state, int drain_rc) {
+    if (drain_rc != 0) return drain_rc;
+    const int runtime_status = completed_runtime_status_impl(&state->runtime, &state->host_api);
+    if (runtime_status == 0) return 0;
+    state->runner->recover_device_or_mark_unusable(runtime_status);
+    return runtime_status;
+}
+
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {
     return ctx != nullptr && concurrent_native_prepare_supported_impl() != 0 ? 1 : 0;
 }
@@ -937,6 +946,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         drain_rc = PTO_RUNTIME_ERR_INTERNAL;
         LOG_ERROR("simpler_wait_run: drain threw (%s)", state->trace_attrs);
     }
+    drain_rc = completed_execution_rc(state, drain_rc);
     if (state->completion_rc == 0) state->completion_rc = drain_rc;
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     emit_native_run_runner_wall(state);
@@ -985,6 +995,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
                 LOG_ERROR("simpler_finalize_run: drain_execution threw (%s)", state->trace_attrs);
             }
         }
+        drain_rc = completed_execution_rc(state, drain_rc);
         if (execution_rc == 0) execution_rc = drain_rc;
         state->completion_rc = execution_rc;
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);

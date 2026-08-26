@@ -221,6 +221,11 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
     return runtime_status_from_error_codes(orch_error_code, sched_error_code);
 }
 
+extern "C" int completed_runtime_status_impl(Runtime *runtime, const HostApi *api) {
+    SharedMemoryHeader host_header{};
+    return read_runtime_status(runtime, api, &host_header);
+}
+
 static void release_tensor_leases(Runtime *runtime, const HostApi *api) {
     int freed = 0;
     int buffer_noop = 0;

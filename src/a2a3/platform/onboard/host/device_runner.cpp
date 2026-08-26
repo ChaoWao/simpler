@@ -632,11 +632,6 @@ int DeviceRunner::wait_run_completion_events(const PreparedExecution &prepared) 
             return static_cast<int>(rc);
         }
     }
-    // Event completion does not propagate a failed predecessor task. A stream
-    // query preserves that sticky error while NOT_READY remains valid when a
-    // healthy successor is queued after this run's event.
-    const int stream_status = query_stream_pair_nonblocking(run_streams_.aicpu(), run_streams_.aicore());
-    if (stream_status == SIMPLER_NATIVE_RUN_POLL_ERROR) return PTO_RUNTIME_ERR_INTERNAL;
     return 0;
 }
 
