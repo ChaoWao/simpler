@@ -10,6 +10,7 @@
 """Manual HBG coverage for the disabled A5 SPMD paged-attention workload."""
 
 from copy import deepcopy
+from pathlib import Path
 
 from simpler_setup import scene_test
 from tests.st.a5.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged_attention import (
@@ -19,6 +20,16 @@ from tests.st.a5.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged_a
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestSpmdPagedAttentionHbgA5(_TmrBase):
+    # Orchestration names one runtime's `Tensor` and builds tensors through that
+    # runtime's factory, so it cannot be compiled under both — this runtime has
+    # its own copy under `kernels/`. The MIX kernel names `TaskTensor`, the
+    # per-translation-unit alias each runtime exports, and is shared.
+    _SHARED_DIR = Path(__file__).resolve().parents[2] / "tensormap_and_ringbuffer/spmd_paged_attention"
+    CALLABLE = deepcopy(_TmrBase.CALLABLE)
+    CALLABLE["orchestration"]["source"] = "kernels/orchestration/spmd_paged_attention_orch.cpp"
+    for _incore in CALLABLE["incores"]:
+        _incore["source"] = str(_SHARED_DIR / "kernels/mix/paged_attention_parallel.cpp")
+
     # The TMR shapes, run through host_build_graph. Deep-copied so the two
     # classes do not share a params dict. Onboard only: the MIX kernel's
     # TPUSH/TPOP path does not build for the CPU simulator (PTO-ISA rejects the
