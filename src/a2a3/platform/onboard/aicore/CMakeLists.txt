@@ -19,6 +19,11 @@ list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../c
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/log/include")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common")
+# The kernel is an add_custom_target, so the profiling header reaches it as an
+# include directory in this list rather than through target_include_directories.
+include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
+simpler_generate_profiling_header(OUT_DIR SIMPLER_PROFILING_INCLUDE_DIR)
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${SIMPLER_PROFILING_INCLUDE_DIR}")
 if(DEFINED CUSTOM_INCLUDE_DIRS)
     foreach(INC_DIR ${CUSTOM_INCLUDE_DIRS})
         list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${INC_DIR}")

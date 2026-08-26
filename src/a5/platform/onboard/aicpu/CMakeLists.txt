@@ -62,6 +62,8 @@ list(LENGTH AICPU_KERNEL_SOURCES NUM_AICPU_KERNEL_SOURCES)
 message(STATUS "AICpu kernel: ${NUM_AICPU_KERNEL_SOURCES} source files")
 message(VERBOSE "AICpu kernel sources: ${AICPU_KERNEL_SOURCES}")
 add_library(aicpu_kernel SHARED ${AICPU_KERNEL_SOURCES})
+include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
+simpler_configure_profiling(aicpu_kernel)
 
 option(WERROR "Treat compiler warnings as errors" ON)
 if(DEFINED ENV{SIMPLER_DISABLE_WARNINGS_AS_ERRORS})
@@ -112,6 +114,7 @@ set(AICPU_DISPATCHER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/aicpu_loader/device/aicpu_dispatcher.cpp"
 )
 add_library(aicpu_dispatcher SHARED ${AICPU_DISPATCHER_SOURCES})
+simpler_configure_profiling(aicpu_dispatcher)
 
 target_compile_options(aicpu_dispatcher
     PRIVATE

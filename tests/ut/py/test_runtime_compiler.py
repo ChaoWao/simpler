@@ -35,12 +35,20 @@ def test_host_build_target_always_receives_shared_cmake_dir(tmp_path):
     assert not any(arg.startswith("-DSIMPLER_SANITIZERS=") for arg in args)
 
 
-def test_device_build_target_does_not_receive_shared_cmake_dir(tmp_path):
+def test_device_build_target_also_receives_shared_cmake_dir(tmp_path):
     from simpler_setup import runtime_compiler  # noqa: PLC0415
 
     target = runtime_compiler.BuildTarget(_StubToolchain(is_host=False), str(tmp_path), "kernel.o")
 
-    assert not any(arg.startswith("-DSIMPLER_CMAKE_DIR=") for arg in target.gen_cmake_args([], []))
+    args = target.gen_cmake_args([], [])
+
+    # Device targets load cmake/profiling_config.cmake for the generated profiling
+    # header, so they need the shared module path too. The four profiling macros must
+    # hold one value across a platform: SIMPLER_DFX adds fields to a struct the host
+    # and the AICPU both compile.
+    assert f"-DSIMPLER_CMAKE_DIR={runtime_compiler.PROJECT_ROOT / 'cmake'}" in args
+    # Sanitizers stay host-only: a device toolchain cannot carry the host runtime.
+    assert not any(arg.startswith("-DSIMPLER_SANITIZERS=") for arg in args)
 
 
 def test_build_output_is_verbose_only_for_debug_logging(tmp_path, monkeypatch, caplog):

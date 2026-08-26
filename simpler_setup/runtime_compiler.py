@@ -93,10 +93,13 @@ class BuildTarget:
         if cmake_defines:
             for key, value in sorted(cmake_defines.items()):
                 args.append(f"-D{key}={value}")
-        # Host-compiled targets load shared project CMake modules through this
-        # stable path rather than paths relative to each target directory.
-        if self.toolchain.is_host:
-            args.append(f"-DSIMPLER_CMAKE_DIR={PROJECT_ROOT / 'cmake'}")
+        # Every target loads shared project CMake modules through this stable path
+        # rather than paths relative to each target directory. Device toolchains need
+        # it too: they read cmake/profiling_config.cmake for the generated profiling
+        # header, and the four profiling macros must hold the same value in every
+        # target of a platform — SIMPLER_DFX adds fields to a struct the host and the
+        # AICPU both compile.
+        args.append(f"-DSIMPLER_CMAKE_DIR={PROJECT_ROOT / 'cmake'}")
         # Sanitizers only apply to host-compiled targets — device toolchains
         # (ccec, aarch64 cross) run on the NPU and can't carry a host sanitizer
         # runtime.
