@@ -2817,6 +2817,20 @@ NB_MODULE(_task_interface, m) {
     // breakdown) is no longer returned from run(); the platform emits it as
     // `[STRACE]` log markers — parse with simpler_setup.tools.strace_timing.
 
+    nb::class_<DeviceMemoryInfo>(m, "DeviceMemoryInfo")
+        .def_ro("free_bytes", &DeviceMemoryInfo::free_bytes)
+        .def_ro("total_bytes", &DeviceMemoryInfo::total_bytes)
+        .def(
+            "__iter__",
+            [](const DeviceMemoryInfo &self) {
+                return nb::make_tuple(self.free_bytes, self.total_bytes).attr("__iter__")();
+            }
+        )
+        .def("__repr__", [](const DeviceMemoryInfo &self) {
+            return "DeviceMemoryInfo(free_bytes=" + std::to_string(self.free_bytes) +
+                   ", total_bytes=" + std::to_string(self.total_bytes) + ")";
+        });
+
     nb::class_<ChipWorkerNativeRun>(m, "_ChipWorkerNativeRun")
         .def_ro("slot_id", &ChipWorkerNativeRun::slot_id)
         .def_ro("generation", &ChipWorkerNativeRun::generation)
@@ -3102,6 +3116,18 @@ NB_MODULE(_task_interface, m) {
             "Excludes HCCL/VMM comm windows. 0 when not "
             "initialized. Lets downstream runtimes subtract simpler's own HBM "
             "from their cache budget (it may be invisible to aclrtGetMemInfo)."
+        )
+        .def(
+            "device_memory_info",
+            [](const ChipWorker &self) {
+                try {
+                    return self.device_memory_info();
+                } catch (const UnsupportedRuntimeOperation &e) {
+                    PyErr_SetString(PyExc_NotImplementedError, e.what());
+                    throw nb::python_error();
+                }
+            },
+            "Return the ACL_HBM_MEM free/total byte snapshot for this worker's device."
         )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))

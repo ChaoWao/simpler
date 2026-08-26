@@ -22,7 +22,7 @@
  *                   simpler_init, finalize_device
  *   - sizing:       get_runtime_size, get_runtime_alignment
  *   - device-mem:   device_malloc_ctx, device_free_ctx,
- *                   committed_device_memory_ctx,
+ *                   committed_device_memory_ctx, device_memory_info_ctx,
  *                   copy_to_device_ctx, copy_from_device_ctx
  *   - prepared run: simpler_register_callable, simpler_prepare_run,
  *                   simpler_launch_run, simpler_poll_run, simpler_wait_run,
@@ -55,6 +55,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "device_memory_info.h"
 
 // simpler_run takes a pointer to the C++ CallConfig POD (task_interface/
 // call_config.h). Forward-declared so this C-linkage header needn't pull the
@@ -248,6 +250,13 @@ void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr);
  * runtime buffers). Excludes HCCL/VMM comm windows. Returns 0 on NULL ctx.
  */
 size_t committed_device_memory_ctx(DeviceContextHandle ctx);
+
+/**
+ * Query the target device's ACL_HBM_MEM free/total byte snapshot. The caller
+ * owns `info`; valid output is published only when the function returns 0.
+ * Unsupported backends return PTO_RUNTIME_ERR_UNSUPPORTED.
+ */
+int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info);
 
 /** Copy host memory to a device pointer within the given device context. */
 int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_ptr, size_t size);

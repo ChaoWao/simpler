@@ -46,6 +46,7 @@
 #include "../task_interface/task_args.h"
 #include "../task_interface/tensor.h"
 #include "../worker/pipeline_slot_pool.h"
+#include "../worker/device_memory_info.h"
 #include "ring.h"
 #include "scope.h"
 #include "tensormap.h"
@@ -107,6 +108,7 @@ public:
     // allocator. Thread-safe: can be called from the orch thread while the
     // target worker is running a task (MemoryAllocator is mutex-protected).
     uint64_t committed_device_memory(int worker_id);
+    DeviceMemoryInfo device_memory_info(int worker_id);
 
     // Submit a NEXT_LEVEL task. `callable` is the stable identity returned
     // by Worker.register(); the child resolves its digest to a private slot.

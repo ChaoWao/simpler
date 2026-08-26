@@ -32,6 +32,7 @@
 #include "task_args.h"
 #include "native_run_context.h"
 
+#include <acl/acl.h>
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstdio>
@@ -42,6 +43,7 @@
 
 #include "common/strace.h"
 #include "common/unified_log.h"
+#include "host/acl_error_log.h"
 #include "host_log.h"
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
@@ -1122,6 +1124,29 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
         return static_cast<DeviceRunnerBase *>(ctx)->committed_device_memory();
     } catch (...) {
         return 0;
+    }
+}
+
+int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
+    if (ctx == NULL || info == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    try {
+        int rc = runner->attach_current_thread(runner->device_id());
+        if (rc != 0) return rc;
+
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        aclError acl_rc = aclrtGetMemInfo(ACL_HBM_MEM, &free_bytes, &total_bytes);
+        if (acl_rc != ACL_SUCCESS) {
+            LOG_ERROR("aclrtGetMemInfo(ACL_HBM_MEM) failed: %d", static_cast<int>(acl_rc));
+            ACL_LOG_ERROR_DETAIL(acl_rc);
+            return static_cast<int>(acl_rc);
+        }
+        info->free_bytes = static_cast<uint64_t>(free_bytes);
+        info->total_bytes = static_cast<uint64_t>(total_bytes);
+        return 0;
+    } catch (...) {
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 }
 

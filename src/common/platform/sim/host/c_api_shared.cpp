@@ -950,6 +950,11 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
     }
 }
 
+int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
+    if (ctx == NULL || info == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 int simpler_provision_dma_workspace(
     DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 ) {

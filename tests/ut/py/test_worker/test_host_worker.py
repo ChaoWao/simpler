@@ -5432,6 +5432,19 @@ class TestDirectControlOrdering:
         with pytest.raises(RuntimeError, match="still in flight"):
             orch.committed_device_memory(0)
 
+    def test_device_memory_info_routes_logical_id_and_takes_mailbox_ordering(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        orch, native = self._orch(worker)
+        worker._chip_shms = cast(Any, [object(), object()])
+        expected = SimpleNamespace(free_bytes=1024, total_bytes=2048)
+        native.device_memory_info.return_value = expected
+
+        with orch_mod._callback_run(12, worker):
+            assert worker.device_memory_info(1) is expected
+
+        native.device_memory_info.assert_called_once_with(1)
+        native.await_run_admission.assert_called_once_with(12)
+
     def test_owner_less_control_is_refused_while_a_run_is_in_flight(self):
         worker = Worker(level=3, num_sub_workers=0)
         orch, native = self._orch(worker)

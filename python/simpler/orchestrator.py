@@ -50,6 +50,7 @@ from .task_interface import (
     CommBufferSpec,
     CommDomainHandle,
     DataType,
+    DeviceMemoryInfo,
     GlobalCommDomainHandle,
     GlobalCommDomainView,
     RemoteAddressSpace,
@@ -739,6 +740,11 @@ class Orchestrator:
         """
         with self._control_admission("committed_device_memory"):
             return int(self._o.committed_device_memory(int(worker_id)))
+
+    def device_memory_info(self, worker_id: int) -> DeviceMemoryInfo:
+        """Device-wide ACL_HBM_MEM free/total byte snapshot for *worker_id*."""
+        with self._control_admission("device_memory_info"):
+            return self._o.device_memory_info(int(worker_id))
 
     # A Worker is the only allocator. The Orchestrator exposes thin wrappers that delegate to the
     # bound Worker's implementation so an orchestration fn can allocate / copy / free without reaching

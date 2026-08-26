@@ -59,6 +59,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     ChipTensor,
     CoreCallable,
     DataType,
+    DeviceMemoryInfo,
     RuntimeEnv,
     TaskArgs,
     TaskHandle,
@@ -153,6 +154,7 @@ from .global_comm_domain import GlobalDomainAttachment, GlobalDomainBuffer, Glob
 
 __all__ = [
     "DataType",
+    "DeviceMemoryInfo",
     "get_element_size",
     "get_dtype_name",
     "MAX_TENSOR_DIMS",
@@ -1702,3 +1704,7 @@ class ChipWorker:
     def committed_device_memory(self) -> int:
         """Total device HBM (bytes) committed by this chip worker's MemoryAllocator."""
         return int(self._impl.committed_device_memory)
+
+    def device_memory_info(self) -> DeviceMemoryInfo:
+        """Device-wide ACL_HBM_MEM free/total byte snapshot."""
+        return self._impl.device_memory_info()
