@@ -178,7 +178,6 @@ struct DumpedArg {
     uint32_t strides[PLATFORM_DUMP_MAX_DIMS];  // Element stride per dim (> 0, type-enforced)
     bool is_contiguous;
     bool truncated;
-    bool overwritten;
     uint64_t payload_size;
     uint64_t bin_offset;
     std::vector<uint8_t> bytes;
@@ -300,7 +299,6 @@ private:
         void *dev_ptr{nullptr};
         void *host_ptr{nullptr};
         uint64_t size{0};
-        uint64_t high_water{0};
     };
     std::vector<ArenaInfo> arenas_;
 
@@ -316,7 +314,6 @@ private:
     // Stats
     std::atomic<uint32_t> total_dropped_record_count_{0};
     std::atomic<uint32_t> total_truncated_count_{0};
-    std::atomic<uint32_t> total_overwrite_count_{0};
     std::array<std::atomic<uint64_t>, PLATFORM_MAX_AICPU_THREADS> written_payload_counts_{};
 
     // Run-scoped state for the writer thread (lazily started on first

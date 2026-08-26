@@ -32,7 +32,6 @@ def _tensor_record(  # noqa: PLR0913
     bin_offset=0,
     bin_size=4,
     truncated=False,
-    overwritten=False,
 ):
     shape = [4] if shape is None else shape
     strides = [1] if strides is None else strides
@@ -50,7 +49,6 @@ def _tensor_record(  # noqa: PLR0913
         "bin_offset": bin_offset,
         "bin_size": bin_size,
         "truncated": truncated,
-        "overwritten": overwritten,
     }
 
 
@@ -132,7 +130,6 @@ def test_restore_arg_scatters_logical_payload_into_strided_physical_view(tmp_pat
     [
         ({"stage": "after_completion", "role": "output"}, "no before_dispatch payload"),
         ({"truncated": True}, "payload is truncated"),
-        ({"overwritten": True}, "payload was overwritten"),
         ({"bin_size": 3}, "does not match logical tensor size"),
     ],
 )

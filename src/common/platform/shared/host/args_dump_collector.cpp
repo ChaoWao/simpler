@@ -115,7 +115,6 @@ int ArgsDumpCollector::initialize(
     reset_collector_shards();
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
     total_truncated_count_.store(0, std::memory_order_relaxed);
-    total_overwrite_count_.store(0, std::memory_order_relaxed);
     last_progress_ms_.store(0, std::memory_order_relaxed);
     for (auto &count : written_payload_counts_) {
         count.store(0, std::memory_order_relaxed);
@@ -333,7 +332,6 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
         dt.scalar_value = rec.scalar_value;
         dt.is_contiguous = (rec.is_contiguous != 0);
         dt.truncated = (rec.truncated != 0);
-        dt.overwritten = false;
         dt.start_offset = rec.start_offset;
         std::memcpy(dt.shapes, rec.shapes, sizeof(dt.shapes));
         std::memcpy(dt.strides, rec.strides, sizeof(dt.strides));
@@ -347,18 +345,7 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
             char *arena_host = reinterpret_cast<char *>(ai.host_ptr);
             uint64_t arena_sz = ai.size;
 
-            uint64_t high_water = ai.high_water;
-            if (high_water > arena_sz && rec.payload_offset < high_water - arena_sz) {
-                dt.overwritten = true;
-                if (total_overwrite_count_.fetch_add(1, std::memory_order_relaxed) == 0) {
-                    LOG_WARN(
-                        "Args dump overwrite detected: host drain was slower than arena reuse. "
-                        "Increase PLATFORM_DUMP_BUFFERS_PER_THREAD."
-                    );
-                }
-            }
-
-            if (!dt.overwritten && rec.payload_size > 0) {
+            if (rec.payload_size > 0) {
                 dt.bytes.resize(rec.payload_size);
                 uint64_t pos = rec.payload_offset % arena_sz;
                 if (pos + rec.payload_size <= arena_sz) {
@@ -369,15 +356,10 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
                     std::memcpy(dt.bytes.data() + first, arena_host, rec.payload_size - first);
                 }
             }
-
-            uint64_t end_offset = rec.payload_offset + rec.payload_size;
-            if (end_offset > ai.high_water) {
-                ai.high_water = end_offset;
-            }
         }
 
         dt.payload_size = dt.bytes.size();
-        bool has_payload = dt.kind == ArgsDumpKind::TENSOR && !dt.overwritten && !dt.bytes.empty();
+        bool has_payload = dt.kind == ArgsDumpKind::TENSOR && !dt.bytes.empty();
         if (has_payload) {
             PayloadWriteRequest writer_item{info.thread_index, std::move(dt.bytes)};
             {
@@ -701,7 +683,6 @@ int ArgsDumpCollector::export_dump_files() {
         reset_collector_shards();
         total_dropped_record_count_.store(0, std::memory_order_relaxed);
         total_truncated_count_.store(0, std::memory_order_relaxed);
-        total_overwrite_count_.store(0, std::memory_order_relaxed);
         writer_started_ = false;
         return 0;
     }
@@ -757,7 +738,6 @@ int ArgsDumpCollector::export_dump_files() {
     json << "  \"inout_args\": " << num_inout_args << ",\n";
     json << "  \"truncated_args\": " << total_truncated_count_.load(std::memory_order_relaxed) << ",\n";
     json << "  \"dropped_records\": " << total_dropped_record_count_.load(std::memory_order_relaxed) << ",\n";
-    json << "  \"dropped_overwrite\": " << total_overwrite_count_.load(std::memory_order_relaxed) << ",\n";
     if (dump_args_level_ == DumpArgsLevel::HYBRID && bytes_written_.load() == 0) {
         json << "  \"bin_file\": null,\n";
     } else {
@@ -799,8 +779,7 @@ int ArgsDumpCollector::export_dump_files() {
             json << ", \"arg_index_ambiguous\": true";
         }
         json << ", \"bin_offset\": " << dt.bin_offset << ", \"bin_size\": " << dt.payload_size
-             << ", \"truncated\": " << (dt.truncated ? "true" : "false")
-             << ", \"overwritten\": " << (dt.overwritten ? "true" : "false") << "}";
+             << ", \"truncated\": " << (dt.truncated ? "true" : "false") << "}";
     }
 
     json << "\n  ]\n}\n";
@@ -812,11 +791,8 @@ int ArgsDumpCollector::export_dump_files() {
 
     uint32_t truncated = total_truncated_count_.load(std::memory_order_relaxed);
     uint32_t dropped = total_dropped_record_count_.load(std::memory_order_relaxed);
-    uint32_t overwritten = total_overwrite_count_.load(std::memory_order_relaxed);
-    if (truncated > 0 || dropped > 0 || overwritten > 0) {
-        LOG_WARN(
-            "Args dump anomalies: truncated=%u, dropped_records=%u, overwritten=%u", truncated, dropped, overwritten
-        );
+    if (truncated > 0 || dropped > 0) {
+        LOG_WARN("Args dump anomalies: truncated=%u, dropped_records=%u", truncated, dropped);
     }
 
     // Clear state so subsequent runs don't accumulate data from previous runs
@@ -827,11 +803,7 @@ int ArgsDumpCollector::export_dump_files() {
     total_metadata_collected_.store(0, std::memory_order_relaxed);
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
     total_truncated_count_.store(0, std::memory_order_relaxed);
-    total_overwrite_count_.store(0, std::memory_order_relaxed);
     writer_started_ = false;
-    for (auto &ai : arenas_) {
-        ai.high_water = 0;
-    }
     return 0;
 }
 
@@ -931,7 +903,6 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
     total_metadata_collected_.store(0, std::memory_order_relaxed);
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
     total_truncated_count_.store(0, std::memory_order_relaxed);
-    total_overwrite_count_.store(0, std::memory_order_relaxed);
     writer_started_ = false;
     clear_memory_context();
     for (auto &count : written_payload_counts_) {

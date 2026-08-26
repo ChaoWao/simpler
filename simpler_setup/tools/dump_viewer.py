@@ -111,9 +111,6 @@ def write_arg(arg: dict, bin_path: Path | None, out):
     out.write(f"# strides: {arg['strides']}\n")
     out.write(f"# start_offset: {arg['start_offset']}\n")
 
-    if arg.get("overwritten"):
-        out.write("# DATA OVERWRITTEN (host too slow)\n")
-        return
     if arg.get("truncated"):
         out.write("# DATA TRUNCATED (tensor too large for arena)\n")
 
