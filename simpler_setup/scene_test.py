@@ -1140,6 +1140,33 @@ def _plot_case_scope_stats(case_label: str, output_prefix: Path) -> None:
         sys.path.remove(str(tools_dir))
 
 
+def _name_failing_case(exc: BaseException, cls_name: str, case_name: str) -> None:
+    """Prefix `exc`'s message with the class and case that raised it, in place.
+
+    The exception object, its type, its traceback and its attributes all survive,
+    which two callers depend on:
+
+    - A negative scene test asserts on the exception its own orchestration raised
+      (`TestAllreduceIbingNranksError` expects `ValueError`). Re-raising a wrapper
+      of a fixed type makes such a test unable to pass however it is written.
+    - `conftest._requires_l2_worker_retirement` gates on
+      `issubclass(excinfo.type, RuntimeError)` before matching device-poison codes
+      in the message. Every code and marker it looks for comes out of the native
+      layer as a `RuntimeError`, so preserving the type keeps it classifiable.
+
+    `str(exc)` keeps the original text after the prefix, so both that classifier
+    and `pytest.raises(match=...)` still match on it.
+
+    Only `args[0]` is rewritten. An exception that renders itself from dedicated
+    attributes rather than from `args` (`OSError` and its errno/strerror) simply
+    does not gain the prefix; it is never left inconsistent. Python 3.11's
+    `BaseException.add_note` would express this directly, but `requires-python` is
+    `>=3.9`.
+    """
+    context = f"SceneTest case failed: {cls_name}::{case_name}"
+    exc.args = (f"{context}: {exc}", *exc.args[1:]) if exc.args else (context,)
+
+
 def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI surface
     worker,
     cls_inst,
@@ -1196,7 +1223,8 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 output_prefix=str(prefix) if diagnostics_on else "",
             )
         except Exception as exc:
-            raise RuntimeError(f"SceneTest case failed: {cls_name}::{case['name']}: {exc}") from exc
+            _name_failing_case(exc, cls_name, case["name"])
+            raise
         finally:
             if enable_chip_swimlane:
                 _convert_case_swimlane(
