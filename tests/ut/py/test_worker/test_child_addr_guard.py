@@ -141,7 +141,9 @@ class TestDeviceAllocationTable:
     def test_a_registered_allocation_is_live_until_dropped(self):
         w = _l3()
         handle = _record_malloc(w, 0, 0x1000)
-        assert w._require_device_capability(handle.identity, BufferCapability.COPY_TO, 64, api="copy_to") is handle
+        registered = w._require_device_capability(handle.identity, BufferCapability.COPY_TO, 64, api="copy_to")
+        assert registered == handle
+        assert registered is not handle  # the authority is a private snapshot, not the mutable public handle
         with w._child_prov_lock:
             w._drop_device_alloc(handle.identity)
         with pytest.raises(ValueError, match="not a live device allocation"):
@@ -175,7 +177,9 @@ class TestDeviceAllocationTable:
             w._drop_device_alloc(a.identity)
         with pytest.raises(ValueError, match="not a live device allocation"):
             w._require_device_capability(a.identity, BufferCapability.COPY_TO, 64, api="copy_to")
-        assert w._require_device_capability(b.identity, BufferCapability.COPY_TO, 64, api="copy_to") is b
+        registered = w._require_device_capability(b.identity, BufferCapability.COPY_TO, 64, api="copy_to")
+        assert registered == b
+        assert registered is not b
 
     def test_only_delegated_copy_rights_are_conferred(self):
         # A Worker never dereferences a device allocation it hands out -- the in-process ChipWorker
@@ -212,8 +216,7 @@ class TestDomainAllocations:
             for buf in (first, second):
                 w._record_device_alloc(buf, domain_allocation_id=7)
         w._require_device_capability(first.identity, BufferCapability.COPY_TO, 64, api="copy_to")
-        with w._child_prov_lock:
-            w._drop_domain_allocs(7)
+        w._drop_domain_allocs(7)
         for buf in (first, second):
             with pytest.raises(ValueError, match="not a live device allocation"):
                 w._require_device_capability(buf.identity, BufferCapability.COPY_TO, 64, api="copy_to")
@@ -249,13 +252,18 @@ class TestDispatchResolution:
     def test_unique_target_and_live_passes(self):
         w = _l3()
         handle = _record_malloc(w, 0, 0x1000)
-        w._child_prov_check_dispatch([(handle.identity, 0)], 0, api="submit_next_level")
+        with w._child_prov_lock:
+            w._child_prov_check_dispatch_locked(
+                [(handle.identity, 0)], 0, args=_child_args(handle), api="submit_next_level"
+            )
 
     def test_unique_target_but_wrong_worker_rejected(self):
         w = _l3()
         handle = _record_malloc(w, 0, 0x1000)  # lives on worker 0
-        with pytest.raises(ValueError, match="not a live allocation on target worker 1"):
-            w._child_prov_check_dispatch([(handle.identity, 0)], 1, api="submit_next_level")
+        with pytest.raises(ValueError, match="not a live allocation on target worker 1"), w._child_prov_lock:
+            w._child_prov_check_dispatch_locked(
+                [(handle.identity, 0)], 1, args=_child_args(handle), api="submit_next_level"
+            )
 
 
 # ----------------------------------------------------------------------------
@@ -273,6 +281,34 @@ class TestChildDeviceMemoryOps:
         w.free(h)
         nw.free.assert_called_once_with(0, 0x1000)
         assert not _is_live(w, 0x1000, 0)
+
+    def test_mutating_public_handle_cannot_redirect_free(self):
+        w, nw = _l3_ready(0x1000)
+        handle = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        handle.owner_worker_id = 1
+        handle.base = 0xDEAD
+        handle.body = (0xDEAD).to_bytes(8, "little")
+        handle.nbytes = 1
+        handle.access = AccessMode.READ
+
+        w.free(handle)
+
+        nw.free.assert_called_once_with(0, 0x1000)
+
+    def test_mutating_public_handle_cannot_change_copy_execution_descriptor(self):
+        w, nw = _l3_ready(0x2000)
+        handle = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        handle.owner_worker_id = 1
+        handle.base = 0xDEAD
+        handle.body = (0xDEAD).to_bytes(8, "little")
+        handle.nbytes = 1
+        handle.access = AccessMode.READ
+
+        w.copy_to(handle, _HOSTSRC)
+
+        wid, dst_desc, _src_desc, nbytes, _dst_offset, _src_offset = nw.copy_to.call_args.args
+        assert (wid, _device_ptr(dst_desc), dst_desc.nbytes, nbytes) == (0, 0x2000, 64, 64)
+        assert dst_desc.access is AccessMode.READWRITE
 
     def test_free_wrong_worker_rejected_without_native_free(self):
         w, nw = _l3_ready(0x1000)
@@ -395,6 +431,32 @@ class TestChildDeviceMemoryOps:
             w.copy_from(_HOSTSRC, _dev_handle(0x3000, wid=0))
         nw.copy_from.assert_not_called()
 
+    def test_copy_from_offset_names_a_subrange_of_the_allocation(self):
+        # D2H carries the same span as H2D, with the device end on `src`: both offsets travel to the
+        # child, and the descriptor still names the allocation's own base.
+        w, nw = _l3_ready(0x3000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        with _host_buf(64) as dst:
+            w.copy_from(dst, h, dst_offset=8, src_offset=32, nbytes=16)
+        (wid, _dst_desc, src_desc, size, dst_off, src_off) = nw.copy_from.call_args.args
+        assert (wid, size, dst_off, src_off) == (0, 16, 8, 32)
+        assert _device_ptr(src_desc) == 0x3000  # the allocation's own base, not base + 32
+
+    def test_copy_from_offset_is_bounded_by_the_registered_allocation(self):
+        # The device end is bounded by the registered extent on this direction too, offset and
+        # length together, and the host end by the host backing.
+        w, nw = _l3_ready(0x3000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        with _host_buf(64) as dst:
+            w.copy_from(dst, h, src_offset=48, nbytes=16)  # exactly reaches the end
+            with pytest.raises(ValueError, match="exceeds the 64-byte backing"):
+                w.copy_from(dst, h, src_offset=48, nbytes=17)
+            with pytest.raises(ValueError, match="src_offset must be non-negative"):
+                w.copy_from(dst, h, src_offset=-1, nbytes=1)
+            with pytest.raises(ValueError, match=r"dst range .* exceeds the 64-byte backing"):
+                w.copy_from(dst, h, dst_offset=60, nbytes=8)
+        assert nw.copy_from.call_count == 1
+
     def test_orch_delegates_to_worker(self):
         # orch.alloc_child_tensor / free are thin wrappers over the bound Worker.
         w, nw = _l3_ready(0x1000)
@@ -449,13 +511,58 @@ class TestSubmitDispatchGuard:
             o.submit_next_level(object(), _child_args(h), None, worker=1)
         fake.submit_next_level.assert_not_called()
 
+    def test_same_identity_changed_descriptor_is_rejected_before_native_submit(self, _fake_handle):
+        w = _l3()
+        handle = _record_malloc(w, 0, 0x1000)
+        # The identity still resolves to the registered allocation, but the descriptor reaching
+        # native names a different address and extent. Authorization and execution must consume the
+        # same Buffer, so the registered snapshot is what decides.
+        handle.body = (0x9999).to_bytes(8, "little")
+        handle.nbytes = 0x4000
+        fake = MagicMock()
+        o = Orchestrator(fake, w)
+
+        with pytest.raises(ValueError, match="does not match the descriptor registered"):
+            o.submit_next_level(object(), _child_args(handle), None, worker=0)
+
+        fake.submit_next_level.assert_not_called()
+
+    def test_single_submit_holds_provenance_through_native_commit(self, _fake_handle):
+        w = _l3()
+        handle = _record_malloc(w, 0, 0x1000)
+        fake = MagicMock()
+
+        def assert_locked(*_args):
+            acquired = w._child_prov_lock.acquire(blocking=False)
+            if acquired:
+                w._child_prov_lock.release()
+            assert not acquired
+
+        fake.submit_next_level.side_effect = assert_locked
+        Orchestrator(fake, w).submit_next_level(object(), _child_args(handle), None, worker=0)
+
+    def test_group_submit_holds_provenance_through_native_commit(self, _fake_handle):
+        w = _l3()
+        handle = _record_malloc(w, 0, 0x1000)
+        fake = MagicMock()
+
+        def assert_locked(*_args):
+            acquired = w._child_prov_lock.acquire(blocking=False)
+            if acquired:
+                w._child_prov_lock.release()
+            assert not acquired
+
+        fake.submit_next_level_group.side_effect = assert_locked
+        Orchestrator(fake, w).submit_next_level_group(object(), [_child_args(handle)], None, workers=[0])
+
     def test_host_only_args_are_not_guarded(self, _fake_handle):
-        # A submit with no device (DEVICE_MALLOC) ref never touches provenance.
+        # A host-backed ref names no child device allocation, so it never enters the dispatch
+        # pre-scan and needs no exact-chip authorization.
         w = _l3()
         fake = MagicMock()
         o = Orchestrator(fake, w)
         args = TaskArgs()
-        host = wrap_fork_inherited(0x9000, 64, _OID, buffer_id=0x9000)
+        host = wrap_fork_inherited(0x9000, 64, w._owner_instance_id, buffer_id=0x9000)
         args.add_tensor(host.tensor(shapes=(16,), dtype=_F32), TensorArgType.INPUT)
         o.submit_next_level(object(), args, None, worker=0)
         fake.submit_next_level.assert_called_once()
@@ -533,8 +640,7 @@ class TestSubmitDispatchGuard:
         with pytest.raises(ValueError, match="target worker 1"):
             o.submit_next_level(object(), _child_args(buf), None, worker=1)
         # after release the buffer is dead everywhere
-        with w._child_prov_lock:
-            w._drop_domain_allocs(42)
+        w._drop_domain_allocs(42)
         with pytest.raises(ValueError, match="not a live allocation"):
             o.submit_next_level(object(), _child_args(buf), None, worker=0)
 
@@ -773,10 +879,14 @@ class TestDomainReleaseOrdering:
         outcome = {}
 
         def _fake_dispatch(**kwargs):
-            # `_child_prov_check_dispatch` takes `_child_prov_lock` itself, and that lock is not
-            # re-entrant, so this runs outside it.
+            # `_child_prov_lock` is not re-entrant, and the release path holds it only while
+            # revoking, so this dispatch check runs outside that window exactly as a real submit
+            # would.
             try:
-                w._child_prov_check_dispatch([(bufs[0].identity, 0)], 0, api="submit_next_level")
+                with w._child_prov_lock:
+                    w._child_prov_check_dispatch_locked(
+                        [(bufs[0].identity, 0)], 0, args=_child_args(bufs[0]), api="submit_next_level"
+                    )
                 outcome["dispatch"] = "allowed"
             except ValueError:
                 outcome["dispatch"] = "rejected"
@@ -810,20 +920,26 @@ class TestDomainReleaseOrdering:
 
 class TestCopyHandleValidation:
     def test_rejects_host_handle(self):
+        # A host handle on the device end is the wrong API, not an unregistered allocation: it is
+        # refused by what it is, so the message names the address space rather than reporting the
+        # same text a stale device identity gets.
         w, nw = _l3_ready(0x1000)
         host = create_host_shared_buffer(64, _OID, buffer_id=1)
         try:
-            with pytest.raises(ValueError, match="expected a DEVICE handle"):
+            with pytest.raises(ValueError, match="expected a DEVICE handle, got HOST"):
                 w.copy_to(host, _HOSTSRC)
+            with pytest.raises(ValueError, match="expected a DEVICE handle, got HOST"):
+                w.copy_from(_HOSTSRC, host)
             nw.copy_to.assert_not_called()
+            nw.copy_from.assert_not_called()
         finally:
             host.close()
 
     def test_rejects_transfer_larger_than_the_backing(self):
         w, nw = _l3_ready(0x2000)
-        w.alloc_child_tensor(0, (32,), DataType.UINT8)  # a 32-byte backing
+        handle = w.alloc_child_tensor(0, (32,), DataType.UINT8)  # a 32-byte backing
         with pytest.raises(ValueError, match="exceeds the 32-byte backing"):
-            w.copy_to(_dev_handle(0x2000, wid=0, nbytes=32), _HOSTSRC)  # _HOSTSRC is 64 B
+            w.copy_to(handle, _HOSTSRC)  # _HOSTSRC is 64 B
         nw.copy_to.assert_not_called()
 
     def test_rejects_write_to_a_read_only_backing(self):

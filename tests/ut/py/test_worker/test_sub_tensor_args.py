@@ -27,6 +27,7 @@ from simpler.buffer import (
     mint_owner_instance_id,
     wrap_fork_inherited,
 )
+from simpler.comm_endpoints import HOST_CPU
 from simpler.task_interface import (
     CallConfig,
     ChipStorageTaskArgs,
@@ -129,7 +130,7 @@ def test_mapped_args_from_blob_delivers_tensors_and_scalars():
     ref = wrap_fork_inherited(va, 16, mint_owner_instance_id(), 1, "L3").tensor((4,), _F32)
     blob = encode_blob([ref], (17, 99))
     buf = ctypes.create_string_buffer(blob, len(blob))
-    args = ImportRegistry(ImportContext(is_host_endpoint=True)).mapped_args_from_blob(ctypes.addressof(buf), len(blob))
+    args = ImportRegistry(ImportContext(deployment=HOST_CPU)).mapped_args_from_blob(ctypes.addressof(buf), len(blob))
     assert len(args) == 1 and args.tensor_count() == 1
     assert args.scalar_count() == 2
     assert args.scalar(0) == 17 and args.scalar(1) == 99

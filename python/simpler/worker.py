@@ -2202,7 +2202,7 @@ def _sub_worker_loop(
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     # SUB is a Python host process: no device VA is ever valid here.
-    import_registry = ImportRegistry(ImportContext(is_host_endpoint=True))
+    import_registry = ImportRegistry(ImportContext(deployment=HOST_CPU))
 
     def handle_task(task_buf) -> tuple[int, str]:
         digest = _read_task_digest(task_buf)
@@ -2752,7 +2752,12 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             target=DeviceAllocationTarget(int(device_id)),
         )
     )
-    import_registry = ImportRegistry(ImportContext(is_host_endpoint=False, device_owner_instance_id=owner_instance_id))
+    import_registry = ImportRegistry(
+        ImportContext(
+            deployment=DEVICE_AICPU,
+            device_owner_instance_id=owner_instance_id,
+        )
+    )
     global_domain_store = _L2GlobalDomainStore()
 
     def handle_task(task_buf) -> tuple[int, str]:
@@ -4572,9 +4577,13 @@ class Worker:
         # Which identities each CommDomain allocation minted, so its release revokes them together.
         self._domain_members: dict[int, set[CanonicalIdentity]] = {}
         # Guards both device-allocation tables. Entry points take it (`_require_device_capability`,
-        # `_device_worker_for`, `_child_prov_check_dispatch`); the record/drop helpers assume the
-        # caller holds it, so that a registration and the native call it follows commit together.
-        # It is not reentrant, so an entry point must never be called with it already held.
+        # `_device_worker_for`, `_child_prov_check_dispatch`, `_drop_domain_allocs`); the `_locked`
+        # helpers and the record/drop-one helpers assume the caller holds it. It is not reentrant,
+        # so an entry point must never be called with it already held -- including indirectly
+        # through `_child_prov_worker_lock`, which takes it to reach the per-worker lock table.
+        # Authorization is fenced by that per-worker lock, not by this one: an op holds its chip's
+        # lock across both the check and the native call, and every revoker of an allocation on
+        # that chip takes the same lock before revoking.
         self._child_prov_lock = threading.Lock()
         # Per-worker locks for the *native* half of a provenance-guarded device op.
         # ``_child_prov_lock`` stays the bookkeeping lock (short, process-wide); the
@@ -8856,8 +8865,7 @@ class Worker:
             # the domain's pointers are no longer dispatchable. Dropping first
             # makes an interrupted/failed release a recoverable leak instead of
             # leaving a use-after-free validation window.
-            with self._child_prov_lock:
-                self._drop_domain_allocs(handle.allocation_id)
+            self._drop_domain_allocs(handle.allocation_id)
             request_shms: dict[int, SharedMemory] = {}
             for chip_idx in workers:
                 req = request_owner.create(req_size)
@@ -9234,8 +9242,7 @@ class Worker:
         state.phase = GlobalDomainPhase.ABORT
         if state.view is not None:
             state.view._committed = False  # noqa: SLF001 -- node session owns the transaction
-        with self._child_prov_lock:
-            self._drop_domain_allocs(self._global_domain_provenance_id(command.domain_id))
+        self._drop_domain_allocs(self._global_domain_provenance_id(command.domain_id))
         if self._worker is None:
             return
         errors: list[BaseException] = []
@@ -9878,9 +9885,12 @@ class Worker:
         """Make ``handle`` a live device allocation operands may name. Caller holds ``_child_prov_lock``.
 
         ``domain_allocation_id`` ties the identity to the CommDomain allocation that minted it, so
-        that domain's release revokes it. A ``malloc``-backed handle has none.
+        that domain's release revokes it. A ``malloc``-backed handle has none. The registry keeps a
+        private snapshot rather than the mutable object returned to the caller: identity resolves
+        every execution field, so changing a public handle can never change the worker id, address,
+        extent, access mode, or descriptor used by a later operation.
         """
-        self._child_alloc[handle.identity] = handle
+        self._child_alloc[handle.identity] = replace(handle)
         if domain_allocation_id is not None:
             self._domain_members.setdefault(domain_allocation_id, set()).add(handle.identity)
 
@@ -9893,14 +9903,43 @@ class Worker:
         self._child_alloc.pop(identity, None)
 
     def _drop_domain_allocs(self, allocation_id: int) -> None:
-        """Revoke every identity a CommDomain allocation minted. Caller holds ``_child_prov_lock``.
+        """Revoke every identity a CommDomain allocation minted. Caller holds neither lock.
 
         Runs at the start of the domain's physical release, before the backend free (see
         ``_release_domain_now``). The backend release is keyed by allocation id and takes no pointer,
         so revoking by allocation id is the same unit the release itself uses.
+
+        Each chip's identities are revoked under that chip's ``_child_prov_worker_lock``, the same
+        fence an authorized copy holds through its native call, so a release can never land between
+        a copy's authorization and its commit. The chips are taken one at a time and never nested:
+        an identity belongs to exactly one ``owner_worker_id``, so per-chip exclusion is the whole
+        requirement, and the backend free still runs after every revocation.
+
+        The final pass drops the membership record. Its ``_child_alloc`` sweep is fail-safe rather
+        than load-bearing: both tables are written together, and a ``buffer_id`` never repeats
+        within an owner incarnation, so a member absent from ``_child_alloc`` during the first pass
+        was already revoked and no later pass can resurrect it.
         """
-        for identity in self._domain_members.pop(allocation_id, set()):
-            self._child_alloc.pop(identity, None)
+        with self._child_prov_lock:
+            worker_ids = sorted(
+                {
+                    int(handle.owner_worker_id)
+                    for identity in self._domain_members.get(allocation_id, ())
+                    if (handle := self._child_alloc.get(identity)) is not None
+                }
+            )
+        for worker_id in worker_ids:
+            # Taken outside `_child_prov_lock`: `_child_prov_worker_lock` acquires it to reach the
+            # per-worker lock table, and that lock is not reentrant.
+            with self._child_prov_worker_lock(worker_id):
+                with self._child_prov_lock:
+                    for identity in tuple(self._domain_members.get(allocation_id, ())):
+                        handle = self._child_alloc.get(identity)
+                        if handle is not None and int(handle.owner_worker_id) == worker_id:
+                            self._child_alloc.pop(identity, None)
+        with self._child_prov_lock:
+            for identity in self._domain_members.pop(allocation_id, set()):
+                self._child_alloc.pop(identity, None)
 
     def _require_freeable(self, handle: Buffer, *, api: str) -> Buffer:
         """The registered allocation ``handle`` names, provided ``free`` is what releases it.
@@ -9929,7 +9968,10 @@ class Worker:
         endpoint: neither can map a device backing, and only this one can still reach one, by
         driving the control mailbox of the chip that owns it.
         """
-        return ImportContext(is_host_endpoint=True, device_owner_instance_id=self._owner_instance_id)
+        return ImportContext(
+            deployment=HOST_CPU,
+            device_owner_instance_id=self._owner_instance_id,
+        )
 
     def _device_worker_for(self, identity: CanonicalIdentity, *, api: str) -> int:
         """The next-level worker ``identity``'s device allocation lives on.
@@ -9947,7 +9989,7 @@ class Worker:
                 )
             return int(bound.owner_worker_id)
 
-    def _require_device_capability(
+    def _require_device_capability_locked(
         self,
         identity: CanonicalIdentity,
         capability: BufferCapability,
@@ -9956,8 +9998,8 @@ class Worker:
         offset: int = 0,
         api: str,
     ) -> Buffer:
-        """Authorize ``capability`` over ``[offset, offset + nbytes)`` of the device backing
-        ``identity`` names, and return the registered ``Buffer`` it resolves to.
+        """Authorize ``capability`` over a registered device Buffer. Caller holds
+        ``_child_prov_lock``.
 
         The identity is the input and the pointer is the *result*, which is the whole point: a
         pointer says nothing about which allocation it currently belongs to, so a handle whose
@@ -9980,35 +10022,57 @@ class Worker:
         if nbytes < 0:
             raise ValueError(f"Worker.{api}: nbytes must be non-negative, got {nbytes}")
         if offset < 0:
-            raise ValueError(f"Worker.{api}: offset must be non-negative, got {offset}")
+            offset_name = "dst_offset" if capability is BufferCapability.COPY_TO else "src_offset"
+            raise ValueError(f"Worker.{api}: {offset_name} must be non-negative, got {offset}")
+        handle = self._child_alloc.get(identity)
+        if handle is None:
+            raise ValueError(
+                f"Worker.{api}: {identity} is not a live device allocation on this worker "
+                f"(never allocated here, already freed, or its domain was released)"
+            )
+        kind, _profile = select_adapter(handle.to_descriptor(), self._owner_endpoint_context(), where=f"Worker.{api}")
+        granted = capabilities_for_adapter(kind, handle.access)
+        if capability not in granted:
+            needed_access = (
+                "WRITE"
+                if capability in (BufferCapability.COPY_TO, BufferCapability.DIRECT_STORE)
+                else "READ"
+                if capability in (BufferCapability.COPY_FROM, BufferCapability.DIRECT_LOAD)
+                else capability.value
+            )
+            raise ValueError(
+                f"Worker.{api}: {identity} was allocated {handle.access.name}, which grants "
+                f"{sorted(c.value for c in granted)} -- not {capability.value}; this direction needs {needed_access}"
+            )
+        extent = int(handle.nbytes)
+        if offset > extent or nbytes > extent - offset:
+            raise ValueError(
+                f"Worker.{api}: [{offset}, {offset}+{nbytes}) overruns {identity}; the range exceeds "
+                f"the {extent}-byte backing"
+            )
+        return handle
+
+    def _require_device_capability(
+        self,
+        identity: CanonicalIdentity,
+        capability: BufferCapability,
+        nbytes: int,
+        *,
+        offset: int = 0,
+        api: str,
+    ) -> Buffer:
+        """Locking entry point for tests and callers that do not already hold provenance."""
         with self._child_prov_lock:
-            handle = self._child_alloc.get(identity)
-            if handle is None:
-                raise ValueError(
-                    f"Worker.{api}: {identity} is not a live device allocation on this worker "
-                    f"(never allocated here, already freed, or its domain was released)"
-                )
-            kind, _profile = select_adapter(handle.to_descriptor(), self._owner_endpoint_context())
-            granted = capabilities_for_adapter(kind, handle.access)
-            if capability not in granted:
-                raise ValueError(
-                    f"Worker.{api}: {identity} was allocated {handle.access.name}, which grants "
-                    f"{sorted(c.value for c in granted)} -- not {capability.value}"
-                )
-            extent = int(handle.nbytes)
-            if offset > extent or nbytes > extent - offset:
-                raise ValueError(
-                    f"Worker.{api}: [{offset}, {offset}+{nbytes}) overruns {identity}, which spans {extent}"
-                )
-            return handle
+            return self._require_device_capability_locked(identity, capability, nbytes, offset=offset, api=api)
 
     @staticmethod
     def _device_identities_in_args(args: Any) -> list[tuple[CanonicalIdentity, int]]:
-        """``(identity, arg_index)`` for every device arg -- what the dispatch guard validates.
+        """``(identity, arg_index)`` for every arg that names a child device allocation.
 
         A ``DEVICE_MALLOC`` (worker device malloc) or ``VMM_WINDOW`` (domain-carved) ref names an
-        allocation behind a chip boundary, so its identity is what the owner can resolve. Host-backed
-        refs (POSIX / fork shm) are not owner-side allocations and contribute nothing.
+        allocation behind a chip boundary, so its identity is what the owner can resolve.
+        Host-backed refs (POSIX/fork shm) name nothing the owner allocation table holds and
+        contribute nothing.
         """
         out: list[tuple[CanonicalIdentity, int]] = []
         for i in range(args.tensor_count()):
@@ -10045,24 +10109,38 @@ class Worker:
             return
         resources.touched_identities.update(self._identities_in_args(args))
 
-    def _child_prov_check_dispatch(
-        self, device_args: list[tuple[CanonicalIdentity, int]], target_worker_id: int, *, api: str
+    def _child_prov_check_dispatch_locked(
+        self,
+        device_args: list[tuple[CanonicalIdentity, int]],
+        target_worker_id: int,
+        *,
+        args: Any,
+        api: str,
     ) -> None:
-        """Validate every device arg against the worker it is dispatched to.
+        """Validate device args against the worker they are dispatched to.
+
+        The caller holds ``_child_prov_lock`` and keeps holding it through the native submit, which
+        is what makes the check and the dispatch one transaction; there is deliberately no
+        lock-taking wrapper, because one would return with the authorization already expired.
 
         The identity carries which worker owns the allocation, so "wrong worker" is an equality on
-        the registered handle rather than a lookup keyed by the pair.
+        the registered handle rather than a lookup keyed by the pair. The descriptor sent to native
+        must also match the private allocation snapshot exactly: authorization and execution consume
+        the same Buffer, so a same-identity descriptor with a changed body/backend/extent/access is
+        rejected before the submit can commit.
         """
-        if not device_args:
-            return
-        with self._child_prov_lock:
-            for identity, arg_index in device_args:
-                handle = self._child_alloc.get(identity)
-                if handle is None or int(handle.owner_worker_id) != target_worker_id:
-                    raise ValueError(
-                        f"orch.{api}: device argument (arg {arg_index}, {identity}) is not a live "
-                        f"allocation on target worker {target_worker_id} (wrong worker, or stale)"
-                    )
+        for identity, arg_index in device_args:
+            handle = self._child_alloc.get(identity)
+            if handle is None or int(handle.owner_worker_id) != target_worker_id:
+                raise ValueError(
+                    f"orch.{api}: device argument (arg {arg_index}, {identity}) is not a live "
+                    f"allocation on target worker {target_worker_id} (wrong worker, or stale)"
+                )
+            if args.tensor(arg_index).buffer != handle.to_descriptor():
+                raise ValueError(
+                    f"orch.{api}: device argument (arg {arg_index}, {identity}) does not match "
+                    "the descriptor registered for that allocation"
+                )
 
     def _require_local_next_level_target(self, worker_id: int, *, api: str) -> None:
         """Reject a local callable pinned to a remote NEXT_LEVEL worker.
@@ -10114,6 +10192,10 @@ class Worker:
             raise TypeError("worker.malloc is L2-only; at L3+ use worker.alloc_child_tensor(worker_id, ...)")
         with self._operation_lease("malloc"):
             assert self._chip_worker is not None
+            # Minted before the registration lock: `_next_buffer_id` takes `_registry_lock`, and
+            # `_child_prov_lock` is never held across another lock. Ids need only be unique, so one
+            # skipped by a failed alloc costs nothing.
+            buffer_id = self._next_buffer_id()
             # L2 is a single chip; worker_id is meaningless there, so the provenance is keyed
             # on the canonical worker 0.
             with self._child_prov_lock:
@@ -10122,7 +10204,7 @@ class Worker:
                     ptr,
                     int(size),
                     self._owner_instance_id,
-                    self._next_buffer_id(),
+                    buffer_id,
                     f"L{self.level}",
                     owner_worker_id=0,
                 )
@@ -10150,15 +10232,15 @@ class Worker:
             self._child_prov_worker_lock(int(worker_id)),
         ):
             ptr = int(self._worker.malloc(int(worker_id), int(nbytes)))
+            handle = wrap_device_malloc(
+                ptr,
+                int(nbytes),
+                self._owner_instance_id,
+                self._next_buffer_id(),
+                f"L{self.level}",
+                owner_worker_id=int(worker_id),
+            )
             with self._child_prov_lock:
-                handle = wrap_device_malloc(
-                    ptr,
-                    int(nbytes),
-                    self._owner_instance_id,
-                    self._next_buffer_id(),
-                    f"L{self.level}",
-                    owner_worker_id=int(worker_id),
-                )
                 self._record_device_alloc(handle)
         return handle
 
@@ -10167,10 +10249,11 @@ class Worker:
 
         The operation lease is re-entrant, so an in-run ``orch.free`` that delegates here nests safely.
         """
-        wid = int(handle.owner_worker_id)
-        # Reject a non-chip target (L4+, or a bad id) before the lease and the fence: a device op is
-        # only meaningful on a next-level chip, and an invalid id must fail now rather than after a
-        # wait for the FIFO head.
+        if self.level != 2 and not self._chip_shms:
+            self._check_chip_worker_id(0)
+        # Lock selection comes from the private registration snapshot. A caller may mutate the
+        # public handle, but cannot redirect a free to another chip.
+        wid = self._device_worker_for(handle.identity, api="free")
         if self.level != 2:
             self._check_chip_worker_id(wid)
         with self._operation_lease("free"), self._device_control_admission("free"):
@@ -10234,28 +10317,6 @@ class Worker:
             return self._orch.device_memory_info(worker_id)
 
     @staticmethod
-    def _check_copy_handle(handle: Buffer, offset: int, nbytes: int, *, writing: bool, side: str, api: str) -> None:
-        """Require ``handle`` to be a device backing this copy may legally touch over
-        ``[offset, offset + nbytes)``.
-
-        Without this check a transfer longer than the device backing writes past it, and a READ-only
-        backing accepts a write.
-        """
-        if handle.address_space != AddressSpace.DEVICE:
-            raise ValueError(
-                f"Worker.{api}: expected a DEVICE handle, got {handle.address_space.name} "
-                f"({handle.backend_kind.name}); host-to-host copies do not go through this API"
-            )
-        if handle.backend_kind not in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
-            raise ValueError(f"Worker.{api}: backend {handle.backend_kind.name} is not reachable from this process")
-        needed = AccessMode.WRITE if writing else AccessMode.READ
-        if handle.access not in (needed, AccessMode.READWRITE):
-            raise ValueError(
-                f"Worker.{api}: backing grants {handle.access.name} but this direction needs {needed.name}"
-            )
-        _require_copy_span(int(handle.nbytes), offset, nbytes, side=side, api=api)
-
-    @staticmethod
     def _copy_extent(
         host_nbytes: int, device_offset: int, host_offset: int, nbytes: int | None, *, host_side: str, api: str
     ) -> tuple[int, int, int]:
@@ -10275,6 +10336,20 @@ class Worker:
         nbytes = max(0, host_nbytes - host_offset) if nbytes is None else int(nbytes)
         _require_copy_span(host_nbytes, host_offset, nbytes, side=host_side, api=api)
         return device_offset, host_offset, nbytes
+
+    @staticmethod
+    def _require_device_end(handle: Buffer, *, api: str) -> None:
+        """Reject a host handle on the device end by what it is, before the identity is looked up.
+
+        Address space is a property of the handle the caller passed, so naming it here says
+        ``copy_to(host_a, host_b)`` is the wrong API rather than reporting the same mistake as an
+        unregistered allocation, which is what the identity lookup alone would call it.
+        """
+        if handle.address_space != AddressSpace.DEVICE:
+            raise ValueError(
+                f"Worker.{api}: expected a DEVICE handle, got {handle.address_space.name} "
+                f"({handle.backend_kind.name}); host-to-host copies do not go through this API"
+            )
 
     @staticmethod
     def _host_side_of_copy(obj, *, writing: bool, api: str) -> tuple[Buffer | None, int, int]:
@@ -10326,11 +10401,9 @@ class Worker:
         dst_offset, src_offset, nbytes = self._copy_extent(
             host_nbytes, dst_offset, src_offset, nbytes, host_side="src", api="copy_to"
         )
-        self._check_copy_handle(dst, dst_offset, nbytes, writing=True, side="dst", api="copy_to")
-        if self.level != 2:
-            # Topology before identity: a Worker with no chip children can hold no device
-            # allocation at all, so it owes that answer rather than "this identity is not live".
-            self._check_chip_worker_id(int(dst.owner_worker_id))
+        if self.level != 2 and not self._chip_shms:
+            self._check_chip_worker_id(0)
+        self._require_device_end(dst, api="copy_to")
         # Which per-worker lock to take, resolved from the registry rather than read off the handle:
         # holding the wrong worker's lock would serialize this device op against the wrong queue.
         wid = self._device_worker_for(dst.identity, api="copy_to")
@@ -10338,29 +10411,39 @@ class Worker:
             self._check_chip_worker_id(wid)
             host = self._require_buffer_host_side(host, "copy_to")
         with self._operation_lease("copy_to"), self._device_control_admission("copy_to"):
+            # This worker's lock spans authorization and the native call. `free` and a CommDomain
+            # release both take it before revoking an allocation on this chip, so neither can retire
+            # the identity in between; `_clear_child_prov` does not, and needs not -- close drains
+            # every leased op before teardown reaches it. The device end is the only end authorized:
+            # it names memory behind a chip boundary, so only owner-side state knows whether that
+            # identity still resolves to a live allocation. A host end is either a Buffer the child
+            # materializes for itself (L3+) or memory already mapped in this process (L2), and the
+            # second is reachable by the caller with or without this API.
             with self._child_prov_worker_lock(wid):
-                # The authorization is here, inside the lock: a free landing between resolution and
-                # the copy would otherwise slip through. The device end is the only end authorized --
-                # it names memory behind a chip boundary, so only owner-side state knows whether that
-                # identity still resolves to a live allocation. A host end is either a Buffer the
-                # child materializes for itself (L3+) or memory already mapped in this process (L2),
-                # and the second is reachable by the caller with or without this API.
-                backing = self._require_device_capability(
-                    dst.identity, BufferCapability.COPY_TO, nbytes, offset=dst_offset, api="copy_to"
-                )
+                with self._child_prov_lock:
+                    registered = self._require_device_capability_locked(
+                        dst.identity, BufferCapability.COPY_TO, nbytes, offset=dst_offset, api="copy_to"
+                    )
                 if self.level == 2:
                     # No fork: the chip worker runs in this process, so the host address is valid and
                     # both offsets are applied here.
                     assert self._chip_worker is not None
                     self._chip_worker.copy_to(
-                        _copy_span_base(int(backing.base), dst_offset),
+                        _copy_span_base(int(registered.base), dst_offset),
                         _copy_span_base(src_addr, src_offset),
                         nbytes,
                     )
                 else:
                     assert self._worker is not None
                     assert host is not None
-                    self._worker.copy_to(wid, dst.to_descriptor(), host.to_descriptor(), nbytes, dst_offset, src_offset)
+                    self._worker.copy_to(
+                        wid,
+                        registered.to_descriptor(),
+                        host.to_descriptor(),
+                        nbytes,
+                        dst_offset,
+                        src_offset,
+                    )
 
     def copy_from(
         self, dst, src: Buffer, *, dst_offset: int = 0, src_offset: int = 0, nbytes: int | None = None
@@ -10378,11 +10461,9 @@ class Worker:
         src_offset, dst_offset, nbytes = self._copy_extent(
             host_nbytes, src_offset, dst_offset, nbytes, host_side="dst", api="copy_from"
         )
-        self._check_copy_handle(src, src_offset, nbytes, writing=False, side="src", api="copy_from")
-        if self.level != 2:
-            # Topology before identity: a Worker with no chip children can hold no device
-            # allocation at all, so it owes that answer rather than "this identity is not live".
-            self._check_chip_worker_id(int(src.owner_worker_id))
+        if self.level != 2 and not self._chip_shms:
+            self._check_chip_worker_id(0)
+        self._require_device_end(src, api="copy_from")
         # Which per-worker lock to take, resolved from the registry rather than read off the handle:
         # holding the wrong worker's lock would serialize this device op against the wrong queue.
         wid = self._device_worker_for(src.identity, api="copy_from")
@@ -10390,30 +10471,38 @@ class Worker:
             self._check_chip_worker_id(wid)
             host = self._require_buffer_host_side(host, "copy_from")
         with self._operation_lease("copy_from"), self._device_control_admission("copy_from"):
+            # This worker's lock spans authorization and the native call. `free` and a CommDomain
+            # release both take it before revoking an allocation on this chip, so neither can retire
+            # the identity in between; `_clear_child_prov` does not, and needs not -- close drains
+            # every leased op before teardown reaches it. The device end is the only end authorized:
+            # it names memory behind a chip boundary, so only owner-side state knows whether that
+            # identity still resolves to a live allocation. A host end is either a Buffer the child
+            # materializes for itself (L3+) or memory already mapped in this process (L2), and the
+            # second is reachable by the caller with or without this API.
             with self._child_prov_worker_lock(wid):
-                # The authorization is here, inside the lock: a free landing between resolution and
-                # the copy would otherwise slip through. The device end is the only end authorized --
-                # it names memory behind a chip boundary, so only owner-side state knows whether that
-                # identity still resolves to a live allocation. A host end is either a Buffer the
-                # child materializes for itself (L3+) or memory already mapped in this process (L2),
-                # and the second is reachable by the caller with or without this API.
-                backing = self._require_device_capability(
-                    src.identity, BufferCapability.COPY_FROM, nbytes, offset=src_offset, api="copy_from"
-                )
+                with self._child_prov_lock:
+                    registered = self._require_device_capability_locked(
+                        src.identity, BufferCapability.COPY_FROM, nbytes, offset=src_offset, api="copy_from"
+                    )
                 if self.level == 2:
                     # No fork: the chip worker runs in this process, so the host address is valid and
                     # both offsets are applied here.
                     assert self._chip_worker is not None
                     self._chip_worker.copy_from(
                         _copy_span_base(dst_addr, dst_offset),
-                        _copy_span_base(int(backing.base), src_offset),
+                        _copy_span_base(int(registered.base), src_offset),
                         nbytes,
                     )
                 else:
                     assert self._worker is not None
                     assert host is not None
                     self._worker.copy_from(
-                        wid, host.to_descriptor(), src.to_descriptor(), nbytes, dst_offset, src_offset
+                        wid,
+                        host.to_descriptor(),
+                        registered.to_descriptor(),
+                        nbytes,
+                        dst_offset,
+                        src_offset,
                     )
 
     # ------------------------------------------------------------------
@@ -11201,7 +11290,10 @@ class Worker:
         if registry is None:
             # This worker runs its own chip in-process (no fork, no mailbox): it is its own device
             # endpoint, so DEVICE backings it materializes must be its own.
-            context = ImportContext(is_host_endpoint=False, device_owner_instance_id=self._owner_instance_id)
+            context = ImportContext(
+                deployment=DEVICE_AICPU,
+                device_owner_instance_id=self._owner_instance_id,
+            )
             registry = ImportRegistry(context)
             self._chip_import_registry = registry
         if args is None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol
@@ -482,37 +482,24 @@ class AdapterKind(str, Enum):
 
 
 class AdapterProfile(str, Enum):
-    """How a consumer reaches a backing — the mechanism, not the wire backend tag.
+    """How a consumer reaches a Buffer — the mechanism, not the wire backend tag."""
 
-    One vocabulary evaluated at two moments, so a value's provenance is either region planning
-    (`_adapter_candidates`), tensor materialization (`buffer.select_adapter`), or both.
-    The partition is a consequence of what each moment can see, not a gap to be filled:
-    `_backend_kind_for_provider` gives a region exactly two backings — `VMM_WINDOW` for a device
-    provider and `POSIX_SHM` for a host one — so the fork-inherited and device-local mechanisms
-    below are unreachable from planning by construction, and `_adapter_candidates` is complete
-    without them.
-    """
-
-    # region planning only. `HOST_SVM_MAP` is the exception with no producer at all:
-    # `_adapter_candidates` stopped offering a direct map over a VMM backing, and the value stays
-    # because `DefaultRegionAccessService` still has to refuse it should another backing ever route
-    # one here.
+    # `HOST_SVM_MAP` currently has no implemented producer. It remains a named mechanism so the
+    # service can reject it explicitly instead of conflating it with an unknown profile.
     HOST_SVM_MAP = "HOST_SVM_MAP"
     HOST_VMM_COPY = "HOST_VMM_COPY"
     DEVICE_VMM_PEER_IMPORT = "DEVICE_VMM_PEER_IMPORT"
     DEVICE_FABRIC_V2_PEER_IMPORT = "DEVICE_FABRIC_V2_PEER_IMPORT"
     REMOTE_COPY = "REMOTE_COPY"
-    # both moments. `HOST_VMM_COPY` is how a host endpoint reaches a VMM window it cannot map, at
-    # either moment: the planner names it for a host region consumer, and `select_adapter` names it
-    # for a host endpoint holding a VMM-backed tensor.
     HOST_SHM_MAP = "HOST_SHM_MAP"
-    # tensor materialization only. These never travel in a `GlobalDomainCommand`, which is why
-    # `global_comm_domain._ADAPTER_PROFILE_IDS` does not number them.
+    # These profiles do not currently travel in a `GlobalDomainCommand`, which is why
+    # `global_comm_domain._ADAPTER_PROFILE_IDS` does not number them. They still enter the same
+    # Buffer candidate/service judgment as the profiles used by region planning.
     FORK_INHERITED_VA = "FORK_INHERITED_VA"
     DEVICE_LOCAL = "DEVICE_LOCAL"
-    # A host endpoint reaching a chip-owned `DEVICE_MALLOC` by asking that chip to copy. The
+    # A host endpoint reaching a chip-owned `DEVICE_MALLOC` Buffer by asking that chip to copy. The
     # planner has no counterpart because `_backend_kind_for_provider` never gives a region a
-    # `DEVICE_MALLOC` backing; the `VMM_WINDOW` half of the same relation is `HOST_VMM_COPY`.
+    # `DEVICE_MALLOC` Buffer; the `VMM_WINDOW` half of the same relation is `HOST_VMM_COPY`.
     OWNER_DEVICE_COPY = "OWNER_DEVICE_COPY"
 
 
@@ -532,14 +519,18 @@ class RegionLayoutSpec:
 
 
 @dataclass(frozen=True)
-class RegionAccessQuery:
-    topology: str
-    part: RegionPartKind
+class BufferAccessQuery:
+    """Facts needed to judge one candidate adapter for one Buffer kind.
+
+    Provider selection, region layout, and concrete Buffer authorization happen before this query.
+    ``same_endpoint`` distinguishes a Buffer already local to the consumer from a same-node peer;
+    backend plus deployment alone cannot distinguish DEVICE_LOCAL from DEVICE_PEER.
+    """
+
     backend_kind: BackendKind
-    provider: EndpointRecord
-    consumer: EndpointRecord
-    layout: RegionLayoutSpec
+    consumer_deployment: EndpointDeployment
     same_node: bool
+    same_endpoint: bool = False
     platform: str | None = None
     runtime: str | None = None
 
@@ -553,6 +544,9 @@ class RegionAccessDiagnostics:
     platform: str | None = None
     runtime: str | None = None
     backend_kind: BackendKind | None = None
+    consumer_deployment: EndpointDeployment | None = None
+    same_node: bool | None = None
+    same_endpoint: bool | None = None
     part: RegionPartKind | None = None
     adapter_kind: AdapterKind | None = None
     adapter_profile: AdapterProfile | None = None
@@ -594,9 +588,9 @@ class BackendPlan:
 
 
 class RegionAccessService(Protocol):
-    def evaluate_region_access(
+    def evaluate_buffer_access(
         self,
-        query: RegionAccessQuery,
+        query: BufferAccessQuery,
         candidate: _AdapterCandidate,
     ) -> RegionAccessDecision: ...
 
@@ -634,27 +628,61 @@ class _AdapterCandidate:
 
 
 class DefaultRegionAccessService:
-    def evaluate_region_access(
+    def evaluate_buffer_access(
         self,
-        query: RegionAccessQuery,
+        query: BufferAccessQuery,
         candidate: _AdapterCandidate,
     ) -> RegionAccessDecision:
-        if candidate.profile is AdapterProfile.HOST_VMM_COPY:
-            return self._evaluate_host_vmm_copy(query, candidate)
-        if candidate.profile is AdapterProfile.HOST_SVM_MAP:
+        if query.backend_kind is BackendKind.REMOTE_SIDECAR:
+            return _region_access_unsupported(
+                RegionAccessReasonCode.UNSUPPORTED_BACKEND_KIND,
+                candidate.unsupported_reason or "REMOTE_SIDECAR is not a locally materializable backend",
+                query,
+                candidate,
+            )
+        # Mechanisms that dereference a peer's memory. Whether one works is a platform fact that
+        # would have to be probed, and no probe exists — nor does a materializer that could carry
+        # either of them out, so admitting one would produce a plan nothing can honour.
+        if candidate.profile in (AdapterProfile.HOST_SVM_MAP, AdapterProfile.DEVICE_VMM_PEER_IMPORT):
             return _region_access_unsupported(
                 RegionAccessReasonCode.NO_IMPLEMENTED_DIRECT_MAP_PROBE,
                 "direct map probe is not implemented for this region access profile",
                 query,
                 candidate,
             )
-        if candidate.unsupported_reason is not None:
+        offered = any(
+            offered.kind is candidate.kind and offered.profile is candidate.profile
+            for offered in buffer_adapter_candidates(query)
+        )
+        if not offered:
             return _region_access_unsupported(
-                RegionAccessReasonCode.NO_COPY_BACKEND,
-                candidate.unsupported_reason,
+                RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION,
+                "adapter does not match this backend and consumer relation",
                 query,
                 candidate,
             )
+        # Availability is a service verdict, never an assertion carried by the candidate. A caller
+        # cannot turn an unimplemented adapter into a supported one by rebuilding the same
+        # kind/profile without its diagnostic `unsupported_reason`.
+        if candidate.profile in (AdapterProfile.REMOTE_COPY, AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT):
+            return _region_access_unsupported(
+                RegionAccessReasonCode.NO_COPY_BACKEND,
+                candidate.unsupported_reason or f"{candidate.profile.value} is not implemented for this endpoint",
+                query,
+                candidate,
+            )
+        # Every profile admitted here is carried out by something: `HOST_VMM_COPY` and
+        # `OWNER_DEVICE_COPY` by the owner's control-plane copy, the three map profiles by a
+        # resolver in `buffer._RESOLVERS`. A mechanism with no implementation belongs above, not
+        # here — admitting one lets a plan through that no materializer can honour.
+        if candidate.profile in (
+            AdapterProfile.HOST_VMM_COPY,
+            AdapterProfile.HOST_SHM_MAP,
+            AdapterProfile.FORK_INHERITED_VA,
+            AdapterProfile.DEVICE_LOCAL,
+            AdapterProfile.OWNER_DEVICE_COPY,
+        ):
+            return _region_access_supported(query, candidate)
         return _region_access_unsupported(
             RegionAccessReasonCode.STATIC_UNSUPPORTED,
             "region access profile is not supported by the default service",
@@ -662,44 +690,13 @@ class DefaultRegionAccessService:
             candidate,
         )
 
-    def _evaluate_host_vmm_copy(
-        self,
-        query: RegionAccessQuery,
-        candidate: _AdapterCandidate,
-    ) -> RegionAccessDecision:
-        if query.backend_kind is not BackendKind.VMM_WINDOW:
-            return _region_access_unsupported(
-                RegionAccessReasonCode.UNSUPPORTED_BACKEND_KIND,
-                "host VMM copy requires a VMM window backend",
-                query,
-                candidate,
-            )
-        if query.provider.deployment not in (DEVICE_AICORE, DEVICE_AICPU):
-            return _region_access_unsupported(
-                RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION,
-                "host VMM copy requires a device provider",
-                query,
-                candidate,
-            )
-        if query.consumer.deployment is not HOST_CPU or not query.same_node:
-            return _region_access_unsupported(
-                RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION,
-                "host VMM copy requires a same-node host consumer",
-                query,
-                candidate,
-            )
-        return _region_access_supported(query, candidate)
-
 
 class StaticRegionAccessService:
     def __init__(
         self,
-        decisions: dict[tuple[BackendKind, RegionPartKind, AdapterKind, AdapterProfile], RegionAccessDecision | bool]
-        | None = None,
+        decisions: dict[tuple[BackendKind, AdapterKind, AdapterProfile], RegionAccessDecision | bool] | None = None,
     ) -> None:
-        self._decisions: dict[
-            tuple[BackendKind, RegionPartKind, AdapterKind, AdapterProfile], RegionAccessDecision
-        ] = {}
+        self._decisions: dict[tuple[BackendKind, AdapterKind, AdapterProfile], RegionAccessDecision] = {}
         for key, decision in (decisions or {}).items():
             normalized = _normalize_region_access_key(key)
             if isinstance(decision, RegionAccessDecision):
@@ -707,12 +704,12 @@ class StaticRegionAccessService:
             else:
                 self._decisions[normalized] = RegionAccessDecision(bool(decision))
 
-    def evaluate_region_access(
+    def evaluate_buffer_access(
         self,
-        query: RegionAccessQuery,
+        query: BufferAccessQuery,
         candidate: _AdapterCandidate,
     ) -> RegionAccessDecision:
-        key = (query.backend_kind, query.part, candidate.kind, candidate.profile)
+        key = (query.backend_kind, candidate.kind, candidate.profile)
         decision = self._decisions.get(key)
         if decision is not None:
             if decision.supported and decision.diagnostics is None:
@@ -734,7 +731,11 @@ class StaticRegionAccessService:
 
 
 class BackendResolver:
-    def __init__(self, registry: EndpointRegistry, region_access: RegionAccessService) -> None:
+    def __init__(
+        self,
+        registry: EndpointRegistry,
+        region_access: RegionAccessService,
+    ) -> None:
         self._registry = registry
         self._region_access = region_access
 
@@ -827,17 +828,26 @@ class BackendResolver:
     ) -> MemberAttachmentPlan | UnsupportedRegionPlan:
         attempts: list[AdapterAttempt] = []
         same_node = self._registry.same_node(provider, member)
-        query = RegionAccessQuery(
-            topology="SingleOwner",
-            part=part,
+        query = BufferAccessQuery(
             backend_kind=backend_kind,
-            provider=provider,
-            consumer=member,
-            layout=layout,
+            consumer_deployment=member.deployment,
             same_node=same_node,
+            # Provider attachments are skipped above. Every consumer considered here therefore
+            # needs either a peer/map/copy edge rather than the Buffer-local mechanism.
+            same_endpoint=False,
         )
-        for candidate in self._adapter_candidates(part, backend_kind, provider, member):
-            decision = self._region_access.evaluate_region_access(query, candidate)
+        for candidate in buffer_adapter_candidates(query):
+            decision = self._region_access.evaluate_buffer_access(query, candidate)
+            if decision.diagnostics is not None:
+                decision = replace(
+                    decision,
+                    diagnostics=replace(
+                        decision.diagnostics,
+                        provider_label=_endpoint_label(provider),
+                        consumer_label=_endpoint_label(member),
+                        part=part,
+                    ),
+                )
             if decision.supported:
                 return MemberAttachmentPlan(
                     member=member.identity,
@@ -859,73 +869,90 @@ class BackendResolver:
             (provider, member),
         )
 
-    def _adapter_candidates(
-        self, part: RegionPartKind, backend_kind: BackendKind, provider: EndpointRecord, member: EndpointRecord
-    ) -> tuple[_AdapterCandidate, ...]:
-        """Ordered adapter candidates for one consumer, most preferred first.
 
-        The single candidate-order entry point. `part` selects nothing today because both parts of
-        a region share one backing (see `_backend_kind_for_provider`); it stays in the signature
-        because the payload/counter distinction is a property of the backing, so the moment the two
-        parts can differ, this is where the order diverges.
-        """
-        del part
-        same_node = self._registry.same_node(provider, member)
-        if backend_kind is BackendKind.VMM_WINDOW:
-            if member.deployment is HOST_CPU:
-                if same_node:
-                    # No host direct-map candidate for either part: `halHostRegister` refuses a
-                    # VMM VA ("Not support vmm va", CANN 9.0 `ascend_hal_base.h`), so one backing
-                    # cannot be both VMM peer-imported and host-registered. A host-mappable
-                    # control buffer needs its own non-VMM backing, which this planner cannot name
-                    # until the platform layer exposes one; offering the candidate here would let
-                    # a region-access service admit a plan no materializer can honour. The
-                    # exclusion is structural, so it lives in candidate enumeration rather than in
-                    # a service decision that an injected service could override.
-                    return (
-                        _AdapterCandidate(
-                            AdapterKind.OWNER_DELEGATED_COPY,
-                            AdapterProfile.HOST_VMM_COPY,
-                        ),
-                    )
-                return _remote_copy_candidates()
-            if member.deployment in (DEVICE_AICORE, DEVICE_AICPU):
-                if same_node:
-                    return (
-                        _AdapterCandidate(
-                            AdapterKind.DEVICE_PEER,
-                            AdapterProfile.DEVICE_VMM_PEER_IMPORT,
-                        ),
-                    )
-                return (
-                    _AdapterCandidate(
-                        AdapterKind.DEVICE_PEER,
-                        AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT,
-                        unsupported_reason="device fabric peer import is not available for this endpoint",
-                    ),
-                    *_remote_copy_candidates(),
-                )
-            return ()
-        if backend_kind is BackendKind.POSIX_SHM:
-            if member.deployment is HOST_CPU:
-                if same_node:
-                    return (
-                        _AdapterCandidate(
-                            AdapterKind.DIRECT_MAP,
-                            AdapterProfile.HOST_SHM_MAP,
-                        ),
-                    )
-                return _remote_copy_candidates()
-            if member.deployment in (DEVICE_AICORE, DEVICE_AICPU):
-                return (
-                    _AdapterCandidate(
-                        AdapterKind.EXPLICIT_TRANSFER,
-                        AdapterProfile.REMOTE_COPY,
-                        unsupported_reason="explicit transfer materializer is not implemented yet",
-                    ),
-                )
-            return ()
-        return ()
+def buffer_adapter_candidates(query: BufferAccessQuery) -> tuple[_AdapterCandidate, ...]:
+    """Ordered adapter candidates for one backing and consumer relation.
+
+    All wire ``BackendKind`` values enter this function, including combinations whose only
+    candidate is currently unimplemented. That guarantees the service owns the structured verdict
+    instead of an empty enumeration silently bypassing it.
+
+    Offering a candidate is not asserting it works. A mechanism with no materializer is offered
+    *with* an ``unsupported_reason`` and refused by the service, because a plan admitting one names
+    an attachment nothing can carry out — the refusal then moves from planning, where it is
+    structured and carries the alternatives tried, to materialization or to nowhere at all. Where
+    the exclusion is structural rather than merely unimplemented it stays here instead, so that an
+    injected service cannot override it.
+    """
+    if query.backend_kind is BackendKind.REMOTE_SIDECAR:
+        return _explicit_transfer_candidates(
+            "REMOTE_SIDECAR is resolved by its remote session, never by a local materializer"
+        )
+    if query.consumer_deployment is HOST_CPU:
+        return _host_consumer_candidates(query.backend_kind, query.same_node)
+    if query.consumer_deployment in (DEVICE_AICORE, DEVICE_AICPU):
+        return _device_consumer_candidates(query.backend_kind, query.same_node, query.same_endpoint)
+    return _explicit_transfer_candidates(f"unsupported consumer deployment {query.consumer_deployment!r}")
+
+
+def _host_consumer_candidates(backend_kind: BackendKind, same_node: bool) -> tuple[_AdapterCandidate, ...]:
+    """What a host consumer can reach a backing by: a local mechanism, or the owner copying for it.
+
+    Off-node the answer does not depend on the backend at all — no mapping survives the hop, so
+    every backing offers the same copy pair. Only the same-node mechanism is backend-specific.
+    """
+    if not same_node:
+        return _remote_copy_candidates()
+    if backend_kind in (BackendKind.FORK_SHM, BackendKind.FORK_COW):
+        return (_AdapterCandidate(AdapterKind.DIRECT_MAP, AdapterProfile.FORK_INHERITED_VA),)
+    if backend_kind is BackendKind.POSIX_SHM:
+        return (_AdapterCandidate(AdapterKind.DIRECT_MAP, AdapterProfile.HOST_SHM_MAP),)
+    if backend_kind is BackendKind.DEVICE_MALLOC:
+        return (_AdapterCandidate(AdapterKind.OWNER_DELEGATED_COPY, AdapterProfile.OWNER_DEVICE_COPY),)
+    if backend_kind is BackendKind.VMM_WINDOW:
+        # A VMM VA cannot be host-registered, so HOST_SVM_MAP is deliberately absent.
+        return (_AdapterCandidate(AdapterKind.OWNER_DELEGATED_COPY, AdapterProfile.HOST_VMM_COPY),)
+    return _explicit_transfer_candidates(f"unsupported backend {backend_kind!r}")
+
+
+def _device_consumer_candidates(
+    backend_kind: BackendKind, same_node: bool, same_endpoint: bool
+) -> tuple[_AdapterCandidate, ...]:
+    """What a device consumer can reach a backing by.
+
+    ``same_endpoint`` is what separates a backing already local to this chip from a same-node peer's:
+    backend and deployment alone cannot tell ``DEVICE_LOCAL`` from ``DEVICE_PEER``.
+    """
+    if same_endpoint and backend_kind in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+        return (_AdapterCandidate(AdapterKind.DIRECT_MAP, AdapterProfile.DEVICE_LOCAL),)
+    if backend_kind is BackendKind.VMM_WINDOW:
+        if same_node:
+            return (
+                _AdapterCandidate(
+                    AdapterKind.DEVICE_PEER,
+                    AdapterProfile.DEVICE_VMM_PEER_IMPORT,
+                    unsupported_reason="device VMM peer import materializer is not implemented yet",
+                ),
+            )
+        return (
+            _AdapterCandidate(
+                AdapterKind.DEVICE_PEER,
+                AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT,
+                unsupported_reason="device fabric peer import is not available for this endpoint",
+            ),
+            *_remote_copy_candidates(),
+        )
+    if backend_kind is BackendKind.DEVICE_MALLOC:
+        return _explicit_transfer_candidates("DEVICE_MALLOC cannot be imported by a peer endpoint")
+    if backend_kind in (BackendKind.FORK_SHM, BackendKind.FORK_COW):
+        return _explicit_transfer_candidates("fork-inherited VA is unavailable at this endpoint")
+    if backend_kind is BackendKind.POSIX_SHM:
+        return _explicit_transfer_candidates("explicit transfer materializer is not implemented yet")
+    return _explicit_transfer_candidates(f"unsupported backend {backend_kind!r}")
+
+
+def _explicit_transfer_candidates(reason: str) -> tuple[_AdapterCandidate, ...]:
+    return (_AdapterCandidate(AdapterKind.EXPLICIT_TRANSFER, AdapterProfile.REMOTE_COPY, unsupported_reason=reason),)
 
 
 def _remote_copy_candidates() -> tuple[_AdapterCandidate, ...]:
@@ -950,7 +977,7 @@ def _backend_kind_for_provider(provider: EndpointRecord) -> BackendKind:
     provider names one backing here: a device provider's control buffer wants a non-VMM,
     host-mappable backing that no platform path allocates yet. Until it does, a device-provided
     counter is VMM-backed and therefore not host direct-mappable — the constraint
-    `_adapter_candidates` encodes.
+    `buffer_adapter_candidates` encodes.
     """
     if provider.deployment in (DEVICE_AICORE, DEVICE_AICPU):
         return BackendKind.VMM_WINDOW
@@ -960,18 +987,13 @@ def _backend_kind_for_provider(provider: EndpointRecord) -> BackendKind:
 
 
 def _normalize_region_access_key(
-    key: tuple[BackendKind | str, RegionPartKind | str, AdapterKind | str, AdapterProfile | str],
-) -> tuple[BackendKind, RegionPartKind, AdapterKind, AdapterProfile]:
-    backend_kind, part, adapter_kind, adapter_profile = key
-    return (
-        BackendKind(backend_kind),
-        RegionPartKind(part),
-        AdapterKind(adapter_kind),
-        AdapterProfile(adapter_profile),
-    )
+    key: tuple[BackendKind | str, AdapterKind | str, AdapterProfile | str],
+) -> tuple[BackendKind, AdapterKind, AdapterProfile]:
+    backend_kind, adapter_kind, adapter_profile = key
+    return BackendKind(backend_kind), AdapterKind(adapter_kind), AdapterProfile(adapter_profile)
 
 
-def _region_access_supported(query: RegionAccessQuery, candidate: _AdapterCandidate) -> RegionAccessDecision:
+def _region_access_supported(query: BufferAccessQuery, candidate: _AdapterCandidate) -> RegionAccessDecision:
     diagnostics = _region_access_diagnostics(
         RegionAccessReasonCode.SUPPORTED,
         "region access is supported",
@@ -984,7 +1006,7 @@ def _region_access_supported(query: RegionAccessQuery, candidate: _AdapterCandid
 def _region_access_unsupported(
     reason_code: RegionAccessReasonCode,
     message: str,
-    query: RegionAccessQuery,
+    query: BufferAccessQuery,
     candidate: _AdapterCandidate,
 ) -> RegionAccessDecision:
     diagnostics = _region_access_diagnostics(reason_code, message, query, candidate)
@@ -994,18 +1016,18 @@ def _region_access_unsupported(
 def _region_access_diagnostics(
     reason_code: RegionAccessReasonCode,
     message: str,
-    query: RegionAccessQuery,
+    query: BufferAccessQuery,
     candidate: _AdapterCandidate,
 ) -> RegionAccessDiagnostics:
     return RegionAccessDiagnostics(
         reason_code=reason_code,
         message=message,
-        provider_label=_endpoint_label(query.provider),
-        consumer_label=_endpoint_label(query.consumer),
         platform=query.platform,
         runtime=query.runtime,
         backend_kind=query.backend_kind,
-        part=query.part,
+        consumer_deployment=query.consumer_deployment,
+        same_node=query.same_node,
+        same_endpoint=query.same_endpoint,
         adapter_kind=candidate.kind,
         adapter_profile=candidate.profile,
     )
@@ -1077,6 +1099,7 @@ __all__ = [
     "BackendPlan",
     "BackendResolver",
     "BackendUnsupportedReason",
+    "BufferAccessQuery",
     "DEVICE_AICORE",
     "DEVICE_AICPU",
     "EndpointDeployment",
@@ -1095,7 +1118,6 @@ __all__ = [
     "ParsedEndpointPath",
     "RegionAccessDecision",
     "RegionAccessDiagnostics",
-    "RegionAccessQuery",
     "RegionAccessReasonCode",
     "RegionAccessService",
     "RegionLayoutSpec",
@@ -1108,6 +1130,7 @@ __all__ = [
     "StaticRegionAccessService",
     "UnsupportedRegionPlan",
     "at",
+    "buffer_adapter_candidates",
     "parse_endpoint_path",
     "under",
 ]

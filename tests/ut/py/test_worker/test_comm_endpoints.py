@@ -12,6 +12,7 @@ import dataclasses
 
 import pytest
 from simpler import comm_endpoints as ce
+from simpler.buffer import _RESOLVERS
 from simpler.buffer import BackendKind as BufferBackendKind
 from simpler.worker import RemoteWorkerSpec, Worker, _Lifecycle
 
@@ -45,11 +46,10 @@ def _record(worker: Worker, path: str, deployment: ce.EndpointDeployment) -> ce.
 
 def _access_key(
     backend_kind: ce.BackendKind,
-    part: ce.RegionPartKind,
     adapter_kind: ce.AdapterKind,
     adapter_profile: ce.AdapterProfile,
 ):
-    return (backend_kind, part, adapter_kind, adapter_profile)
+    return (backend_kind, adapter_kind, adapter_profile)
 
 
 def _supported_parts(
@@ -57,10 +57,7 @@ def _supported_parts(
     adapter_kind: ce.AdapterKind,
     adapter_profile: ce.AdapterProfile,
 ):
-    return {
-        _access_key(backend_kind, part, adapter_kind, adapter_profile): True
-        for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER)
-    }
+    return {_access_key(backend_kind, adapter_kind, adapter_profile): True}
 
 
 def _plan(worker: Worker, members, topology=None, access=None):
@@ -75,6 +72,252 @@ def _plan(worker: Worker, members, topology=None, access=None):
 
 def _attachments_by_member(part: ce.RegionPartPlan) -> dict[ce.EndpointIdentity, ce.MemberAttachmentPlan]:
     return {attachment.member: attachment for attachment in part.attachments}
+
+
+@pytest.mark.parametrize(
+    (
+        "backend_kind",
+        "deployment",
+        "same_node",
+        "same_endpoint",
+        "expected_kind",
+        "expected_profile",
+        "supported",
+    ),
+    [
+        (
+            ce.BackendKind.FORK_SHM,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.DIRECT_MAP,
+            ce.AdapterProfile.FORK_INHERITED_VA,
+            True,
+        ),
+        (
+            ce.BackendKind.FORK_COW,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.DIRECT_MAP,
+            ce.AdapterProfile.FORK_INHERITED_VA,
+            True,
+        ),
+        (
+            ce.BackendKind.POSIX_SHM,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.DIRECT_MAP,
+            ce.AdapterProfile.HOST_SHM_MAP,
+            True,
+        ),
+        (
+            ce.BackendKind.DEVICE_MALLOC,
+            ce.DEVICE_AICPU,
+            True,
+            True,
+            ce.AdapterKind.DIRECT_MAP,
+            ce.AdapterProfile.DEVICE_LOCAL,
+            True,
+        ),
+        (
+            ce.BackendKind.DEVICE_MALLOC,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.OWNER_DEVICE_COPY,
+            True,
+        ),
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.DEVICE_AICPU,
+            True,
+            True,
+            ce.AdapterKind.DIRECT_MAP,
+            ce.AdapterProfile.DEVICE_LOCAL,
+            True,
+        ),
+        # Offered as the same-node peer mechanism, and refused: nothing materializes a device peer
+        # import, so admitting it would name an attachment no materializer can carry out.
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.DEVICE_AICPU,
+            True,
+            False,
+            ce.AdapterKind.DEVICE_PEER,
+            ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT,
+            False,
+        ),
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.HOST_VMM_COPY,
+            True,
+        ),
+        (
+            ce.BackendKind.POSIX_SHM,
+            ce.DEVICE_AICORE,
+            True,
+            False,
+            ce.AdapterKind.EXPLICIT_TRANSFER,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.REMOTE_SIDECAR,
+            ce.HOST_CPU,
+            True,
+            False,
+            ce.AdapterKind.EXPLICIT_TRANSFER,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        # Cross-node: a mechanism that dereferences a local mapping cannot survive the hop, so a
+        # host consumer falls back to the two copy candidates, most preferred first, and the
+        # service refuses both. The refusal must come from the service, never from an empty
+        # enumeration.
+        (
+            ce.BackendKind.FORK_SHM,
+            ce.HOST_CPU,
+            False,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.FORK_COW,
+            ce.HOST_CPU,
+            False,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.POSIX_SHM,
+            ce.HOST_CPU,
+            False,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.DEVICE_MALLOC,
+            ce.HOST_CPU,
+            False,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.DEVICE_MALLOC,
+            ce.DEVICE_AICPU,
+            False,
+            False,
+            ce.AdapterKind.EXPLICIT_TRANSFER,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.HOST_CPU,
+            False,
+            False,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.REMOTE_COPY,
+            False,
+        ),
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.DEVICE_AICPU,
+            False,
+            False,
+            ce.AdapterKind.DEVICE_PEER,
+            ce.AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT,
+            False,
+        ),
+    ],
+)
+def test_buffer_candidate_and_service_matrix(
+    backend_kind,
+    deployment,
+    same_node,
+    same_endpoint,
+    expected_kind,
+    expected_profile,
+    supported,
+):
+    query = ce.BufferAccessQuery(backend_kind, deployment, same_node, same_endpoint)
+    candidates = ce.buffer_adapter_candidates(query)
+    assert candidates
+    candidate = candidates[0]
+    assert (candidate.kind, candidate.profile) == (expected_kind, expected_profile)
+    decision = ce.DefaultRegionAccessService().evaluate_buffer_access(query, candidate)
+    assert decision.supported is supported
+    assert decision.diagnostics is not None
+    assert decision.diagnostics.backend_kind is backend_kind
+    assert decision.diagnostics.consumer_deployment is deployment
+
+
+def test_same_node_device_relation_distinguishes_local_buffer_from_peer_buffer():
+    local = ce.BufferAccessQuery(ce.BackendKind.VMM_WINDOW, ce.DEVICE_AICPU, True, True)
+    peer = ce.BufferAccessQuery(ce.BackendKind.VMM_WINDOW, ce.DEVICE_AICPU, True, False)
+    assert ce.buffer_adapter_candidates(local)[0].profile is ce.AdapterProfile.DEVICE_LOCAL
+    assert ce.buffer_adapter_candidates(peer)[0].profile is ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT
+
+
+def test_default_service_does_not_trust_candidate_unsupported_reason_for_availability():
+    query = ce.BufferAccessQuery(ce.BackendKind.POSIX_SHM, ce.DEVICE_AICORE, True, False)
+    offered = ce.buffer_adapter_candidates(query)[0]
+    assert offered.unsupported_reason is not None
+    stripped = ce._AdapterCandidate(offered.kind, offered.profile)  # pyright: ignore[reportPrivateUsage]
+
+    decision = ce.DefaultRegionAccessService().evaluate_buffer_access(query, stripped)
+
+    assert not decision.supported
+    assert decision.diagnostics is not None
+    assert decision.diagnostics.reason_code is ce.RegionAccessReasonCode.NO_COPY_BACKEND
+
+
+def test_every_admitted_profile_has_something_that_carries_it_out():
+    """The default service must not admit a mechanism nothing implements.
+
+    A supported verdict becomes either a ``MemberAttachmentPlan`` a region materializer is expected
+    to honour or the ``(kind, profile)`` the Tensor path resolves. Admitting a profile with neither
+    moves the refusal out of planning — where it is structured and lists every adapter tried — into
+    materialization, or into nowhere at all for a region shape no caller materializes. That is the
+    same defect as refusing at the enumeration layer, pointed the other way.
+    """
+    # The two ends that carry a mechanism out: a resolver that produces a local address, or the
+    # owner's control-plane copy (`Worker.copy_to` / `copy_from`).
+    owner_copy_profiles = {ce.AdapterProfile.HOST_VMM_COPY, ce.AdapterProfile.OWNER_DEVICE_COPY}
+    service = ce.DefaultRegionAccessService()
+    admitted = {
+        candidate.profile
+        for backend_kind in ce.BackendKind
+        for deployment in ce.EndpointDeployment
+        for same_node in (True, False)
+        for same_endpoint in (True, False)
+        for query in [ce.BufferAccessQuery(backend_kind, deployment, same_node, same_endpoint)]
+        for candidate in ce.buffer_adapter_candidates(query)
+        if service.evaluate_buffer_access(query, candidate).supported
+    }
+    assert admitted, "the service admits nothing at all — the enumeration or the service is broken"
+    unimplemented = sorted(
+        profile.value for profile in admitted if profile not in _RESOLVERS and profile not in owner_copy_profiles
+    )
+    assert not unimplemented, (
+        f"the default service admits {unimplemented}, which no resolver and no owner-side copy "
+        f"implements; offer such a profile with an `unsupported_reason` and let the service refuse it"
+    )
 
 
 def test_selector_constructors_validate_shape_and_preserve_hashability():
@@ -369,16 +612,11 @@ def test_host_direct_map_is_never_offered_over_a_vmm_backing():
     assert ce.AdapterProfile.HOST_SVM_MAP not in [attempt.adapter_profile for attempt in plan.attempted_adapters]
     assert ce.AdapterKind.DIRECT_MAP not in [attempt.adapter_kind for attempt in plan.attempted_adapters]
 
-    provider = _record(worker, "L3/L2[0]", ce.DEVICE_AICORE)
-    host = _record(worker, "L3", ce.HOST_CPU)
-    resolver = ce.BackendResolver(worker._get_endpoint_registry(), worker._get_region_access_service())
-    for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER):
-        offered = resolver._adapter_candidates(  # pyright: ignore[reportPrivateUsage]
-            part, ce.BackendKind.VMM_WINDOW, provider, host
-        )
-        assert [(candidate.kind, candidate.profile) for candidate in offered] == [
-            (ce.AdapterKind.OWNER_DELEGATED_COPY, ce.AdapterProfile.HOST_VMM_COPY)
-        ]
+    query = ce.BufferAccessQuery(ce.BackendKind.VMM_WINDOW, ce.HOST_CPU, True, False)
+    offered = ce.buffer_adapter_candidates(query)
+    assert [(candidate.kind, candidate.profile) for candidate in offered] == [
+        (ce.AdapterKind.OWNER_DELEGATED_COPY, ce.AdapterProfile.HOST_VMM_COPY)
+    ]
 
 
 def test_device_backend_attempts_are_recorded_when_direct_and_copy_are_absent():
@@ -396,67 +634,40 @@ def test_device_backend_attempts_are_recorded_when_direct_and_copy_are_absent():
 
 
 def test_default_service_refuses_host_svm_map_when_asked_directly():
-    """`_adapter_candidates` no longer offers the direct map over a VMM backing, but the default
+    """`buffer_adapter_candidates` does not offer a direct map over a VMM Buffer, but the default
     service's own refusal still has to hold — it is the backstop if some other backing ever
     routes a `HOST_SVM_MAP` candidate here.
     """
     worker = _l3(device_ids=[0])
-    provider = _record(worker, "L3/L2[0]", ce.DEVICE_AICORE)
     host = _record(worker, "L3", ce.HOST_CPU)
-    query = ce.RegionAccessQuery(
-        topology="SingleOwner",
-        part=ce.RegionPartKind.COUNTER,
+    query = ce.BufferAccessQuery(
         backend_kind=ce.BackendKind.VMM_WINDOW,
-        provider=provider,
-        consumer=host,
-        layout=ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=8),
+        consumer_deployment=host.deployment,
         same_node=True,
-        platform=worker._config.get("platform"),
-        runtime=worker._config.get("runtime"),
+        same_endpoint=False,
     )
     direct_candidate = ce._AdapterCandidate(  # pyright: ignore[reportPrivateUsage]
         ce.AdapterKind.DIRECT_MAP, ce.AdapterProfile.HOST_SVM_MAP
     )
-    decision = worker._get_region_access_service().evaluate_region_access(query, direct_candidate)
+    decision = worker._get_region_access_service().evaluate_buffer_access(query, direct_candidate)
     assert not decision.supported
     assert decision.diagnostics is not None
     assert decision.diagnostics.reason_code is ce.RegionAccessReasonCode.NO_IMPLEMENTED_DIRECT_MAP_PROBE
 
 
-def test_consumer_attachment_passes_part_to_candidate_selection():
+def test_consumer_attachment_keeps_region_part_out_of_buffer_access_query():
     worker = _l3(device_ids=[0])
     registry = worker._get_endpoint_registry()
     provider = _record(worker, "L3/L2[0]", ce.DEVICE_AICORE)
     host = _record(worker, "L3", ce.HOST_CPU)
-    resolver = ce.BackendResolver(
-        registry,
-        ce.StaticRegionAccessService(
-            {
-                _access_key(
-                    ce.BackendKind.VMM_WINDOW,
-                    ce.RegionPartKind.COUNTER,
-                    ce.AdapterKind.OWNER_DELEGATED_COPY,
-                    ce.AdapterProfile.HOST_VMM_COPY,
-                ): True
-            }
-        ),
-    )
-    candidate = resolver._adapter_candidates(  # pyright: ignore[reportPrivateUsage]
-        ce.RegionPartKind.COUNTER,
-        ce.BackendKind.VMM_WINDOW,
-        provider,
-        host,
-    )[0]
-    seen_parts = []
+    seen_queries = []
 
-    def candidate_order(part, backend_kind, provider_record, member_record):
-        seen_parts.append(part)
-        assert backend_kind is ce.BackendKind.VMM_WINDOW
-        assert provider_record == provider
-        assert member_record == host
-        return (candidate,)
+    class RecordingService:
+        def evaluate_buffer_access(self, query, candidate):
+            seen_queries.append((query, candidate))
+            return ce.RegionAccessDecision(True)
 
-    resolver._adapter_candidates = candidate_order  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    resolver = ce.BackendResolver(registry, RecordingService())
     attachment = resolver._consumer_attachment(  # pyright: ignore[reportPrivateUsage]
         ce.RegionPartKind.COUNTER,
         ce.BackendKind.VMM_WINDOW,
@@ -465,7 +676,9 @@ def test_consumer_attachment_passes_part_to_candidate_selection():
         ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=8),
     )
     assert isinstance(attachment, ce.MemberAttachmentPlan)
-    assert seen_parts == [ce.RegionPartKind.COUNTER]
+    assert len(seen_queries) == 1
+    query, _candidate = seen_queries[0]
+    assert not hasattr(query, "part")
 
 
 def test_host_shm_plan_and_host_provider_device_member_attempts():
@@ -550,6 +763,26 @@ def test_cross_node_device_member_attempt_order_includes_fabric_before_remote_co
         ce.AdapterProfile.REMOTE_COPY,
     ]
     assert plan.attempted_adapters[0].reason == "device fabric peer import is not available for this endpoint"
+
+
+def test_cross_node_host_member_over_shm_keeps_both_copy_attempts():
+    """A host provider's POSIX_SHM backing offers the same two copy candidates off-node as a VMM one.
+
+    Which copy candidate leads is a property of the relation — a host consumer on another node — not
+    of the backend, so this must not narrow to the explicit-transfer candidate alone just because
+    ``POSIX_SHM`` maps directly on the same node.
+    """
+    worker = _l4_with_remote(RemoteWorkerSpec(endpoint="10.0.0.7:1234", platform="a2a3", device_ids=(6,)))
+    plan = _plan(
+        worker,
+        [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]", ce.HOST_CPU)],
+        ce.SingleOwner(provider=ce.at("L4", ce.HOST_CPU)),
+    )
+    assert isinstance(plan, ce.UnsupportedRegionPlan)
+    assert [(attempt.adapter_kind, attempt.adapter_profile) for attempt in plan.attempted_adapters] == [
+        (ce.AdapterKind.OWNER_DELEGATED_COPY, ce.AdapterProfile.REMOTE_COPY),
+        (ce.AdapterKind.EXPLICIT_TRANSFER, ce.AdapterProfile.REMOTE_COPY),
+    ]
 
 
 def test_worker_region_planning_uses_lease_admission_and_close_invalidates_epoch():

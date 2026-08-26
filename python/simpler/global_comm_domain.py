@@ -16,7 +16,17 @@ from dataclasses import dataclass
 
 from _task_interface import AddressSpace  # pyright: ignore[reportMissingImports]
 
-from .comm_endpoints import AdapterKind, AdapterProfile, AttachmentRole
+from .comm_endpoints import (
+    AdapterKind,
+    AdapterProfile,
+    AttachmentRole,
+    BufferAccessQuery,
+    EndpointDeployment,
+    EndpointIdentity,
+    EndpointRecord,
+    _backend_kind_for_provider,
+    buffer_adapter_candidates,
+)
 
 #: Descriptor layout. Paired with ``COMM_GLOBAL_DOMAIN_VERSION`` in
 #: ``src/common/platform_comm/comm.h``: the platform backend stamps this number into every
@@ -342,6 +352,51 @@ _ADAPTER_PROFILE_IDS = {
     AdapterProfile.REMOTE_COPY: 6,
 }
 _ADAPTER_PROFILE_BY_ID = {value: key for key, value in _ADAPTER_PROFILE_IDS.items()}
+
+
+def _assert_every_plannable_profile_is_numbered() -> None:
+    """Fail import if region planning can name an ``AdapterProfile`` this wire cannot encode.
+
+    ``AdapterProfile`` is deliberately wider than this table: the Buffer access judgment is shared
+    with the per-Tensor path, which reaches mechanisms (``FORK_INHERITED_VA``, ``DEVICE_LOCAL``,
+    ``OWNER_DEVICE_COPY``) that no region plan can produce and that therefore never travel in a
+    ``GlobalDomainCommand``. That is a fact about ``buffer_adapter_candidates`` and
+    ``_backend_kind_for_provider``, not a property either declaration states, so nothing but this
+    check ties the two together — and the failure it prevents surfaces as a ``ValueError`` at
+    allocation time, from a planner that had already accepted the plan.
+    """
+
+    # Drives the real `_backend_kind_for_provider` rather than restating which backends a provider
+    # can name; only the deployment is read, so the rest of the record is filler.
+    def _provider(deployment: EndpointDeployment) -> EndpointRecord:
+        return EndpointRecord(
+            identity=EndpointIdentity(session_instance_id=b"", registry_epoch=0, endpoint_id=0),
+            path="L0",
+            deployment=deployment,
+            node_scope_id=0,
+        )
+
+    plannable = {
+        candidate.profile
+        for backend_kind in {_backend_kind_for_provider(_provider(deployment)) for deployment in EndpointDeployment}
+        for deployment in EndpointDeployment
+        for same_node in (True, False)
+        # Region planning attaches consumers, never the provider itself, so the Buffer is never
+        # already local to the endpoint being planned for.
+        for candidate in buffer_adapter_candidates(
+            BufferAccessQuery(backend_kind, deployment, same_node, same_endpoint=False)
+        )
+    }
+    missing = sorted(profile.value for profile in plannable if profile not in _ADAPTER_PROFILE_IDS)
+    if missing:
+        raise AssertionError(
+            f"region planning can produce adapter profiles the global-domain wire cannot number: "
+            f"{missing}; add them to _ADAPTER_PROFILE_IDS (and to COMM_GLOBAL_DOMAIN_VERSION's "
+            f"contract) or keep them out of buffer_adapter_candidates for a planner backend"
+        )
+
+
+_assert_every_plannable_profile_is_numbered()
 
 
 def _attachment_role_id(role: AttachmentRole) -> int:

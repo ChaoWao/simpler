@@ -34,7 +34,8 @@ def test_logging_helpers_remain_exported():
 def test_comm_endpoints_region_access_surface_is_module_scoped():
     ce = importlib.import_module("simpler.comm_endpoints")
     for name in (
-        "RegionAccessQuery",
+        "BufferAccessQuery",
+        "buffer_adapter_candidates",
         "RegionAccessDecision",
         "RegionAccessDiagnostics",
         "RegionAccessReasonCode",
