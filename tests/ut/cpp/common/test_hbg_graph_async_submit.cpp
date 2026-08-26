@@ -11,13 +11,16 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <cstdint>
 #include <mutex>
 #include <set>
 #include <thread>
 
+#include "graph_recorder_pool.h"
 #include "orchestration_api.h"
 
 namespace {
@@ -48,7 +51,9 @@ struct FakeRuntime {
     int begin_calls{0};
     int prepare_calls{0};
     int end_calls{0};
-    int commit_calls{0};
+    // Written from a recorder worker (the recorded body calls rt_graph_commit) and from
+    // the main thread, so it cannot be a plain int.
+    std::atomic<int> commit_calls{0};
     int scope_begin_calls{0};
     int scope_end_calls{0};
     std::thread::id record_thread;
@@ -148,6 +153,26 @@ void fake_scope_begin(RuntimeContext *rt) { as_fake(rt)->scope_begin_calls++; }
 
 void fake_scope_end(RuntimeContext *rt) { as_fake(rt)->scope_end_calls++; }
 
+// The pool is the runtime's now, so rt_graph_submit reaches it through these two rather
+// than through a static in the orchestration header. Wiring them to the same process-wide
+// pool the runtime uses is what keeps this test exercising the asynchronous path -- with
+// them null, rt_graph_submit correctly falls back to recording inline and the test would
+// be asserting the fallback instead.
+// This test's own pool, not the runtime's: the point is the pool's behaviour, and a
+// file-local instance keeps the test from linking the runtime translation unit that owns
+// the process-wide one.
+GraphAsyncRecordingState &test_pool() {
+    static GraphAsyncRecordingState pool;
+    return pool;
+}
+
+bool fake_graph_record_start(RuntimeContext *, const GraphTaskArgs &args, void *job) {
+    auto *record = static_cast<std::function<void(GraphTaskArgs &)> *>(job);
+    return test_pool().start(args, std::move(*record));
+}
+
+void fake_graph_record_wait(RuntimeContext *) { test_pool().wait(); }
+
 const RuntimeOps kFakeOps = {
     .scope_begin = fake_scope_begin,
     .scope_end = fake_scope_end,
@@ -157,6 +182,8 @@ const RuntimeOps kFakeOps = {
     .graph_abort = fake_graph_abort,
     .graph_end = fake_graph_end,
     .graph_commit = fake_graph_commit,
+    .graph_record_start = fake_graph_record_start,
+    .graph_record_wait = fake_graph_record_wait,
 };
 
 }  // namespace

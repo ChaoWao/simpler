@@ -52,6 +52,17 @@ host_tensor_write(HostTensorAccessor *, uint64_t dev_addr, const void *src, uint
     return true;
 }
 
+// No recorder pool exists on device, so refuse and let the caller record the body
+// inline. Refusing leaves the caller's job untouched, which is the contract the ops
+// table documents. The host build overrides both with host/graph_recorder_pool.cpp;
+// visibility is hidden for the same reason as host_tensor_read above.
+__attribute__((weak, visibility("hidden"))) bool
+graph_record_start_impl(RuntimeContext *, const GraphTaskArgs &, void *) {
+    return false;
+}
+
+__attribute__((weak, visibility("hidden"))) void graph_record_wait_impl(RuntimeContext *) {}
+
 // Host fallback for the host-orchestration path. The AICPU cycle counter is a
 // device register unavailable on the host, so return a monotonic wall-clock
 // scaled to that counter's cycle units (PLATFORM_PROF_SYS_CNT_FREQ). The
@@ -407,6 +418,8 @@ static const RuntimeOps s_runtime_ops = {
 #else
     .record_orch_phase = nullptr,
 #endif
+    .graph_record_start = graph_record_start_impl,
+    .graph_record_wait = graph_record_wait_impl,
 };
 
 // =============================================================================

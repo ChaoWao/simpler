@@ -109,6 +109,16 @@ struct RuntimeOps {
     // runtime only through this table. Always present in the struct so the layout does
     // not move with SIMPLER_DFX; nullptr when off.
     void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
+    // Queue one Graph body for asynchronous recording, and drain every queued one.
+    // `job` is a `std::function<void(GraphTaskArgs &)> *` the pool moves out of --
+    // whether or not it queues it, since start() takes the callable before it checks
+    // capacity -- so the caller must not invoke it afterwards. Nothing is owned across
+    // the boundary either way: the caller's std::function destructs normally, empty or
+    // not, and rt_graph_submit's fallback re-runs its own copy of the body. The pool is
+    // runtime-owned (host/graph_recorder_pool.h) and the AICPU build links a refusing
+    // fallback, which is what makes the device path record synchronously.
+    bool (*graph_record_start)(RuntimeContext *rt, const GraphTaskArgs &args, void *job);
+    void (*graph_record_wait)(RuntimeContext *rt);
 };
 
 /**
@@ -273,6 +283,12 @@ void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &l
  * after runtime_wire_arena_pointers.
  */
 void runtime_bind_ops(RuntimeContext *rt);
+
+// Backing the two graph_record_* ops. Weak fallbacks live in runtime_core.cpp so the
+// AICPU build links a refusing start and a no-op wait; the host build overrides both in
+// host/graph_recorder_pool.cpp, where the pool is.
+bool graph_record_start_impl(RuntimeContext *rt, const GraphTaskArgs &args, void *job);
+void graph_record_wait_impl(RuntimeContext *rt);
 
 /**
  * Destroy runtime. With the prebuilt-arena fast path the arena buffer is

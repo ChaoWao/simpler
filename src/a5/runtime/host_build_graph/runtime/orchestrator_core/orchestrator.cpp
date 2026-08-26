@@ -736,9 +736,20 @@ void unbind_recorder_boundary() {
 // limits rather than a worst case invented here: the tensor pool and tensor_sources are
 // one entry per tensor argument (CORE_MAX_TENSOR_ARGS), the two scalar arrays one per
 // scalar argument (CORE_MAX_SCALAR_ARGS), and predicates and output_ranges at most one per
-// node. internal_fanins has no such cap — a node may depend on any number of its
-// predecessors — so it keeps the high-water mark rather than a reservation quadratic in
-// the node cap.
+// node.
+//
+// internal_fanins is the one array left growing, and the reason is the size it grows to
+// rather than the bound it could reach. It has no per-node cap: CHIP_MAX_FANIN bounds a
+// ring task's inline fanin, but a Graph node's producers travel in the Definition's own
+// CSR, which the scheduler reads directly, so the only limits are uint16 producer indices
+// and each producer being an earlier node — a structural 1024 x 1023 / 2 edges, 4.2 MB.
+// What decides whether growth costs anything is not that bound but whether a reallocation
+// crosses glibc's mmap threshold, since a freed block below it is reused off the heap
+// without re-faulting (see the entry cited above). A dsv4 body holds ~630 edges, 5 KB, two
+// orders of magnitude under the threshold — so buying 4.2 MB of address space per recorder
+// thread for it would be sizing an array to a worst case, which is the opposite of what
+// the reservations above do. Re-decide this with a measurement if a workload's bodies ever
+// get dense enough to push it past ~128 KB.
 //
 // The tensor pool is 4 MB and the rest ~1.3 MB per recorder thread, next to the 2.17 MB
 // hazard map. Only the pool's used prefix ever becomes resident: it is default-initialized
@@ -762,6 +773,32 @@ bool graph_recording_reserve_storage(GraphRecording &recording) {
 // Bind this thread's storage to one in-flight entry and empty it. Returns false when the
 // hazard map or the node tensor pool cannot be stood up, which is only reachable on the
 // thread's first recording.
+// Stand this thread's storage up once, or report that it could not be. Idempotent.
+//
+// Either allocation failing drops whatever the other one took, so the next attempt starts
+// from nothing instead of finding the flag set and one of the two regions missing — the
+// record path guards on that same flag, so a half-built storage would be recorded through.
+bool graph_recording_stand_up(GraphRecording &recording) {
+    if (recording.storage_ready) return true;
+    try {
+        if (!graph_recording_init_tensor_map(recording) || !graph_recording_reserve_storage(recording)) {
+            recording = GraphRecording{};
+            return false;
+        }
+    } catch (const std::bad_alloc &) {
+        // The node tensor pool is a nothrow new, but the flat arrays are vectors whose
+        // resize/reserve throw. This also runs on a recorder worker as it starts, where an
+        // escaping exception terminates the process instead of letting the pool's prewarm
+        // report the failure.
+        recording = GraphRecording{};
+        return false;
+    }
+    recording.storage_ready = true;
+    return true;
+}
+
+// Bind this thread's storage to one in-flight entry and empty it. Returns false when the
+// hazard map or the node tensor pool cannot be stood up.
 bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecording &entry) {
     // A body over GRAPH_MAX_NODES is abandoned, but it still grew every array to its real
     // size while it ran. Handing that to the next recording would retain storage for a
@@ -771,15 +808,8 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     if (recording.nodes.size() > GRAPH_MAX_NODES) {
         recording = GraphRecording{};
     }
-    if (!recording.storage_ready) {
-        // Either allocation failing drops whatever the other one took, so the next
-        // recording on this thread stands the storage up again instead of finding the flag
-        // set and the pool null.
-        if (!graph_recording_init_tensor_map(recording) || !graph_recording_reserve_storage(recording)) {
-            recording = GraphRecording{};
-            return false;
-        }
-        recording.storage_ready = true;
+    if (!graph_recording_stand_up(recording)) {
+        return false;
     }
     recording.tensor_map.reset();
     recording.full_key = entry.full_key;
@@ -1160,6 +1190,19 @@ const GraphDefinition *graph_record_definition(const GraphHostState &state, cons
 }
 
 }  // namespace
+
+// Counted rather than returned across the .so boundary: the orch .so's prewarm entry has
+// no return value, and giving it one would make an orch .so built before this change
+// report whatever its x0 held.
+std::atomic<size_t> g_recorder_storage_failures{0};
+
+bool graph_recorder_stand_up_storage() {
+    if (graph_recording_stand_up(recorder_recording())) return true;
+    g_recorder_storage_failures.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+size_t graph_recorder_storage_failures() { return g_recorder_storage_failures.load(std::memory_order_relaxed); }
 
 GraphHostStatePtr make_graph_host_state(const GraphDefinitionArena &arena) {
     return GraphHostStatePtr{new (std::nothrow) GraphHostState{arena}};
