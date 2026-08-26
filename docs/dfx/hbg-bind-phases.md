@@ -374,10 +374,13 @@ scale.** Both are per-byte costs over what a bind stages, and dsv4's parameters
 now live in child memory: allocated once before the first round, and passed
 through without malloc, H2D or a host view. What still crosses is
 `num_tokens_per_owner`, the one caller tensor the host orchestrator has to read —
-so a bind stages **1 of its 92 tensors, 8 bytes**. Before the caller-buffer view
-change, the same recipe on `f830f13c3` plus the child-memory change measured
-`args` at 0.045–0.074 ms and `host_view_close` at 0.014–0.028 ms, against 1.48 s
-and 0.28 s over 45.8 GB above. qwen still stages its fixture.
+so a bind stages **1 of its 92 tensors, 8 bytes**. On `dcf7559e8`, 12 binds
+(`--rounds 6`, both ranks) measure `args` at 0.036–0.075 ms and
+`host_view_close` at 0.0012–0.0030 ms with `count=0 bytes=0`, against 1.48 s and
+0.28 s over 45.8 GB above. The same run peaks at 1.31 GiB of host RSS across the
+whole process tree under `--skip-golden`, and at 23.4 GiB when the fixture is
+streamed in, where the row above cost ~45.5 GB per rank. qwen still stages its
+fixture.
 
 The rows also describe the legacy mapping behavior at the pinned commit. A
 current bind uses the caller's existing host buffers as its
