@@ -12,118 +12,82 @@
  * @file device_log.cpp (sim)
  * @brief Simulation Platform Log Implementation
  *
- * Level flags are populated by host via set_log_level() at AICPU kernel init
- * (see kernel.cpp / aicpu_executor.cpp); this file does not read env vars.
+ * The process-owned HostLogger state is bound by the sim host before AICPU
+ * execution begins; this file does not read env vars.
  */
 
 #include "aicpu/device_log.h"
 #include "common/host_log_binding.h"
+#include "host_log.h"
 
-#include <cerrno>
 #include <cstdarg>
-#include <cstddef>
-#include <cstdio>
-#include <unistd.h>
-
-// =============================================================================
-// Level enable flags (mutated by the setter below)
-// =============================================================================
-
-bool g_is_log_enable_debug = false;
-bool g_is_log_enable_info = false;
-bool g_is_log_enable_timing = true;
-bool g_is_log_enable_warn = true;
-bool g_is_log_enable_error = true;
 
 namespace {
 SimplerHostLogState *g_host_log_state = nullptr;
 }
+
+bool is_log_enable_debug() { return HostLogger::get_instance().is_enabled(simpler::log::LogLevel::DEBUG); }
+
+bool is_log_enable_info() { return HostLogger::get_instance().is_enabled(simpler::log::LogLevel::INFO); }
+
+bool is_log_enable_timing() { return HostLogger::get_instance().is_enabled(simpler::log::LogLevel::TIMING); }
+
+bool is_log_enable_warn() { return HostLogger::get_instance().is_enabled(simpler::log::LogLevel::WARN); }
+
+bool is_log_enable_error() { return HostLogger::get_instance().is_enabled(simpler::log::LogLevel::ERROR); }
 
 // =============================================================================
 // Setters (called by AICPU init from KernelArgs)
 // =============================================================================
 
 extern "C" void set_log_level(int level) {
-    g_is_log_enable_debug = level <= 10;
-    g_is_log_enable_info = level <= 20;
-    g_is_log_enable_timing = level <= 25;
-    g_is_log_enable_warn = level <= 30;
-    g_is_log_enable_error = level <= 40;
+    if (g_host_log_state != nullptr && simpler::log::is_valid_level(level)) {
+        HostLogger::get_instance().set_level(static_cast<simpler::log::LogLevel>(level));
+    }
 }
 
-extern "C" void set_host_log_state(SimplerHostLogState *state) { g_host_log_state = state; }
+extern "C" void set_host_log_state(SimplerHostLogState *state) {
+    if (HostLogger::get_instance().bind_state(state) == 0) g_host_log_state = state;
+}
 
 int bind_orchestration_host_log_state(void *handle, const char **error) {
     return simpler::log::bind_loaded_host_log_state(handle, g_host_log_state, error);
 }
 
 // =============================================================================
-// init_log_switch: sim respects host-pushed config. The no-op entry point is
-// retained for ABI compatibility with onboard, where it queries CANN dlog.
+// init_log_switch: the sim threshold lives in the bound host-log state. The
+// no-op entry point shares the platform interface with the onboard CANN query.
 // =============================================================================
 
 void init_log_switch() {
-    // Sim has no env / dlog to consult. Defaults already applied at static
-    // init; host overrides via set_log_level() before this
-    // is called.
+    // Sim has no CANN log switch to query.
 }
 
 // =============================================================================
 // Low-level dev_log_* / dev_vlog_*
 //
-// Each record "[TAG] func: body\n" is formatted into a single stack buffer and
-// emitted with one write(). The buffer caps the record at 2048 bytes, below
-// Linux PIPE_BUF (4096), so a record is delivered atomically when stderr is a
-// pipe — concurrent AICPU sim threads and forked chip workers sharing stderr
-// never interleave partial records.
+// The shared AICPU adapter retains this va_list interface on both platforms.
+// HostLogger owns the sim envelope, threshold and configured output; onboard
+// supplies the corresponding CANN-backed definitions in its platform
+// implementation.
 // =============================================================================
 
-namespace {
-
-void emit_record(const char *level_tag, const char *func, const char *fmt, va_list args) {
-    char buffer[2048];
-    constexpr size_t kNewlineSlot = 1;
-    constexpr size_t kBodyLimit = sizeof(buffer) - kNewlineSlot;
-
-    int prefix = snprintf(buffer, sizeof(buffer), "[%s] %s: ", level_tag, func);
-    size_t len = (prefix < 0) ? 0 : static_cast<size_t>(prefix);
-    if (len > kBodyLimit) {
-        len = kBodyLimit;  // prefix filled the buffer; reserve the newline slot
-    }
-
-    int body = vsnprintf(buffer + len, sizeof(buffer) - len, fmt, args);
-    if (body > 0) {
-        len += static_cast<size_t>(body);
-        if (len > kBodyLimit) {
-            len = kBodyLimit;  // body truncated; reserve the newline slot
-        }
-    }
-
-    buffer[len++] = '\n';
-    // On a pipe this transfers the whole record (<= PIPE_BUF) in one atomic
-    // call; the loop only iterates for a non-pipe stderr (regular file, socket)
-    // where write(2) may be interrupted or short, and must not leave a record
-    // without its terminating newline.
-    for (size_t off = 0; off < len;) {
-        ssize_t written = write(STDERR_FILENO, buffer + off, len - off);
-        if (written < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;  // nothing the device-log backend can do on a hard failure
-        }
-        off += static_cast<size_t>(written);
-    }
+void dev_vlog_debug(const char *func, const char *fmt, va_list args) {
+    HostLogger::get_instance().vlog(simpler::log::LogLevel::DEBUG, func, fmt, args);
 }
 
-}  // namespace
+void dev_vlog_info(const char *func, const char *fmt, va_list args) {
+    HostLogger::get_instance().vlog(simpler::log::LogLevel::INFO, func, fmt, args);
+}
 
-void dev_vlog_debug(const char *func, const char *fmt, va_list args) { emit_record("DEBUG", func, fmt, args); }
+void dev_vlog_timing(const char *func, const char *fmt, va_list args) {
+    HostLogger::get_instance().vlog(simpler::log::LogLevel::TIMING, func, fmt, args);
+}
 
-void dev_vlog_info(const char *func, const char *fmt, va_list args) { emit_record("INFO", func, fmt, args); }
+void dev_vlog_warn(const char *func, const char *fmt, va_list args) {
+    HostLogger::get_instance().vlog(simpler::log::LogLevel::WARN, func, fmt, args);
+}
 
-void dev_vlog_timing(const char *func, const char *fmt, va_list args) { emit_record("TIMING", func, fmt, args); }
-
-void dev_vlog_warn(const char *func, const char *fmt, va_list args) { emit_record("WARN", func, fmt, args); }
-
-void dev_vlog_error(const char *func, const char *fmt, va_list args) { emit_record("ERROR", func, fmt, args); }
+void dev_vlog_error(const char *func, const char *fmt, va_list args) {
+    HostLogger::get_instance().vlog(simpler::log::LogLevel::ERROR, func, fmt, args);
+}

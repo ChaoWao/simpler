@@ -24,11 +24,23 @@
 #include <cstdarg>
 #include <cstdio>
 
+namespace {
 bool g_is_log_enable_debug = false;
 bool g_is_log_enable_info = false;
 bool g_is_log_enable_timing = false;
 bool g_is_log_enable_warn = false;
 bool g_is_log_enable_error = false;
+}  // namespace
+
+bool is_log_enable_debug() { return g_is_log_enable_debug; }
+
+bool is_log_enable_info() { return g_is_log_enable_info; }
+
+bool is_log_enable_timing() { return g_is_log_enable_timing; }
+
+bool is_log_enable_warn() { return g_is_log_enable_warn; }
+
+bool is_log_enable_error() { return g_is_log_enable_error; }
 
 void init_log_switch() {
     g_is_log_enable_debug = CheckLogLevel(AICPU, DLOG_DEBUG);

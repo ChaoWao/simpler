@@ -204,17 +204,17 @@ int DeviceRunner::ensure_binaries_loaded() {
         if (!load_sym("set_platform_scope_stats_base", reinterpret_cast<void **>(&set_platform_scope_stats_base_func_)))
             return PTO_RUNTIME_ERR_INTERNAL;
 
-        // The AICPU sim SO owns its level flags because it is RTLD_LOCAL.
-        // Forward the process-wide HostLogger threshold explicitly.
+        // The AICPU sim SO binds its private HostLogger before the compatibility
+        // level setter can emit a clock anchor.
         using SetLogLevelFunc = void (*)(int);
         SetLogLevelFunc set_log_level_func = nullptr;
         if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return PTO_RUNTIME_ERR_INTERNAL;
-        set_log_level_func(HostLogger::get_instance().level());
         using SetHostLogStateFunc = void (*)(SimplerHostLogState *);
         SetHostLogStateFunc set_host_log_state_func = nullptr;
         if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func)))
             return PTO_RUNTIME_ERR_INTERNAL;
         set_host_log_state_func(HostLogger::get_instance().state());
+        set_log_level_func(HostLogger::get_instance().level());
 
         aicpu_so_loaded_ = true;
         LOG_INFO("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());

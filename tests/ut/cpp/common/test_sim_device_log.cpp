@@ -9,12 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Sim device-log atomicity: every dev_vlog_* call emits exactly one intact
-// physical line, even when many AICPU sim threads or forked chip workers write
-// the shared stderr concurrently. A record no larger than the pipe's PIPE_BUF
-// reaches it in one indivisible write(2), so it cannot interleave with another
-// writer. The records here are ~30 bytes, inside even the portable
-// _POSIX_PIPE_BUF floor of 512 that macOS uses.
+// Sim AICPU records use the bound HostLogger threshold and host envelope. The
+// short records below also stay intact when many threads or forked chip workers
+// share the stderr fallback.
 
 #include <cstdarg>
 #include <cstdio>
@@ -31,13 +28,23 @@
 #include <gtest/gtest.h>
 
 #include "aicpu/device_log.h"
+#include "common/host_log_state.h"
+#include "common/log_level.h"
 
 namespace {
 
 constexpr const char *kTags[] = {"DEBUG", "INFO", "TIMING", "WARN", "ERROR"};
 
-// dev_vlog_* gate on nothing (the unified_log_* adapter owns level filtering),
-// so these thin wrappers always emit. level_idx selects the backend under test.
+SimplerHostLogState g_log_state{
+    SIMPLER_HOST_LOG_STATE_ABI_VERSION,
+    sizeof(SimplerHostLogState),
+    static_cast<int32_t>(simpler::log::LogLevel::ERROR),
+    0,
+    0,
+    {},
+};
+
+// level_idx selects the compatibility entry point under test.
 void emit(int level_idx, const char *func, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -65,6 +72,15 @@ std::string record(int level_idx, const char *func, const std::string &body) {
     return std::string("[") + kTags[level_idx % 5] + "] " + func + ": " + body;
 }
 
+void bind_level(simpler::log::LogLevel level) {
+    g_log_state.threshold = static_cast<int32_t>(level);
+    g_log_state.clock_anchor_pid = static_cast<int32_t>(getpid());
+    g_log_state.log_directory_bound = 0;
+    g_log_state.log_directory[0] = '\0';
+    set_host_log_state(&g_log_state);
+    set_log_level(static_cast<int>(level));
+}
+
 // Redirect stderr onto a fresh pipe, drained from the moment it is installed.
 //
 // A pipe holds a bounded amount of unread data — 16 KiB on macOS, 64 KiB on
@@ -74,10 +90,8 @@ std::string record(int level_idx, const char *func, const std::string &body) {
 // runs concurrently so the writers never block, whatever they emit.
 //
 // The reader owns the buffer through a shared_ptr, so returning `Capture` by
-// value cannot leave the thread writing into a moved-from string. `fork` is safe
-// alongside it because the record path allocates nothing: it formats into a
-// stack buffer and calls write(2), so a child cannot deadlock on a malloc lock
-// this thread happened to hold.
+// value cannot leave the thread writing into a moved-from string. No logger
+// producer is active at the fork boundary in the process tests below.
 struct Capture {
     int read_fd = -1;
     int saved_stderr = -1;
@@ -123,8 +137,13 @@ void expect_intact(const std::string &captured, std::multiset<std::string> expec
     while (start < captured.size()) {
         size_t nl = captured.find('\n', start);
         ASSERT_NE(nl, std::string::npos) << "record missing terminating newline";
-        std::string line = captured.substr(start, nl - start);
-        auto it = expected.find(line);
+        const std::string line = captured.substr(start, nl - start);
+        const size_t monotonic_end = line.find("][");
+        ASSERT_NE(monotonic_end, std::string::npos) << "host envelope missing from: '" << line << "'";
+        const size_t thread_end = line.find("][", monotonic_end + 2);
+        ASSERT_NE(thread_end, std::string::npos) << "host envelope missing from: '" << line << "'";
+        const std::string payload = line.substr(thread_end + 1);
+        auto it = expected.find(payload);
         ASSERT_NE(it, expected.end()) << "torn or unexpected record: '" << line << "'";
         expected.erase(it);
         start = nl + 1;
@@ -134,10 +153,33 @@ void expect_intact(const std::string &captured, std::multiset<std::string> expec
 
 }  // namespace
 
+TEST(SimDeviceLogTest, UsesHostEnvelopeAndLiveBoundThreshold) {
+    bind_level(simpler::log::LogLevel::ERROR);
+
+    testing::internal::CaptureStderr();
+    emit(3, "worker", "warn-hidden");
+    emit(4, "worker", "error-visible");
+    std::string captured = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(captured.find("warn-hidden"), std::string::npos);
+    EXPECT_NE(captured.find("][ERROR] worker: error-visible\n"), std::string::npos);
+    EXPECT_NE(captured.find("[mono_ns="), std::string::npos);
+    EXPECT_NE(captured.find("][T0x"), std::string::npos);
+
+    // The adapter reads the shared state on every query; no second push into a
+    // private sim flag table is required.
+    g_log_state.threshold = static_cast<int32_t>(simpler::log::LogLevel::WARN);
+    testing::internal::CaptureStderr();
+    emit(3, "worker", "warn-visible");
+    captured = testing::internal::GetCapturedStderr();
+    EXPECT_NE(captured.find("][WARN] worker: warn-visible\n"), std::string::npos);
+}
+
 TEST(SimDeviceLogTest, MultiThreadedRecordsStayIntact) {
     constexpr int kThreads = 4;
     constexpr int kPerThread = 200;
 
+    bind_level(simpler::log::LogLevel::DEBUG);
     std::multiset<std::string> expected;
     for (int t = 0; t < kThreads; ++t) {
         for (int i = 0; i < kPerThread; ++i) {
@@ -169,6 +211,7 @@ TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
     constexpr int kChildren = 8;
     constexpr int kPerChild = 100;
 
+    bind_level(simpler::log::LogLevel::DEBUG);
     std::multiset<std::string> expected;
     for (int c = 0; c < kChildren; ++c) {
         for (int i = 0; i < kPerChild; ++i) {
@@ -185,6 +228,7 @@ TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
         pid_t pid = fork();
         ASSERT_GE(pid, 0);
         if (pid == 0) {
+            g_log_state.clock_anchor_pid = static_cast<int32_t>(getpid());
             for (int i = 0; i < kPerChild; ++i) {
                 emit(c, "chip_worker", "c%d-r%03d", c, i);
             }
@@ -214,6 +258,7 @@ TEST(SimDeviceLogTest, WritersOutrunASmallPipeWithoutDeadlocking) {
     constexpr int kChildren = 4;
     constexpr int kPerChild = 400;
 
+    bind_level(simpler::log::LogLevel::DEBUG);
     std::multiset<std::string> expected;
     for (int c = 0; c < kChildren; ++c) {
         for (int i = 0; i < kPerChild; ++i) {
@@ -235,6 +280,7 @@ TEST(SimDeviceLogTest, WritersOutrunASmallPipeWithoutDeadlocking) {
         pid_t pid = fork();
         ASSERT_GE(pid, 0);
         if (pid == 0) {
+            g_log_state.clock_anchor_pid = static_cast<int32_t>(getpid());
             for (int i = 0; i < kPerChild; ++i) {
                 emit(c, "chip_worker", "c%d-r%03d", c, i);
             }

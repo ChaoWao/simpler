@@ -242,10 +242,7 @@ namespace {
 // binds the process-owned state. Missing binding is therefore observable as an
 // absent module stream rather than output filtered at the wrong threshold.
 SimplerHostLogState g_module_log_state{
-    SIMPLER_HOST_LOG_STATE_ABI_VERSION,
-    sizeof(SimplerHostLogState),
-    static_cast<int32_t>(LogLevel::NUL),
-    0,
+    SIMPLER_HOST_LOG_STATE_ABI_VERSION, sizeof(SimplerHostLogState), static_cast<int32_t>(LogLevel::NUL), 0, 0, {},
 };
 
 int32_t atomic_load_i32(const int32_t *value) { return __atomic_load_n(value, __ATOMIC_ACQUIRE); }

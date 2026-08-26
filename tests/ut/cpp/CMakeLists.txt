@@ -1167,12 +1167,13 @@ target_link_libraries(test_onboard_device_log_level PRIVATE
 add_test(NAME test_onboard_device_log_level COMMAND test_onboard_device_log_level)
 set_tests_properties(test_onboard_device_log_level PROPERTIES LABELS "no_hardware")
 
-# Sim device-log record atomicity: concurrent threads and forked workers must
-# not interleave partial records on the shared stderr. Pure host code — compile
-# the sim backend alongside the test; no CANN, no hardware.
+# Sim device logging uses the bound HostLogger threshold, envelope, and output.
+# Pure host code — compile the sim adapter and HostLogger alongside the test;
+# no CANN, no hardware.
 add_executable(test_sim_device_log
     common/test_sim_device_log.cpp
     ${COMMON_PLATFORM_DIR}/sim/aicpu/device_log.cpp
+    ${SIMPLER_LOG_DIR}/host_log.cpp
 )
 target_include_directories(test_sim_device_log PRIVATE
     ${GTEST_INCLUDE_DIRS}
