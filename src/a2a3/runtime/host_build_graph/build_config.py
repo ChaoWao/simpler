@@ -20,9 +20,10 @@
 #
 # The "orchestration" directory contains source files compiled into both
 # runtime targets AND the orchestration .so (e.g., tensor methods needed
-# by the ChipTensor constructor's validation logic).
-# "host_orchestration_support" is linked only into that host-loaded .so; its
-# recorder prewarm entry must not instantiate host threads in runtime targets.
+# by the ChipTensor constructor's validation logic). Nothing in it may create host
+# threads, because the aicore and aicpu targets compile it too: the Graph recorder pool
+# therefore lives in "host" (host/graph_recorder_pool.cpp), which only the host target
+# builds, and the orchestration .so reaches it through the ops table.
 
 BUILD_CONFIG = {
     "aicore": {"include_dirs": ["runtime", "common", ".."], "source_dirs": ["aicore", "orchestration"]},
@@ -36,6 +37,6 @@ BUILD_CONFIG = {
     },
     "orchestration": {
         "include_dirs": ["runtime", "orchestration", "common", ".."],
-        "source_dirs": ["orchestration", "host_orchestration_support"],
+        "source_dirs": ["orchestration"],
     },
 }

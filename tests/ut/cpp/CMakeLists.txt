@@ -129,6 +129,7 @@ function(add_a2a3_hbg_runtime_test name src)
     target_include_directories(${name} PRIVATE
         ${GTEST_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/orchestration
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/host
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/common
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
@@ -156,6 +157,7 @@ function(add_a5_hbg_runtime_test name src)
     target_include_directories(${name} PRIVATE
         ${GTEST_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/orchestration
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/host
         ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime
         ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/common
         ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include

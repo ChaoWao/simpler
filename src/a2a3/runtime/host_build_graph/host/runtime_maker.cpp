@@ -61,6 +61,7 @@
 #include "../runtime/graph_host_state.h"
 #include "../runtime/host_phase_trace.h"
 #include "../runtime/orchestrator.h"
+#include "graph_recorder_pool.h"
 #include "../runtime/runtime_core.h"
 #include "../runtime/shared_memory.h"
 #include "../runtime/types.h"
@@ -323,7 +324,6 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
 // The orchestration .so exports these (submit_task form).
 typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(RuntimeContext *);
-typedef void (*OrchestrationPrewarmFunc)();
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
 // of these (the entry, plus the .so's own framework_bind_runtime, which sets
@@ -900,8 +900,12 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         void *handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (handle == nullptr) {
             LOG_ERROR("host-orch: dlopen failed: %s", dlerror());
+            unlink(so_path.c_str());
             return PTO_RUNTIME_ERR_INTERNAL;
         }
+        // Unlinked as soon as it is mapped: the handle keeps the image alive regardless of
+        // path, and every failure return below then leaves nothing behind in /tmp.
+        unlink(so_path.c_str());
         const char *bind_log_error = nullptr;
         if (simpler::log::bind_loaded_host_log_state(handle, HostLogger::get_instance().state(), &bind_log_error) !=
             0) {
@@ -927,15 +931,16 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
             dlclose(handle);
             return PTO_RUNTIME_ERR_INTERNAL;
         }
-        void *prewarm_sym = dlsym(handle, "framework_prewarm_graph_recorders");
-        if (prewarm_sym == nullptr) {
-            LOG_ERROR("host-orch: orch .so does not export framework_prewarm_graph_recorders: %s", dlerror());
+        // The recorder pool is the runtime's, one per process, so this is a plain call
+        // rather than a symbol in the .so just loaded: it parks the prewarmed workers and
+        // stands each one's recording storage up, and a later registration finds the pool
+        // already warm. Failing here fails registration, where the caller can act on it,
+        // instead of abandoning a recording mid-bind.
+        if (!graph_recorder_prewarm()) {
+            LOG_ERROR("host-orch: could not park the graph recorder pool");
             dlclose(handle);
             return PTO_RUNTIME_ERR_INTERNAL;
         }
-        reinterpret_cast<OrchestrationPrewarmFunc>(prewarm_sym)();
-        // Safe to unlink now: the handle keeps the .so mapped regardless of path.
-        unlink(so_path.c_str());
         auto *eps = new HostOrchEntryPoints{};
         eps->entry = reinterpret_cast<OrchestrationEntryFunc>(entry);
         eps->bind = reinterpret_cast<OrchestrationBindFunc>(bind_sym);

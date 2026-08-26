@@ -35,20 +35,20 @@ def test_host_orchestration_matches_runtime_sanitizer_toolchain(monkeypatch, pla
 
 
 @pytest.mark.parametrize(
-    ("target_platform", "target_runtime", "expects_host_logger", "expects_graph_recorder_prewarm"),
+    ("target_platform", "target_runtime", "expects_host_logger"),
     [
-        ("a2a3sim", "host_build_graph", True, True),
-        ("a2a3sim", "tensormap_and_ringbuffer", True, False),
-        ("a2a3", "host_build_graph", True, True),
-        ("a2a3", "tensormap_and_ringbuffer", False, False),
-        ("a5sim", "host_build_graph", True, True),
-        ("a5sim", "tensormap_and_ringbuffer", True, False),
-        ("a5", "host_build_graph", True, True),
-        ("a5", "tensormap_and_ringbuffer", False, False),
+        ("a2a3sim", "host_build_graph", True),
+        ("a2a3sim", "tensormap_and_ringbuffer", True),
+        ("a2a3", "host_build_graph", True),
+        ("a2a3", "tensormap_and_ringbuffer", False),
+        ("a5sim", "host_build_graph", True),
+        ("a5sim", "tensormap_and_ringbuffer", True),
+        ("a5", "host_build_graph", True),
+        ("a5", "tensormap_and_ringbuffer", False),
     ],
 )
 def test_host_orchestration_is_a_self_contained_log_consumer(
-    monkeypatch, target_platform, target_runtime, expects_host_logger, expects_graph_recorder_prewarm
+    monkeypatch, target_platform, target_runtime, expects_host_logger
 ):
     from simpler_setup import kernel_compiler, toolchain  # noqa: PLC0415
 
@@ -76,7 +76,11 @@ def test_host_orchestration_is_a_self_contained_log_consumer(
         assert "unified_log_host.cpp" not in source_names
         assert "-pthread" not in compiler._orchestration_link_flags(compiler._orchestration_toolchain(target_runtime))
 
-    assert ("graph_recorder_prewarm.cpp" in source_names) is expects_graph_recorder_prewarm
+    # The Graph recorder pool belongs to the runtime, and these sources are shared with the
+    # aicore and aicpu targets, so nothing that creates host threads may be compiled into
+    # the orchestration .so -- see the note on "orchestration" in each runtime's
+    # build_config.py. The pool used to live here behind a framework_* entry point.
+    assert "graph_recorder_pool.cpp" not in source_names
 
 
 def test_direct_compiler_command_uses_checkout_relative_paths(monkeypatch, tmp_path):
