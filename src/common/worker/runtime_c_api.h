@@ -407,6 +407,9 @@ int simpler_prepare_run(
  */
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx);
 
+/** Return nonzero when two prepared runs may be submitted to the same run streams. */
+int supports_queued_native_launch_ctx(DeviceContextHandle ctx);
+
 /**
  * Launch a prepared run. Returns only after the platform has published its
  * real kernel-launch marker, or after execution terminates before that marker.

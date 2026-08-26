@@ -647,6 +647,11 @@ int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {
     return ctx != nullptr && concurrent_native_prepare_supported_impl() != 0 ? 1 : 0;
 }
 
+int supports_queued_native_launch_ctx(DeviceContextHandle ctx) {
+    if (ctx == nullptr) return 0;
+    return static_cast<DeviceRunnerBase *>(ctx)->native_launch_depth() > 1 ? 1 : 0;
+}
+
 static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
     const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
@@ -1027,9 +1032,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     // the provider/session.
     state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
     if (state->runner_claimed) {
-        // The point a successor's launch becomes admissible. Ordering a
-        // successor's device work against this boundary is what separates a
-        // pipelined launch from a reordered one, and no other span marks it.
+        // This run no longer occupies one slot in the submitted-run owner set.
         STRACE("chip.run.claim_release");
         state->runner->release_native_run(state);
         state->runner_claimed = false;

@@ -97,9 +97,8 @@ public:
     DeviceRunnerBase &operator=(DeviceRunnerBase &&) = delete;
 
     /**
-     * Claim the runner for one native execution. The opaque owner and
-     * runner-owned timing and diagnostic state remain exclusive through
-     * validation/finalize.
+     * Claim one submitted-run slot and mint its identity-bound launch permit.
+     * The backend's native_launch_depth() controls how many owners coexist.
      */
     bool try_acquire_native_run(const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit);
     void release_native_run(const void *owner);
@@ -109,7 +108,7 @@ public:
     /**
      * Reserve caller-owned native-run storage before binding starts. A
      * concurrent reservation is admitted only while the first reservation
-     * owns the execution claim and selects a distinct pipeline slot. A backend
+     * owns a submitted-run slot and selects a distinct pipeline slot. A backend
      * that shares an arena bank must reject or defer incompatible preparation
      * before mutating that bank.
      */
@@ -526,6 +525,9 @@ public:
      */
     virtual bool can_accept_run() const = 0;
 
+    /** Maximum number of submitted native runs retained by this runner. */
+    virtual size_t native_launch_depth() const { return 1; }
+
     /**
      * An AICore launch or stream sync failed outside the per-run path. The arch
      * runner drains what it can and flips its device-unusable flag, so the next
@@ -861,7 +863,7 @@ protected:
      * reset every record, and publish the base for AICPU stamping. Allocation or
      * reset failure is non-fatal; the base stays null and timing reads as 0.
      */
-    void ensure_device_wall_buffer(KernelArgsHelper &kernel_args);
+    void ensure_device_wall_buffer(KernelArgsHelper &kernel_args, uint32_t pipeline_slot);
     int arm_device_wall_buffer(KernelArgsHelper &kernel_args);
 
     /**
@@ -900,11 +902,11 @@ protected:
     int sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream);
 
     /**
-     * Read and reduce the device-phase/task-timing records after stream sync.
+     * Read and reduce one run's device-phase/task-timing records after its fence.
      * Capture-disabled runs and missing buffers leave all cached timings at 0.
      * A D2H failure is a soft warning and also leaves timing at 0.
      */
-    void read_device_wall_ns();
+    void read_device_wall_ns(const KernelArgsHelper &kernel_args);
 
     /**
      * H2D the Runtime struct via the supplied per-execution kernel arguments. Log config
@@ -958,7 +960,7 @@ protected:
      *   - chip_callable_buffers_ free + clear
      *   - callables_ dlclose-on-hbg + clear + aicpu counter reset
      *   - 3 arenas release + cached size reset
-     *   - device_wall_dev_ptr_ free (before mem_alloc_.finalize)
+     *   - per-slot device phase buffer frees (before mem_alloc_.finalize)
      *   - mem_alloc_.finalize
      *   - block_dim_, worker_count_, aicore_kernel_binary_ reset
      *
@@ -1074,7 +1076,7 @@ protected:
     };
     mutable std::mutex native_run_mu_;
     std::array<NativeRunReservation, PTO_PIPELINE_MAX_DEPTH> native_run_reservations_{};
-    std::atomic<const void *> active_native_run_{nullptr};
+    std::array<const void *, PTO_PIPELINE_MAX_DEPTH> active_native_runs_{};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
@@ -1218,10 +1220,10 @@ protected:
     // Platform-level device phase buffer: a header, thread-major phase records,
     // and the optional task-timing tail. Its address rides on
     // `KernelArgs.device_wall_data_base`. AICPU stamps raw sys-counter cycles;
-    // subclass drain always pulls back the header + phases after stream sync,
+    // subclass drain pulls back the completed run's header + phases after its fence,
     // and only pulls the tail when the header marks it used. Allocated lazily
-    // on the first capture-enabled run and freed in subclass `finalize()`.
-    void *device_wall_dev_ptr_{nullptr};
+    // once per pipeline slot and freed in subclass `finalize()`.
+    std::array<void *, PTO_PIPELINE_MAX_DEPTH> device_wall_dev_ptrs_{};
     uint64_t device_wall_ns_{0};
     uint64_t device_phase_ns_[NUM_AICPU_PHASES] = {0};
     // Per-phase start offset (ns) from the earliest sub-phase start; see

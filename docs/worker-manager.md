@@ -251,10 +251,11 @@ the same two-frame protocol but defer native prepare because their shared
 diagnostic or device-scratch state cannot be rewritten while another run is
 active.
 
-An HBG token remains unlaunched and unaccepted until activation, and no backend
-launches a successor until the predecessor is polled and finalized. Shutdown,
-stale activation, and pre-launch failure finalize any unlaunched token exactly
-once.
+An HBG token remains unlaunched and unaccepted until activation. A backend with
+queued-launch support may then submit it behind its predecessor; completion and
+finalization remain FIFO. Other backends and diagnostic runs wait for the
+predecessor to finalize. Shutdown, stale activation, and pre-launch failure
+finalize every token exactly once.
 
 Activation is sticky on the parent side: FIFO promotion may be observed before
 the child reaches `FRAME_STAGED`. The endpoint records that permission and

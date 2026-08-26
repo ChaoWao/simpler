@@ -130,7 +130,7 @@ reduce_aicpu_phase_windows(const AicpuPhaseRecord *buf, int threads, uint64_t *o
 // =============================================================================
 //
 // A fixed tail appended after the AicpuPhaseRecord region in the SAME device
-// buffer (same base pointer and per-run H2D reset). The header controls whether
+// per-slot buffer (one base per in-flight slot and a per-run H2D reset). The header controls whether
 // the host performs the tail's separate post-sync D2H copy.
 // Orchestration tags selected tasks with a slot id 0..NUM_TASK_TIMING_SLOTS-1;
 // the scheduler folds each tagged task's AICPU dispatch/finish cycles into that

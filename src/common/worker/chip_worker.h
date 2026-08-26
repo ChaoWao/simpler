@@ -121,9 +121,10 @@ public:
      * the token, and the caller must still finalize it. The blocking composition
      * performs that cleanup internally on every exit.
      *
-     * Onboard HBG may prepare one distinct-slot successor while another run
-     * owns the execution claim. Diagnostics and backends without the explicit
-     * capability remain depth-one. Lease generation gates admission; after a
+     * A capable onboard backend may prepare and submit one distinct-slot
+     * successor while another run remains below its completion fence.
+     * Diagnostics and backends without both capabilities remain depth-one.
+     * Lease generation gates admission; after a
      * successful prepare, the slot plus process-unique run epoch prevents a
      * delayed phase call from touching reused storage, including another run
      * under the same pipeline lease or on another ChipWorker.
@@ -233,6 +234,7 @@ public:
     unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
     size_t runtime_slot_count() const { return runtime_bufs_.size(); }
     bool supports_concurrent_native_prepare() const;
+    bool supports_queued_native_launch() const;
 
     /// Opaque host native-run storage address for every slot the contract
     /// asked for. Two slots hold distinct storage; tests read this to prove
@@ -331,6 +333,7 @@ private:
     SimplerNativeRunFn wait_run_fn_ = nullptr;
     SimplerNativeRunFn finalize_run_fn_ = nullptr;
     SupportsConcurrentNativePrepareFn supports_concurrent_native_prepare_fn_ = nullptr;
+    SupportsConcurrentNativePrepareFn supports_queued_native_launch_fn_ = nullptr;
     GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
     GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;

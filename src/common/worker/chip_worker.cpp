@@ -222,6 +222,8 @@ void ChipWorker::init(
         finalize_run_fn_ = load_symbol<SimplerNativeRunFn>(handle, "simpler_finalize_run");
         supports_concurrent_native_prepare_fn_ =
             load_symbol<SupportsConcurrentNativePrepareFn>(handle, "supports_concurrent_native_prepare_ctx");
+        supports_queued_native_launch_fn_ =
+            load_symbol<SupportsConcurrentNativePrepareFn>(handle, "supports_queued_native_launch_ctx");
         get_arena_bank_gm_heap_base_fn_ =
             load_symbol<GetArenaBankGmHeapBaseFn>(handle, "get_arena_bank_gm_heap_base_ctx");
         get_retained_temp_addr_fn_ = load_symbol<GetRetainedTempAddrFn>(handle, "get_retained_temp_addr_ctx");
@@ -348,6 +350,7 @@ void ChipWorker::init(
         wait_run_fn_ = nullptr;
         finalize_run_fn_ = nullptr;
         supports_concurrent_native_prepare_fn_ = nullptr;
+        supports_queued_native_launch_fn_ = nullptr;
         get_arena_bank_gm_heap_base_fn_ = nullptr;
         get_retained_temp_addr_fn_ = nullptr;
         unregister_callable_fn_ = nullptr;
@@ -400,6 +403,7 @@ void ChipWorker::init(
         wait_run_fn_ = nullptr;
         finalize_run_fn_ = nullptr;
         supports_concurrent_native_prepare_fn_ = nullptr;
+        supports_queued_native_launch_fn_ = nullptr;
         get_arena_bank_gm_heap_base_fn_ = nullptr;
         get_retained_temp_addr_fn_ = nullptr;
         unregister_callable_fn_ = nullptr;
@@ -524,6 +528,7 @@ void ChipWorker::finalize() {
     wait_run_fn_ = nullptr;
     finalize_run_fn_ = nullptr;
     supports_concurrent_native_prepare_fn_ = nullptr;
+    supports_queued_native_launch_fn_ = nullptr;
     get_arena_bank_gm_heap_base_fn_ = nullptr;
     get_retained_temp_addr_fn_ = nullptr;
     unregister_callable_fn_ = nullptr;
@@ -656,6 +661,10 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_for_lane(
 bool ChipWorker::supports_concurrent_native_prepare() const {
     return initialized_ && pipeline_contract_.pipeline_depth > 1 &&
            supports_concurrent_native_prepare_fn_(device_ctx_) > 0;
+}
+
+bool ChipWorker::supports_queued_native_launch() const {
+    return initialized_ && pipeline_contract_.pipeline_depth > 1 && supports_queued_native_launch_fn_(device_ctx_) > 0;
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(

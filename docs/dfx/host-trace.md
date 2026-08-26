@@ -152,7 +152,7 @@ children are TMR-only; HBG orchestration runs on the host and stamps none of
 those phases. All emitted device spans are tagged `clk=dev`. They are not host
 `steady_clock` spans: the AICPU stamps raw sys-counter cycles into a host-allocated buffer
 (whose address rides on `KernelArgs::device_wall_data_base`), the host reads it
-back after stream-sync, converts cycles → ns, and emits the marker. `orch`/
+back after that run's completion event, converts cycles → ns, and emits the marker. `orch`/
 `sched` are the orchestrator/scheduler windows that formerly only appeared as
 device-log lines. A phase that was never stamped
 (0 ns) is skipped — e.g. `so_load` is ~0 on a cached-callable run. See
@@ -161,7 +161,7 @@ device-log lines. A phase that was never stamped
 The phased native-run interface preserves this same marker contract. Prepare
 allocates one `inv` and records the host-wall start; prepare, the child progress
 path's launch/drain lifecycle, and finalize bind that `(inv, hid)` while
-emitting their spans. Finalize releases the runner claim, destroys the per-run
+emitting their spans. Finalize releases the run's submitted-owner slot, destroys the per-run
 state, and then emits the stored `chip.run` wall, so the root includes that
 cleanup tail.
 No trace scope or synthetic nesting remains active between C API calls. For
@@ -343,13 +343,13 @@ tree, and the root span already carries the identity that tells two runs apart.
 | -------- | --------- |
 | successor's preparation | `chip.run.bind` — its arena build + host orchestration |
 | predecessor's device work | `chip.run.runner_run` |
-| when a successor may launch | `chip.run.claim_release` |
+| successor queued launch | overlapping `chip.run.runner_run` spans |
 | which run each belongs to | root `chip.run` attrs, joined by `(pid, inv)` |
 
-Only `claim_release` was added for this: it wraps `release_native_run` inside
-finalize, the point a successor's launch becomes admissible, and no other span
-marks that boundary. `node.post_fence_retirement` covers the L3 orchestrator's
-`release_run` tail for the same reason.
+`claim_release` wraps `release_native_run` inside finalize and records when one
+submitted-owner slot is returned. It is not a launch barrier on a backend that
+queues two runs. `node.post_fence_retirement` covers the L3 orchestrator's
+`release_run` tail.
 
 The identity is `run_id / dispatch_id / run_epoch / slot_id / generation`. Each
 field means one thing: `run_id` and `dispatch_id` are zero on the direct-chip
@@ -363,9 +363,10 @@ python -m simpler_setup.tools.strace_timing path/to/log --assert-native-overlap
 ```
 
 Per adjacent run on one child process, the command requires `bind(N+1)` to
-**overlap** `runner_run(N)` — the intervals intersect — and `runner_run(N+1)` not
-to start before `claim_release(N)`. It exits nonzero on a missing identity, a
-missing span, or an ordering violation.
+**overlap** `runner_run(N)` and `runner_run(N+1)` to begin before
+`runner_run(N)` ends. The latter proves the successor was submitted before the
+predecessor completion fence. It exits nonzero on a missing identity, a missing
+span, or an ordering violation.
 
 Reading `bind` rather than the whole prepare is deliberate: `bind` sits inside
 prepare, so an overlap it reports is one the prepare certainly had.

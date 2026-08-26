@@ -53,6 +53,7 @@ size_t g_poll_count{0};
 // on the poll count instead of looping forever.
 size_t g_poll_completes_after{0};
 bool g_supports_successor{true};
+bool g_supports_queued_launch{true};
 std::mutex g_wait_mu;
 std::condition_variable g_wait_cv;
 bool g_wait_entered{false};
@@ -111,6 +112,8 @@ int finalize_run(void *, void *runtime) {
 
 int supports_successor(void *) { return g_supports_successor ? 1 : 0; }
 
+int supports_queued_launch(void *) { return g_supports_queued_launch ? 1 : 0; }
+
 void prime_worker(ChipWorker &worker) {
     g_slots.clear();
     g_complete = {};
@@ -124,6 +127,7 @@ void prime_worker(ChipWorker &worker) {
     g_poll_count = 0;
     g_poll_completes_after = 0;
     g_supports_successor = true;
+    g_supports_queued_launch = true;
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
         g_wait_entered = false;
@@ -143,6 +147,7 @@ void prime_worker(ChipWorker &worker) {
     worker.wait_run_fn_ = wait_run;
     worker.finalize_run_fn_ = finalize_run;
     worker.supports_concurrent_native_prepare_fn_ = supports_successor;
+    worker.supports_queued_native_launch_fn_ = supports_queued_launch;
 }
 
 ChipRun submit(ChipRunLane &lane, uint64_t run_id, uint32_t slot, bool activate = true) {
@@ -163,12 +168,13 @@ TEST(ChipRunLaneTest, OwnsFifoPreparationAndLaunch) {
     EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
 
     second.activate();
+    EXPECT_TRUE(second.launched());
+    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "launch1"}));
     EXPECT_FALSE(second.done());
     g_complete[0] = true;
     EXPECT_TRUE(first.done());
     EXPECT_FALSE(second.done());
-    EXPECT_TRUE(second.launched());
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "launch1"}));
+    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "launch1", "finalize0"}));
 
     g_complete[1] = true;
     EXPECT_TRUE(second.done());
@@ -308,9 +314,9 @@ TEST(ChipRunLaneTest, DirectCapacityTwoPreparesSuccessorAndBackpressuresThird) {
     ChipRun first = lane.submit(1, args, CallConfig{});
     ChipRun second = lane.submit(1, args, CallConfig{});
     EXPECT_TRUE(first.launched());
-    EXPECT_FALSE(second.launched());
+    EXPECT_TRUE(second.launched());
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
-    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "launch1"}));
 
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
@@ -346,7 +352,7 @@ TEST(ChipRunLaneTest, DirectCapacityTwoPreparesSuccessorAndBackpressuresThird) {
     ASSERT_EQ(submit_error, nullptr);
     ASSERT_TRUE(third.has_value());
     EXPECT_TRUE(second.launched());
-    EXPECT_FALSE(third->launched());
+    EXPECT_TRUE(third->launched());
     EXPECT_EQ(third->preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
     EXPECT_EQ(g_prepare_count[0], 2u);
 
@@ -430,6 +436,28 @@ TEST(ChipRunLaneTest, DirectRuntimeWithoutConcurrentPrepareRetainsDepthOne) {
     EXPECT_EQ(g_prepare_count[0], 2u);
     EXPECT_EQ(g_prepare_count[1], 0u);
     g_complete[0] = true;
+    EXPECT_TRUE(second.done());
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, ConcurrentPrepareWithoutQueuedLaunchRetainsDepthOneExecution) {
+    ChipWorker worker;
+    prime_worker(worker);
+    g_supports_queued_launch = false;
+    ChipRunLane lane(worker);
+    ChipStorageTaskArgs args{};
+
+    ChipRun first = lane.submit(1, args, CallConfig{});
+    ChipRun second = lane.submit(1, args, CallConfig{});
+
+    EXPECT_TRUE(first.launched());
+    EXPECT_FALSE(second.launched());
+    EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
+    EXPECT_TRUE(second.launched());
+    g_complete[1] = true;
     EXPECT_TRUE(second.done());
     lane.close();
     worker.finalize();

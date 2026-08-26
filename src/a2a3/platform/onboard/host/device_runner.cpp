@@ -254,7 +254,7 @@ int DeviceRunner::prepare_execution(
         return rc;
     }
 
-    ensure_device_wall_buffer(execution->kernel_args);
+    ensure_device_wall_buffer(execution->kernel_args, pipeline_slot);
 
     if (block_dim < 1) {
         LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
@@ -431,8 +431,8 @@ int DeviceRunner::prepare_execution(
 
 int DeviceRunner::poll_execution(const ActiveExecution &active) {
     if (active.prepared == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
-    return run_streams_.poll([](void *aicpu, void *aicore) {
-        return query_stream_pair_nonblocking(static_cast<rtStream_t>(aicpu), static_cast<rtStream_t>(aicore));
+    return run_streams_.poll(active.prepared.get(), [this, &active](void *, void *) {
+        return query_run_completion_events(*active.prepared);
     });
 }
 
@@ -443,7 +443,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         cleanup_execution(prepared, /*retire_aicore=*/true);
     });
 
-    int rc = reap_run();
+    int rc = reap_run(prepared);
     if (rc != 0) {
         // The device/sync error remains authoritative over teardown errors.
         return rc;
@@ -455,6 +455,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     prepared.aicore_retirement_attempted = true;
     rc = retire_run_aicore_stream(&prepared, RunStreamPair::CompletionStatus::Complete);
     if (rc != 0) return rc;
+    reset_run_completion_events(prepared.pipeline_slot);
 
     // Reads device memory, so it must precede KernelArgs/runtime cleanup.
     print_handshake_results(prepared.kernel_args);
@@ -560,6 +561,108 @@ int DeviceRunner::destroy_run_streams() {
     return rc;
 }
 
+int DeviceRunner::ensure_run_completion_events(uint32_t pipeline_slot) {
+    if (pipeline_slot >= run_completion_events_.size()) return PTO_RUNTIME_ERR_INTERNAL;
+    RunCompletionEvents &events = run_completion_events_[pipeline_slot];
+    if (events.recorded) return PTO_RUNTIME_ERR_INTERNAL;
+    for (void **event : {&events.aicpu, &events.aicore}) {
+        if (*event != nullptr) continue;
+        aclrtEvent created = nullptr;
+        const aclError rc = aclrtCreateEventExWithFlag(&created, ACL_EVENT_CAPTURE_STREAM_PROGRESS);
+        if (rc != ACL_SUCCESS) {
+            LOG_ERROR("aclrtCreateEventExWithFlag (run completion) failed: %d", static_cast<int>(rc));
+            ACL_LOG_ERROR_DETAIL(rc);
+            return static_cast<int>(rc);
+        }
+        *event = created;
+    }
+    return 0;
+}
+
+int DeviceRunner::record_run_completion_events(const PreparedExecution &prepared) {
+    if (prepared.pipeline_slot >= run_completion_events_.size()) return PTO_RUNTIME_ERR_INTERNAL;
+    RunCompletionEvents &events = run_completion_events_[prepared.pipeline_slot];
+    if (events.aicpu == nullptr || events.aicore == nullptr || events.recorded) return PTO_RUNTIME_ERR_INTERNAL;
+    aclError rc = aclrtRecordEvent(static_cast<aclrtEvent>(events.aicore), run_streams_.aicore());
+    if (rc == ACL_SUCCESS) {
+        rc = aclrtRecordEvent(static_cast<aclrtEvent>(events.aicpu), run_streams_.aicpu());
+    }
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("aclrtRecordEvent (run completion) failed: %d", static_cast<int>(rc));
+        ACL_LOG_ERROR_DETAIL(rc);
+        return static_cast<int>(rc);
+    }
+    events.recorded = true;
+    return 0;
+}
+
+int DeviceRunner::query_run_completion_events(const PreparedExecution &prepared) {
+    if (prepared.pipeline_slot >= run_completion_events_.size()) return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    const RunCompletionEvents &events = run_completion_events_[prepared.pipeline_slot];
+    if (!events.recorded || events.aicpu == nullptr || events.aicore == nullptr) {
+        return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    }
+    for (void *event : {events.aicpu, events.aicore}) {
+        aclrtEventRecordedStatus status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+        const aclError rc = aclrtQueryEventStatus(static_cast<aclrtEvent>(event), &status);
+        if (rc != ACL_SUCCESS) {
+            LOG_ERROR("aclrtQueryEventStatus (run completion) failed: %d", static_cast<int>(rc));
+            ACL_LOG_ERROR_DETAIL(rc);
+            return SIMPLER_NATIVE_RUN_POLL_ERROR;
+        }
+        if (status != ACL_EVENT_RECORDED_STATUS_COMPLETE) return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+    }
+    return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+}
+
+int DeviceRunner::wait_run_completion_events(const PreparedExecution &prepared) {
+    if (prepared.pipeline_slot >= run_completion_events_.size()) return PTO_RUNTIME_ERR_INTERNAL;
+    const RunCompletionEvents &events = run_completion_events_[prepared.pipeline_slot];
+    if (!events.recorded || events.aicpu == nullptr || events.aicore == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
+    for (const auto &[name, event] :
+         {std::pair<const char *, void *>{"AICPU", events.aicpu}, {"AICore", events.aicore}}) {
+        const aclError rc =
+            aclrtSynchronizeEventWithTimeout(static_cast<aclrtEvent>(event), timeout_config_.stream_sync_timeout_ms);
+        if (rc != ACL_SUCCESS) {
+            LOG_ERROR(
+                "Event sync failed: event=%s timeout_ms=%d device_id=%d block_dim=%d rc=%d", name,
+                timeout_config_.stream_sync_timeout_ms, device_id_, block_dim_, static_cast<int>(rc)
+            );
+            ACL_LOG_ERROR_DETAIL(rc);
+            return static_cast<int>(rc);
+        }
+    }
+    return 0;
+}
+
+void DeviceRunner::reset_run_completion_events(uint32_t pipeline_slot) noexcept {
+    if (pipeline_slot >= run_completion_events_.size()) return;
+    RunCompletionEvents &events = run_completion_events_[pipeline_slot];
+    events.recorded = false;
+}
+
+int DeviceRunner::destroy_run_completion_events() {
+    int first_error = 0;
+    for (RunCompletionEvents &events : run_completion_events_) {
+        for (void **event : {&events.aicpu, &events.aicore}) {
+            if (*event == nullptr) continue;
+            const aclError rc = aclrtDestroyEvent(static_cast<aclrtEvent>(*event));
+            if (rc != ACL_SUCCESS) {
+                if (first_error == 0) first_error = static_cast<int>(rc);
+                continue;
+            }
+            *event = nullptr;
+        }
+        events.recorded = false;
+    }
+    return first_error;
+}
+
+void DeviceRunner::abandon_run_completion_events() noexcept {
+    for (RunCompletionEvents &events : run_completion_events_)
+        events = RunCompletionEvents{};
+}
+
 DeviceRunnerBase::LaunchOutcome
 DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) {
     LaunchOutcome outcome;
@@ -587,10 +690,10 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
     // It intentionally performs no stream synchronization or per-run cleanup.
     //
     // The pair is readied here rather than at prepare because this is the first
-    // point the caller holds the execution claim: a prepared successor overlaps
-    // its predecessor's execution, so replacing a stale AICore stream during
-    // preparation would destroy a stream the predecessor is still running on.
-    if (ensure_run_streams() != 0) {
+    // point the caller owns a submitted-run slot. A prepared successor overlaps
+    // its predecessor's execution, and a queued successor must reuse the same
+    // warm pair rather than replace a stream with outstanding work.
+    if (ensure_run_streams() != 0 || ensure_run_completion_events(prepared.pipeline_slot) != 0) {
         return LaunchTransactionResult{};
     }
     RunStreamSet streams{static_cast<rtStream_t>(run_streams_.aicpu()), static_cast<rtStream_t>(run_streams_.aicore())};
@@ -667,21 +770,22 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
             if (launch_rc != 0) {
                 LOG_ERROR("launch_aicpu_kernel (main) failed: %d", launch_rc);
             }
-            return launch_rc;
+            if (launch_rc != 0) return launch_rc;
+            return record_run_completion_events(prepared);
         }
     );
     return result;
 }
 
-int DeviceRunner::reap_run() {
+int DeviceRunner::reap_run(PreparedExecution &prepared) {
     if (!run_streams_.ready()) {
         LOG_ERROR("reap_run: the run stream pair is not ready");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    int rc = sync_stream_pair(run_streams_.aicpu(), run_streams_.aicore());
+    int rc = wait_run_completion_events(prepared);
     if (rc != 0) {
-        // The pair wait surfaces the AICore op-timeout (STARS-reaped op ->
-        // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout
+        // The event wait surfaces the AICore op-timeout (STARS-reaped op ->
+        // 507000/507018/507046 at the recorded stream completion point). The op-timeout
         // leaves the device context poisoned for the SAME DeviceRunner's next
         // run, so attempt recovery / mark-unusable here too, not only on the
         // launch-error path above.
@@ -698,7 +802,7 @@ int DeviceRunner::reap_run() {
         return rc;
     }
 
-    read_device_wall_ns();
+    read_device_wall_ns(prepared.kernel_args);
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
@@ -1033,6 +1137,7 @@ int DeviceRunner::finalize() {
         }
 
         run_streams_.abandon();
+        abandon_run_completion_events();
         int abandon_rc = abandon_common_after_device_failure();
 
         // Only finalize the ACL owner after force reset established a clean
@@ -1073,12 +1178,14 @@ int DeviceRunner::finalize() {
     // The run stream pair is this subclass's own RTS-owning member, so it is
     // released here, while RTS is live and before the device reset below — the
     // same window finalize_common() uses for the bootstrap pair.
+    int event_rc = destroy_run_completion_events();
     int stream_rc = destroy_run_streams();
 
     // Shared cleanup body — streams, kernel_args, callable/orch maps,
     // chip-callable buffer pool, the three arenas, device_wall,
     // mem_alloc_.finalize(), and cached arena sizes.
     rc = finalize_common();
+    if (rc == 0) rc = event_rc;
     if (rc == 0) rc = stream_rc;
 
     // Reset device AFTER all device memory is freed. Two paths:

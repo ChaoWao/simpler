@@ -887,6 +887,8 @@ int simpler_run(
 
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle) { return 0; }
 
+int supports_queued_native_launch_ctx(DeviceContextHandle) { return 0; }
+
 uint64_t get_arena_bank_gm_heap_base_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
     if (ctx == NULL) return 0;
     return static_cast<SimDeviceRunnerBase *>(ctx)->arena_bank_gm_heap_base(bank_id);

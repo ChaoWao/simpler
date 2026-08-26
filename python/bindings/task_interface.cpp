@@ -3089,6 +3089,10 @@ NB_MODULE(_task_interface, m) {
             "Whether non-diagnostic native preparation may overlap one active run in another slot."
         )
         .def_prop_ro(
+            "supports_queued_native_launch", &ChipWorker::supports_queued_native_launch,
+            "Whether two non-diagnostic native runs may be queued on the device streams."
+        )
+        .def_prop_ro(
             "runtime_buffer_addrs", &ChipWorker::runtime_buffer_addrs,
             "Host Runtime staging buffer address of every copy the runtime's "
             "PipelineContract asked for, in slot order."

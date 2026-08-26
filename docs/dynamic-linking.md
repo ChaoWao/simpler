@@ -388,9 +388,9 @@ device_worker_main(device_id)
                   launch_aicpu_kernel(Run)     rtsLaunchCpuKernel, cached rtFuncHandle
                   publish acceptance from the completed launch receipt
               simpler_poll_run(...)            nonblocking child progress query
-                DeviceRunner::poll_execution(active) nonblocking stream query
+                DeviceRunner::poll_execution(active) query this run's event pair
               simpler_wait_run(...)
-                DeviceRunner::drain_execution(active) wait on both streams
+                DeviceRunner::drain_execution(active) wait on this run's event pair
               simpler_finalize_run(...)        rtMemcpy results back; destroy state
 
     ChipWorker.finalize()
