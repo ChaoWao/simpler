@@ -77,7 +77,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
     This is a thin wrapper around ``KernelCompiler`` that reads the CALLABLE
     structure you'd see in a ``@scene_test`` class and returns the opaque
     handle Worker.run(...) expects. In production code this lives inside
-    ``simpler_setup/scene_test.py`` (see ``_compile_chip_callable_from_spec``);
+    ``simpler_setup/scene_test.py`` (see ``compile_chip_callable_spec``);
     we inline a minimal version here so the flow is visible.
     """
     kc = KernelCompiler(platform=platform)

@@ -1,6 +1,7 @@
 # DeepSeek-V4 FLASH full decode network (EP2 / TP2, 2 dies)
 
-The complete DeepSeek-V4 FLASH 43-layer decode forward as one scene test:
+The complete DeepSeek-V4 FLASH 43-layer decode forward as one standalone case
+(`main.py` driving an L3 `Worker` itself, plus a thin pytest wrapper):
 pypto-generated chip orchestration + 368 incore kernels per rank, dispatched to
 two dies that cooperate through a communication domain (expert-parallel MoE
 dispatch/combine and a TP-sharded LM head). This is the first pypto-harvested
@@ -25,9 +26,50 @@ Per rank the chip program receives 92 tensors (79 per-rank shards, 12
 comm-window views, 1 shared counts vector) plus 13 scalars (rank id + 12
 `CommContext` pointers), then runs the whole decode step as one dispatch.
 
+## Parameters live in child memory
+
+Every per-rank parameter is one `Worker.alloc_child_tensor` buffer on its own
+rank — device-resident, allocated once before the first round, reused by every
+round. The runtime passes such a tensor through without malloc, H2D staging or
+copy-back (`runtime_maker.cpp`'s `is_device_memory()` branch), which is what
+keeps the measurable part of a run the network rather than 42.6 GiB per rank of
+memcpy. The two modes:
+
+| Property | default | `--skip-golden` |
+| -------- | ------- | --------------- |
+| host allocation | one staging buffer per parameter, released after its upload | none beyond an 8-byte counts buffer |
+| device buffers | allocated, then loaded from the fixture | allocated, **left uninitialized** |
+| data | `simpler_setup/goldens/deepseek_v4_flash_decode.py::param_tensors`, one parameter at a time | whatever HBM held |
+
+Neither mode compares anything — see *Validation semantics* below. The flag
+follows the framework's: `store_true`, so a bare run uploads the data and
+`--skip-golden` is what opts out. This case has no host-computable expected
+output, so the pytest wrapper passes `skip_golden=True` — the standalone
+equivalent of the `CASES[*]["skip_golden"]` it used to declare — and that is the
+mode CI runs.
+
+`num_tokens_per_owner` is the one parameter that stays host-backed. Under
+`host_build_graph` the orchestrator runs on the host and reads it with
+`get_tensor_data` to size a task's block count, and a child-memory tensor
+reaches the device without a host view. It is 8 bytes and always carries T.
+
+### What "uninitialized" means for the index parameters
+
+Under `--skip-golden` a fresh `alloc_child_tensor` is not zeroed by anything:
+`device_malloc_ctx` is a plain allocation. Measured on an a2a3 die, most of it
+reads back as zero (fresh HBM pages), but a recycled region does not — a 1 MiB
+probe came back with 15 non-zero bytes. So the parameters the device dereferences
+as *indices* (`block_table` and the four other block tables, `position_ids`,
+`kv_seq_lens`, `block_counts`, `input_ids`, `tid2eid`, `logit_row_indices` —
+127 MiB of the 42.6 GiB) are the ones where a stale byte can put a kernel out of
+bounds or make a count zero, which surfaces as `507018` / `HandleTaskTimeout`
+rather than a wrong number. Uploading only that group under `--skip-golden` is
+the fix if it ever shows up: the upload path is the default mode's, and 127 MiB
+against 42.6 GiB does not change what the flag is for.
+
 ## Validation semantics
 
-The case is `skip_golden`: it is a completion/smoke test. Upstream pypto-lib
+The case is a completion/smoke test with no golden. Upstream pypto-lib
 drives the same fixture with `golden_fn=None` — a full-network torch reference
 does not exist there either; numeric coverage lives with the standalone kernel
 harnesses in pypto-lib (`models/deepseek_v4_flash_mtp/*.py`), and real-weight
@@ -96,18 +138,32 @@ dedicated job parallel to the main sweep.
 ## Running
 
 ```bash
-# standalone (2 dies; wrap in task-submit on a shared box)
-python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/test_deepseek_v4_flash_decode.py \
+# what CI runs: no data uploaded (2 dies; wrap in task-submit on a shared box)
+python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/main.py \
+    -p a2a3 -d <d0>,<d1> --skip-golden
+
+# several decode steps over the same child memory
+python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/main.py \
+    -p a2a3 -d <d0>,<d1> --skip-golden --rounds 6
+
+# the harvest's real data — the default (needs the host RAM, see below)
+python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/main.py \
     -p a2a3 -d <d0>,<d1>
 
-# pytest
+# compile the kernels only — no device
+python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/main.py \
+    -p a2a3 --compile-only
+
+# pytest (the case is manual, and the wrapper passes skip_golden itself)
 pytest examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode \
-    --platform a2a3 --device <d0>,<d1>
+    --platform a2a3 --manual only --device <d0>,<d1>
 ```
 
-The fixture materializes on the order of 100 GiB of host tensors (weights for
-both ranks); the machine needs the RAM headroom, and generation takes a few
-minutes.
+`--skip-golden` allocates 42.6 GiB of device memory per rank and touches no host
+memory for it. The default builds the fixture one parameter at a time, so the
+host peak is the largest single parameter (10.75 GiB, one of the 43x-tiled
+routed-expert stacks) plus its staging copy rather than the ~85 GiB total;
+generation still takes a few minutes.
 
 ## Provenance
 
@@ -130,14 +186,13 @@ of its pinned runtime `3165cc89`; simpler renamed them on main per the role-base
 naming rule, with no compat alias). The intentional post-harvest edits are the
 `hc_head_linear` row-tail bound, the device-side initialization, and the
 kernel-side scale loads described above; regeneration must reapply all three.
-`test_deepseek_v4_flash_decode.py`'s
+`main.py`'s
 `_KERNELS` / `_ORCH_SIG` tables are transcribed from the harvest's
 `kernel_config.py`, and `_ARG_STEPS` / the comm-domain layout from its
-generated `host_orch.py` (per-rank stacked slices become the `_r0`/`_r1` host
-tensors because the scene-test rehost passes whole buffers, and pypto's
-device-resident weight upload becomes plain host-tensor args — both are
-mechanical translations, not behavior changes; residency only matters for
-repeated dispatch).
+generated `host_orch.py` (per-rank stacked slices become the `_r0`/`_r1`
+per-rank buffers because a task arg names one whole buffer, not a slice of a
+stacked one; pypto's device-resident weight upload is the child-memory
+allocation here — both are mechanical translations, not behavior changes).
 
 ### To regenerate
 
@@ -152,7 +207,8 @@ repeated dispatch).
 #     while pypto's pinned runtime predates the role-based renames
 #   - next_levels/decode_fwd/kernel_config.py -> _KERNELS / _ORCH_SIG tables
 #   - orchestration/host_orch.py -> _ARG_STEPS / _WINDOW_BUFFERS tables + orch fn
-#   - build_tensor_specs() in decode_fwd.py -> simpler_setup/goldens/deepseek_v4_flash_decode.py
+#   - build_tensor_specs() in decode_fwd.py -> PARAM_SPECS + param_tensors in
+#     simpler_setup/goldens/deepseek_v4_flash_decode.py
 ```
 
 ## Cost (measured on a2a3, 2 dies)

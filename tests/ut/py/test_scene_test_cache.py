@@ -38,9 +38,9 @@ from simpler_setup.compile_pool import compile_worker_budget
 from simpler_setup.scene_test import (
     SceneTestCase,
     _compile_cache,
-    _compile_chip_callable_from_spec,
     _pto_isa_compile_cache_token,
     clear_compile_cache,
+    compile_chip_callable_spec,
     l3_compile_cache_key,
 )
 
@@ -91,7 +91,7 @@ def test_compile_cache_keys_include_module(monkeypatch):
     scene_test_module = importlib.import_module("simpler_setup.scene_test")
     monkeypatch.setattr(
         scene_test_module,
-        "_compile_chip_callable_from_spec",
+        "compile_chip_callable_spec",
         lambda spec, platform, runtime, cache_key: captured.append(cache_key),
     )
 
@@ -190,7 +190,7 @@ def test_callable_compiles_orchestration_and_incore_concurrently(monkeypatch, tm
     _FakeKernelCompiler.compile_barrier = Barrier(2, timeout=2)
 
     with compile_worker_budget(2):
-        compiled = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+        compiled = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert compiled.child_count == 1
 
@@ -223,7 +223,7 @@ def test_callable_preserves_spec_order_when_kernels_finish_out_of_order(monkeypa
 
     monkeypatch.setattr(_FakeKernelCompiler, "compile_incore", finish_second_first)
     with compile_worker_budget(3):
-        compiled = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+        compiled = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert [compiled.child_func_id(index) for index in range(compiled.child_count)] == [0, 7]
 
@@ -242,7 +242,7 @@ def test_callable_key_reuses_precomputed_incore_keys(monkeypatch, tmp_path):
         return original(metadata, captured["units"])
 
     monkeypatch.setattr(scene_test_module, "compile_artifact_key", recording_key)
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert [Path(source).name for source, _include_dirs in captured["units"]] == ["orchestration.cpp"]
     assert len(captured["metadata"]["incores"]) == 1
@@ -254,12 +254,12 @@ def test_compile_cache_survives_session_cache_clear(monkeypatch, tmp_path):
     spec, _header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    first = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    first = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     assert _FakeKernelCompiler.orchestration_compiles == 1
     assert _FakeKernelCompiler.incore_compiles == 1
 
     clear_compile_cache()
-    second = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    second = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 1
     assert _FakeKernelCompiler.incore_compiles == 1
@@ -273,10 +273,10 @@ def test_compile_cache_invalidates_transitive_include(monkeypatch, tmp_path):
     spec, header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     clear_compile_cache()
     header.write_text("constexpr int VALUE = 2;\n")
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 2
@@ -287,10 +287,10 @@ def test_orchestration_change_reuses_incore_artifact(monkeypatch, tmp_path):
     spec, _header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     clear_compile_cache()
     Path(spec["orchestration"]["source"]).write_text('extern "C" void orchestration_changed() {}\n')
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 1
@@ -312,10 +312,10 @@ def test_only_changed_incore_recompiles(monkeypatch, tmp_path):
     )
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     clear_compile_cache()
     second.write_text('extern "C" void kernel_entry() { int changed = 1; }\n')
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 3
@@ -355,7 +355,7 @@ def test_callables_share_incore_artifact_across_case_directories(monkeypatch, tm
 
     for index, spec in enumerate(specs):
         cache_key = (f"TestScene{index}", "a2a3sim", "host_build_graph", "pin")
-        _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+        compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 1
@@ -367,10 +367,10 @@ def test_compile_cache_invalidates_compiler_schema(monkeypatch, tmp_path):
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
     _FakeKernelCompiler.cache_schema = 1
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     clear_compile_cache()
     _FakeKernelCompiler.cache_schema = 2
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 2
@@ -381,11 +381,11 @@ def test_compile_cache_rebuilds_incomplete_callable_and_reuses_incore(monkeypatc
     spec, _header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     binary_path = next((tmp_path / "cache").glob("*/callable.bin"))
     binary_path.write_bytes(b"incomplete")
     clear_compile_cache()
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 1
@@ -396,12 +396,12 @@ def test_compile_cache_rebuilds_incomplete_incore_artifact(monkeypatch, tmp_path
     spec, _header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
     incore_path = next((tmp_path / "cache" / "incore").glob("*/artifact.bin"))
     incore_path.write_bytes(b"incomplete")
     clear_compile_cache()
     Path(spec["orchestration"]["source"]).write_text('extern "C" void orchestration_changed() {}\n')
-    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 2
@@ -650,7 +650,7 @@ def test_unwritable_cache_warns_once_for_callable_and_incore(monkeypatch, tmp_pa
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
 
     with caplog.at_level("WARNING"):
-        callable_obj = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+        callable_obj = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     disabled_messages = [record.message for record in caplog.records if "[SceneTestCache] disabled:" in record.message]
     assert callable_obj.func_name == "orchestration"

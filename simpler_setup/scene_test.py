@@ -73,7 +73,7 @@ def _validate_diagnostic_flags(*, chip_swimlane: int, swimlane_overhead: bool) -
         raise ValueError("--enable-swimlane-overhead requires --enable-chip-swimlane")
 
 
-def _effective_diagnostic_options(
+def effective_diagnostic_options(
     rounds: int,
     *,
     chip_swimlane: int,
@@ -963,7 +963,7 @@ def _outputs_dir() -> Path:
     return _project_root() / "outputs"
 
 
-def _build_output_prefix(case_label: str) -> Path:
+def build_output_prefix(case_label: str) -> Path:
     """Per-case directory for diagnostic artifacts.
 
     Each case gets its own ``outputs/<case_label>_<timestamp>/`` directory; the
@@ -1206,7 +1206,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
         # any diagnostic flag is on; CallConfig::validate() throws otherwise.
         # scope_stats writes below the per-case output prefix, so it uses the
         # same output-prefix allocation as the other diagnostics.
-        prefix = _build_output_prefix(case_label) if diagnostics_on else Path("")
+        prefix = build_output_prefix(case_label) if diagnostics_on else Path("")
         try:
             cls_inst._run_and_validate(
                 worker,
@@ -1251,8 +1251,15 @@ def _compare_outputs(test_args, golden_args, output_names, rtol, atol):
             raise AssertionError(f"Golden mismatch on '{name}': max_diff={diff}, rtol={rtol}, atol={atol}")
 
 
-def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
-    """Compile a chip entry spec into a memory- and disk-cached ``ChipCallable``."""
+def compile_chip_callable_spec(spec, platform, runtime, cache_key):
+    """Compile a chip entry spec into a memory- and disk-cached ``ChipCallable``.
+
+    The one compile path for a `CALLABLE`-shaped spec dict, whoever owns the
+    Worker: the `SceneTestCase` classes below, the `st_worker` pytest fixture,
+    and standalone cases that drive an L3 Worker themselves. Key it through
+    ``l3_compile_cache_key`` so every path shares one cache entry per
+    orchestration.
+    """
     if cache_key in _compile_cache:
         return _compile_cache[cache_key]
 
@@ -1496,7 +1503,7 @@ class SceneTestCase:
     def compile_chip_callable(cls, platform):
         """Compile CALLABLE -> ChipCallable (L2). Session-cached."""
         cache_key = (cls.__module__, cls.__qualname__, platform, cls._st_runtime, _pto_isa_compile_cache_token())
-        return _compile_chip_callable_from_spec(cls.CALLABLE, platform, cls._st_runtime, cache_key)
+        return compile_chip_callable_spec(cls.CALLABLE, platform, cls._st_runtime, cache_key)
 
     @classmethod
     def _compile_l3_callables(cls, platform):
@@ -1506,7 +1513,7 @@ class SceneTestCase:
             if "orchestration" in entry:
                 name = entry["name"]
                 cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, platform, cls._st_runtime)
-                chip = _compile_chip_callable_from_spec(entry, platform, cls._st_runtime, cache_key)
+                chip = compile_chip_callable_spec(entry, platform, cls._st_runtime, cache_key)
                 compiled[name] = chip
                 compiled[f"{name}_sig"] = entry["orchestration"].get("signature", [])
         return compiled
@@ -1584,7 +1591,7 @@ class SceneTestCase:
         config.enable_scope_stats = enable_scope_stats
         # `output_prefix` is required by CallConfig::validate() whenever any
         # diagnostic flag is enabled. Caller threads it down from the per-case
-        # directory built by _build_output_prefix().
+        # directory built by build_output_prefix().
         if output_prefix:
             config.output_prefix = str(output_prefix)
         return config
@@ -1706,7 +1713,7 @@ class SceneTestCase:
                     getattr(test_args, name).copy_(initial)
 
             # Every diagnostic reaching this loop is already multi-round-safe:
-            # _effective_diagnostic_options zeroes all of them when rounds > 1,
+            # effective_diagnostic_options zeroes all of them when rounds > 1,
             # so no per-round masking belongs here.
             config = self._build_config(
                 config_dict,
@@ -1830,7 +1837,7 @@ class SceneTestCase:
         Subclass hooks use the same effective-value rule as the main run path
         without emitting an additional user-facing warning.
         """
-        return _effective_diagnostic_options(
+        return effective_diagnostic_options(
             request.config.getoption("--rounds", default=1),
             chip_swimlane=0,
             dump_args=0,
@@ -1860,7 +1867,7 @@ class SceneTestCase:
         enable_dep_gen = request.config.getoption("--enable-dep-gen", default=False)
         enable_scope_stats = request.config.getoption("--enable-scope-stats", default=False)
         enable_swimlane_overhead = request.config.getoption("--enable-swimlane-overhead", default=False)
-        diagnostics = _effective_diagnostic_options(
+        diagnostics = effective_diagnostic_options(
             rounds,
             chip_swimlane=enable_chip_swimlane,
             dump_args=enable_dump_args,
@@ -2080,7 +2087,7 @@ class SceneTestCase:
         # Resolved before the eager PTO-ISA checkout below so a rejected flag
         # combination costs no clone.
         try:
-            diagnostics = _effective_diagnostic_options(
+            diagnostics = effective_diagnostic_options(
                 args.rounds,
                 chip_swimlane=args.enable_chip_swimlane,
                 dump_args=args.dump_args,
@@ -2501,7 +2508,7 @@ def _create_standalone_worker(group, level, args, selected_by_cls):
             elif "orchestration" in entry:
                 name = entry["name"]
                 cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, args.platform, cls._st_runtime)
-                chip = _compile_chip_callable_from_spec(entry, args.platform, cls._st_runtime, cache_key)
+                chip = compile_chip_callable_spec(entry, args.platform, cls._st_runtime, cache_key)
                 handle = worker.register(chip)
                 cls_chip_handles[name] = handle
                 cls_chip_handles[f"{name}_sig"] = entry["orchestration"].get("signature", [])

@@ -7,6 +7,13 @@ Two ways in, split by what you are trying to learn.
 | [`workers/`](workers/README.md) | the raw `Worker` class | **How the runtime works.** Every step is explicit — build a `ChipCallable` from `.cpp` sources, pack `TaskArgs`, compose chips and sub-workers into a DAG. Organized by level: [`l2/`](workers/l2/README.md) is one chip, [`l3/`](workers/l3/README.md) is a host driving several. |
 | [`a2a3/`](a2a3/tensormap_and_ringbuffer/README.md), [`a5/`](a5/tensormap_and_ringbuffer/README.md) | the `@scene_test` framework | **How to write and validate a kernel.** Case parametrization, golden comparison, and pytest integration are handled for you. Organized by architecture, then runtime. |
 
+The architecture trees are organized by architecture and runtime because that is
+what a kernel tree needs, not because every case in them uses `@scene_test`. One
+does not: `deepseek_v4_flash_decode` drives an L3 `Worker` from its own `main.py`
+under both runtimes, because its 42.6 GiB of per-rank parameters have to stay in
+child memory instead of being rehosted per run. Its kernels, its two orchestration
+sources and its architecture stay where they are.
+
 Start with `workers/l2/hello_worker/` if the runtime is new to you; start with
 your architecture's `vector_example/` if kernels are new to you.
 
@@ -55,7 +62,8 @@ examples/
 ```
 
 An example directory holds its test file, a `kernels/` tree (`aic/`, `aiv/`,
-`orchestration/`), and a README:
+`orchestration/`), and a README; a case that drives the `Worker` itself adds a
+`main.py` beside the test file, which is then a thin wrapper over it:
 
 ```text
 my_example/
@@ -63,6 +71,7 @@ my_example/
 │   ├── aic/                # AICore-CUBE sources        (optional)
 │   ├── aiv/                # AICore-VECTOR sources      (optional)
 │   └── orchestration/      # orchestration C++
+├── main.py                 # only when the case drives the Worker itself
 ├── test_my_example.py
 └── README.md
 ```

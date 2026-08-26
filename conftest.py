@@ -1701,13 +1701,13 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
                 sub_handles[entry["name"]] = handle
             elif "orchestration" in entry:
                 from simpler_setup.scene_test import (  # noqa: PLC0415
-                    _compile_chip_callable_from_spec,
+                    compile_chip_callable_spec,
                     l3_compile_cache_key,
                 )
 
                 name = entry["name"]
                 cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, st_platform, runtime)
-                chip = _compile_chip_callable_from_spec(entry, st_platform, runtime, cache_key)
+                chip = compile_chip_callable_spec(entry, st_platform, runtime, cache_key)
                 handle = w.register(chip)
                 chip_handles[name] = handle
                 chip_handles[f"{name}_sig"] = entry["orchestration"].get("signature", [])

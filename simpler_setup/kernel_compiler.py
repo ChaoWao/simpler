@@ -32,7 +32,7 @@ from .toolchain import (
 logger = logging.getLogger(__name__)
 
 # Covers the part of the persistent scene-test cache key that nothing else
-# fingerprints: how ``scene_test._compile_chip_callable_from_spec`` assembles
+# fingerprints: how ``scene_test.compile_chip_callable_spec`` assembles
 # compiled binaries into a ``ChipCallable``. The modules that decide the bytes
 # of a single compiled artifact carry their own digest (see
 # ``_artifact_logic_token``), and the binding layout carries an ABI token, so a
