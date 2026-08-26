@@ -40,3 +40,12 @@ def test_a5_sdma_cmake_maps_to_unified_workspace_macros() -> None:
     assert "PTO_COMM_WORKSPACE_SDMA_SUPPORTED=1" in cmake
     assert "PTO_COMM_WORKSPACE_URMA_SUPPORTED=0" in cmake
     assert "PTO_COMM_WORKSPACE_RDMA_SUPPORTED=0" in cmake
+
+
+def test_a5_sdma_workspace_smoke_expects_non_dense_derived_context_to_inherit_workspace() -> None:
+    test_source = (REPO_ROOT / "tests/ut/py/test_worker/test_platform_comm.py").read_text()
+
+    assert "sdma_overlay_enabled" in test_source
+    assert "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE" in test_source
+    assert "non-dense derived SDMA workSpace" in test_source
+    assert "non-dense derived SDMA workSpaceSize" in test_source
