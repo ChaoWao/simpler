@@ -2589,6 +2589,53 @@ TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
     wait_consumed(submitted.task_slot);
 }
 
+// A dispatch pass the scheduler thread has completed since `before`, so a test
+// can assert on what an iteration did without a wall-clock budget deciding the
+// verdict: a loaded box waits longer here rather than failing.
+void wait_dispatch_round_after(Scheduler &sched, uint64_t before) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (sched.dispatch_round_count() == before) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            FAIL() << "Scheduler ran no dispatch pass after being notified";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+TEST_F(SchedulerFixture, ADispatchingLoopIterationEmitsOneSpanCountingWhatItDid) {
+    ScopedHostSpanCapture host_span_capture;
+
+    auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
+    mock_worker.wait_running();
+    mock_worker.complete();
+    wait_consumed(submitted.task_slot);
+
+    const std::string loop_span = simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::SchedulerLoop);
+    ASSERT_TRUE(captured_host_span(loop_span));
+    // The first one is the iteration that dispatched this task: nothing had
+    // completed yet, so it drained none, and `spins` counts the iterations
+    // before it that did neither.
+    const std::string attrs = captured_host_span_attrs(loop_span);
+    EXPECT_EQ(attrs.rfind("role=scheduler drained=0 dispatched=1 drain_ns=", 0), 0u) << attrs;
+    EXPECT_NE(attrs.find(" spins="), std::string::npos) << attrs;
+    EXPECT_EQ(sched.dispatched_total(), 1u);
+}
+
+TEST_F(SchedulerFixture, AnIterationThatNeitherDrainedNorDispatchedEmitsNothing) {
+    // A wake with nothing ready is an ordinary event — the loop also skips its
+    // wait entirely while any worker is busy — so an unbounded number of these
+    // iterations can run per unit of work. The round counter is the positive
+    // control: without it, a loop that never woke would pass this test.
+    ScopedHostSpanCapture host_span_capture;
+
+    const uint64_t rounds_before = sched.dispatch_round_count();
+    sched.notify_ready();
+    wait_dispatch_round_after(sched, rounds_before);
+
+    EXPECT_TRUE(captured_host_spans_empty());
+    EXPECT_EQ(sched.dispatched_total(), 0u);
+}
+
 TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {
     auto args_a = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level(C(42), args_a, cfg, 0);

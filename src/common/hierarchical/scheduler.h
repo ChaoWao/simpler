@@ -125,6 +125,9 @@ public:
     // Diagnostic only — counts dispatch passes so an observer can tell a parked
     // scheduler from one spinning on unplaceable work. Orders nothing.
     uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_relaxed); }
+    // Diagnostic only — tasks actually handed to a worker, which a dispatch pass
+    // may do any number of times including none. Orders nothing.
+    uint64_t dispatched_total() const { return dispatched_total_.load(std::memory_order_relaxed); }
 
     // Called by WorkerManager after endpoint progress reaches a terminal outcome.
     void worker_done(WorkerCompletion completion);
@@ -167,6 +170,10 @@ private:
     };
 
     std::atomic<uint64_t> dispatch_round_count_{0};
+    // Tasks handed to a worker, counted at the one funnel every dispatch passes
+    // through. Atomic for the same reason as the round count above: the loop
+    // writes it on sched_thread_ while a reader is on another thread.
+    std::atomic<uint64_t> dispatched_total_{0};
     // sched_thread_ owns this: update_reservation_stall() writes it under
     // loop_mu_ and reservation_stall_deadline() reads it under completion_mu_,
     // which is only race-free because both run on that one thread. start()

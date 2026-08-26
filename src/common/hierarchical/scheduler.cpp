@@ -14,8 +14,11 @@
 #include <algorithm>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
+#include "common/host_span_names.h"
+#include "common/host_span_scope.h"
 #include "ring.h"
 #include "types.h"
 #include "worker_manager.h"
@@ -253,6 +256,14 @@ void Scheduler::notify_ready() {
 
 void Scheduler::run() {
     uint64_t observed_wake_generation = 0;
+#if SIMPLER_HOST_STRACE
+    // Iterations that neither drained nor dispatched, since the last iteration
+    // that did. The loop skips its wait whenever any worker is busy, so its
+    // iteration count is bounded by CPU speed rather than by work — a span per
+    // iteration would be unbounded. Carrying the count on the next span that
+    // does describe work keeps the spin ratio observable at zero records.
+    uint64_t spins = 0;
+#endif
     while (true) {
         {
             std::unique_lock<std::mutex> lk(completion_mu_);
@@ -270,6 +281,15 @@ void Scheduler::run() {
             observed_wake_generation = wake_generation_;
         }
 
+#if SIMPLER_HOST_STRACE
+        // Outside the loop_mu_ acquisition below, so a span covers the wait for
+        // that lock: the gap between two spans is then the condition-variable
+        // wait alone, which is the "no work to do" reading the span cannot give.
+        const bool trace_loop = simpler::host_trace::enabled();
+        const int64_t loop_start_ns = trace_loop ? simpler::host_trace::now_ns() : 0;
+        const uint64_t dispatched_before = dispatched_total_.load(std::memory_order_relaxed);
+#endif
+
         // Hold loop_mu_ across the entire slot-touching body so quiescent
         // compaction cannot free TaskSlotStates while on_task_complete or
         // dispatch_ready is still reading them.
@@ -278,6 +298,7 @@ void Scheduler::run() {
         cfg_.manager->progress();
 
         // Phase 1: drain completions
+        [[maybe_unused]] uint64_t drained = 0;
         while (true) {
             WorkerCompletion completion;
             {
@@ -287,11 +308,35 @@ void Scheduler::run() {
                 completion_queue_.pop();
             }
             on_task_complete(completion);
+            drained++;
         }
+
+#if SIMPLER_HOST_STRACE
+        const int64_t drain_end_ns = trace_loop ? simpler::host_trace::now_ns() : 0;
+#endif
 
         // Phase 2: dispatch ready tasks. Once teardown publishes stop, the
         // existing endpoint-owned work drains but no new slot enters a worker.
         if (!stop_requested_.load(std::memory_order_acquire)) dispatch_ready();
+
+#if SIMPLER_HOST_STRACE
+        const uint64_t dispatched = dispatched_total_.load(std::memory_order_relaxed) - dispatched_before;
+        if (drained == 0 && dispatched == 0) {
+            spins++;
+        } else {
+            if (trace_loop) {
+                const int64_t loop_end_ns = simpler::host_trace::now_ns();
+                const std::string loop_attrs =
+                    "role=scheduler drained=" + std::to_string(drained) + " dispatched=" + std::to_string(dispatched) +
+                    " drain_ns=" + std::to_string(drain_end_ns - loop_start_ns) + " spins=" + std::to_string(spins);
+                simpler::host_trace::emit(
+                    simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::SchedulerLoop), 0, 0, 0,
+                    loop_start_ns, loop_end_ns - loop_start_ns, loop_attrs.c_str()
+                );
+            }
+            spins = 0;
+        }
+#endif
 
         // Exit when stop requested and all workers idle
         if (stop_requested_.load(std::memory_order_acquire)) {
@@ -459,6 +504,7 @@ bool claim_for_dispatch(TaskSlotState &s) {
 }
 
 void Scheduler::dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared) {
+    dispatched_total_.fetch_add(1, std::memory_order_relaxed);
     // The endpoint lane owns publication failure through one terminal callback.
     // Retrying here after that callback starts can duplicate a partially
     // published completion. The callback contract is the same non-throwing

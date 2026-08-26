@@ -37,8 +37,8 @@
 
 namespace simpler::host_trace {
 
-/// The host-scheduler family. One entry per span the orchestrator or a worker
-/// thread emits; `kCount` sizes the resolved table.
+/// The host-scheduler family. One entry per span the orchestrator, a worker
+/// thread, or the scheduler loop emits; `kCount` sizes the resolved table.
 enum class HostSpan : size_t {
     GraphBuild = 0,
     Submit,
@@ -47,13 +47,15 @@ enum class HostSpan : size_t {
     Activate,
     Complete,
     PostFenceRetirement,
+    SchedulerLoop,
     kCount,
 };
 
 namespace detail {
 
 inline constexpr std::array<const char *, static_cast<size_t>(HostSpan::kCount)> kHostSpanSuffixes = {
-    ".graph_build", ".submit", ".dispatch", ".frame_submit", ".activate", ".complete", ".post_fence_retirement",
+    ".graph_build",           ".submit",         ".dispatch", ".frame_submit", ".activate", ".complete",
+    ".post_fence_retirement", ".scheduler_loop",
 };
 
 /// The bound level word. Defaults to `node`: L3 is the only level that has ever
