@@ -1086,16 +1086,13 @@ extern "C" int bind_callable_to_runtime_impl(
         LOG_DEBUG("  ChipTensor %d: %zu bytes at %p", i, size, dev_ptr);
 
         // host_build_graph runs the orchestrator on the host, which may read
-        // control tensors (e.g. paged_attention's context_lens/block_table) via
-        // get_tensor_data to shape the graph. Give it a host view of this
-        // buffer: the device buffer itself where the platform can map it into
-        // the host address space (released in validate_runtime_impl before
-        // device_free), otherwise the staging copy, which holds the same bytes
-        // for the whole orchestration window and whose writes are pushed back
-        // to the device. A tensor with neither is not host-accessible, so the
-        // prepare fails here rather than the orchestrator dereferencing a
-        // device address.
-        if (!tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr)) {
+        // staged control tensors (e.g. paged_attention's context_lens and
+        // block_table) via get_tensor_data to shape the graph. A pure output
+        // has no valid readable bytes before execution, and a5 cannot map it;
+        // exposing its caller buffer would therefore make reads unsafe. Leave
+        // it unregistered so both get_tensor_data and set_tensor_data fail
+        // closed during orchestration.
+        if (!is_pure_output && !tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr)) {
             LOG_ERROR("host-orch: no host view for tensor %d (dev_ptr %p, %zu bytes)", i, dev_ptr, size);
             return PTO_RUNTIME_ERR_INTERNAL;
         }

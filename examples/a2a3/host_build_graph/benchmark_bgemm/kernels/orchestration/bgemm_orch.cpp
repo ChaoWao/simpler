@@ -52,11 +52,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const simpler::hbg::Tensor &ext_config = orch_args.tensor(3).ref();
 
     // Read config from tensor data: [tile_size, grid_k, num_groups, incore_loop]
-    int64_t *host_config = orch_args.tensor(3).ref().data_as<int64_t>();
-    int tile_size = static_cast<int>(host_config[0]);
-    int grid_k = static_cast<int>(host_config[1]);
-    int num_groups = static_cast<int>(host_config[2]);
-    int incore_loop = static_cast<int>(host_config[3]);
+    uint32_t config_idx[1] = {0};
+    int tile_size = static_cast<int>(get_tensor_data<int64_t>(ext_config, 1, config_idx));
+    config_idx[0]++;
+    int grid_k = static_cast<int>(get_tensor_data<int64_t>(ext_config, 1, config_idx));
+    config_idx[0]++;
+    int num_groups = static_cast<int>(get_tensor_data<int64_t>(ext_config, 1, config_idx));
+    config_idx[0]++;
+    int incore_loop = static_cast<int>(get_tensor_data<int64_t>(ext_config, 1, config_idx));
     uint64_t tile_elems = static_cast<uint64_t>(tile_size) * tile_size;
 
     int grid_m = 1;

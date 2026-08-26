@@ -13,11 +13,9 @@
  * Host-view resolution for the host orchestrator's tensor reads and writes,
  * and the per-run ownership of the mappings that serve them.
  *
- * The mirror path (a platform that cannot map device memory into the host
- * address space) has no reachable call site on a2a3, whose SVM map always
- * succeeds, so these tests are the only place it executes. `g_registered_view`
- * is what the fake `register_device_memory_to_host` hands back: null models a
- * platform with no mapping, so `add` falls back to the staging view.
+ * The fallback path serves staged tensors without mapping their device
+ * allocations. `g_registered_view` is what the fake
+ * `register_device_memory_to_host` hands back when no fallback is available.
  */
 
 #include <gtest/gtest.h>
@@ -46,6 +44,7 @@ struct CopyCall {
 std::vector<CopyCall> g_copies;
 std::vector<void *> g_unregistered;
 void *g_registered_view = nullptr;
+int g_register_count = 0;
 int g_copy_result = 0;
 
 int record_copy(void *, void *dev_ptr, const void *host_ptr, size_t size) {
@@ -53,7 +52,10 @@ int record_copy(void *, void *dev_ptr, const void *host_ptr, size_t size) {
     return g_copy_result;
 }
 
-void *record_register(void *, void *, size_t) { return g_registered_view; }
+void *record_register(void *, void *, size_t) {
+    ++g_register_count;
+    return g_registered_view;
+}
 
 void record_unregister(void *, void *dev_ptr) { g_unregistered.push_back(dev_ptr); }
 
@@ -70,31 +72,55 @@ protected:
         g_copies.clear();
         g_unregistered.clear();
         g_registered_view = nullptr;
+        g_register_count = 0;
         g_copy_result = 0;
     }
 };
 
-TEST_F(HostTensorAccessTest, DirectRegionReadsAndWritesInPlace) {
+TEST_F(HostTensorAccessTest, MissingFallbackUsesReturnedDeviceMappingAddress) {
     int32_t buffer[4] = {10, 20, 30, 40};
-    const uint64_t base = reinterpret_cast<uint64_t>(buffer);
     g_registered_view = buffer;
     HostTensorAccessor accessor(&kHostApi);
-    ASSERT_TRUE(accessor.add(base, sizeof(buffer), nullptr));
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(buffer), nullptr));
+    EXPECT_EQ(g_register_count, 1);
+    EXPECT_EQ(accessor.mapping_count(), 1u);
+    EXPECT_EQ(accessor.mapped_bytes(), sizeof(buffer));
 
     int32_t value = 0;
-    ASSERT_TRUE(host_tensor_read(&accessor, base + 2 * sizeof(int32_t), &value, sizeof(value)));
+    ASSERT_TRUE(host_tensor_read(&accessor, kFakeDeviceBase + 2 * sizeof(int32_t), &value, sizeof(value)));
     EXPECT_EQ(value, 30);
 
     const int32_t written = 99;
-    ASSERT_TRUE(host_tensor_write(&accessor, base + sizeof(int32_t), &written, sizeof(written)));
+    ASSERT_TRUE(host_tensor_write(&accessor, kFakeDeviceBase + sizeof(int32_t), &written, sizeof(written)));
     EXPECT_EQ(buffer[1], 99);
     EXPECT_TRUE(g_copies.empty());
+
+    accessor.close();
+    EXPECT_EQ(g_unregistered, std::vector<void *>{reinterpret_cast<void *>(kFakeDeviceBase)});
 }
 
-TEST_F(HostTensorAccessTest, MirroredRegionReadsAndPushesWrites) {
-    int32_t mirror[4] = {1, 2, 3, 4};
+TEST_F(HostTensorAccessTest, FallbackViewAvoidsDeviceMapping) {
+    int32_t fallback[2] = {1, 2};
+    int32_t mapped[2] = {3, 4};
+    g_registered_view = mapped;
     HostTensorAccessor accessor(&kHostApi);
-    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(mirror), mirror));
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(fallback), fallback));
+
+    EXPECT_EQ(g_register_count, 0);
+    EXPECT_EQ(accessor.mapping_count(), 0u);
+    EXPECT_EQ(accessor.mapped_bytes(), 0u);
+    int32_t value = 0;
+    ASSERT_TRUE(host_tensor_read(&accessor, kFakeDeviceBase, &value, sizeof(value)));
+    EXPECT_EQ(value, 1);
+
+    accessor.close();
+    EXPECT_TRUE(g_unregistered.empty());
+}
+
+TEST_F(HostTensorAccessTest, FallbackWriteMutatesCallerBufferAndPushesToDevice) {
+    int32_t fallback[4] = {1, 2, 3, 4};
+    HostTensorAccessor accessor(&kHostApi);
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(fallback), fallback));
 
     int32_t value = 0;
     ASSERT_TRUE(host_tensor_read(&accessor, kFakeDeviceBase + 3 * sizeof(int32_t), &value, sizeof(value)));
@@ -103,17 +129,17 @@ TEST_F(HostTensorAccessTest, MirroredRegionReadsAndPushesWrites) {
     const int32_t written = 77;
     const uint64_t dev_addr = kFakeDeviceBase + 2 * sizeof(int32_t);
     ASSERT_TRUE(host_tensor_write(&accessor, dev_addr, &written, sizeof(written)));
-    EXPECT_EQ(mirror[2], 77);
+    EXPECT_EQ(fallback[2], 77);
     ASSERT_EQ(g_copies.size(), 1u);
     EXPECT_EQ(g_copies[0].dev_ptr, reinterpret_cast<void *>(dev_addr));
-    EXPECT_EQ(g_copies[0].host_ptr, static_cast<const void *>(&mirror[2]));
+    EXPECT_EQ(g_copies[0].host_ptr, static_cast<const void *>(&fallback[2]));
     EXPECT_EQ(g_copies[0].size, sizeof(int32_t));
 }
 
-TEST_F(HostTensorAccessTest, MirroredWriteReportsCopyFailure) {
-    int32_t mirror[2] = {1, 2};
+TEST_F(HostTensorAccessTest, FallbackWriteReportsCopyFailure) {
+    int32_t fallback[2] = {1, 2};
     HostTensorAccessor accessor(&kHostApi);
-    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(mirror), mirror));
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(fallback), fallback));
 
     g_copy_result = -1;
     const int32_t written = 5;
@@ -121,12 +147,12 @@ TEST_F(HostTensorAccessTest, MirroredWriteReportsCopyFailure) {
 }
 
 // The fail-closed contract: an address outside every registered region — a
-// GM-heap tensor the orchestrator created, or a pass-through child-memory
+// GM-heap tensor the orchestrator created or a pass-through child-memory
 // buffer — resolves to nothing instead of being dereferenced.
 TEST_F(HostTensorAccessTest, UnregisteredSpanFailsClosed) {
-    int32_t mirror[2] = {1, 2};
+    int32_t fallback[2] = {1, 2};
     HostTensorAccessor accessor(&kHostApi);
-    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(mirror), mirror));
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(fallback), fallback));
 
     int32_t value = 0xABCD;
     EXPECT_FALSE(host_tensor_read(&accessor, kFakeDeviceBase + 0x100000, &value, sizeof(value)));
@@ -138,9 +164,9 @@ TEST_F(HostTensorAccessTest, UnregisteredSpanFailsClosed) {
 }
 
 TEST_F(HostTensorAccessTest, SpanOverrunningTheRegionFails) {
-    int32_t mirror[2] = {1, 2};
+    int32_t fallback[2] = {1, 2};
     HostTensorAccessor accessor(&kHostApi);
-    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(mirror), mirror));
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(fallback), fallback));
 
     int64_t value = 0;
     // Starts inside the region, ends past it.

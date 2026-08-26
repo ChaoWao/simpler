@@ -25,18 +25,19 @@ line per segment per bind at `LOG_TIMING`:
 
 | Segment | What it covers |
 | ------- | -------------- |
-| `args` | staging the caller's host tensors and mapping them for host access |
+| `args` | staging readable caller tensors H2D and exposing their existing host buffers to orchestration; pure outputs skip both |
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
 | `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
 | `graph_upload` | one H2D of the block holding every Definition object, and binding each Graph task to the one with its key. The recorders built the objects in that block's host staging during `host_orch`, so this segment writes their headers and copies in only what did not fit |
 | `arena_h2d` | one H2D of the arena's copied zone and the shared-memory image |
-| `host_view_close` | unmapping the host views taken in `args` |
+| `host_view_close` | closing per-run tensor-access regions and any optional device mappings; the current bind path installs none (`count=0 bytes=0`) |
 
 The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
 arena_h2d`: everything between "the caller's data is in place" and "the device
-can start". It is what the < 1 ms target applies to. `args` and
-`host_view_close` are excluded — they scale with the caller's tensor bytes, not
-with the graph.
+can start". It is what the < 1 ms target applies to. `args` is excluded because
+it scales with the caller's tensor bytes, not with the graph. `host_view_close`
+stays excluded so current reports remain comparable with older logs, although
+the current bind path has no device mappings to close.
 
 **Two of those five are retired kinds a current run does not emit.** `relocate`
 and `sm_h2d` date from when the shared-memory image was relocated and copied on
@@ -47,9 +48,8 @@ as absent from every bind. The table above is what a current run emits: ten
 segments, three of them control plane.
 
 **The control plane is a sum of costs, not an interval.** `arena_h2d` runs
-*after* `host_view_close`, hundreds of milliseconds later, so the segments do not
-form one contiguous window. Sum the ones the bind has; do not subtract two
-timestamps.
+*after* `host_view_close`, so the segments do not form one contiguous window.
+Sum the ones the bind has; do not subtract two timestamps.
 
 ## Prerequisites
 
@@ -359,7 +359,7 @@ meant to outlive it.
 | `heap_used` | 127,673,344 | 2,038,508,544 |
 | device wall | 39.3 ms | does not complete yet (`sched_error_code=5 INVALID_ARGS`) |
 | `args` (excluded) | 1.37 s / 40.9 GB, 19 of 20 staged | 1.48 s / 45.8 GB, 77 of 92 staged |
-| `host_view_close` (excluded) | 0.25 s / 40.9 GB | 0.28 s / 45.8 GB |
+| `host_view_close` (excluded, legacy mapping path) | 0.25 s / 40.9 GB | 0.28 s / 45.8 GB |
 
 † The three upload rows are the markers as they read at that commit, before the
 upload was restructured: `graph_upload`'s `bytes=` then also counted the Graph
@@ -374,21 +374,29 @@ scale.** Both are per-byte costs over what a bind stages, and dsv4's parameters
 now live in child memory: allocated once before the first round, and passed
 through without malloc, H2D or a host view. What still crosses is
 `num_tokens_per_owner`, the one caller tensor the host orchestrator has to read —
-so a bind stages **1 of its 92 tensors, 8 bytes**, and closes one host view over
-the same 8 bytes. Measured with the same recipe on `f830f13c3` plus that change,
-6 rounds on two dies: `args` 0.045–0.074 ms and `host_view_close`
-0.014–0.028 ms, against 1.48 s and 0.28 s over 45.8 GB above. qwen still stages
-its fixture and its two rows still read as in the table.
+so a bind stages **1 of its 92 tensors, 8 bytes**. Before the caller-buffer view
+change, the same recipe on `f830f13c3` plus the child-memory change measured
+`args` at 0.045–0.074 ms and `host_view_close` at 0.014–0.028 ms, against 1.48 s
+and 0.28 s over 45.8 GB above. qwen still stages its fixture.
+
+The rows also describe the legacy mapping behavior at the pinned commit. A
+current bind uses the caller's existing host buffers as its
+orchestration views, so it performs no `halHostRegister` calls and reports
+`host_view_close count=0 bytes=0`. On Qwen3-14B this makes the close marker
+20.12–24.73 us instead of the 0.25 s shown above. The old `args` figure included
+20 registrations in addition to staging 19 tensors H2D; current `args` retains
+the H2D work but removes that registration side.
 
 Three of these deserve reading together. `host_orch` is the whole story on dsv4 —
 839 `submit_task`, 743 `record_node` and 272 `alloc_tensors` per bind against qwen's
 5, 277 and 2 — and its 2.3 ms of scatter is why a claim about it needs a
-sub-counter rather than a stopwatch. `args` plus `host_view_close` are two orders of
-magnitude above everything else while being excluded from the control plane: they
-are per-byte costs over the ~41–46 GB of weights each case staged at that commit,
-so they belong to getting the weights resident, not to dispatching a graph —
-which is why moving dsv4's parameters to child memory left its bind staging one
-8-byte tensor rather than 45.8 GB. And dsv4's device wall is absent because the
-case did not complete on device on that commit — it is a completion case with no
-golden whose host path is what these numbers describe, which is also why
+sub-counter rather than a stopwatch. At the pinned commit, `args` plus
+`host_view_close` are two orders of magnitude above everything else while being
+excluded from the control plane: they are staging and legacy mapping costs over
+the ~41–46 GB of weights, not graph dispatch. Current qwen runs retain the
+staging cost in `args` but close no mappings; moving dsv4's parameters to child
+memory left its bind staging one 8-byte tensor, whose caller-buffer view also
+needs no mapping. And dsv4's device wall is absent because the case did not
+complete on device at the pinned commit — it is a completion case with no golden
+whose host path is what these numbers describe, which is also why
 `SIMPLER_SKIP_DEVICE_RUN` appears in its recipe.
