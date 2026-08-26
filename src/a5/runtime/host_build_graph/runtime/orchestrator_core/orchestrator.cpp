@@ -679,13 +679,13 @@ constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 constexpr size_t GRAPH_RECORD_NODE_TENSOR_POOL_ELEMS =
     static_cast<size_t>(GRAPH_MAX_NODES) * static_cast<size_t>(CORE_MAX_TENSOR_ARGS);
 
-// The outer local id a recorded node's GRAPH_NODE id carries. A recorded node
-// belongs to no outer task -- every shell replaying the Definition re-mints the id
-// with its own local id at materialize -- so record time names a node by its index
-// alone, and the id's low field is that index and nothing else. That is what keeps
-// the index inside the GRAPH_MAX_NODES task chains the recording's hazard map is
+// The graph_local_id a recorded task's IN_GRAPH id carries. A recorded task belongs
+// to no Graph task yet -- every shell replaying the Definition re-mints the id with
+// its own local id at materialize -- so record time names a task by its index alone,
+// and the id's low field is that index and nothing else. That is what keeps the
+// index inside the GRAPH_MAX_NODES task chains the recording's hazard map is
 // dimensioned for.
-constexpr uint32_t GRAPH_RECORD_OUTER_LOCAL_ID = 0;
+constexpr uint32_t GRAPH_RECORD_NO_OWNING_GRAPH = 0;
 
 // Stand the recording's hazard map up on its own allocation. Failure is
 // reported to the caller, which abandons the recording rather than producing a
@@ -1240,10 +1240,10 @@ static bool fanin_mark_seen(OrchestratorState &orch, TaskId producer_task_id) {
 static bool append_fanin_or_fail(
     OrchestratorState &orch, TaskId producer_task_id, TaskId self_task_id, int32_t *fanin_slots, int32_t &fanin_count
 ) {
-    // Only a RING-space producer has an entry in the task table. A GRAPH_NODE id's
-    // low bits are a packed (outer task, node index) pair, so using them as a table
+    // Only a GLOBAL producer has an entry in the task table. An IN_GRAPH id's low
+    // bits are a packed (Graph task, task index) pair, so using them as a table
     // index names an unrelated task — or, since get_slot_state_by_task_id does not
-    // bounds-check, no task at all. A recorded node's id is GRAPH_NODE and the
+    // bounds-check, no task at all. A recorded task's id is IN_GRAPH and the
     // recorder resolves it against its own body, never here, so a foreign space
     // reaching this point is an id that escaped its Graph — a caller error, not a
     // case to tolerate.
@@ -1251,11 +1251,11 @@ static bool append_fanin_or_fail(
     // The table lookup lives here, after this check, rather than at the three call
     // sites: that keeps the id-space invariant in one place and makes it impossible
     // for a caller to form the out-of-bounds slot reference before reaching it.
-    if (!simpler::hbg::is_ring_task(producer_task_id)) {
+    if (!simpler::hbg::is_global_task(producer_task_id)) {
         orch.report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
-            "producer task %#llx is in id space %u, not RING; host_build_graph resolves every fanin edge against its "
-            "one task table",
+            "producer task %#llx is in id space %u, not GLOBAL; host_build_graph resolves every fanin edge against "
+            "its one task table",
             static_cast<unsigned long long>(producer_task_id.raw),
             static_cast<unsigned int>(simpler::hbg::task_id_space(producer_task_id))
         );
@@ -1347,7 +1347,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = simpler::hbg::make_ring_task(static_cast<uint32_t>(out->alloc_result.task_id));
+    out->task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->tasks.get_slot_state_by_task_id(out->alloc_result.task_id);
     out->task = &orch->sm_header->tasks.task_descriptors[out->alloc_result.task_id];
     out->payload = &orch->sm_header->tasks.task_payloads[out->alloc_result.task_id];
@@ -1876,7 +1876,7 @@ bool graph_submit_outer(
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
-    const TaskId task_id = simpler::hbg::make_ring_task(static_cast<uint32_t>(allocation.task_id));
+    const TaskId task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(allocation.task_id));
     SharedMemoryTaskHeader &tasks = orch->sm_header->tasks;
     TaskDescriptor &task = tasks.task_descriptors[allocation.task_id];
     TaskPayload &payload = tasks.task_payloads[allocation.task_id];
@@ -2048,12 +2048,12 @@ TaskOutputTensors graph_record_submit_node(
     GraphRecording &recording = *active_graph_recording(orch);
 
     const size_t node_index = recording.node_count;
-    // A recorded node lives in the GRAPH_NODE id space, so an id the body hands
+    // A recorded task lives in the IN_GRAPH id space, so an id the body hands
     // around says which of the two kinds of thing it names without any arithmetic:
-    // a GRAPH_NODE id is a node of this body, indexed by its low field; a RING id is
-    // a task submitted before the Graph, which no node may depend on.
+    // an IN_GRAPH id is a task of this body, indexed by its low field; a GLOBAL id is
+    // a task submitted before the Graph, which nothing in the body may depend on.
     const TaskId task_id =
-        simpler::hbg::make_graph_node(GRAPH_RECORD_OUTER_LOCAL_ID, static_cast<uint32_t>(node_index));
+        simpler::hbg::make_in_graph_task(GRAPH_RECORD_NO_OWNING_GRAPH, static_cast<uint32_t>(node_index));
     result.set_task_id(task_id);
 
     if (node_index >= GRAPH_MAX_NODES || args.has_error) {
@@ -2248,8 +2248,8 @@ TaskOutputTensors graph_record_submit_node(
         };
         const bool manual_scope = recording.in_manual_scope();
         if (!recording.storage_ready || node_index >= GRAPH_MAX_NODES) {
-            // An over-cap body is already abandoned, and its node ids have run past
-            // the index field make_graph_node packs them into, so registering one
+            // An over-cap body is already abandoned, and its task ids have run past
+            // the index field make_in_graph_task packs them into, so registering one
             // would key the map outside its task chains.
             recording.unsupported = true;
         } else if (recording.tensor_map.free_entries() < count_registrable_outputs(dep_inputs, manual_scope)) {
@@ -2263,11 +2263,11 @@ TaskOutputTensors graph_record_submit_node(
             recording.unsupported = true;
         } else {
             auto emit_inferred = [&add_fanin, node_index](TaskId producer) -> bool {
-                // A RING producer is a task submitted before the Graph. The outer shell
+                // A GLOBAL producer is a task submitted before the Graph. The outer shell
                 // was submitted through the ordinary path against this same boundary, so
                 // its own fanin already orders the whole body behind that task and the
                 // Definition carries no edge of its own.
-                if (simpler::hbg::is_ring_task(producer)) return true;
+                if (simpler::hbg::is_global_task(producer)) return true;
                 const uint32_t producer_index = simpler::hbg::task_local_id(producer);
                 if (producer_index < static_cast<uint32_t>(node_index)) {
                     add_fanin(static_cast<size_t>(producer_index));
@@ -2284,7 +2284,7 @@ TaskOutputTensors graph_record_submit_node(
             recording.unsupported = true;
             continue;
         }
-        if (simpler::hbg::is_ring_task(dep)) {
+        if (simpler::hbg::is_global_task(dep)) {
             // Only the outer shell can order the body behind a pre-Graph task, and it
             // does so through its boundary args -- so a dep no boundary tensor carries
             // has no edge in the Definition and the body cannot be recorded.
@@ -2299,7 +2299,7 @@ TaskOutputTensors graph_record_submit_node(
         }
         const uint32_t dep_index = simpler::hbg::task_local_id(dep);
         if (dep_index >= static_cast<uint32_t>(node_index)) {
-            // A node of this body that is not yet recorded: the Definition's edges are
+            // A task of this body that is not yet recorded: the Definition's edges are
             // acyclic by construction, so a forward reference cannot be expressed.
             recording.unsupported = true;
             continue;

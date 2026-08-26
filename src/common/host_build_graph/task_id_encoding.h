@@ -25,47 +25,52 @@ namespace simpler::hbg {
 /**
  * Which id space a task id belongs to, held in the high 32 bits.
  *
- * This runtime has exactly one ring, so the high bits name the *storage* an id
- * resolves against rather than a ring index:
+ * Everything this runtime schedules is a task. The high bits say whether a task
+ * belongs to a Graph task or stands on its own, which is also what decides where
+ * its id resolves:
  *
- *   RING       — a task placed on the shared-memory ring. Its low bits are the
- *                task allocator's local id, resolvable via get_slot_by_task_id().
- *   GRAPH_NODE — a node of a Graph body. It lives in that Graph's own storage,
- *                not on the ring, so its low bits are the packed pair below and
- *                must never be resolved against a ring slot.
+ *   GLOBAL   — a task of the run itself, holding a slot in the shared-memory task
+ *              table. Its low bits are the task allocator's local id, resolvable
+ *              via get_slot_by_task_id().
+ *   IN_GRAPH — a task belonging to one Graph task's body. It lives in that Graph's
+ *              own storage, not in the task table, so its low bits are the packed
+ *              pair below and must never be resolved against a table slot.
  *
- * A GRAPH_NODE id is minted twice for the same node, in two disjoint scopes. The
- * recorder mints one per node it records, with `outer_local_id` fixed at 0: a
+ * An IN_GRAPH id is minted twice for the same task, in two disjoint scopes. The
+ * recorder mints one per task it records, with `graph_local_id` fixed at 0: a
  * Definition is shared by every shell that replays it, so record time has no
- * single outer task to name, and the low field is then the node index alone —
+ * single Graph task to name, and the low field is then the task index alone —
  * which is what keeps it inside the task chains the recording's hazard map is
  * dimensioned for. Materialize mints the other, with the replaying shell's real
  * local id. The two never meet: a recorded id lives only in the recorder thread's
- * private map and the body's own locals, and a materialized node is addressed by
+ * private map and the body's own locals, and a materialized task is addressed by
  * index rather than looked up by id.
  */
-enum class TaskIdSpace : uint32_t { RING = 0, GRAPH_NODE = 1 };
+enum class TaskIdSpace : uint32_t { GLOBAL = 0, IN_GRAPH = 1 };
 
-// A graph node's low bits pack its outer GRAPH task's local id above its index
-// within that graph. graph_execution.h asserts GRAPH_MAX_NODES fits the index.
-inline constexpr uint32_t GRAPH_NODE_INDEX_BITS = 10;
+// An in-graph task's low bits pack its Graph task's local id above its index
+// within that Graph. graph_execution.h asserts GRAPH_MAX_NODES fits the index.
+inline constexpr uint32_t IN_GRAPH_TASK_INDEX_BITS = 10;
 
-constexpr TaskId make_ring_task(uint32_t local_id) {
-    return TaskId{(static_cast<uint64_t>(TaskIdSpace::RING) << 32) | static_cast<uint64_t>(local_id)};
+constexpr TaskId make_global_task(uint32_t local_id) {
+    return TaskId{(static_cast<uint64_t>(TaskIdSpace::GLOBAL) << 32) | static_cast<uint64_t>(local_id)};
 }
 
-constexpr TaskId make_graph_node(uint32_t outer_local_id, uint32_t node_index) {
-    const uint32_t packed = (outer_local_id << GRAPH_NODE_INDEX_BITS) | node_index;
-    return TaskId{(static_cast<uint64_t>(TaskIdSpace::GRAPH_NODE) << 32) | static_cast<uint64_t>(packed)};
+constexpr TaskId make_in_graph_task(uint32_t graph_local_id, uint32_t task_index) {
+    const uint32_t packed = (graph_local_id << IN_GRAPH_TASK_INDEX_BITS) | task_index;
+    return TaskId{(static_cast<uint64_t>(TaskIdSpace::IN_GRAPH) << 32) | static_cast<uint64_t>(packed)};
 }
 
 constexpr TaskIdSpace task_id_space(TaskId id) { return static_cast<TaskIdSpace>(static_cast<uint32_t>(id.raw >> 32)); }
 
-constexpr bool is_ring_task(TaskId id) { return task_id_space(id) == TaskIdSpace::RING; }
+// True exactly when this id names a slot in the shared-memory task table, which is
+// what every caller that is about to resolve one is really asking. An IN_GRAPH id
+// answers false and must not reach get_slot_by_task_id().
+constexpr bool is_global_task(TaskId id) { return task_id_space(id) == TaskIdSpace::GLOBAL; }
 
-// The low 32 bits. A ring local id for a RING task; the packed pair above for a
-// GRAPH_NODE, which is why callers that resolve a ring slot must gate on
-// is_ring_task() first.
+// The low 32 bits. A task-table local id for a GLOBAL task; the packed pair above
+// for an IN_GRAPH one, which is why callers that resolve a table slot must gate on
+// is_global_task() first.
 constexpr uint32_t task_local_id(TaskId id) { return static_cast<uint32_t>(id.raw & 0xFFFFFFFFu); }
 
 }  // namespace simpler::hbg

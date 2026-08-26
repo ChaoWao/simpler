@@ -24,8 +24,8 @@
 
 inline constexpr uint32_t GRAPH_MAX_NODES = 1024;
 static_assert(
-    GRAPH_MAX_NODES <= (1u << simpler::hbg::GRAPH_NODE_INDEX_BITS),
-    "a node index must fit the low field of a GRAPH_NODE task id"
+    GRAPH_MAX_NODES <= (1u << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
+    "a node index must fit the low field of an IN_GRAPH task id"
 );
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_NODES = 4;
 

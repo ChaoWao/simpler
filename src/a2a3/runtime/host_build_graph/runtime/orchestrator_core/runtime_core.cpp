@@ -186,11 +186,11 @@ static bool wait_for_tensor_ready(
     // Callers branch on the returned pointer, not on `failed`: the slot is
     // dereferenced immediately and a null return is the only safe signal.
     auto resolve_producer = [&](TaskId producer) -> const ChipTaskSlotState * {
-        if (!producer.is_valid() || !simpler::hbg::is_ring_task(producer)) {
+        if (!producer.is_valid() || !simpler::hbg::is_global_task(producer)) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
-                "tensor producer task %#llx is in id space %u, not RING; host_build_graph resolves a producer against "
-                "its one task table",
+                "tensor producer task %#llx is in id space %u, not GLOBAL; host_build_graph resolves a producer "
+                "against its one task table",
                 static_cast<unsigned long long>(producer.raw),
                 static_cast<unsigned int>(simpler::hbg::task_id_space(producer))
             );

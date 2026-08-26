@@ -9,10 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * A recorded node's id is what its entry in the recording's hazard map is keyed on,
- * and that map holds GRAPH_MAX_NODES task chains. A GRAPH_NODE id's low field is
- * the node index, so the key is in range however far into a run the Graph begins —
- * which a RING id carrying the allocator's own local id would not be.
+ * A recorded task's id is what its entry in the recording's hazard map is keyed on,
+ * and that map holds GRAPH_MAX_NODES task chains. An IN_GRAPH id's low field is the
+ * task's index within its body, so the key is in range however far into a run the
+ * Graph begins — which a GLOBAL id carrying the allocator's own local id would not
+ * be.
  *
  * These tests place the Graph past that many ordinary tasks, where an id drawn from
  * the run's numbering would key the map outside its chains.
@@ -79,10 +80,10 @@ protected:
     }
 };
 
-// A Graph recorded after GRAPH_MAX_NODES ordinary tasks. Its node registers its
-// outputs in the recording hazard map keyed on its own id, so that id decides
+// A Graph recorded after GRAPH_MAX_NODES ordinary tasks. Its recorded task registers
+// its outputs in the recording hazard map keyed on its own id, so that id decides
 // whether the key lands inside the map's task chains.
-TEST_F(HbgGraphRecordingBoundsTest, RecordedNodeIsKeyedByItsIndexNotByTheRunsNumbering) {
+TEST_F(HbgGraphRecordingBoundsTest, RecordedTaskIsKeyedByItsIndexNotByTheRunsNumbering) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
@@ -104,17 +105,17 @@ TEST_F(HbgGraphRecordingBoundsTest, RecordedNodeIsKeyedByItsIndexNotByTheRunsNum
     ASSERT_NE(graph.recording_handle, nullptr);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    // An INOUT operand is what makes the node register an output: the recording's
-    // hazard map exists for exactly the write-in-place shape.
+    // An INOUT operand is what makes the recorded task register an output: the
+    // recording's hazard map exists for exactly the write-in-place shape.
     CoreTaskArgs node_args;
     node_args.add_inout(boundary);
     const TaskId node_id = orch.submit_dummy_task(node_args).task_id();
     ASSERT_TRUE(node_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_id_space(node_id), simpler::hbg::TaskIdSpace::GRAPH_NODE)
-        << "a recorded node must not take a RING id: nothing resolves it against the task table, and its low "
+    EXPECT_EQ(simpler::hbg::task_id_space(node_id), simpler::hbg::TaskIdSpace::IN_GRAPH)
+        << "a recorded task must not take a GLOBAL id: nothing resolves it against the task table, and its low "
            "field is what keys the recording's hazard map";
     EXPECT_EQ(simpler::hbg::task_local_id(node_id), 0u)
-        << "the first recorded node's low field is node index 0, independent of how many tasks the run has "
+        << "the first recorded task's low field is task index 0, independent of how many tasks the run has "
            "already allocated";
     EXPECT_LT(simpler::hbg::task_local_id(node_id), GRAPH_MAX_NODES);
 
@@ -122,7 +123,7 @@ TEST_F(HbgGraphRecordingBoundsTest, RecordedNodeIsKeyedByItsIndexNotByTheRunsNum
 }
 
 // Channel the outer shell owns: a boundary tensor allocated before the Graph makes
-// compute_task_fanin emit that pre-Graph producer for every node reading it. No edge
+// compute_task_fanin emit that pre-Graph producer for every task reading it. No edge
 // in the Definition may name it — the shell was submitted through the ordinary path
 // against the same boundary, so its own fanin orders the whole body behind it.
 TEST_F(HbgGraphRecordingBoundsTest, PreGraphProducerOfABoundaryTensorContributesNoEdge) {

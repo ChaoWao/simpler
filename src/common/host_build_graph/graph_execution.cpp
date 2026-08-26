@@ -402,7 +402,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         TaskPayload &payload = storage->payload;
         ChipTaskSlotState &slot = storage->slot;
 
-        task.task_id = simpler::hbg::make_graph_node(
+        task.task_id = simpler::hbg::make_in_graph_task(
             simpler::hbg::task_local_id(outer_slot.task->task_id), static_cast<uint32_t>(i)
         );
         const GraphNodeDefinition &source = nodes[i];
