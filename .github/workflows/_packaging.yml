@@ -91,6 +91,20 @@ jobs:
       - name: Run packaging matrix
         run: |
           . .venv/bin/activate
+          if [[ -z "${CC:-}" && -z "${CXX:-}" ]]; then
+            # Use the unversioned platform-default compilers intentionally (Apple
+            # Clang on current macOS runners), not versioned Homebrew GCC. Absolute
+            # paths keep the compiler identity stable across packaging modes.
+            if CC="$(command -v gcc)" && CXX="$(command -v g++)"; then
+              export CC CXX
+              echo "Resolved platform compilers: CC=$CC CXX=$CXX"
+              "$CC" --version
+              "$CXX" --version
+            else
+              echo "::error::gcc/g++ not found on PATH; runner provisioning is incomplete"
+              exit 1
+            fi
+          fi
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             export MACOSX_DEPLOYMENT_TARGET
             MACOSX_DEPLOYMENT_TARGET="$(sw_vers -productVersion | cut -d. -f1,2)"

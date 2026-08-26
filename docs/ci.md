@@ -44,7 +44,12 @@ also installs ccache, while its macOS fallback is outside the shared action's
 strict GCC 15 contract. Only the compiler is required there — ninja comes from
 PyPI with the venv, and both the workflow and `tools/verify_packaging.sh` run
 without ccache — so a package manager that cannot serve ccache emits a warning
-and the job continues. `apt-install` gives every apt operation a wall-clock
+and the job continues. The packaging matrix preserves any explicit `CC`/`CXX`
+selection and resolves its required `gcc`/`g++` pair once when neither is set,
+so every install mode and its nested runtime builds use one compiler identity.
+The job logs the default pair's resolved paths and compiler versions, and
+reports an explicit runner-provisioning error if that pair is absent.
+`apt-install` gives every apt operation a wall-clock
 bound and attempts to repair an interrupted dpkg transaction before another apt
 operation can run. It uses the runner's existing package indexes by default, avoiding a
 full mirror refresh for ordinary CI dependencies. `setup-gcc-15` is the one
