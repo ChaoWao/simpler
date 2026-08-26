@@ -45,7 +45,7 @@
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
 #include "task_args.h"
-#include "tensor.h"  // EntryArgsStorage
+#include "tensormap_and_ringbuffer/entry_args.h"  // EntryArgsStorage
 
 // =============================================================================
 // Configuration Macros

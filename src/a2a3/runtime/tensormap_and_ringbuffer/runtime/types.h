@@ -42,7 +42,8 @@
 #include "submit_types.h"
 #include "task_args.h"
 #include "tensor.h"
-#include "tensor_create_info.h"  // runtime-only TensorCreateInfo + materialization helpers
+#include "tensor_create_info.h"                   // runtime-only TensorCreateInfo + materialization helpers
+#include "tensormap_and_ringbuffer/entry_args.h"  // EntryArgsStorage
 
 // TaskAttrs packs the timing tag into a 4-bit field and reports "untagged" as
 // -1, so the tag domain must fit 0..15 and the untagged sentinel must be -1.
