@@ -14,7 +14,10 @@ import time
 
 import pytest
 import simpler.mpi_group_mailbox as mailbox_mod
-from _task_interface import _mpi_mailbox_layout  # pyright: ignore[reportMissingImports]
+from _task_interface import (  # pyright: ignore[reportMissingImports]
+    _mailbox_wait_i32_result_for_test,
+    _mpi_mailbox_layout,
+)
 from simpler.mpi_group_mailbox import (
     MAILBOX_REQUEST_OFFSET,
     MailboxGroupState,
@@ -27,6 +30,8 @@ from simpler.mpi_group_mailbox import (
     _as_byte_view,
     open_rank_mailbox,
 )
+
+_NATIVE_TIMEOUT_WATCHDOG_S = 5.0
 
 
 def test_shared_memory_view_is_normalized_to_unsigned_bytes():
@@ -324,13 +329,48 @@ def test_wait_request_state_unblocks_on_mismatch_and_bounds_the_park():
     mailbox = MpiGroupMailbox.create(world_size=1)
     try:
         mailbox.publish_ready()
+        request_state_addr = mailbox._address + mailbox_mod._OFF_REQUEST_STATE  # noqa: SLF001
+        assert (
+            _mailbox_wait_i32_result_for_test(
+                request_state_addr,
+                int(MailboxRequestState.TASK_DONE),
+                30.0,
+            )
+            == "value_mismatch"
+        )
         start = time.monotonic()
-        mailbox.wait_request_state(MailboxRequestState.TASK_DONE, timeout_s=30.0)
-        assert time.monotonic() - start < 5.0
-
-        start = time.monotonic()
-        mailbox.wait_request_state(MailboxRequestState.IDLE, timeout_s=0.05)
+        timeout_result = _mailbox_wait_i32_result_for_test(
+            request_state_addr,
+            int(MailboxRequestState.IDLE),
+            0.05,
+        )
         elapsed = time.monotonic() - start
-        assert 0.02 <= elapsed < 5.0
+        assert timeout_result == "timed_out"
+        assert elapsed < _NATIVE_TIMEOUT_WATCHDOG_S, (
+            f"50ms mailbox timeout exceeded its 5s end-to-end watchdog; native wait returned after {elapsed:.3f}s"
+        )
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_wait_request_state_forwards_address_expected_and_timeout(monkeypatch):
+    mailbox = MpiGroupMailbox.create(world_size=1)
+    calls: list[tuple[int, int, float]] = []
+    try:
+        monkeypatch.setattr(
+            mailbox_mod,
+            "_mailbox_wait_i32",
+            lambda addr, expected, timeout_s: calls.append((addr, expected, timeout_s)),
+        )
+
+        mailbox.wait_request_state(MailboxRequestState.TASK_DONE, timeout_s=0.25)
+
+        assert calls == [
+            (
+                mailbox._address + mailbox_mod._OFF_REQUEST_STATE,  # noqa: SLF001
+                int(MailboxRequestState.TASK_DONE),
+                0.25,
+            )
+        ]
     finally:
         mailbox.close(unlink=True)

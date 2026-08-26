@@ -480,6 +480,16 @@ _ROLLBACK_GRACEFUL_TIMEOUT_S = 10.0
 # gets its own, larger budget. Rollback stays at the tighter value above: its
 # wait guards an unlink-only graceful path that is stuck when it exceeds it.
 _CLOSE_CHILD_REAP_TIMEOUT_S = 60.0
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 # Bounded re-check interval for a close() joiner waiting on an in-flight
 # _CloseAttempt. A joiner normally wakes immediately on the completing thread's
 # notify_all(); the timeout is a backstop so that if that notify is skipped (an
@@ -3964,7 +3974,7 @@ class RunHandle:
         value = float(timeout)
         if value < 0 or not math.isfinite(value):
             raise ValueError("RunHandle timeout must be a non-negative finite number of seconds")
-        return time.monotonic() + value
+        return _monotonic() + value
 
     @property
     def done(self) -> bool:
@@ -4121,7 +4131,7 @@ class RunHandle:
         try:
             with self._cv:
                 while not self._terminal and self._wait_in_progress:
-                    remaining = None if deadline is None else deadline - time.monotonic()
+                    remaining = None if deadline is None else deadline - _monotonic()
                     if remaining is not None and remaining <= 0:
                         raise TimeoutError("RunHandle.wait() timed out")
                     recheck = (
@@ -4142,7 +4152,7 @@ class RunHandle:
                 boundary_hook("after_election")
 
             assert run_id is not None
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            remaining = None if deadline is None else max(0.0, deadline - _monotonic())
             try:
                 completed = self._worker._wait_run_handle(run_id, remaining)
             except Exception as exc:  # native run failures are terminal
@@ -4158,7 +4168,7 @@ class RunHandle:
             # execution with acceptance waiting.
             with self._cv:
                 while self._accept_wait_in_progress:
-                    remaining = None if deadline is None else deadline - time.monotonic()
+                    remaining = None if deadline is None else deadline - _monotonic()
                     if remaining is not None and remaining <= 0:
                         raise TimeoutError("RunHandle.wait() timed out")
                     recheck = (
@@ -4771,7 +4781,7 @@ class Worker:
         # A blocking op's slice of the single root startup deadline. Raising here
         # keeps the timeout local and clear, and avoids settimeout(0.0) — which
         # would flip the socket to non-blocking and surface BlockingIOError.
-        remaining = deadline - time.monotonic()
+        remaining = deadline - _monotonic()
         if remaining <= 0:
             raise TimeoutError(f"{what}: startup deadline exceeded")
         return remaining
@@ -5313,7 +5323,7 @@ class Worker:
                         f"MPI L3 group {group.group_id} exited before READY (status {group.process.returncode})"
                     )
                 self._remaining_until(deadline, "MPI L3 mailbox READY")
-                time.sleep(_STARTUP_POLL_INTERVAL_S)
+                _sleep(_STARTUP_POLL_INTERVAL_S)
             if mailbox.group_state is not MailboxGroupState.READY:
                 raise RuntimeError(f"MPI L3 group {group.group_id} failed before READY: {mailbox.terminal_reason()}")
             self._worker.add_mpi_group_mailbox(
@@ -5331,7 +5341,7 @@ class Worker:
                 name=f"simpler-mpirun-monitor-{group.group_id[:8]}",
             )
             group.monitor_thread.start()
-        if time.monotonic() >= deadline:
+        if _monotonic() >= deadline:
             raise RuntimeError("MPI L3 activation: startup deadline exceeded after attach")
 
     def _require_remote_worker_started(self, worker_id: int) -> None:
@@ -7511,7 +7521,7 @@ class Worker:
             self._owner_instance_id: bytes = mint_owner_instance_id()
             if self.level >= 3:
                 self._is_startup_root = _startup_deadline is None
-                own_deadline = time.monotonic() + self._startup_timeout_s
+                own_deadline = _monotonic() + self._startup_timeout_s
                 # A recursive descendant caps its own timeout at the parent's
                 # remaining budget so the whole tree fits one startup_timeout_s.
                 self._startup_deadline = (
@@ -7537,7 +7547,7 @@ class Worker:
                 # every hierarchical worker, not just those with direct remote
                 # sessions — a local child may have remote descendants whose
                 # startup this deadline also bounds.
-                if self.level >= 3 and time.monotonic() >= self._startup_deadline:
+                if self.level >= 3 and _monotonic() >= self._startup_deadline:
                     raise RuntimeError("hierarchical startup: startup deadline exceeded before READY")
                 if self._cancel_token:
                     raise InitCancelled("init cancelled by close() before READY commit")
@@ -7673,7 +7683,7 @@ class Worker:
             raise ValueError("remote worker ids/specs length mismatch")
         session_timeout = self._remote_session_timeout_s()
         for worker_id, spec in zip(self._remote_worker_ids, self._remote_worker_specs):
-            remaining = deadline - time.monotonic()
+            remaining = deadline - _monotonic()
             if remaining <= 0:
                 raise RuntimeError("remote L3 session activation: startup deadline exceeded")
             session_id = uuid.uuid4().int & ((1 << 63) - 1)
@@ -7695,7 +7705,7 @@ class Worker:
                     f"remote L3 session open failed for worker {worker_id}: {type(exc).__name__}: {exc}"
                 ) from exc
             self._remote_sessions.append(session)
-            remaining = deadline - time.monotonic()
+            remaining = deadline - _monotonic()
             if remaining <= 0:
                 raise RuntimeError("remote L3 endpoint attach: startup deadline exceeded")
             assert self._worker is not None
@@ -7722,7 +7732,7 @@ class Worker:
                 ) from exc
         # Attach may have consumed the last slice of the budget; a final root
         # deadline check keeps a just-over-budget attach from committing READY.
-        if time.monotonic() >= deadline:
+        if _monotonic() >= deadline:
             raise RuntimeError("remote L3 activation: startup deadline exceeded after attach")
 
     def _start_hierarchical(self) -> None:  # noqa: PLR0912 -- three parallel fork loops (sub/chip/next) + bootstrap wait + scheduler register/init; branches track the fork order documented in the body
@@ -8035,12 +8045,12 @@ class Worker:
             if pending:
                 if self._cancel_token:
                     raise InitCancelled(f"{kind} worker readiness wait cancelled by close()")
-                if time.monotonic() > deadline:
+                if _monotonic() > deadline:
                     raise RuntimeError(
                         f"{kind} worker(s) {pending} did not become ready within "
                         f"{self._startup_timeout_s}s (startup deadline exceeded)"
                     )
-                time.sleep(_STARTUP_POLL_INTERVAL_S)
+                _sleep(_STARTUP_POLL_INTERVAL_S)
 
     # ------------------------------------------------------------------
     # Hierarchical abort
@@ -8075,7 +8085,7 @@ class Worker:
            already reaped are excluded so a reused PID is never signalled.
         """
         if deadline is None:
-            deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
+            deadline = _monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
         reaped = set(self._startup_reaped_pids)
         graceful: list[int] = []
         cancelled: list[int] = []
@@ -8120,7 +8130,7 @@ class Worker:
 
         waiting = set(graceful) | set(cancelled)
         if waiting:
-            while waiting and time.monotonic() <= deadline:
+            while waiting and _monotonic() <= deadline:
                 for pid in list(waiting):
                     try:
                         wpid, _status = os.waitpid(pid, os.WNOHANG)
@@ -8132,7 +8142,7 @@ class Worker:
                         waiting.discard(pid)
                         reaped.add(pid)
                 if waiting:
-                    time.sleep(_STARTUP_POLL_INTERVAL_S)
+                    _sleep(_STARTUP_POLL_INTERVAL_S)
 
         # Phase 2: hard backstop for any survivor. A not-yet-reaped pid still
         # holds its slot (no reuse), so killpg on the root reaps the survivor's
@@ -8165,8 +8175,8 @@ class Worker:
                 if wpid != 0:
                     to_reap.discard(pid)
                     reaped.add(pid)
-            if to_reap and time.monotonic() <= deadline:
-                time.sleep(_STARTUP_POLL_INTERVAL_S)
+            if to_reap and _monotonic() <= deadline:
+                _sleep(_STARTUP_POLL_INTERVAL_S)
             else:
                 break
 
@@ -8213,7 +8223,7 @@ class Worker:
         (including ``_abort_hierarchical``) so the whole rollback is bounded
         end-to-end rather than each phase re-acquiring a full timeout.
         """
-        deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
+        deadline = _monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
 
         with contextlib.suppress(BaseException):
             self._teardown_worker_tree(startup_abort=True, deadline=deadline)
@@ -11273,9 +11283,9 @@ class Worker:
                         raise RuntimeError("Worker.close(): cannot cancel init() from the init-owner thread")
                     self._cancel_token = True
                     self._hierarchical_start_cv.notify_all()
-                    _cancel_deadline = time.monotonic() + _CLOSE_CANCEL_UNWIND_TIMEOUT_S
+                    _cancel_deadline = _monotonic() + _CLOSE_CANCEL_UNWIND_TIMEOUT_S
                     while self._lifecycle is _Lifecycle.INITIALIZING:
-                        _remaining = _cancel_deadline - time.monotonic()
+                        _remaining = _cancel_deadline - _monotonic()
                         if _remaining <= 0:
                             raise RuntimeError(
                                 "Worker.close(): cancelled init() did not unwind within "
@@ -11335,7 +11345,7 @@ class Worker:
                 # One absolute budget covers both kinds of admitted work. A
                 # lease that consumes most of it must not be followed by a
                 # fresh full-budget wait on an accepted run fence.
-                drain_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
+                drain_deadline = _monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
                 # Drain in-flight leases before touching the tree. CLOSED already
                 # rejects new leases; a tree with a live op is never torn down.
                 # If an op outlives the budget, teardown stays UN-attempted and
@@ -11344,7 +11354,7 @@ class Worker:
                 # an async interruption leaving an accepted run fence undrained).
                 if self._active_ops > 0:
                     while self._active_ops > 0:
-                        remaining = drain_deadline - time.monotonic()
+                        remaining = drain_deadline - _monotonic()
                         if remaining <= 0:
                             break
                         self._hierarchical_start_cv.wait(timeout=remaining)
@@ -11362,7 +11372,7 @@ class Worker:
                 # the lifecycle CV: handle retirement acquires the same lock.
                 assert drain_deadline is not None
                 for handle in handles_to_drain:
-                    remaining = drain_deadline - time.monotonic()
+                    remaining = drain_deadline - _monotonic()
                     if remaining <= 0:
                         drain_deadline_expired = True
                         break
@@ -11371,7 +11381,7 @@ class Worker:
                     except BaseException as exc:  # noqa: BLE001
                         if result is None:
                             result = exc
-                        if isinstance(exc, TimeoutError) and time.monotonic() >= drain_deadline:
+                        if isinstance(exc, TimeoutError) and _monotonic() >= drain_deadline:
                             drain_deadline_expired = True
                             break
                 with self._hierarchical_start_cv:
@@ -11535,8 +11545,8 @@ class Worker:
                 else:
                     still.append((g, i))
             pending = still
-            if pending and time.monotonic() <= deadline:
-                time.sleep(_STARTUP_POLL_INTERVAL_S)
+            if pending and _monotonic() <= deadline:
+                _sleep(_STARTUP_POLL_INTERVAL_S)
             else:
                 break
         survivors: list[int] = []
@@ -11783,7 +11793,7 @@ class Worker:
             # teardown entry — so the (blocking) pre-child cleanup above cannot
             # eat it. Reap transfers a surviving pid/shm pair into the journal;
             # a later close() can retry without freeing a live mailbox.
-            reap_deadline = time.monotonic() + _CLOSE_CHILD_REAP_TIMEOUT_S
+            reap_deadline = _monotonic() + _CLOSE_CHILD_REAP_TIMEOUT_S
             _step(lambda: self._reclaim_child_groups(reap_deadline))
             # A prior attempt may already have transferred a surviving child
             # and its mailbox into the journal. Retry those entries only after

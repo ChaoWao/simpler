@@ -33,15 +33,20 @@ import os
 import struct
 import threading
 import time
+from functools import partial
+from multiprocessing import Event
 from multiprocessing.shared_memory import SharedMemory
+from typing import Protocol
 
 import pytest
+import simpler.worker as worker_mod
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import RemoteCallable, RemoteWorkerSpec, RunHandle, Worker
 
 from ._harness import (
     CHIP_INIT_FAILURE,
     TEST_WALL_BUDGET_S,
+    TickingClock,
     chip_callable,
     fake_chip_l3,
     hard_timeout,
@@ -50,7 +55,76 @@ from ._harness import (
 )
 
 _TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+_DEADLINE_AFTER_WATCHDOG_S = 2 * _TEST_WALL_BUDGET_S
 _hard_timeout = hard_timeout
+
+
+class _EventLike(Protocol):
+    def set(self) -> None: ...
+
+    def wait(self, timeout: float = ...) -> bool: ...
+
+
+class _ManualClock:
+    def __init__(self, poll_advance_s: float = 1.0, advance_limit_s: float = 2.0) -> None:
+        self.now = 0.0
+        self.poll_advance_s = poll_advance_s
+        self.advance_limit_s = advance_limit_s
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, _seconds: float) -> None:
+        self.now = min(self.now + self.poll_advance_s, self.advance_limit_s)
+
+
+def _install_manual_worker_clock(monkeypatch, *, poll_advance_s: float = 1.0) -> _ManualClock:
+    clock = _ManualClock(poll_advance_s)
+    monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(worker_mod, "_sleep", clock.sleep)
+    return clock
+
+
+class _ReleaseOnFirstReady(set):
+    def __init__(self, release: _EventLike) -> None:
+        super().__init__()
+        self._release = release
+
+    def add(self, pid: int) -> None:
+        super().add(pid)
+        self._release.set()
+
+
+def _release_failure_after_first_ready(monkeypatch, release: _EventLike) -> _ReleaseOnFirstReady:
+    ready_pids = _ReleaseOnFirstReady(release)
+    await_children_ready = Worker._await_children_ready
+
+    def observed(self, shms, pids, kind, deadline):
+        if kind == "next_level":
+            ready_pids.update(self._startup_ready_pids)
+            self._startup_ready_pids = ready_pids
+        return await_children_ready(self, shms, pids, kind, deadline)
+
+    monkeypatch.setattr(Worker, "_await_children_ready", observed)
+    return ready_pids
+
+
+def _observe_init_waiters(monkeypatch, expected: int = 1) -> threading.Event:
+    all_entered = threading.Event()
+    lock = threading.Lock()
+    entered = 0
+    wait_out_init = Worker._wait_out_init_locked
+
+    def observed(self, api):
+        nonlocal entered
+        with lock:
+            entered += 1
+            if entered == expected:
+                all_entered.set()
+        return wait_out_init(self, api)
+
+    monkeypatch.setattr(Worker, "_wait_out_init_locked", observed)
+    return all_entered
 
 
 def _raiser(exc: BaseException):
@@ -97,11 +171,10 @@ def _init_raises(*_a, **_k):
     raise RuntimeError("injected inner init failure")
 
 
-def _init_slow_raises(*_a, **_k):
-    # Delay so a healthy sibling reliably reaches READY before this one fails,
-    # exercising the graceful-close rollback path deterministically.
-    time.sleep(0.5)
-    raise RuntimeError("injected slow inner init failure")
+def _init_after_release_raises(release: _EventLike, message: str, *_a, **_k):
+    if not release.wait(_TEST_WALL_BUDGET_S):
+        raise TimeoutError("test release was not signalled after a sibling became ready")
+    raise RuntimeError(message)
 
 
 def _init_hard_exits(*_a, **_k):
@@ -213,15 +286,15 @@ class TestNextLevelStartupFailure:
         l3 = _l3_child()
         l3.init = _init_raises  # noqa: SLF001 -- test injection inherited across fork
 
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=10.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w4.register(_trivial_orch)
         w4.add_worker(l3)
-        start = time.monotonic()
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 with pytest.raises(RuntimeError, match="injected inner init failure"):
                     w4.init()
-            assert time.monotonic() - start < _TEST_WALL_BUDGET_S
+            assert w4._next_level_pids == []
+            assert w4._next_level_shms == []
         finally:
             w4.close()
 
@@ -230,7 +303,7 @@ class TestNextLevelStartupFailure:
         l3 = _l3_child()
         l3.init = _init_hard_exits  # noqa: SLF001
 
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=10.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w4.register(_trivial_orch)
         w4.add_worker(l3)
         try:
@@ -240,26 +313,27 @@ class TestNextLevelStartupFailure:
         finally:
             w4.close()
 
-    def test_startup_deadline_fires_on_hung_child(self):
+    def test_startup_deadline_fires_on_hung_child(self, monkeypatch):
         """A child that hangs in init trips the startup deadline, not an infinite spin."""
+        clock = _install_manual_worker_clock(monkeypatch)
         l3 = _l3_child()
         l3.init = _init_hangs  # noqa: SLF001
 
         w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=1.5)
         w4.register(_trivial_orch)
         w4.add_worker(l3)
-        start = time.monotonic()
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 with pytest.raises(RuntimeError, match="deadline"):
                     w4.init()
-            elapsed = time.monotonic() - start
-            assert 1.5 <= elapsed < _TEST_WALL_BUDGET_S
+            assert clock.now > 1.5
+            assert w4._next_level_pids == []
         finally:
             w4.close()
 
     def test_failed_startup_reaps_children_no_leak(self, monkeypatch):
         """After a startup failure the forked children are killed and reaped."""
+        _install_manual_worker_clock(monkeypatch)
         l3 = _l3_child()
         l3.init = _init_hangs  # noqa: SLF001
 
@@ -293,24 +367,30 @@ class TestNextLevelStartupFailure:
         finally:
             w4.close()
 
-    def test_ready_sibling_closed_gracefully_on_sibling_failure(self):
+    def test_ready_sibling_closed_gracefully_on_sibling_failure(self, monkeypatch):
         """A child that reached READY is closed gracefully (not SIGKILLed) when a sibling fails.
 
         The healthy L3 owns a nested sub-worker mailbox shm only it can unlink;
         graceful SHUTDOWN lets it clean up. The failing L3 is delayed so the
         healthy one is reliably READY first.
         """
+        allow_failure = Event()
         good = _l3_child(num_sub_workers=1)
         bad = _l3_child(num_sub_workers=1)
-        bad.init = _init_slow_raises  # noqa: SLF001
+        bad.init = partial(  # noqa: SLF001
+            _init_after_release_raises,
+            allow_failure,
+            "injected sibling init failure",
+        )
 
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=20.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
+        ready_pids = _release_failure_after_first_ready(monkeypatch, allow_failure)
         w4.register(_trivial_orch)
         w4.add_worker(good)
         w4.add_worker(bad)
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
-                with pytest.raises(RuntimeError, match="slow inner init failure"):
+                with pytest.raises(RuntimeError, match="sibling init failure"):
                     w4.init()
 
             report = w4._last_rollback
@@ -319,17 +399,25 @@ class TestNextLevelStartupFailure:
             # gracefully (SHUTDOWN + reaped), not SIGKILLed.
             assert len(report["graceful"]) >= 1
             assert set(report["graceful"]).isdisjoint(report["killed"])
+            assert set(report["graceful"]) == ready_pids
             assert w4._next_level_pids == []
         finally:
+            allow_failure.set()
             w4.close()
 
-    def test_second_child_failure_reaps_first(self):
+    def test_second_child_failure_reaps_first(self, monkeypatch):
         """When one of several next-level children fails, all are torn down."""
+        allow_failure = Event()
         good = _l3_child()
         bad = _l3_child()
-        bad.init = _init_raises  # noqa: SLF001
+        bad.init = partial(  # noqa: SLF001
+            _init_after_release_raises,
+            allow_failure,
+            "injected inner init failure",
+        )
 
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=10.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
+        ready_pids = _release_failure_after_first_ready(monkeypatch, allow_failure)
         w4.register(_trivial_orch)
         w4.add_worker(good)
         w4.add_worker(bad)
@@ -337,8 +425,14 @@ class TestNextLevelStartupFailure:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 with pytest.raises(RuntimeError, match="injected inner init failure"):
                     w4.init()
+            report = w4._last_rollback
+            assert report is not None
+            assert set(report["graceful"]) == ready_pids
+            assert set(report["graceful"]).isdisjoint(report["killed"])
             assert w4._next_level_pids == []
+            assert w4._next_level_shms == []
         finally:
+            allow_failure.set()
             w4.close()
 
 
@@ -358,7 +452,7 @@ class TestSubStartupFailure:
 
         monkeypatch.setattr(worker_mod, "_make_local_identity_tables", _boom)
 
-        w3 = Worker(level=3, num_sub_workers=1, startup_timeout_s=10.0)
+        w3 = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w3.register(lambda args: None)
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
@@ -389,6 +483,7 @@ class TestReadyBarrierHappyPath:
     children) came up during the parent's init(), not on first run.
     """
 
+    @_hard_timeout(_TEST_WALL_BUDGET_S)
     def test_l4_l3_tree_comes_up_and_runs(self):
         counter_shm, counter_buf = _make_shared_counter()
         w4 = None
@@ -399,7 +494,7 @@ class TestReadyBarrierHappyPath:
             def l3_orch(orch, args, config):
                 orch.submit_sub(l3_sub)
 
-            w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=30.0)
+            w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
             l3_handle = w4.register(l3_orch)
             l3_worker_id = w4.add_worker(l3)
             w4.init()
@@ -415,6 +510,7 @@ class TestReadyBarrierHappyPath:
             counter_shm.close()
             counter_shm.unlink()
 
+    @_hard_timeout(_TEST_WALL_BUDGET_S)
     def test_multiple_l3_children_all_ready(self):
         """Two next-level children both pass the barrier and dispatch.
 
@@ -437,7 +533,7 @@ class TestReadyBarrierHappyPath:
             def l3b_orch(orch, args, config):
                 orch.submit_sub(b_sub)
 
-            w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=30.0)
+            w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
             ha = w4.register(l3a_orch)
             hb = w4.register(l3b_orch)
             l3a_worker_id = w4.add_worker(l3a)
@@ -488,9 +584,10 @@ class TestEagerInitContract:
         assert hw._sub_pids == []
         assert hw._worker is None
 
+    @_hard_timeout(_TEST_WALL_BUDGET_S)
     def test_l4_l3_sub_subtree_ready_after_init_no_run(self):
         l3 = _l3_child(num_sub_workers=1)
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=30.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w4.register(_trivial_orch)
         w4.add_worker(l3)
         w4.init()
@@ -623,9 +720,10 @@ class TestApiLinearizationDuringInit:
     def test_register_blocks_during_initializing_then_completes(self, monkeypatch):
         entered = threading.Event()
         release = threading.Event()
+        register_waiting = _observe_init_waiters(monkeypatch)
         monkeypatch.setattr(Worker, "_start_hierarchical", self._pause_start(entered, release))
 
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
         init_err: list = []
         proceed = threading.Event()
@@ -642,16 +740,13 @@ class TestApiLinearizationDuringInit:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 assert entered.wait(3.0)
                 reg_out: list[object] = []
-                reg_started = threading.Event()
 
                 def do_reg():
-                    reg_started.set()
                     reg_out.append(w.register(lambda args: None))
 
                 rt = threading.Thread(target=do_reg)
                 rt.start()
-                assert reg_started.wait(3.0)
-                time.sleep(0.3)
+                assert register_waiting.wait(3.0)
                 assert reg_out == [], "register must block while INITIALIZING"
                 release.set()
                 rt.join(10.0)  # register completes post-READY (implies init done)
@@ -665,6 +760,7 @@ class TestApiLinearizationDuringInit:
     def test_init_failure_wakes_register_waiter_with_startup_error(self, monkeypatch):
         entered = threading.Event()
         release = threading.Event()
+        register_waiting = _observe_init_waiters(monkeypatch)
 
         def boom(_self):
             entered.set()
@@ -673,7 +769,7 @@ class TestApiLinearizationDuringInit:
 
         monkeypatch.setattr(Worker, "_start_hierarchical", boom)
 
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
         init_err: list = []
         it = threading.Thread(target=lambda: init_err.append(_run_catch(w.init)))
@@ -682,16 +778,13 @@ class TestApiLinearizationDuringInit:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 assert entered.wait(3.0)
                 reg_err: list = []
-                reg_started = threading.Event()
 
                 def do_reg():
-                    reg_started.set()
                     reg_err.append(_run_catch(lambda: w.register(lambda args: None)))
 
                 rt = threading.Thread(target=do_reg)
                 rt.start()
-                assert reg_started.wait(3.0)
-                time.sleep(0.2)
+                assert register_waiting.wait(3.0)
                 release.set()
                 it.join(10.0)
                 rt.join(10.0)
@@ -707,7 +800,7 @@ class TestApiLinearizationDuringInit:
         release = threading.Event()
         monkeypatch.setattr(Worker, "_start_hierarchical", self._pause_start(entered, release))
 
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=30.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w4.register(_trivial_orch)
         w4.add_worker(_l3_child())
         proceed = threading.Event()
@@ -738,10 +831,19 @@ class TestApiLinearizationDuringInit:
 
         entered = threading.Event()
         release = threading.Event()
+        cancel_latched = threading.Event()
         monkeypatch.setattr(Worker, "_start_hierarchical", self._pause_start(entered, release))
 
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
+        real_monotonic = worker_mod._monotonic
+
+        def observe_cancel():
+            if w._cancel_token:
+                cancel_latched.set()
+            return real_monotonic()
+
+        monkeypatch.setattr(worker_mod, "_monotonic", observe_cancel)
 
         def owner_body():
             _run_catch(w.init)
@@ -755,9 +857,7 @@ class TestApiLinearizationDuringInit:
                 close_result: list = []
                 ct = threading.Thread(target=lambda: close_result.append(_run_catch(w.close)))
                 ct.start()
-                # Wait for cancel token to latch, then release the init thread.
-                while not w._cancel_token:
-                    time.sleep(0.001)
+                assert cancel_latched.wait(3.0)
                 release.set()
                 ct.join(10.0)
                 it.join(10.0)
@@ -1111,6 +1211,7 @@ class TestLevel2Lifecycle:
         interrupt = SystemExit("before close outcome publication")
         entered = threading.Event()
         release = threading.Event()
+        joiner_waiting = threading.Event()
         attempt_type = worker_mod._CloseAttempt
 
         class _InterruptBeforeOutcome(attempt_type):
@@ -1128,6 +1229,13 @@ class TestLevel2Lifecycle:
                     raise interrupt
                 return super().publish(error, incomplete)
 
+            @property
+            def done(self):
+                done = super().done
+                if not done:
+                    joiner_waiting.set()
+                return done
+
         monkeypatch.setattr(worker_mod, "_CloseAttempt", _InterruptBeforeOutcome)
         w = self._make_l2(monkeypatch)
         owner_result: list = []
@@ -1143,7 +1251,7 @@ class TestLevel2Lifecycle:
         try:
             assert entered.wait(5.0)
             joiner_thread.start()
-            time.sleep(0.1)
+            assert joiner_waiting.wait(5.0)
             assert joiner_thread.is_alive()
             release.set()
             owner_thread.join(5.0)
@@ -1226,23 +1334,25 @@ class TestLevel2Lifecycle:
 
         import simpler.worker as worker_mod  # noqa: PLC0415
 
-        monkeypatch.setattr(worker_mod, "_ROLLBACK_GRACEFUL_TIMEOUT_S", 1.0)
+        monkeypatch.setattr(worker_mod, "_CLOSE_CHILD_REAP_TIMEOUT_S", 1.0)
+        clock = _ManualClock(poll_advance_s=0.0, advance_limit_s=10.0)
+        monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
         w = Worker(level=3, num_sub_workers=0)
         w._worker = types.SimpleNamespace(close=lambda: None)  # look "started" for the L3 branch
 
-        # A slow pre-child cleanup step (runs before the SHUTDOWN broadcast).
-        monkeypatch.setattr(Worker, "_release_all_buffers", lambda self: time.sleep(0.6))
+        def consume_pre_child_budget(_self):
+            clock.now += 0.6
+
+        monkeypatch.setattr(Worker, "_release_all_buffers", consume_pre_child_budget)
         captured: dict = {}
 
         def capture_reap(groups, deadline):
-            captured["remaining"] = deadline - time.monotonic()
+            captured["remaining"] = deadline - clock.monotonic()
 
         monkeypatch.setattr(Worker, "_reap_child_groups", staticmethod(capture_reap))
         with _hard_timeout(_TEST_WALL_BUDGET_S):
             w._teardown_ready_tree()
-        # The reap got ~full grace (1.0s), not 1.0 - 0.6 left over from a deadline
-        # fixed at teardown entry.
-        assert captured["remaining"] > 0.7
+        assert captured["remaining"] == pytest.approx(1.0)
 
     def test_reap_child_groups_stuck_child_no_starvation(self, monkeypatch):
         # A stuck child in one group must not starve the reap of healthy children
@@ -1274,11 +1384,12 @@ class TestLevel2Lifecycle:
             return (pid, 0)  # reaped, clean exit
 
         monkeypatch.setattr(worker_mod.os, "waitpid", fake_waitpid)
+        clock = _install_manual_worker_clock(monkeypatch)
         sub_shms, sub_pids = [_FakeShm()], [stuck_pid]
         chip_shms, chip_pids = [_FakeShm()], [90002]
         next_shms, next_pids = [_FakeShm()], [90003]
         groups = [(sub_shms, sub_pids), (chip_shms, chip_pids), (next_shms, next_pids)]
-        deadline = time.monotonic() + 1.0
+        deadline = clock.monotonic() + 1.0
         with _hard_timeout(_TEST_WALL_BUDGET_S):
             err = _run_catch(lambda: Worker._reap_child_groups(groups, deadline))  # type: ignore[arg-type]
         # The wedged child is a reported survivor, kept in its group...
@@ -1310,7 +1421,17 @@ class TestLevel2Lifecycle:
 
         entered = threading.Event()
         release = threading.Event()
+        joiner_waiting = threading.Event()
         orig_teardown = Worker._teardown_ready_tree
+        attempt_type = worker_mod._CloseAttempt
+
+        class _ObservedCloseAttempt(attempt_type):
+            @property
+            def done(self):
+                done = super().done
+                if not done:
+                    joiner_waiting.set()
+                return done
 
         def paused_teardown(self):
             entered.set()
@@ -1318,6 +1439,7 @@ class TestLevel2Lifecycle:
             return orig_teardown(self)
 
         monkeypatch.setattr(Worker, "_teardown_ready_tree", paused_teardown)
+        monkeypatch.setattr(worker_mod, "_CloseAttempt", _ObservedCloseAttempt)
         w = self._make_l2(monkeypatch)
         results: dict = {}
 
@@ -1334,7 +1456,7 @@ class TestLevel2Lifecycle:
                 joiner: list = []
                 jt = threading.Thread(target=lambda: joiner.append(_run_catch(w.close)))
                 jt.start()
-                time.sleep(0.2)  # joiner parks on the in-flight attempt
+                assert joiner_waiting.wait(3.0)
                 assert w._close_completion is not None and not w._close_completion.done
                 release.set()
                 ot.join(10.0)
@@ -1353,6 +1475,7 @@ class TestLevel2Lifecycle:
 
         entered = threading.Event()
         release = threading.Event()
+        drain_started = threading.Event()
 
         def paused_run(self, *_a, **_k):
             entered.set()
@@ -1368,11 +1491,22 @@ class TestLevel2Lifecycle:
             try:
                 assert entered.wait(3.0)  # run() admitted, holding a lease
                 assert w._active_ops == 1
-                releaser = threading.Thread(target=lambda: (time.sleep(0.5), release.set()))
+                real_monotonic = worker_mod._monotonic
+
+                def observe_drain_start():
+                    drain_started.set()
+                    return real_monotonic()
+
+                monkeypatch.setattr(worker_mod, "_monotonic", observe_drain_start)
+
+                def release_after_drain_starts():
+                    assert drain_started.wait(10.0)
+                    assert w._active_ops == 1
+                    release.set()
+
+                releaser = threading.Thread(target=release_after_drain_starts)
                 releaser.start()
-                t0 = time.monotonic()
                 w.close()  # owner close: drains the lease before teardown
-                assert time.monotonic() - t0 >= 0.4
                 assert w._lifecycle is worker_mod._Lifecycle.CLOSED
                 assert w._active_ops == 0
                 releaser.join(5.0)
@@ -1424,6 +1558,8 @@ class TestLevel2Lifecycle:
             try:
                 assert entered.wait(3.0)
                 assert w._active_ops == 1
+                clock = TickingClock()
+                monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
                 err = _run_catch(w.close)  # owner drains, times out at 0.5s
                 assert isinstance(err, TimeoutError)
                 assert w._lifecycle is worker_mod._Lifecycle.CLOSED  # admission fenced
@@ -1459,6 +1595,8 @@ class TestLevel2Lifecycle:
             rt.start()
             try:
                 assert entered.wait(3.0)
+                clock = TickingClock()
+                monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
                 # First close: times out, CLOSED + incomplete, native intact.
                 assert isinstance(_run_catch(w.close), TimeoutError)
                 assert w._chip_worker is not None
@@ -1525,12 +1663,14 @@ class TestLevel2Lifecycle:
         w = self._make_l2_with_chip(monkeypatch, _PausingChip)
         errs: list = []
         proceed = threading.Event()
+        owner_finished = threading.Event()
         state: dict = {}
 
         def owner_body():
             errs.append(_run_catch(w.init))
             state["initialized"] = w._initialized
             state["build"] = build_count["n"]
+            owner_finished.set()
             proceed.wait(10.0)
             _run_catch(w.close)  # the winning (owner) thread closes
 
@@ -1544,10 +1684,7 @@ class TestLevel2Lifecycle:
                 assert isinstance(err2, RuntimeError)
                 assert "in progress" in str(err2)
                 release.set()
-                # Wait for the owner to finish init (it then parks on `proceed`).
-                deadline = time.monotonic() + 10.0
-                while "initialized" not in state and time.monotonic() < deadline:
-                    time.sleep(0.01)
+                assert owner_finished.wait(10.0)
                 assert errs == [None]
                 assert state["initialized"] is True
                 assert state["build"] == 1
@@ -1565,6 +1702,7 @@ class TestLevel2Lifecycle:
 
         entered = threading.Event()
         release = threading.Event()
+        cancel_latched = threading.Event()
         finalized = {"n": 0}
 
         class _PausingChip:
@@ -1579,6 +1717,14 @@ class TestLevel2Lifecycle:
                 finalized["n"] += 1
 
         w = self._make_l2_with_chip(monkeypatch, _PausingChip)
+        real_monotonic = worker_mod._monotonic
+
+        def observe_cancel():
+            if w._cancel_token:
+                cancel_latched.set()
+            return real_monotonic()
+
+        monkeypatch.setattr(worker_mod, "_monotonic", observe_cancel)
         init_err: list = []
 
         def owner_body():
@@ -1593,9 +1739,7 @@ class TestLevel2Lifecycle:
                 close_result: list = []
                 ct = threading.Thread(target=lambda: close_result.append(_run_catch(w.close)))
                 ct.start()
-                # Wait for cancel token to latch, then release init.
-                while not w._cancel_token:
-                    time.sleep(0.001)
+                assert cancel_latched.wait(3.0)
                 release.set()
                 ct.join(10.0)
                 t1.join(10.0)
@@ -1621,16 +1765,21 @@ class TestChipStartupFailure:
 
     def test_chip_init_failure_raises_bounded(self, monkeypatch):
         # chip-only L3; the chip forks from device_ids
-        with fake_chip_l3(monkeypatch, script="raises", init=False, startup_timeout_s=10.0) as l3:
+        with fake_chip_l3(
+            monkeypatch,
+            script="raises",
+            init=False,
+            startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+        ) as l3:
             with pytest.raises(RuntimeError, match=CHIP_INIT_FAILURE):
                 l3.init()
 
     def test_chip_init_hang_trips_deadline(self, monkeypatch):
-        start = time.monotonic()
+        clock = _install_manual_worker_clock(monkeypatch)
         with fake_chip_l3(monkeypatch, script="hangs", init=False, startup_timeout_s=1.5) as l3:
             with pytest.raises(RuntimeError, match="deadline"):
                 l3.init()
-            assert 1.5 <= time.monotonic() - start < _TEST_WALL_BUDGET_S
+            assert clock.now > 1.5
 
 
 class TestEligibleTargetPrecheck:
@@ -1871,9 +2020,10 @@ class TestFailureSurfacing:
         entered = threading.Event()
         release = threading.Event()
         original = RuntimeError("distinctive start failure")
+        waiters_parked = _observe_init_waiters(monkeypatch, expected=3)
         monkeypatch.setattr(Worker, "_start_hierarchical", self._fail_start(entered, release, original))
 
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         init_err: list = []
         it = threading.Thread(target=lambda: init_err.append(_run_catch(w.init)))
         it.start()
@@ -1881,18 +2031,15 @@ class TestFailureSurfacing:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 assert entered.wait(3.0)
                 reg_errs: list = []
-                started = threading.Event()
                 n = 3
 
                 def do_reg():
-                    started.set()
                     reg_errs.append(_run_catch(lambda: w.register(lambda args: None)))
 
                 threads = [threading.Thread(target=do_reg) for _ in range(n)]
                 for t in threads:
                     t.start()
-                assert started.wait(3.0)
-                time.sleep(0.3)  # let the waiters park on the epoch condition
+                assert waiters_parked.wait(3.0)
                 release.set()
                 for t in threads:
                     t.join(10.0)

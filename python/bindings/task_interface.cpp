@@ -617,6 +617,11 @@ public:
         return active_leases_;
     }
 
+    bool closing() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return state_ == State::CLOSING;
+    }
+
     void close() {
         std::unique_ptr<RegionMapping> mapping;
         std::exception_ptr close_error;
@@ -727,6 +732,15 @@ public:
             throw std::runtime_error("mapped-region handle is closed or unknown");
         }
         return it->second->active_leases();
+    }
+
+    bool closing(uint64_t handle) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = regions_.find(handle);
+        if (it == regions_.end()) {
+            throw std::runtime_error("mapped-region handle is closed or unknown");
+        }
+        return it->second->closing();
     }
 
     void close(uint64_t handle) {
@@ -3334,6 +3348,13 @@ NB_MODULE(_task_interface, m) {
         nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
     );
     m.def(
+        "_region_closing_for_test",
+        [](uint64_t handle) {
+            return region_registry().closing(handle);
+        },
+        nb::arg("handle"), "Report whether close is waiting for mapped-region leases."
+    );
+    m.def(
         "_region_take_cleanup_error",
         [](const std::string &owner_token) {
             if (owner_token.empty()) {
@@ -3488,6 +3509,13 @@ NB_MODULE(_task_interface, m) {
             return region_registry().active_leases(handle);
         },
         nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
+    );
+    m.def(
+        "_worker_host_mapped_region_closing_for_test",
+        [](uint64_t handle) {
+            return region_registry().closing(handle);
+        },
+        nb::arg("handle"), "Report whether close is waiting for L3 Host mapped-region leases."
     );
     m.def(
         "_worker_host_mapped_region_take_cleanup_error",

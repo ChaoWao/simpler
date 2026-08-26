@@ -209,6 +209,11 @@ public:
 
     void set_test_hook(std::function<void(OrchestratorTestPoint)> hook) { test_hook_ = std::move(hook); }
 
+    // Deterministic observation seam for tests that must issue another submit
+    // only after an asynchronous task failure has reached the current run.
+    bool current_building_run_failed_for_test() const;
+    size_t begin_run_waiter_count_for_test() const;
+
 private:
     TensorMap *tensormap_ = nullptr;
     Ring *allocator_ = nullptr;
@@ -228,6 +233,7 @@ private:
     RunId next_run_id_{1};
     RunId building_run_id_{INVALID_RUN_ID};
     RunId active_run_id_{INVALID_RUN_ID};
+    size_t begin_run_waiters_{0};
 
     // Scheduler's loop mutex (not owned). Held across optional quiescent
     // compaction so the scheduler cannot retain a slot pointer being removed.

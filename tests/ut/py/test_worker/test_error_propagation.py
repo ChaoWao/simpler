@@ -30,6 +30,8 @@ import pytest
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import Worker
 
+_TEST_WALL_BUDGET_S = 30.0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -185,10 +187,14 @@ class TestScopeMidFailure:
 
             def orch(o, args, cfg):
                 o.submit_sub(handle)
-                # Give the child enough wall-clock time to run and fail
-                # before issuing the second submit, so the fail-fast check
-                # in submit_impl has something to trip on.
-                time.sleep(1.0)
+                # The second submit specifically exercises the native
+                # fail-fast check. Wait for that state, rather than guessing
+                # how long this server needs to propagate the child failure.
+                deadline = time.monotonic() + _TEST_WALL_BUDGET_S
+                while not o._o._current_run_failed_for_test():
+                    if time.monotonic() >= deadline:
+                        pytest.fail("child failure never reached the current orchestration run")
+                    time.sleep(0.001)
                 o.submit_sub(handle)
 
             with pytest.raises(RuntimeError) as info:

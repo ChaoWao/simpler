@@ -74,10 +74,17 @@ RunId Orchestrator::begin_run() {
             throw std::logic_error("Orchestrator::begin_run: another run is still building");
         }
         std::optional<PipelineSlotLease> lease;
-        runs_cv_.wait(lk, [this, &lease] {
-            lease = pipeline_slots_.try_acquire(admission_depth_);
-            return lease.has_value();
-        });
+        ++begin_run_waiters_;
+        try {
+            runs_cv_.wait(lk, [this, &lease] {
+                lease = pipeline_slots_.try_acquire(admission_depth_);
+                return lease.has_value();
+            });
+        } catch (...) {
+            --begin_run_waiters_;
+            throw;
+        }
+        --begin_run_waiters_;
         if (next_run_id_ == INVALID_RUN_ID || next_run_id_ == std::numeric_limits<RunId>::max()) {
             pipeline_slots_.release(*lease);
             throw std::overflow_error("Orchestrator::begin_run: run id space exhausted");
@@ -517,6 +524,17 @@ void Orchestrator::record_run_error(const std::shared_ptr<RunState> &run, std::e
 void Orchestrator::record_run_error(RunId run_id, std::exception_ptr error) {
     if (!error) return;
     record_run_error(find_run(run_id), std::move(error));
+}
+
+bool Orchestrator::current_building_run_failed_for_test() const {
+    auto run = current_building_run();
+    std::lock_guard<std::mutex> lk(run->completion_mu);
+    return static_cast<bool>(run->first_error);
+}
+
+size_t Orchestrator::begin_run_waiter_count_for_test() const {
+    std::lock_guard<std::mutex> lk(runs_mu_);
+    return begin_run_waiters_;
 }
 
 void Orchestrator::report_task_error(TaskSlot slot, const std::string &message) {

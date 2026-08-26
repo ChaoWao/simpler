@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ctypes
 import signal
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -53,6 +54,48 @@ TEST_WALL_BUDGET_S = 30.0
 _HANG_S = 3600.0
 
 _SCRIPTS = ("ok", "raises", "hangs")
+
+
+class ObservedCondition:
+    def __init__(
+        self,
+        condition: threading.Condition,
+        wait_entered: threading.Event | None = None,
+        *,
+        enter_thread_name: str | None = None,
+        enter_attempted: threading.Event | None = None,
+    ) -> None:
+        self._condition = condition
+        self._wait_entered = wait_entered
+        self._enter_thread_name = enter_thread_name
+        self._enter_attempted = enter_attempted
+
+    def __enter__(self):
+        if self._enter_attempted is not None and threading.current_thread().name == self._enter_thread_name:
+            self._enter_attempted.set()
+        return self._condition.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._condition.__exit__(*exc_info)
+
+    def wait(self, timeout=None):
+        if self._wait_entered is not None:
+            self._wait_entered.set()
+        return self._condition.wait(timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._condition, name)
+
+
+class TickingClock:
+    def __init__(self, tick_s: float = 1.0) -> None:
+        self.now = 0.0
+        self.tick_s = tick_s
+
+    def monotonic(self) -> float:
+        now = self.now
+        self.now += self.tick_s
+        return now
 
 
 @contextmanager

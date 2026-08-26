@@ -541,6 +541,7 @@ void RemoteL3SocketTransport::write_all(
 }
 
 std::vector<uint8_t> RemoteL3SocketTransport::read_frame(std::chrono::steady_clock::time_point deadline) {
+    last_read_deadline_ = deadline;
     std::vector<uint8_t> frame(remote_l3::FRAME_HEADER_BYTES);
     size_t off = 0;
     while (off < remote_l3::FRAME_HEADER_BYTES) {
