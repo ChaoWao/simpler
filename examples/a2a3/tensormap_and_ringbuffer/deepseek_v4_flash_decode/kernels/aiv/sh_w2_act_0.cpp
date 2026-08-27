@@ -482,26 +482,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: h_tile_scale_dq_inline2676_inline10005__ssa_v1
-    __gm__ TaskTensor *h_tile_scale_dq_inline2676_inline10005__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *h_tile_scale_dq_inline2676_inline10005__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *h_tile_scale_dq_inline2676_inline10005__ssa_v1 =
         reinterpret_cast<__gm__ float *>(h_tile_scale_dq_inline2676_inline10005__ssa_v1_tensor->buffer.addr) +
         h_tile_scale_dq_inline2676_inline10005__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: sh_inline10094__iter_v1
-    __gm__ TaskTensor *sh_inline10094__iter_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *sh_inline10094__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *sh_inline10094__iter_v1 =
         reinterpret_cast<__gm__ bfloat16_t *>(sh_inline10094__iter_v1_tensor->buffer.addr) +
         sh_inline10094__iter_v1_tensor->start_offset;
 
     // Unpack tensor: y_i32_inline2673_inline10147__ssa_v1
-    __gm__ TaskTensor *y_i32_inline2673_inline10147__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *y_i32_inline2673_inline10147__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *y_i32_inline2673_inline10147__ssa_v1 =
         reinterpret_cast<__gm__ int32_t *>(y_i32_inline2673_inline10147__ssa_v1_tensor->buffer.addr) +
         y_i32_inline2673_inline10147__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: shared_w2_scale_l1_inline702__ssa_v0
-    __gm__ TaskTensor *shared_w2_scale_l1_inline702__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *shared_w2_scale_l1_inline702__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *shared_w2_scale_l1_inline702__ssa_v0 =
         reinterpret_cast<__gm__ float *>(shared_w2_scale_l1_inline702__ssa_v0_tensor->buffer.addr) +
         shared_w2_scale_l1_inline702__ssa_v0_tensor->start_offset;

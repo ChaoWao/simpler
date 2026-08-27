@@ -214,19 +214,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: qr_bf16_inline1969_inline12702__ssa_v1
-    __gm__ TaskTensor *qr_bf16_inline1969_inline12702__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *qr_bf16_inline1969_inline12702__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *qr_bf16_inline1969_inline12702__ssa_v1 =
         reinterpret_cast<__gm__ bfloat16_t *>(qr_bf16_inline1969_inline12702__ssa_v1_tensor->buffer.addr) +
         qr_bf16_inline1969_inline12702__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: csa_hadamard_idx_last_inline669__ssa_v0
-    __gm__ TaskTensor *csa_hadamard_idx_last_inline669__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *csa_hadamard_idx_last_inline669__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *csa_hadamard_idx_last_inline669__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(csa_hadamard_idx_last_inline669__ssa_v0_tensor->buffer.addr) +
         csa_hadamard_idx_last_inline669__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qh_acc_gm_inline2006_inline12354__ssa_v0
-    __gm__ TaskTensor *qh_acc_gm_inline2006_inline12354__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *qh_acc_gm_inline2006_inline12354__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *qh_acc_gm_inline2006_inline12354__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qh_acc_gm_inline2006_inline12354__ssa_v0_tensor->buffer.addr) +
         qh_acc_gm_inline2006_inline12354__ssa_v0_tensor->start_offset;

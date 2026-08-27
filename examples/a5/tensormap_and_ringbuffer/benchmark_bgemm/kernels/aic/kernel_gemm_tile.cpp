@@ -13,13 +13,13 @@
  *
  * Computes: output = input_a @ input_b (tile_size x tile_size tile matmul)
  *
- * Args (TaskTensor*):
+ * Args (Tensor*):
  *   args[0] = input_a (INPUT)
  *   args[1] = input_b (INPUT)
  *   args[2] = output  (OUTPUT)
  *
  * The A5 Case0 kernel uses 128 x 128 tiles and derives the tile count from the
- * TaskTensor view created by orchestration.
+ * Tensor view created by orchestration.
  */
 
 #include <cstdint>
@@ -47,7 +47,7 @@ AICORE constexpr inline T CeilAlign(T num_1, T num_2) {
     return (num_1 + num_2 - 1) / num_2 * num_2;
 }
 
-static __aicore__ inline int get_num_tiles(__gm__ TaskTensor *tensor, uint64_t tile_elems) {
+static __aicore__ inline int get_num_tiles(__gm__ Tensor *tensor, uint64_t tile_elems) {
     uint64_t total_elems = tensor->shapes[0];
     return static_cast<int>(total_elems / tile_elems);
 }
@@ -113,9 +113,9 @@ static __aicore__ void gemm_tile_impl(__gm__ float *input_a, __gm__ float *input
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *input_a = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *input_b = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *output = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *input_a = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *input_b = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *output = reinterpret_cast<__gm__ Tensor *>(args[2]);
     constexpr uint64_t TILE_ELEMS = 128 * 128;
     int num_tiles = get_num_tiles(input_a, TILE_ELEMS);
 

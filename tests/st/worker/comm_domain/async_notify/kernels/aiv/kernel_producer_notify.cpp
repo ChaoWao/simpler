@@ -34,8 +34,8 @@ static inline __aicore__ __gm__ T *comm_remote_ptr(__gm__ CommContext *ctx, __gm
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *in_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *in_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *local_counter = reinterpret_cast<__gm__ int32_t *>(args[2]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
 

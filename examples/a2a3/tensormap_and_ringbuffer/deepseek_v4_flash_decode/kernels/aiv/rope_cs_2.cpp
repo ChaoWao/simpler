@@ -627,27 +627,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: rope_cos_t_inline11615__rv_v2
-    __gm__ TaskTensor *rope_cos_t_inline11615__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *rope_cos_t_inline11615__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *rope_cos_t_inline11615__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(rope_cos_t_inline11615__rv_v2_tensor->buffer.addr) +
         rope_cos_t_inline11615__rv_v2_tensor->start_offset;
 
     // Unpack tensor: rope_sin_t_inline11554__rv_v2
-    __gm__ TaskTensor *rope_sin_t_inline11554__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *rope_sin_t_inline11554__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *rope_sin_t_inline11554__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(rope_sin_t_inline11554__rv_v2_tensor->buffer.addr) +
         rope_sin_t_inline11554__rv_v2_tensor->start_offset;
 
     // Unpack tensor: rope_cos_il_inline1559_inline11376__ssa_v0
-    __gm__ TaskTensor *rope_cos_il_inline1559_inline11376__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *rope_cos_il_inline1559_inline11376__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *rope_cos_il_inline1559_inline11376__ssa_v0 =
         reinterpret_cast<__gm__ float *>(rope_cos_il_inline1559_inline11376__ssa_v0_tensor->buffer.addr) +
         rope_cos_il_inline1559_inline11376__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: rope_sin_signed_inline1560_inline11790__ssa_v0
-    __gm__ TaskTensor *rope_sin_signed_inline1560_inline11790__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *rope_sin_signed_inline1560_inline11790__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *rope_sin_signed_inline1560_inline11790__ssa_v0 =
         reinterpret_cast<__gm__ float *>(rope_sin_signed_inline1560_inline11790__ssa_v0_tensor->buffer.addr) +
         rope_sin_signed_inline1560_inline11790__ssa_v0_tensor->start_offset;

@@ -958,32 +958,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: y_flat_inline2837_inline11813__ssa_v0
-    __gm__ TaskTensor *y_flat_inline2837_inline11813__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *y_flat_inline2837_inline11813__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *y_flat_inline2837_inline11813__ssa_v0 =
         reinterpret_cast<__gm__ float *>(y_flat_inline2837_inline11813__ssa_v0_tensor->buffer.addr) +
         y_flat_inline2837_inline11813__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: post_ffn_inline11927__ssa_v1
-    __gm__ TaskTensor *post_ffn_inline11927__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *post_ffn_inline11927__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *post_ffn_inline11927__ssa_v1 =
         reinterpret_cast<__gm__ float *>(post_ffn_inline11927__ssa_v1_tensor->buffer.addr) +
         post_ffn_inline11927__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: ffn_out_inline11827__phi_v3
-    __gm__ TaskTensor *ffn_out_inline11827__phi_v3_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *ffn_out_inline11827__phi_v3_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *ffn_out_inline11827__phi_v3 =
         reinterpret_cast<__gm__ bfloat16_t *>(ffn_out_inline11827__phi_v3_tensor->buffer.addr) +
         ffn_out_inline11827__phi_v3_tensor->start_offset;
 
     // Unpack tensor: comb_ffn_inline11955__ssa_v0
-    __gm__ TaskTensor *comb_ffn_inline11955__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *comb_ffn_inline11955__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *comb_ffn_inline11955__ssa_v0 =
         reinterpret_cast<__gm__ float *>(comb_ffn_inline11955__ssa_v0_tensor->buffer.addr) +
         comb_ffn_inline11955__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: residual_flat_inline2836_inline11814__ssa_v0
-    __gm__ TaskTensor *residual_flat_inline2836_inline11814__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *residual_flat_inline2836_inline11814__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *residual_flat_inline2836_inline11814__ssa_v0 =
         reinterpret_cast<__gm__ float *>(residual_flat_inline2836_inline11814__ssa_v0_tensor->buffer.addr) +
         residual_flat_inline2836_inline11814__ssa_v0_tensor->start_offset;

@@ -286,19 +286,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: sh_inline9332__rv_v2
-    __gm__ TaskTensor *sh_inline9332__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *sh_inline9332__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *sh_inline9332__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(sh_inline9332__rv_v2_tensor->buffer.addr) +
         sh_inline9332__rv_v2_tensor->start_offset;
 
     // Unpack tensor: routed_y_buf__ssa_v0
-    __gm__ TaskTensor *routed_y_buf__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *routed_y_buf__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *routed_y_buf__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(routed_y_buf__ssa_v0_tensor->buffer.addr) +
         routed_y_buf__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: ffn_out_inline9141__ssa_v0
-    __gm__ TaskTensor *ffn_out_inline9141__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *ffn_out_inline9141__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *ffn_out_inline9141__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(ffn_out_inline9141__ssa_v0_tensor->buffer.addr) +
         ffn_out_inline9141__ssa_v0_tensor->start_offset;

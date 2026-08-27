@@ -200,18 +200,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: position_ids__ssa_v0
-    __gm__ TaskTensor *position_ids__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *position_ids__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *position_ids__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(position_ids__ssa_v0_tensor->buffer.addr) +
         position_ids__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: block_table__ssa_v0
-    __gm__ TaskTensor *block_table__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *block_table__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *block_table__ssa_v0 = reinterpret_cast<__gm__ int32_t *>(block_table__ssa_v0_tensor->buffer.addr) +
                                           block_table__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: swa_indices_inline636__ssa_v0
-    __gm__ TaskTensor *swa_indices_inline636__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *swa_indices_inline636__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *swa_indices_inline636__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(swa_indices_inline636__ssa_v0_tensor->buffer.addr) +
         swa_indices_inline636__ssa_v0_tensor->start_offset;

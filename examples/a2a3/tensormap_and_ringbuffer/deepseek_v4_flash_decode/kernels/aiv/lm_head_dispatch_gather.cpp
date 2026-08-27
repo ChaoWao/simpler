@@ -157,14 +157,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: lm_head_hidden_window__ssa_v0
-    __gm__ TaskTensor *lm_head_hidden_window__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *lm_head_hidden_window__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *lm_head_hidden_window__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(lm_head_hidden_window__ssa_v0_tensor->buffer.addr) +
         lm_head_hidden_window__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: owner_hiddens_inline50_inline13292__ssa_v0
-    __gm__ TaskTensor *owner_hiddens_inline50_inline13292__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *owner_hiddens_inline50_inline13292__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *owner_hiddens_inline50_inline13292__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(owner_hiddens_inline50_inline13292__ssa_v0_tensor->buffer.addr) +
         owner_hiddens_inline50_inline13292__ssa_v0_tensor->start_offset;

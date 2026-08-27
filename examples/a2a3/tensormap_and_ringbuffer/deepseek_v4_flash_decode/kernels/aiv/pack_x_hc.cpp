@@ -198,18 +198,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: x_hc_flat_inline8701__ssa_v0
-    __gm__ TaskTensor *x_hc_flat_inline8701__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *x_hc_flat_inline8701__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *x_hc_flat_inline8701__ssa_v0 =
         reinterpret_cast<__gm__ float *>(x_hc_flat_inline8701__ssa_v0_tensor->buffer.addr) +
         x_hc_flat_inline8701__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: input_ids__ssa_v0
-    __gm__ TaskTensor *input_ids__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *input_ids__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int64_t *input_ids__ssa_v0 = reinterpret_cast<__gm__ int64_t *>(input_ids__ssa_v0_tensor->buffer.addr) +
                                         input_ids__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: embed_weight__ssa_v0
-    __gm__ TaskTensor *embed_weight__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *embed_weight__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *embed_weight__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(embed_weight__ssa_v0_tensor->buffer.addr) +
         embed_weight__ssa_v0_tensor->start_offset;

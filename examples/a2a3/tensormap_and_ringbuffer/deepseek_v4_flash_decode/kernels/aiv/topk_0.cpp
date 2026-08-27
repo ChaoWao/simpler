@@ -472,25 +472,24 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: topk_idxs_flat_inline1930_inline12661__ssa_v0
-    __gm__ TaskTensor *topk_idxs_flat_inline1930_inline12661__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *topk_idxs_flat_inline1930_inline12661__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *topk_idxs_flat_inline1930_inline12661__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(topk_idxs_flat_inline1930_inline12661__ssa_v0_tensor->buffer.addr) +
         topk_idxs_flat_inline1930_inline12661__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: kv_seq_lens__ssa_v0
-    __gm__ TaskTensor *kv_seq_lens__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *kv_seq_lens__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *kv_seq_lens__ssa_v0 = reinterpret_cast<__gm__ int32_t *>(kv_seq_lens__ssa_v0_tensor->buffer.addr) +
                                           kv_seq_lens__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: position_ids_bsd_inline12252__ssa_v0
-    __gm__ TaskTensor *position_ids_bsd_inline12252__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *position_ids_bsd_inline12252__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *position_ids_bsd_inline12252__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(position_ids_bsd_inline12252__ssa_v0_tensor->buffer.addr) +
         position_ids_bsd_inline12252__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: score_flat_inline1948_inline12292__rv_v2
-    __gm__ TaskTensor *score_flat_inline1948_inline12292__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *score_flat_inline1948_inline12292__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *score_flat_inline1948_inline12292__rv_v2 =
         reinterpret_cast<__gm__ float *>(score_flat_inline1948_inline12292__rv_v2_tensor->buffer.addr) +
         score_flat_inline1948_inline12292__rv_v2_tensor->start_offset;

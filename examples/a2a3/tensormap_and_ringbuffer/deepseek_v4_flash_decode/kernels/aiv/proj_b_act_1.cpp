@@ -409,26 +409,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: wo_b_scale_csa_inline733__ssa_v0
-    __gm__ TaskTensor *wo_b_scale_csa_inline733__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *wo_b_scale_csa_inline733__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *wo_b_scale_csa_inline733__ssa_v0 =
         reinterpret_cast<__gm__ float *>(wo_b_scale_csa_inline733__ssa_v0_tensor->buffer.addr) +
         wo_b_scale_csa_inline733__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: partials_inline2126_inline10317__rv_v2
-    __gm__ TaskTensor *partials_inline2126_inline10317__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *partials_inline2126_inline10317__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *partials_inline2126_inline10317__rv_v2 =
         reinterpret_cast<__gm__ int32_t *>(partials_inline2126_inline10317__rv_v2_tensor->buffer.addr) +
         partials_inline2126_inline10317__rv_v2_tensor->start_offset;
 
     // Unpack tensor: act_scale_dq_inline2081_inline10852__rv_v2
-    __gm__ TaskTensor *act_scale_dq_inline2081_inline10852__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *act_scale_dq_inline2081_inline10852__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *act_scale_dq_inline2081_inline10852__rv_v2 =
         reinterpret_cast<__gm__ float *>(act_scale_dq_inline2081_inline10852__rv_v2_tensor->buffer.addr) +
         act_scale_dq_inline2081_inline10852__rv_v2_tensor->start_offset;
 
     // Unpack tensor: attn_out_inline10836__ssa_v0
-    __gm__ TaskTensor *attn_out_inline10836__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *attn_out_inline10836__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ bfloat16_t *attn_out_inline10836__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(attn_out_inline10836__ssa_v0_tensor->buffer.addr) +
         attn_out_inline10836__ssa_v0_tensor->start_offset;

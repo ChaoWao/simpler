@@ -327,20 +327,19 @@ static __aicore__ void x_norm_quant_2(__gm__ float *v1, __gm__ int8_t *v2, __gm_
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: xn_scale_buf_inline2572_inline12044__ssa_v0
-    __gm__ TaskTensor *xn_scale_buf_inline2572_inline12044__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *xn_scale_buf_inline2572_inline12044__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *xn_scale_buf_inline2572_inline12044__ssa_v0 =
         reinterpret_cast<__gm__ float *>(xn_scale_buf_inline2572_inline12044__ssa_v0_tensor->buffer.addr) +
         xn_scale_buf_inline2572_inline12044__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: x_norm_i8_inline11951__iter_v1
-    __gm__ TaskTensor *x_norm_i8_inline11951__iter_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *x_norm_i8_inline11951__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int8_t *x_norm_i8_inline11951__iter_v1 =
         reinterpret_cast<__gm__ int8_t *>(x_norm_i8_inline11951__iter_v1_tensor->buffer.addr) +
         x_norm_i8_inline11951__iter_v1_tensor->start_offset;
 
     // Unpack tensor: xg_buf_inline2582_inline12082__ssa_v0
-    __gm__ TaskTensor *xg_buf_inline2582_inline12082__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *xg_buf_inline2582_inline12082__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *xg_buf_inline2582_inline12082__ssa_v0 =
         reinterpret_cast<__gm__ float *>(xg_buf_inline2582_inline12082__ssa_v0_tensor->buffer.addr) +
         xg_buf_inline2582_inline12082__ssa_v0_tensor->start_offset;

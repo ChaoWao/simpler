@@ -222,19 +222,19 @@ static __aicore__ void kv_hadamard(__gm__ bfloat16_t *v1, __gm__ float *v2, __gm
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: normed_kv_inline14668__ssa_v4
-    __gm__ TaskTensor *normed_kv_inline14668__ssa_v4_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *normed_kv_inline14668__ssa_v4_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *normed_kv_inline14668__ssa_v4 =
         reinterpret_cast<__gm__ bfloat16_t *>(normed_kv_inline14668__ssa_v4_tensor->buffer.addr) +
         normed_kv_inline14668__ssa_v4_tensor->start_offset;
 
     // Unpack tensor: kv_final_inline14614__ssa_v0
-    __gm__ TaskTensor *kv_final_inline14614__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *kv_final_inline14614__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *kv_final_inline14614__ssa_v0 =
         reinterpret_cast<__gm__ float *>(kv_final_inline14614__ssa_v0_tensor->buffer.addr) +
         kv_final_inline14614__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: csa_hadamard_idx_csa_inline572__ssa_v0
-    __gm__ TaskTensor *csa_hadamard_idx_csa_inline572__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *csa_hadamard_idx_csa_inline572__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *csa_hadamard_idx_csa_inline572__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(csa_hadamard_idx_csa_inline572__ssa_v0_tensor->buffer.addr) +
         csa_hadamard_idx_csa_inline572__ssa_v0_tensor->start_offset;

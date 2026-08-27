@@ -367,31 +367,31 @@ static __aicore__ void swa_cache_insert_valid_bias_0(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: kv_cache_flat_inline9842__ssa_v0
-    __gm__ TaskTensor *kv_cache_flat_inline9842__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *kv_cache_flat_inline9842__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *kv_cache_flat_inline9842__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(kv_cache_flat_inline9842__ssa_v0_tensor->buffer.addr) +
         kv_cache_flat_inline9842__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: swa_slot_mapping_inline576__ssa_v0
-    __gm__ TaskTensor *swa_slot_mapping_inline576__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *swa_slot_mapping_inline576__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int64_t *swa_slot_mapping_inline576__ssa_v0 =
         reinterpret_cast<__gm__ int64_t *>(swa_slot_mapping_inline576__ssa_v0_tensor->buffer.addr) +
         swa_slot_mapping_inline576__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: kv_inline9787__ssa_v0
-    __gm__ TaskTensor *kv_inline9787__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *kv_inline9787__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *kv_inline9787__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(kv_inline9787__ssa_v0_tensor->buffer.addr) +
         kv_inline9787__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: swa_lens_inline628__ssa_v0
-    __gm__ TaskTensor *swa_lens_inline628__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *swa_lens_inline628__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ int32_t *swa_lens_inline628__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(swa_lens_inline628__ssa_v0_tensor->buffer.addr) +
         swa_lens_inline628__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: sparse_bias_inline9764__ssa_v0
-    __gm__ TaskTensor *sparse_bias_inline9764__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *sparse_bias_inline9764__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *sparse_bias_inline9764__ssa_v0 =
         reinterpret_cast<__gm__ float *>(sparse_bias_inline9764__ssa_v0_tensor->buffer.addr) +
         sparse_bias_inline9764__ssa_v0_tensor->start_offset;

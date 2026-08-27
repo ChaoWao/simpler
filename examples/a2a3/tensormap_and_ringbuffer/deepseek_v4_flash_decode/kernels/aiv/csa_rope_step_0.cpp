@@ -376,43 +376,43 @@ static __aicore__ void csa_rope_step_0(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: rope_cos_t_inline12435__ssa_v0
-    __gm__ TaskTensor *rope_cos_t_inline12435__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *rope_cos_t_inline12435__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *rope_cos_t_inline12435__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(rope_cos_t_inline12435__ssa_v0_tensor->buffer.addr) +
         rope_cos_t_inline12435__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: rope_sin_t_inline12737__ssa_v0
-    __gm__ TaskTensor *rope_sin_t_inline12737__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *rope_sin_t_inline12737__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *rope_sin_t_inline12737__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(rope_sin_t_inline12737__ssa_v0_tensor->buffer.addr) +
         rope_sin_t_inline12737__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: step_cos_inline12428__ssa_v0
-    __gm__ TaskTensor *step_cos_inline12428__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *step_cos_inline12428__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *step_cos_inline12428__ssa_v0 =
         reinterpret_cast<__gm__ float *>(step_cos_inline12428__ssa_v0_tensor->buffer.addr) +
         step_cos_inline12428__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: step_sin_inline12412__ssa_v0
-    __gm__ TaskTensor *step_sin_inline12412__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *step_sin_inline12412__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *step_sin_inline12412__ssa_v0 =
         reinterpret_cast<__gm__ float *>(step_sin_inline12412__ssa_v0_tensor->buffer.addr) +
         step_sin_inline12412__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: position_ids__ssa_v0
-    __gm__ TaskTensor *position_ids__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *position_ids__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ int32_t *position_ids__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(position_ids__ssa_v0_tensor->buffer.addr) +
         position_ids__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: compressed_freqs_cos_inline559__ssa_v0
-    __gm__ TaskTensor *compressed_freqs_cos_inline559__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ Tensor *compressed_freqs_cos_inline559__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
     __gm__ bfloat16_t *compressed_freqs_cos_inline559__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(compressed_freqs_cos_inline559__ssa_v0_tensor->buffer.addr) +
         compressed_freqs_cos_inline559__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: compressed_freqs_sin_inline692__ssa_v0
-    __gm__ TaskTensor *compressed_freqs_sin_inline692__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[6]);
+    __gm__ Tensor *compressed_freqs_sin_inline692__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[6]);
     __gm__ bfloat16_t *compressed_freqs_sin_inline692__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(compressed_freqs_sin_inline692__ssa_v0_tensor->buffer.addr) +
         compressed_freqs_sin_inline692__ssa_v0_tensor->start_offset;

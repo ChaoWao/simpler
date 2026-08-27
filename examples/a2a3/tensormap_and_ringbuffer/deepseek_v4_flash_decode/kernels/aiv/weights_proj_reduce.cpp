@@ -265,14 +265,13 @@ static __aicore__ void weights_proj_reduce(__gm__ float *v1, __gm__ float *v2) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: weights_partial_inline2014_inline10666__ssa_v1
-    __gm__ TaskTensor *weights_partial_inline2014_inline10666__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *weights_partial_inline2014_inline10666__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *weights_partial_inline2014_inline10666__ssa_v1 =
         reinterpret_cast<__gm__ float *>(weights_partial_inline2014_inline10666__ssa_v1_tensor->buffer.addr) +
         weights_partial_inline2014_inline10666__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: weights_inline2015_inline10621__ssa_v0
-    __gm__ TaskTensor *weights_inline2015_inline10621__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *weights_inline2015_inline10621__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *weights_inline2015_inline10621__ssa_v0 =
         reinterpret_cast<__gm__ float *>(weights_inline2015_inline10621__ssa_v0_tensor->buffer.addr) +
         weights_inline2015_inline10621__ssa_v0_tensor->start_offset;

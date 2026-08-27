@@ -531,21 +531,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: q_proj_i32_inline1756_inline12345__ssa_v0
-    __gm__ TaskTensor *q_proj_i32_inline1756_inline12345__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *q_proj_i32_inline1756_inline12345__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *q_proj_i32_inline1756_inline12345__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(q_proj_i32_inline1756_inline12345__ssa_v0_tensor->buffer.addr) +
         q_proj_i32_inline1756_inline12345__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_i8_matmul_inline1775_inline12282__rv_v2
-    __gm__ TaskTensor *qr_i8_matmul_inline1775_inline12282__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *qr_i8_matmul_inline1775_inline12282__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int8_t *qr_i8_matmul_inline1775_inline12282__rv_v2 =
         reinterpret_cast<__gm__ int8_t *>(qr_i8_matmul_inline1775_inline12282__rv_v2_tensor->buffer.addr) +
         qr_i8_matmul_inline1775_inline12282__rv_v2_tensor->start_offset;
 
     // Unpack tensor: wq_b_last_inline703__ssa_v0
-    __gm__ TaskTensor *wq_b_last_inline703__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *wq_b_last_inline703__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int8_t *wq_b_last_inline703__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(wq_b_last_inline703__ssa_v0_tensor->buffer.addr) +
         wq_b_last_inline703__ssa_v0_tensor->start_offset;

@@ -39,16 +39,20 @@ the chip receives the resolved form.
 
 **A kernel or orchestration translation unit sees only the last two rows.** A
 `#include "tensor.h"` on a runtime's include path supplies `ChipTensor` and that
-runtime's `Tensor` (aliased `TaskTensor`), and neither it nor `orchestration_api.h`
-reaches the wire `Tensor` in `task_interface/buffer.h`. Two headers keep that true:
-the runtime's entry-arg storage, which needs the argument template, sits in
-`entry_args.h` beside `tensor.h` rather than inside it; and `task_args.h` carries
-only the template and the L2 ABI alias, while the L3+ `TaskArgs`, the blob codec and
-the submit checks — the parts whose element *is* the wire `Tensor` — sit in
-`task_args_wire.h`. Since the wire type and a runtime type are both spelled `Tensor`
-— one at global scope, one in `simpler::{hbg,tmr}` — an include that reintroduces
-that edge makes the two names collide in every kernel and orchestration source that
-picks up the header.
+runtime's own tensor **under the unqualified name `Tensor`**, and neither it nor
+`orchestration_api.h` reaches the wire `Tensor` in `task_interface/buffer.h`. Two
+headers keep that true: the runtime's entry-arg storage, which needs the argument
+template, sits in `entry_args.h` beside `tensor.h` rather than inside it; and
+`task_args.h` carries only the template and the L2 ABI alias, while the L3+
+`TaskArgs`, the blob codec and the submit checks — the parts whose element *is* the
+wire `Tensor` — sit in `task_args_wire.h`.
+
+That separation is what makes the unqualified spelling legal, so it is enforced
+rather than assumed: `tests/lint/check_kernel_wire_isolation.py` fails pre-commit on
+any new includer of `buffer.h` or `task_args_wire.h` outside the allowlist of places
+that genuinely handle the L3+ form. Without it, one added include turns a runtime's
+`using Tensor = …` into a redeclaration, and the error surfaces in whichever kernel
+happens to pick the header up rather than in the file that added the edge.
 
 > **Status.** `TaskArgs.add_tensor` takes a `Tensor`, and `simpler.task_interface`
 > re-exports it: the public submit surface names the type its own submit call accepts.

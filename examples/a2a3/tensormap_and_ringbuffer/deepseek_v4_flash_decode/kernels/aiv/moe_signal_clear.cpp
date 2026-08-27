@@ -161,24 +161,24 @@ static __aicore__ void moe_signal_clear(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: pre_hc_hidden_out__ssa_v0
-    __gm__ TaskTensor *pre_hc_hidden_out__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *pre_hc_hidden_out__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *pre_hc_hidden_out__ssa_v0 =
         reinterpret_cast<__gm__ float *>(pre_hc_hidden_out__ssa_v0_tensor->buffer.addr) +
         pre_hc_hidden_out__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: arrived__ssa_v0
-    __gm__ TaskTensor *arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(arrived__ssa_v0_tensor->buffer.addr) + arrived__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: data_arrived__ssa_v0
-    __gm__ TaskTensor *data_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *data_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *data_arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(data_arrived__ssa_v0_tensor->buffer.addr) +
         data_arrived__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: combine_arrived__ssa_v0
-    __gm__ TaskTensor *combine_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *combine_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ int32_t *combine_arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(combine_arrived__ssa_v0_tensor->buffer.addr) +
         combine_arrived__ssa_v0_tensor->start_offset;

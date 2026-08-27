@@ -381,20 +381,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: x_flat_inline1958_inline10808__ssa_v0
-    __gm__ TaskTensor *x_flat_inline1958_inline10808__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *x_flat_inline1958_inline10808__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *x_flat_inline1958_inline10808__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(x_flat_inline1958_inline10808__ssa_v0_tensor->buffer.addr) +
         x_flat_inline1958_inline10808__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: csa_weights_proj_csa_inline553__ssa_v0
-    __gm__ TaskTensor *csa_weights_proj_csa_inline553__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *csa_weights_proj_csa_inline553__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *csa_weights_proj_csa_inline553__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(csa_weights_proj_csa_inline553__ssa_v0_tensor->buffer.addr) +
         csa_weights_proj_csa_inline553__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: weights_partial_inline2014_inline10666__ssa_v0
-    __gm__ TaskTensor *weights_partial_inline2014_inline10666__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *weights_partial_inline2014_inline10666__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *weights_partial_inline2014_inline10666__ssa_v0 =
         reinterpret_cast<__gm__ float *>(weights_partial_inline2014_inline10666__ssa_v0_tensor->buffer.addr) +
         weights_partial_inline2014_inline10666__ssa_v0_tensor->start_offset;

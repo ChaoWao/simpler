@@ -32,8 +32,8 @@ static inline __aicore__ __gm__ T *comm_remote_ptr(__gm__ CommContext *ctx, __gm
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *partial_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *mailbox_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *partial_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *mailbox_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *local_counter = reinterpret_cast<__gm__ int32_t *>(args[3]);
     __gm__ CommContext *ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 

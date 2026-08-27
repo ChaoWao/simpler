@@ -131,13 +131,13 @@ static __aicore__ void dispatch_wait(__gm__ int32_t *v1, __gm__ int32_t *v2, int
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: indices_inline9286__ssa_v0
-    __gm__ TaskTensor *indices_inline9286__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *indices_inline9286__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *indices_inline9286__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(indices_inline9286__ssa_v0_tensor->buffer.addr) +
         indices_inline9286__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: data_arrived__ssa_v0
-    __gm__ TaskTensor *data_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *data_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *data_arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(data_arrived__ssa_v0_tensor->buffer.addr) +
         data_arrived__ssa_v0_tensor->start_offset;

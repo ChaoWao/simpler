@@ -397,21 +397,20 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: qh_acc_gm_inline2006_inline12354__ssa_v1
-    __gm__ TaskTensor *qh_acc_gm_inline2006_inline12354__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *qh_acc_gm_inline2006_inline12354__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *qh_acc_gm_inline2006_inline12354__ssa_v1 =
         reinterpret_cast<__gm__ float *>(qh_acc_gm_inline2006_inline12354__ssa_v1_tensor->buffer.addr) +
         qh_acc_gm_inline2006_inline12354__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0
-    __gm__ TaskTensor *qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0_tensor =
+        reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0_tensor->buffer.addr) +
         qr_hadamard_scale_dq_inline2018_inline12242__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_hadamard_i8_inline2038_inline12719__ssa_v0
-    __gm__ TaskTensor *qr_hadamard_i8_inline2038_inline12719__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *qr_hadamard_i8_inline2038_inline12719__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int8_t *qr_hadamard_i8_inline2038_inline12719__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(qr_hadamard_i8_inline2038_inline12719__ssa_v0_tensor->buffer.addr) +
         qr_hadamard_i8_inline2038_inline12719__ssa_v0_tensor->start_offset;

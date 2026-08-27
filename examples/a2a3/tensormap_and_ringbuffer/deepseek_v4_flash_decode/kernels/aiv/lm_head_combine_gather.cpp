@@ -224,12 +224,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: logits__ssa_v0
-    __gm__ TaskTensor *logits__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *logits__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *logits__ssa_v0 =
         reinterpret_cast<__gm__ float *>(logits__ssa_v0_tensor->buffer.addr) + logits__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: lm_head_logits_window__ssa_v0
-    __gm__ TaskTensor *lm_head_logits_window__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *lm_head_logits_window__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *lm_head_logits_window__ssa_v0 =
         reinterpret_cast<__gm__ float *>(lm_head_logits_window__ssa_v0_tensor->buffer.addr) +
         lm_head_logits_window__ssa_v0_tensor->start_offset;

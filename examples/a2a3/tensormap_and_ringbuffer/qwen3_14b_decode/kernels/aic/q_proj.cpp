@@ -585,18 +585,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: q_proj_inline139__rv_v2
-    __gm__ TaskTensor *q_proj_inline139__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *q_proj_inline139__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *q_proj_inline139__rv_v2 =
         reinterpret_cast<__gm__ float *>(q_proj_inline139__rv_v2_tensor->buffer.addr) +
         q_proj_inline139__rv_v2_tensor->start_offset;
 
     // Unpack tensor: normed__iter_v4
-    __gm__ TaskTensor *normed__iter_v4_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *normed__iter_v4_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *normed__iter_v4 = reinterpret_cast<__gm__ bfloat16_t *>(normed__iter_v4_tensor->buffer.addr) +
                                          normed__iter_v4_tensor->start_offset;
 
     // Unpack tensor: wq__ssa_v0
-    __gm__ TaskTensor *wq__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *wq__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *wq__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(wq__ssa_v0_tensor->buffer.addr) + wq__ssa_v0_tensor->start_offset;
 

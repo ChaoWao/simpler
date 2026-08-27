@@ -1463,46 +1463,43 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: sparse_bias_inline9764__ssa_v1
-    __gm__ TaskTensor *sparse_bias_inline9764__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *sparse_bias_inline9764__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *sparse_bias_inline9764__ssa_v1 =
         reinterpret_cast<__gm__ float *>(sparse_bias_inline9764__ssa_v1_tensor->buffer.addr) +
         sparse_bias_inline9764__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: swa_kv_flat_inline1000_inline9849__rv_v2
-    __gm__ TaskTensor *swa_kv_flat_inline1000_inline9849__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *swa_kv_flat_inline1000_inline9849__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *swa_kv_flat_inline1000_inline9849__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(swa_kv_flat_inline1000_inline9849__rv_v2_tensor->buffer.addr) +
         swa_kv_flat_inline1000_inline9849__rv_v2_tensor->start_offset;
 
     // Unpack tensor: sparse_blk_li_inline1070_inline9770__ssa_v0
-    __gm__ TaskTensor *sparse_blk_li_inline1070_inline9770__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *sparse_blk_li_inline1070_inline9770__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *sparse_blk_li_inline1070_inline9770__ssa_v0 =
         reinterpret_cast<__gm__ float *>(sparse_blk_li_inline1070_inline9770__ssa_v0_tensor->buffer.addr) +
         sparse_blk_li_inline1070_inline9770__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: sparse_blk_mi_inline1018_inline9869__ssa_v0
-    __gm__ TaskTensor *sparse_blk_mi_inline1018_inline9869__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *sparse_blk_mi_inline1018_inline9869__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *sparse_blk_mi_inline1018_inline9869__ssa_v0 =
         reinterpret_cast<__gm__ float *>(sparse_blk_mi_inline1018_inline9869__ssa_v0_tensor->buffer.addr) +
         sparse_blk_mi_inline1018_inline9869__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: sparse_blk_oi_inline1043_inline9871__ssa_v0
-    __gm__ TaskTensor *sparse_blk_oi_inline1043_inline9871__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *sparse_blk_oi_inline1043_inline9871__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *sparse_blk_oi_inline1043_inline9871__ssa_v0 =
         reinterpret_cast<__gm__ float *>(sparse_blk_oi_inline1043_inline9871__ssa_v0_tensor->buffer.addr) +
         sparse_blk_oi_inline1043_inline9871__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: q_flat_inline1064_inline9687__ssa_v0
-    __gm__ TaskTensor *q_flat_inline1064_inline9687__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ Tensor *q_flat_inline1064_inline9687__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
     __gm__ bfloat16_t *q_flat_inline1064_inline9687__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(q_flat_inline1064_inline9687__ssa_v0_tensor->buffer.addr) +
         q_flat_inline1064_inline9687__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: __gm_pipe_buffer
-    __gm__ TaskTensor *__gm_pipe_buffer_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[6]);
+    __gm__ Tensor *__gm_pipe_buffer_tensor = reinterpret_cast<__gm__ Tensor *>(args[6]);
     // SPMD: shard GM pipe workspace by logical block_idx to avoid overlap.
     int64_t __pypto_gm_block_num = static_cast<int64_t>(__pypto_spmd_block_num);
     if (__pypto_gm_block_num <= 0) __pypto_gm_block_num = 1;

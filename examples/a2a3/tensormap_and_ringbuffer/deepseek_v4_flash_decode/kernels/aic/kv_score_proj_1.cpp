@@ -924,33 +924,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: x_flat_inline1388_inline11613__ssa_v0
-    __gm__ TaskTensor *x_flat_inline1388_inline11613__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *x_flat_inline1388_inline11613__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *x_flat_inline1388_inline11613__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(x_flat_inline1388_inline11613__ssa_v0_tensor->buffer.addr) +
         x_flat_inline1388_inline11613__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: hca_cmp_wkv_hca_inline584__ssa_v0
-    __gm__ TaskTensor *hca_cmp_wkv_hca_inline584__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *hca_cmp_wkv_hca_inline584__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *hca_cmp_wkv_hca_inline584__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(hca_cmp_wkv_hca_inline584__ssa_v0_tensor->buffer.addr) +
         hca_cmp_wkv_hca_inline584__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: hca_cmp_wgate_hca_inline630__ssa_v0
-    __gm__ TaskTensor *hca_cmp_wgate_hca_inline630__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *hca_cmp_wgate_hca_inline630__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *hca_cmp_wgate_hca_inline630__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(hca_cmp_wgate_hca_inline630__ssa_v0_tensor->buffer.addr) +
         hca_cmp_wgate_hca_inline630__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: kv_proj_pad_inline1372_inline11788__ssa_v0
-    __gm__ TaskTensor *kv_proj_pad_inline1372_inline11788__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *kv_proj_pad_inline1372_inline11788__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *kv_proj_pad_inline1372_inline11788__ssa_v0 =
         reinterpret_cast<__gm__ float *>(kv_proj_pad_inline1372_inline11788__ssa_v0_tensor->buffer.addr) +
         kv_proj_pad_inline1372_inline11788__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: score_proj_pad_inline1382_inline11463__ssa_v0
-    __gm__ TaskTensor *score_proj_pad_inline1382_inline11463__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *score_proj_pad_inline1382_inline11463__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *score_proj_pad_inline1382_inline11463__ssa_v0 =
         reinterpret_cast<__gm__ float *>(score_proj_pad_inline1382_inline11463__ssa_v0_tensor->buffer.addr) +
         score_proj_pad_inline1382_inline11463__ssa_v0_tensor->start_offset;

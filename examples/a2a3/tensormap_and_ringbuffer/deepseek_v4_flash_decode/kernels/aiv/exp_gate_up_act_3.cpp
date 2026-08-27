@@ -801,46 +801,43 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: h_tile_fp32_inline2744_inline13154__ssa_v0
-    __gm__ TaskTensor *h_tile_fp32_inline2744_inline13154__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *h_tile_fp32_inline2744_inline13154__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *h_tile_fp32_inline2744_inline13154__ssa_v0 =
         reinterpret_cast<__gm__ float *>(h_tile_fp32_inline2744_inline13154__ssa_v0_tensor->buffer.addr) +
         h_tile_fp32_inline2744_inline13154__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: gate_tile_i32_inline2749_inline13026__rv_v2
-    __gm__ TaskTensor *gate_tile_i32_inline2749_inline13026__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *gate_tile_i32_inline2749_inline13026__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *gate_tile_i32_inline2749_inline13026__rv_v2 =
         reinterpret_cast<__gm__ int32_t *>(gate_tile_i32_inline2749_inline13026__rv_v2_tensor->buffer.addr) +
         gate_tile_i32_inline2749_inline13026__rv_v2_tensor->start_offset;
 
     // Unpack tensor: up_tile_i32_inline2764_inline13106__rv_v2
-    __gm__ TaskTensor *up_tile_i32_inline2764_inline13106__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *up_tile_i32_inline2764_inline13106__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *up_tile_i32_inline2764_inline13106__rv_v2 =
         reinterpret_cast<__gm__ int32_t *>(up_tile_i32_inline2764_inline13106__rv_v2_tensor->buffer.addr) +
         up_tile_i32_inline2764_inline13106__rv_v2_tensor->start_offset;
 
     // Unpack tensor: recv_scale_out_inline12903__ssa_v0
-    __gm__ TaskTensor *recv_scale_out_inline12903__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *recv_scale_out_inline12903__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *recv_scale_out_inline12903__ssa_v0 =
         reinterpret_cast<__gm__ float *>(recv_scale_out_inline12903__ssa_v0_tensor->buffer.addr) +
         recv_scale_out_inline12903__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: routed_w1_scale_last_inline490__ssa_v0
-    __gm__ TaskTensor *routed_w1_scale_last_inline490__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *routed_w1_scale_last_inline490__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *routed_w1_scale_last_inline490__ssa_v0 =
         reinterpret_cast<__gm__ float *>(routed_w1_scale_last_inline490__ssa_v0_tensor->buffer.addr) +
         routed_w1_scale_last_inline490__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: routed_w3_scale_last_inline673__ssa_v0
-    __gm__ TaskTensor *routed_w3_scale_last_inline673__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ Tensor *routed_w3_scale_last_inline673__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
     __gm__ float *routed_w3_scale_last_inline673__ssa_v0 =
         reinterpret_cast<__gm__ float *>(routed_w3_scale_last_inline673__ssa_v0_tensor->buffer.addr) +
         routed_w3_scale_last_inline673__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_count_out
-    __gm__ TaskTensor *recv_count_out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[6]);
+    __gm__ Tensor *recv_count_out_tensor = reinterpret_cast<__gm__ Tensor *>(args[6]);
     __gm__ int32_t *recv_count_out =
         reinterpret_cast<__gm__ int32_t *>(recv_count_out_tensor->buffer.addr) + recv_count_out_tensor->start_offset;
 

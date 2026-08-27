@@ -270,29 +270,29 @@ static __aicore__ void dispatch_meta_3(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: indices_inline13017__ssa_v0
-    __gm__ TaskTensor *indices_inline13017__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *indices_inline13017__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *indices_inline13017__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(indices_inline13017__ssa_v0_tensor->buffer.addr) +
         indices_inline13017__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_meta__ssa_v0
-    __gm__ TaskTensor *recv_meta__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *recv_meta__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *recv_meta__ssa_v0 = reinterpret_cast<__gm__ int32_t *>(recv_meta__ssa_v0_tensor->buffer.addr) +
                                         recv_meta__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: arrived__ssa_v0
-    __gm__ TaskTensor *arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(arrived__ssa_v0_tensor->buffer.addr) + arrived__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_meta_local_inline13136__ssa_v0
-    __gm__ TaskTensor *recv_meta_local_inline13136__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *recv_meta_local_inline13136__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ int32_t *recv_meta_local_inline13136__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(recv_meta_local_inline13136__ssa_v0_tensor->buffer.addr) +
         recv_meta_local_inline13136__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_count_out_inline13069__ssa_v0
-    __gm__ TaskTensor *recv_count_out_inline13069__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *recv_count_out_inline13069__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ int32_t *recv_count_out_inline13069__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(recv_count_out_inline13069__ssa_v0_tensor->buffer.addr) +
         recv_count_out_inline13069__ssa_v0_tensor->start_offset;

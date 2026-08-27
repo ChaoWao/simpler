@@ -48,8 +48,8 @@
 
 template <int M, int N>
 static __aicore__ void softmax_prepare_n_impl(
-    __gm__ TaskTensor *sij_buf, __gm__ TaskTensor *pij_buf, __gm__ TaskTensor *mij, __gm__ TaskTensor *lij,
-    float scale_value, uint64_t n_blocks, uint64_t valid_len_last
+    __gm__ Tensor *sij_buf, __gm__ Tensor *pij_buf, __gm__ Tensor *mij, __gm__ Tensor *lij, float scale_value,
+    uint64_t n_blocks, uint64_t valid_len_last
 ) {
     __gm__ float *sij_base = reinterpret_cast<__gm__ float *>(sij_buf->buffer.addr) + sij_buf->start_offset;
     __gm__ bfloat16_t *pij_base = reinterpret_cast<__gm__ bfloat16_t *>(pij_buf->buffer.addr) + pij_buf->start_offset;
@@ -242,10 +242,10 @@ static __aicore__ void softmax_prepare_n_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *sij_buf = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *pij_buf = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *mij = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
-    __gm__ TaskTensor *lij = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *sij_buf = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *pij_buf = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *mij = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ Tensor *lij = reinterpret_cast<__gm__ Tensor *>(args[3]);
     union {
         uint64_t u;
         float f;

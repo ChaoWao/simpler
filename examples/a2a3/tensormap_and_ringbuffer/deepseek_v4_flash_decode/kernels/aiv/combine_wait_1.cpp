@@ -157,7 +157,7 @@ static __aicore__ void combine_wait_1(__gm__ int32_t *v1, int32_t v2, int32_t v3
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: combine_arrived__ssa_v0
-    __gm__ TaskTensor *combine_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *combine_arrived__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *combine_arrived__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(combine_arrived__ssa_v0_tensor->buffer.addr) +
         combine_arrived__ssa_v0_tensor->start_offset;

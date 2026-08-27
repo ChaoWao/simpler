@@ -575,25 +575,25 @@ static __aicore__ void rope_interleave(__gm__ float *v1, __gm__ float *v2, __gm_
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: step_cos_inline10504__rv_v2
-    __gm__ TaskTensor *step_cos_inline10504__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *step_cos_inline10504__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *step_cos_inline10504__rv_v2 =
         reinterpret_cast<__gm__ float *>(step_cos_inline10504__rv_v2_tensor->buffer.addr) +
         step_cos_inline10504__rv_v2_tensor->start_offset;
 
     // Unpack tensor: step_cos_il_inline10506__ssa_v0
-    __gm__ TaskTensor *step_cos_il_inline10506__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *step_cos_il_inline10506__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *step_cos_il_inline10506__ssa_v0 =
         reinterpret_cast<__gm__ float *>(step_cos_il_inline10506__ssa_v0_tensor->buffer.addr) +
         step_cos_il_inline10506__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: step_sin_inline10488__rv_v2
-    __gm__ TaskTensor *step_sin_inline10488__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *step_sin_inline10488__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *step_sin_inline10488__rv_v2 =
         reinterpret_cast<__gm__ float *>(step_sin_inline10488__rv_v2_tensor->buffer.addr) +
         step_sin_inline10488__rv_v2_tensor->start_offset;
 
     // Unpack tensor: step_sin_signed_inline10441__ssa_v0
-    __gm__ TaskTensor *step_sin_signed_inline10441__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *step_sin_signed_inline10441__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *step_sin_signed_inline10441__ssa_v0 =
         reinterpret_cast<__gm__ float *>(step_sin_signed_inline10441__ssa_v0_tensor->buffer.addr) +
         step_sin_signed_inline10441__ssa_v0_tensor->start_offset;

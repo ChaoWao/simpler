@@ -199,14 +199,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: qr_partials_inline1686_inline10606__rv_v2
-    __gm__ TaskTensor *qr_partials_inline1686_inline10606__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *qr_partials_inline1686_inline10606__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *qr_partials_inline1686_inline10606__rv_v2 =
         reinterpret_cast<__gm__ float *>(qr_partials_inline1686_inline10606__rv_v2_tensor->buffer.addr) +
         qr_partials_inline1686_inline10606__rv_v2_tensor->start_offset;
 
     // Unpack tensor: qr_fp32_inline1689_inline10647__ssa_v0
-    __gm__ TaskTensor *qr_fp32_inline1689_inline10647__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *qr_fp32_inline1689_inline10647__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *qr_fp32_inline1689_inline10647__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_fp32_inline1689_inline10647__ssa_v0_tensor->buffer.addr) +
         qr_fp32_inline1689_inline10647__ssa_v0_tensor->start_offset;

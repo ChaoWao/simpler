@@ -70,9 +70,9 @@ AICORE inline void MeshBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_r
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *input_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *output_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *scratch_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *input_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *output_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *scratch_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     int nranks = static_cast<int>(args[3]);
     __gm__ CommContext *commCtx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 

@@ -85,7 +85,7 @@ static __aicore__ void hc_head_mixes_zero(__gm__ float *mixes_raw, int64_t total
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     int32_t block_idx = get_block_idx(args);
-    __gm__ TaskTensor *mixes_raw_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *mixes_raw_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *mixes_raw =
         reinterpret_cast<__gm__ float *>(mixes_raw_tensor->buffer.addr) + mixes_raw_tensor->start_offset;
     int64_t total_rows = static_cast<int64_t>(mixes_raw_tensor->shapes[0]);
