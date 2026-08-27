@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import struct
 from multiprocessing.shared_memory import SharedMemory
@@ -54,6 +55,7 @@ from simpler.comm_provider_control import (
     ProviderReleaseClient,
     RegionControlProtocolError,
     ReleaseReplyTag,
+    _as_memoryview,
     _discard_control_shm,
     decode_allocate_reply,
     decode_allocate_request,
@@ -168,6 +170,13 @@ def test_codec_uses_wire_prefix_of_larger_transport_mapping():
 
     assert peek_allocate_reply_resource_id(reply) == 11
     assert peek_allocate_reply_resource_id(bytearray(ALLOCATE_REPLY_BYTES - 1)) == 0
+
+
+def test_as_memoryview_returns_the_input_view_for_a_padded_mapping():
+    root = memoryview(bytearray(4096))
+    view = _as_memoryview(root, ALLOCATE_REQUEST_BYTES, writable=True)
+    assert view is root
+    assert view.nbytes == 4096
 
 
 @pytest.mark.parametrize(
@@ -843,3 +852,49 @@ def test_allocate_and_release_survive_control_shm_cleanup_failure(monkeypatch, c
     assert ops == ["close", "unlink", "close", "unlink", "close", "unlink", "close", "unlink"]
     assert caplog.text.count("operation=close") == 4
     assert caplog.text.count("operation=unlink") == 4
+
+
+def _force_page_padded_control_shm(monkeypatch) -> None:
+    from simpler import comm_provider_control as control
+
+    real = control.SharedMemory
+
+    def _padded(name=None, create=False, size=0):
+        if create and 0 < size < 4096:
+            size = 4096
+        return real(name=name, create=create, size=size)
+
+    monkeypatch.setattr(control, "SharedMemory", _padded)
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_allocate_client_page_padded_discard_does_not_leave_unraisable_close(monkeypatch):
+    _force_page_padded_control_shm(monkeypatch)
+    factory = FakeShellFactory()
+    store = ProviderRegionStore(_sim_context(), _shell_factory=factory)
+    mailbox = _CommitThenRaiseMailbox(store)
+    client = ProviderAllocateClient(mailbox, 3)
+    with pytest.raises(RuntimeError, match="mailbox down after commit"):
+        client.allocate(_allocation_spec())
+    assert client.dispatch_started is True
+    assert client.committed_resource_id == 1
+    gc.collect()
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_release_client_page_padded_discard_does_not_leave_unraisable_close(monkeypatch):
+    _force_page_padded_control_shm(monkeypatch)
+
+    class _BoomMailbox:
+        def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise AssertionError("allocate must not be called")
+
+        def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+            del worker_id, request_shm_name, reply_shm_name
+            raise RuntimeError("mailbox down")
+
+    client = ProviderReleaseClient(_BoomMailbox(), 1)
+    with pytest.raises(RegionControlProtocolError):
+        client.release(4)
+    gc.collect()

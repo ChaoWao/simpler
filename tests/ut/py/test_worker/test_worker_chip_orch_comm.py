@@ -44,12 +44,15 @@ from simpler.comm_provider import (
 from simpler.comm_provider_control import (
     ALLOCATE_REPLY_BYTES,
     ALLOCATE_REQUEST_BYTES,
+    RELEASE_REQUEST_BYTES,
     AllocateReplyTag,
     decode_allocate_reply,
     decode_allocate_request,
+    decode_release_reply,
     decode_release_request,
     encode_allocate_request,
     encode_allocate_success_reply,
+    encode_release_request,
     encode_release_result_reply,
 )
 from simpler.orchestrator import Orchestrator
@@ -1190,8 +1193,8 @@ def test_region_allocate_handler_commits_store_success_into_reply_shm():
         assert released.status is ProviderReleaseStatus.RELEASED
     finally:
         ctrl_buf.release()
-        del req_buf
-        del reply_buf
+        req_buf.release()
+        reply_buf.release()
         req_shm.close()
         req_shm.unlink()
         reply_shm.close()
@@ -1221,8 +1224,133 @@ def test_region_allocate_handler_writes_request_error_for_bad_magic():
         assert error.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
     finally:
         ctrl_buf.release()
-        del req_buf
-        del reply_buf
+        req_buf.release()
+        reply_buf.release()
+        req_shm.close()
+        req_shm.unlink()
+        reply_shm.close()
+        reply_shm.unlink()
+
+
+def _page_padded_region_ctrl_pair():
+    req_shm = SharedMemory(create=True, size=4096)
+    reply_shm = SharedMemory(create=True, size=4096)
+    ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
+    ctrl_buf = memoryview(ctrl_storage)
+    _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
+    _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
+    return req_shm, reply_shm, ctrl_buf
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_region_allocate_handler_page_padded_request_error_closes_without_buffer_error():
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
+    try:
+        req_buf = cast(memoryview, req_shm.buf)
+        req_buf[:ALLOCATE_REQUEST_BYTES] = b"\x00" * ALLOCATE_REQUEST_BYTES
+        struct.pack_into("<QI", req_buf, 0, 0xDEAD, ALLOCATE_REQUEST_BYTES)
+        req_buf.release()
+        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+        worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
+        reply_buf = cast(memoryview, reply_shm.buf)
+        try:
+            tag, result, _payload, _counter, error = decode_allocate_reply(reply_buf)
+        finally:
+            reply_buf.release()
+        assert tag is AllocateReplyTag.REQUEST_ERROR
+        assert result is None
+        assert isinstance(error, RegionControlError)
+        assert error.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
+    finally:
+        ctrl_buf.release()
+        req_shm.close()
+        req_shm.unlink()
+        reply_shm.close()
+        reply_shm.unlink()
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_region_allocate_handler_preserves_store_lifecycle_over_close_buffer_error(monkeypatch):
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _allocation_spec, _sim_context
+
+    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
+    try:
+        req_buf = cast(memoryview, req_shm.buf)
+        encode_allocate_request(req_buf, _allocation_spec())
+        req_buf.release()
+        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+
+        def _closed(_spec):
+            raise RegionControlError(RegionControlErrorKind.STORE_LIFECYCLE, "store is not OPEN")
+
+        monkeypatch.setattr(store, "allocate_and_export", _closed)
+        with pytest.raises(RegionControlError) as exc_info:
+            worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
+        assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
+        attached_req = SharedMemory(name=req_shm.name)
+        attached_req.close()
+        attached_reply = SharedMemory(name=reply_shm.name)
+        attached_reply.close()
+    finally:
+        ctrl_buf.release()
+        req_shm.close()
+        req_shm.unlink()
+        reply_shm.close()
+        reply_shm.unlink()
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_region_release_handler_page_padded_request_error_closes_without_buffer_error():
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
+    try:
+        req_buf = cast(memoryview, req_shm.buf)
+        req_buf[:RELEASE_REQUEST_BYTES] = b"\x00" * RELEASE_REQUEST_BYTES
+        req_buf.release()
+        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+        worker_module._handle_ctrl_region_release(ctrl_buf, store)
+        reply_buf = cast(memoryview, reply_shm.buf)
+        try:
+            decoded = decode_release_reply(reply_buf)
+        finally:
+            reply_buf.release()
+        assert isinstance(decoded, RegionControlError)
+        assert decoded.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+    finally:
+        ctrl_buf.release()
+        req_shm.close()
+        req_shm.unlink()
+        reply_shm.close()
+        reply_shm.unlink()
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_region_release_handler_preserves_backend_failure_over_close_buffer_error(monkeypatch):
+    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
+
+    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
+    try:
+        req_buf = cast(memoryview, req_shm.buf)
+        encode_release_request(req_buf, 4)
+        req_buf.release()
+        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
+
+        def _injected(_resource_id):
+            raise RegionControlError(RegionControlErrorKind.BACKEND_FAILURE, "injected")
+
+        monkeypatch.setattr(store, "release", _injected)
+        with pytest.raises(RegionControlError) as exc_info:
+            worker_module._handle_ctrl_region_release(ctrl_buf, store)
+        assert exc_info.value.kind is RegionControlErrorKind.BACKEND_FAILURE
+        attached_req = SharedMemory(name=req_shm.name)
+        attached_req.close()
+        attached_reply = SharedMemory(name=reply_shm.name)
+        attached_reply.close()
+    finally:
+        ctrl_buf.release()
         req_shm.close()
         req_shm.unlink()
         reply_shm.close()
@@ -1899,6 +2027,7 @@ def test_sim_worker_counter_wait_timeout_does_not_poison_region_and_free_is_idem
         worker.close()
 
 
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
 @pytest.mark.parametrize("platform", ["a2a3sim", "a5sim"])
 def test_sim_public_api_two_shm_objects_and_two_consecutive_lifecycles(platform, monkeypatch):
     try:
