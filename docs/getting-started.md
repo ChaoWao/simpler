@@ -55,8 +55,8 @@ To use a different PTO-ISA revision, update `pto_isa.pin` to the desired
 diff and applies the same revision to install-time runtime builds and run-time
 kernel compilation.
 
-For platforms that embed PTO-ISA headers into onboard host runtimes (a2a3
-always; a5 when an async workspace overlay is ON), builds record the actual
+For platforms that embed PTO-ISA headers into onboard host runtimes (a2a3 and
+a5), builds record the actual
 PTO-ISA git HEAD used for each runtime in `build/lib/pto_isa_build.json`.
 This JSON is artifact provenance, not a second configuration source. Lookup
 of those runtimes **requires** the metadata file: if it is missing, or if it

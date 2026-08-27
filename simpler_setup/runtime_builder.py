@@ -24,6 +24,7 @@ from .runtime_compiler import RuntimeCompiler
 logger = logging.getLogger(__name__)
 
 _GIT_COMMIT_FILE = ".git_commit"
+_RETIRED_A5_URMA_WORKSPACE_ENV = "SIMPLER_ENABLE_PTO_URMA_WORKSPACE"
 _DEFAULT_PROFILING_CONFIG = {
     "SIMPLER_DFX": "1",
     "SIMPLER_ORCH_PROFILING": "0",
@@ -164,6 +165,11 @@ class RuntimeBuilder:
         """
         self.platform = platform
         self._arch, self._variant = parse_platform(platform)
+        if self._arch == "a5" and self._variant == "onboard" and _RETIRED_A5_URMA_WORKSPACE_ENV in os.environ:
+            logger.warning(
+                "%s is retired; A5 onboard always builds SDMA and URMA workspaces",
+                _RETIRED_A5_URMA_WORKSPACE_ENV,
+            )
 
         runtime_root = PROJECT_ROOT
         self.runtime_root = runtime_root
@@ -391,9 +397,6 @@ class RuntimeBuilder:
             if target == "host":
                 if build_pto_isa_commit:
                     defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit
-                for opt_in_define in ("SIMPLER_ENABLE_PTO_URMA_WORKSPACE",):
-                    if os.environ.get(opt_in_define, "").upper() in {"1", "ON", "TRUE", "YES"}:
-                        defines[opt_in_define] = "ON"
             cmake_defines = defines or None
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name

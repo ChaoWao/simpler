@@ -191,6 +191,9 @@ int comm_get_window_size(CommHandle h, size_t *size_out);
  * device_ctx_out points to a backend-owned device CommContext that remains
  * valid until comm_destroy(base).
  *
+ * A5's URMA workspace is indexed in communicator-rank order; CommContext's
+ * rank map translates arbitrary domain subsets/reorderings to that index.
+ *
  * @param h                Allocated base communicator handle.
  * @param rank_ids         Base-communicator rank ids in domain rank order.
  * @param rank_count       Number of domain ranks.
@@ -208,22 +211,31 @@ int comm_derive_context(
 /**
  * Allocate a fresh per-rank symmetric window pool for a subset of ranks.
  *
- * Unlike comm_alloc_windows() which allocates the single base pool once at
- * bootstrap, this allocates an additional pool for a dynamically-derived
- * domain (a subset of the base communicator).  Multiple concurrent
+ * Backends may allocate an additional pool or derive a slice from the base
+ * communicator's persistent pool. Multiple concurrent
  * allocations are disambiguated by `allocation_id`, which is mixed into
  * every internal handshake / barrier filename so a second allocation
  * does not collide with the first.
  *
  * This is a collective operation across the subset only: every
  * participating chip must call this with matching arguments; non-members
- * of the subset do NOT call it.  Internal file barriers synchronise the
- * subset, so the parent (orchestrator) only needs to dispatch and wait
- * for completion — it does not need to broker the cross-rank handshake.
+ * of the subset do NOT call it.
  *
- * On HCCL this performs aclrtMalloc + the same Path-D IPC pattern as
- * comm_alloc_windows but on a fresh per-allocation buffer.  On sim it
- * shm_opens a fresh POSIX shm scoped by `allocation_id`.
+ * How the subset synchronises differs by backend, and only the release side
+ * is uniform.  A2/A3 and sim rendezvous inside this call, so the caller needs
+ * no barrier of its own.  A5 does not: an arena slice is already mapped and
+ * peer-visible, so the call only clears the slice and builds a context, and
+ * what keeps a peer from writing into a slice its owner has not yet cleared is
+ * the caller joining every member's call before it publishes the domain.  That
+ * holds because one Worker process owns every A5 rank of a communicator.  A
+ * deployment that spread those ranks across processes would need a barrier
+ * here, and would also need `window_offset` agreed across those processes —
+ * the offsets come from a free list private to the calling Worker.
+ *
+ * A2/A3 HCCL performs the same Path-D IPC pattern as comm_alloc_windows on a
+ * fresh buffer. A5 derives a slice from its communicator-lifetime arena so
+ * its URMA memory registration and channels cannot outlive their memory. On
+ * sim this shm_opens a fresh POSIX shm scoped by `allocation_id`.
  *
  * Resources allocated here remain owned by the base handle; either an
  * explicit comm_release_domain_windows() or final comm_destroy(base)
@@ -238,6 +250,14 @@ int comm_derive_context(
  *                                domain order (length rank_count).
  * @param rank_count              Number of subset members.
  * @param domain_rank             This caller's dense rank in the subset.
+ * @param window_offset           Offset in a communicator-owned persistent
+ *                                arena, for backends that derive domain views.
+ *                                Every rank of the subset must pass the same
+ *                                value, and the range must not overlap another
+ *                                live allocation.  Backends whose windows are
+ *                                owned by the allocation have no arena to
+ *                                offset into and **reject** a non-zero value
+ *                                rather than ignoring it.
  * @param window_size             Bytes per rank.  Backend must allocate
  *                                exactly this size; no auto-rounding.
  * @param device_ctx_out          Receives a device pointer to a new
@@ -249,7 +269,7 @@ int comm_derive_context(
  */
 int comm_alloc_domain_windows(
     CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
-    size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
+    size_t window_offset, size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
 );
 
 /**

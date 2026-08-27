@@ -373,11 +373,11 @@ static aclError release_domain_windows(DomainAllocation *alloc) {
 static aclError release_base_windows(CommHandle h) {
     aclError first_error = release_vmm_windows(&h->base_peer_windows);
     record_first_error(release_vmm_window(&h->base_local_window), &first_error);
-    const uint64_t workspace = h->host_ctx.workSpace;
-    const uint64_t workspace_size = h->host_ctx.workSpaceSize;
+    const uint64_t workspace = h->host_ctx.sdmaWorkSpace;
+    const uint64_t workspace_size = h->host_ctx.sdmaWorkSpaceSize;
     h->host_ctx = CommContext{};
-    h->host_ctx.workSpace = workspace;
-    h->host_ctx.workSpaceSize = workspace_size;
+    h->host_ctx.sdmaWorkSpace = workspace;
+    h->host_ctx.sdmaWorkSpaceSize = workspace_size;
     return first_error;
 }
 
@@ -1367,7 +1367,8 @@ extern "C" int comm_derive_context(
         );
         return -1;
     }
-    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
+    if (window_offset > static_cast<size_t>(h->host_ctx.winSize) ||
+        window_size > static_cast<size_t>(h->host_ctx.winSize) - window_offset) {
         LOG_ERROR(
             "[comm rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu", h->rank,
             window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
@@ -1390,6 +1391,7 @@ extern "C" int comm_derive_context(
         }
         ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset;
         ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset;
+        ctx.urmaRankMap[i] = base_rank;
     }
 
     void *newDevMem = nullptr;
@@ -1433,9 +1435,19 @@ extern "C" int comm_barrier(CommHandle h) {
 
 extern "C" int comm_alloc_domain_windows(
     CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
-    size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
+    size_t window_offset, size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
 ) try {
     if (!h || !rank_ids || !device_ctx_out || !local_window_base_out) return -1;
+    // Every allocation owns its window here, so there is no arena to offset
+    // into. Reject a non-zero request instead of returning a window that
+    // silently starts somewhere else than the caller asked for.
+    if (window_offset != 0) {
+        LOG_ERROR(
+            "[comm rank %d] alloc_domain: window_offset=%zu is not supported by the a2a3 backend", h->rank,
+            window_offset
+        );
+        return -1;
+    }
     if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count || window_size == 0) {
         LOG_ERROR(
             "[comm rank %d] alloc_domain: bad args (rank_count=%zu domain_rank=%u window_size=%zu)", h->rank,

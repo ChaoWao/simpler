@@ -109,7 +109,7 @@ The functional differences group into the following themes:
 | Cache coherence | Hardware coherence model | Yes | Retain the required invalidate/flush operations on A2/A3; do not copy unnecessary maintenance operations to A5 |
 | PMU collection | Hardware PMU and platform collection protocol | Yes | Retain the different counter counts, readers, and FIN submission paths |
 | System counter and DMB | Hardware timing and register layout | Yes | Use the constants for each platform |
-| URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
+| URMA completion | A5-specific implementation and product capability | Yes, for now | Retain the A5 path; the default onboard build provisions it together with SDMA |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
 | Scheduler progress publication | AICPU topology and measured publication cost | No | Retain A5's 16-task batching; keep per-advance publication on A2/A3, where the portable implementation showed no significant benefit |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
@@ -184,18 +184,17 @@ platform's `platform/include/common/platform_config.h`.
 | `runtime/scheduler/scheduler_completion.cpp` | After FIN, A2/A3 invokes the AICPU MMIO reader for eight counters; A5 commits the ten-counter slot written by the AICore |
 | `platform/shared/aicpu/pmu_collector_aicpu.cpp` | Implements the A2/A3 direct MMIO read and the A5 staging-slot consumption paths |
 
-### Optional A5-Specific URMA Backend
+### A5-Specific URMA Backend
 
 A5 contains the source path for issuing URMA completion requests, creating
 deferred entries, forwarding FIN, and polling/retiring CQ entries. A2/A3
 currently registers only the COUNTER and SDMA completion backends.
 
-The repository does not currently define `PTO_URMA_SUPPORTED`. A5 therefore
-compiles the shared ABI, mailbox, CQ polling/retirement, and related paths, but
-the kernel path that successfully issues URMA PTO instructions is unreachable.
-The current state is "implemented but disabled by default." It neither means
-that the default A5 build supports URMA nor proves that the A2/A3 hardware does
-not support URMA.
+The pinned PTO-ISA defines `PTO_URMA_SUPPORTED` for DAV_3510. A5 compiles the
+request path together with the shared ABI, mailbox, and CQ polling/retirement
+paths. Its host communication context provisions SDMA and URMA workspaces
+together, so the default build supports both engines without a selector. This
+does not imply that A2/A3 hardware supports URMA.
 
 Both platforms already share `CompletionToken::backend_cookie`,
 `ASYNC_ENGINE_URMA`, the 32-byte `DeferredCompletionEntry`, end-to-end cookie
@@ -341,7 +340,6 @@ comparison. Examples and tests unique to either platform primarily reflect
 chip-feature validation and test-porting progress; they cannot be used to
 infer whether the runtime supports a shared algorithm.
 
-For example, A5 has `urma_deferred_completion_demo`, but this does not mean
-that the current build defines `PTO_URMA_SUPPORTED`. Likewise, the absence of a
-workload on one platform does not automatically mean that the corresponding
-runtime capability is unavailable.
+For example, A5's `urma_deferred_completion_demo` exercises an A5-only
+capability. The absence of a corresponding workload on another platform does
+not automatically establish a hardware limitation there.

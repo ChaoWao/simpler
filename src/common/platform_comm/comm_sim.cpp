@@ -380,8 +380,8 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
     // cross-rank address-agreement assert is specifically an HCCL-GVA
     // invariant and is not expected to hold (nor intended to run) under sim.
     auto &ctx = h->host_ctx;
-    ctx.workSpace = 0;
-    ctx.workSpaceSize = 0;
+    ctx.sdmaWorkSpace = 0;
+    ctx.sdmaWorkSpaceSize = 0;
     ctx.rankId = static_cast<uint32_t>(h->rank);
     ctx.rankNum = static_cast<uint32_t>(h->nranks);
     ctx.winSize = win_size;
@@ -446,7 +446,8 @@ extern "C" int comm_derive_context(
         );
         return -1;
     }
-    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
+    if (window_offset > static_cast<size_t>(h->host_ctx.winSize) ||
+        window_size > static_cast<size_t>(h->host_ctx.winSize) - window_offset) {
         std::fprintf(
             stderr, "[comm_sim rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu\n",
             h->rank, window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
@@ -456,8 +457,8 @@ extern "C" int comm_derive_context(
 
     auto *ctx = new (std::nothrow) CommContext{};
     if (ctx == nullptr) return -1;
-    ctx->workSpace = h->host_ctx.workSpace;
-    ctx->workSpaceSize = h->host_ctx.workSpaceSize;
+    ctx->sdmaWorkSpace = h->host_ctx.sdmaWorkSpace;
+    ctx->sdmaWorkSpaceSize = h->host_ctx.sdmaWorkSpaceSize;
     ctx->rankId = domain_rank;
     ctx->rankNum = static_cast<uint32_t>(rank_count);
     ctx->winSize = window_size;
@@ -473,6 +474,7 @@ extern "C" int comm_derive_context(
         }
         ctx->windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset;
         ctx->windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset;
+        ctx->urmaRankMap[i] = base_rank;
     }
 
     h->derived_contexts.push_back(ctx);
@@ -529,9 +531,19 @@ extern "C" int comm_barrier(CommHandle h) {
 
 extern "C" int comm_alloc_domain_windows(
     CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
-    size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
+    size_t window_offset, size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
 ) try {
     if (h == nullptr || rank_ids == nullptr || device_ctx_out == nullptr || local_window_base_out == nullptr) return -1;
+    // Every allocation owns its shm here, so there is no arena to offset into.
+    // Reject a non-zero request instead of returning a window that silently
+    // starts somewhere else than the caller asked for.
+    if (window_offset != 0) {
+        std::fprintf(
+            stderr, "[comm_sim rank %d] alloc_domain: window_offset=%zu is not supported by the sim backend\n", h->rank,
+            window_offset
+        );
+        return -1;
+    }
     if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count || window_size == 0) {
         std::fprintf(
             stderr, "[comm_sim rank %d] alloc_domain: bad args (rank_count=%zu domain_rank=%u window_size=%zu)\n",
@@ -634,8 +646,8 @@ extern "C" int comm_alloc_domain_windows(
     auto *win_base = static_cast<uint8_t *>(base) + HEADER_SIZE;
     alloc->host_ctx = std::make_unique<CommContext>();
     auto &ctx = *alloc->host_ctx;
-    ctx.workSpace = 0;
-    ctx.workSpaceSize = 0;
+    ctx.sdmaWorkSpace = 0;
+    ctx.sdmaWorkSpaceSize = 0;
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(rank_count);
     ctx.winSize = window_size;

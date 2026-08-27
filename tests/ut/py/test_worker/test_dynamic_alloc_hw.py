@@ -42,8 +42,9 @@ import pytest
 def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
     """End-to-end 2-rank hardware alloc + release round trip.
 
-    A3 performs two sequential allocations on the same base communicator to
-    check Fabric mapping release. A5 keeps the existing single allocation.
+    Performs two sequential allocations on the same base communicator.  The
+    second reverses communicator ranks, covering the A5 URMA rank remap while
+    also checking that an arena slice can be released and reused.
     """
     from simpler.task_interface import CallConfig, CommBufferSpec
     from simpler.worker import Worker
@@ -58,11 +59,14 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
 
     captures: list[dict[str, object]] = []
 
+    worker_orders = [tuple(range(nranks)), tuple(reversed(range(nranks)))]
+
     def orch_fn(orch, _args, _cfg):
         captured: dict[str, object] = {}
+        order = worker_orders[len(captures)]
         with orch.allocate_domain(
             name="tp",
-            workers=list(range(nranks)),
+            workers=list(order),
             window_size=4 * 1024 * 1024,
             buffers=[
                 CommBufferSpec(name="scratch", dtype="float32", count=16, nbytes=64),
@@ -77,6 +81,7 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
                     "domain_size": tp[chip_idx].domain_size,
                     "device_ctx": int(tp[chip_idx].device_ctx),
                     "local_window_base": int(tp[chip_idx].local_window_base),
+                    "window_offset": int(tp[chip_idx].window_offset),
                     "buffer_bases": {name: h.base for name, h in tp[chip_idx].buffers.items()},
                 }
                 for chip_idx in tp.workers
@@ -93,7 +98,7 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
     )
     try:
         worker.init()
-        repetitions = 2 if st_platform == "a2a3" else 1
+        repetitions = len(worker_orders)
         for _ in range(repetitions):
             worker.run(orch_fn, args=None, config=CallConfig())
     finally:
@@ -102,18 +107,22 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
     assert len(captures) == repetitions
     if repetitions == 2:
         assert captures[0]["alloc_id"] != captures[1]["alloc_id"]
-    for captured in captures:
+    for capture_index, captured in enumerate(captures):
         assert captured["released_after_with"] is True
-        assert captured["workers"] == tuple(range(nranks))
+        expected_order = worker_orders[capture_index]
+        assert captured["workers"] == expected_order
 
         contexts: dict[int, dict[str, object]] = captured["contexts"]  # type: ignore[assignment]
-        # Dense domain ranks follow worker order.
-        assert contexts[0]["domain_rank"] == 0
-        assert contexts[1]["domain_rank"] == 1
+        # Dense domain ranks follow the caller's worker order, including a
+        # non-prefix/reordered A5 domain.
+        for domain_rank, chip_idx in enumerate(expected_order):
+            assert contexts[chip_idx]["domain_rank"] == domain_rank
         for chip_idx in range(nranks):
             ctx = contexts[chip_idx]
             assert ctx["device_ctx"] != 0, f"chip {chip_idx}: device_ctx is 0"
             assert ctx["local_window_base"] != 0, f"chip {chip_idx}: local_window_base is 0"
+            if st_platform == "a5":
+                assert ctx["window_offset"] != 0, f"chip {chip_idx}: A5 domain did not use a derived arena slice"
             # Buffers are carved sequentially from the local pool.
             ptrs = ctx["buffer_bases"]
             assert isinstance(ptrs, dict)

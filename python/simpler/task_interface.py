@@ -912,17 +912,21 @@ def _validate_remote_sidecar_access(args: TaskArgs, remote_sidecar: _RemoteTaskA
 
 class _CommContextStruct(ctypes.Structure):
     _fields_ = [
-        ("workSpace", ctypes.c_uint64),
-        ("workSpaceSize", ctypes.c_uint64),
+        ("sdmaWorkSpace", ctypes.c_uint64),
+        ("sdmaWorkSpaceSize", ctypes.c_uint64),
         ("rankId", ctypes.c_uint32),
         ("rankNum", ctypes.c_uint32),
         ("winSize", ctypes.c_uint64),
         ("windowsIn", ctypes.c_uint64 * COMM_MAX_RANK_NUM),
         ("windowsOut", ctypes.c_uint64 * COMM_MAX_RANK_NUM),
+        ("urmaWorkSpace", ctypes.c_uint64),
+        ("urmaWorkSpaceSize", ctypes.c_uint64),
+        ("urmaWindowOffset", ctypes.c_uint64),
+        ("urmaRankMap", ctypes.c_uint32 * COMM_MAX_RANK_NUM),
     ]
 
 
-assert ctypes.sizeof(_CommContextStruct) == 1056
+assert ctypes.sizeof(_CommContextStruct) == 1336
 
 
 def scalar_to_uint64(value) -> int:
@@ -982,6 +986,9 @@ class ChipDomainContext:
     # Each named window slice as a device ``VMM_WINDOW`` Buffer owned by this chip. Name a task
     # arg with ``buffers[name].tensor(shapes, dtype)`` and dispatch it only to this chip (``domain_rank``).
     buffers: dict[str, Buffer]
+    # Offset inside a backend-owned persistent arena. Zero for backends that
+    # allocate one independent window per domain.
+    window_offset: int = 0
 
 
 class CommDomainHandle:

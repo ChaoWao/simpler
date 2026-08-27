@@ -587,13 +587,14 @@ class TestRuntimeBuilderGetBinaries:
         assert calls == [(RuntimeBuilder._LIB_DIR, "/tmp/pto-isa", ["a5/onboard/test_rt"])]
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
-    def test_a5_default_host_build_passes_pto_isa_cmake_define(self, MockCompiler, tmp_path, monkeypatch):
-        """a5 host ccache key includes the pinned PTO-ISA commit."""
+    def test_a5_host_build_ignores_retired_urma_workspace_env(self, MockCompiler, tmp_path, monkeypatch, caplog):
+        """a5 always builds both communication workspaces without an opt-in define."""
         from simpler_setup import pto_isa  # noqa: PLC0415
         from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
 
         pin = "b" * 40
         self._make_runtime(tmp_path, "a5")
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", "ON")
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
@@ -606,7 +607,9 @@ class TestRuntimeBuilderGetBinaries:
         host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
         assert host_call.kwargs["cmake_defines"]["SIMPLER_PTO_ISA_BUILD_COMMIT"] == pin
         assert "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE" not in host_call.kwargs["cmake_defines"]
+        assert "SIMPLER_ENABLE_PTO_URMA_WORKSPACE" not in host_call.kwargs["cmake_defines"]
         assert host_call.kwargs["cmake_defines"]["PTO_ISA_ROOT"] == "/tmp/pto-isa"
+        assert "A5 onboard always builds SDMA and URMA workspaces" in caplog.text
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_sim_direct_build_does_not_write_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
@@ -717,11 +720,10 @@ class TestBuildCacheStamp:
         assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
 
     def test_a5_default_folds_in_pto_isa_commit(self, monkeypatch):
-        """a5 default SDMA workspace folds the pto-isa pin into the cache stamp."""
+        """a5 default DMA workspaces fold the pto-isa pin into the cache stamp."""
         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
         from simpler_setup import pto_isa  # noqa: PLC0415
 
-        monkeypatch.delenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", raising=False)
         monkeypatch.setattr(rb_module, "_get_git_head", lambda _root: "runtime_sha")
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
@@ -774,18 +776,8 @@ class TestResolveBuildPtoIsaCommit:
     def test_a5_default_reads_pin(self, monkeypatch):
         from simpler_setup import pto_isa  # noqa: PLC0415
 
-        monkeypatch.delenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", raising=False)
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
-        builder = self._make_builder("a5")
-        assert builder._resolve_build_pto_isa_commit() == "isa_sha"
-
-    def test_a5_urma_overlay_on_reads_pin(self, monkeypatch):
-        """URMA overlay also embeds pto-isa, so it reads the pin too (#1392)."""
-        from simpler_setup import pto_isa  # noqa: PLC0415
-
-        monkeypatch.setenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", "ON")
-        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
         builder = self._make_builder("a5")
         assert builder._resolve_build_pto_isa_commit() == "isa_sha"
 
