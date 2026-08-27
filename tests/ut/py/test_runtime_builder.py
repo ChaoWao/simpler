@@ -694,7 +694,7 @@ class TestAbbrevStamp:
 
 
 class TestBuildCacheStamp:
-    """Test cmake cache stamp composition (runtime HEAD + pto-isa commit)."""
+    """Test cmake cache stamp composition (runtime HEAD + pto-isa/CANN inputs)."""
 
     def _make_builder(self, platform):
         from simpler_setup.platform_info import parse_platform  # noqa: PLC0415
