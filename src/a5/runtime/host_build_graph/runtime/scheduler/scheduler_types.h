@@ -895,6 +895,26 @@ struct alignas(128) SchedulerDispatchSlot {
     uint8_t publication_padding[56];
 };
 
+// Stable device-side localization for the first scheduler failure. These values
+// are diagnostic ABI: keep existing numbers stable when adding new sites.
+enum class SchedulerErrorSite : uint64_t {
+    UNKNOWN = 0,
+    ROUTE_INVALID_STATE = 2,
+    READY_POP_INVALID_HEAD = 40,
+    READY_POP_INVALID_LINK = 41,
+    DISPATCH_INVALID_SHAPE = 44,
+    DISPATCH_INVALID_CALLABLE = 45,
+    DISPATCH_MATERIALIZE_FAILED = 46,
+    DISPATCH_INVALID_PREDICATE = 47,
+    BOOTSTRAP_WAKE_INVALID_HEAD = 60,
+    COMPLETION_TASK_NOT_DONE = 61,
+    COMPLETION_WAKE_ALREADY_CLOSED = 62,
+    COMPLETION_INVALID_WAITER = 63,
+    COMPLETION_WAITER_NOT_EXECUTABLE = 64,
+    COMPLETION_READY_APPEND_FAILED = 65,
+    COMPLETION_READY_PUBLISH_FAILED = 66,
+};
+
 struct alignas(128) SchedulerRunControl {
     uint64_t config_reserved_prefix[2];
     uint64_t active_worker_count;
@@ -936,7 +956,8 @@ struct alignas(128) SchedulerRunControl {
     volatile uint64_t error_descriptors_address;
     volatile uint64_t error_payloads_address;
     volatile uint64_t error_task_window_mask;
-    uint64_t error_reserved[7];
+    volatile uint64_t error_site;
+    uint64_t error_reserved[6];
 };
 
 struct alignas(128) AicpuCoreLifecycleTrace {
@@ -1201,6 +1222,7 @@ static_assert(sizeof(SchedulerRunControl) == 384, "run control layout changed");
 static_assert(alignof(SchedulerRunControl) == 128, "run control alignment changed");
 static_assert(offsetof(SchedulerRunControl, executed_task_count) == 128, "lifecycle atomics need their own line");
 static_assert(offsetof(SchedulerRunControl, error_claimed) == 256, "error state needs its own line");
+static_assert(offsetof(SchedulerRunControl, error_site) == 328, "error site ABI changed");
 static_assert(sizeof(AicpuCoreLifecycleTrace) == 128, "AICPU lifecycle trace layout changed");
 static_assert(sizeof(SchedulerTailTrace) == 256, "scheduler tail trace layout changed");
 static_assert(sizeof(SchedulerWorkerContext) == 1024, "worker context layout changed");
