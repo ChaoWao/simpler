@@ -106,8 +106,8 @@ def format_task_display(task_id):
 
     The high 32 bits are a ring index under ``tensormap_and_ringbuffer`` (any ring in
     ``0..CHIP_MAX_RING_DEPTH-1``) and an id space under ``host_build_graph``
-    (0 = RING, 1 = GRAPH_NODE). The short form below therefore covers tmr ring 0 and
-    every hbg RING task; a tmr task on ring 2 is equally ordinary and gets the long
+    (0 = GLOBAL, 1 = IN_GRAPH). The short form below therefore covers tmr ring 0 and
+    every hbg GLOBAL task; a tmr task on ring 2 is equally ordinary and gets the long
     form.
 
     Returns:
@@ -128,9 +128,9 @@ def format_task_display(task_id):
 def _decode_graph_node_task_id(task_id):
     """Decode Scheduler-owned Graph-node ids.
 
-    ``host_build_graph`` puts a materialized node in id space 1 (GRAPH_NODE) with
-    ``local=(outer_local << 10) | node_index``; the stream-visible outer Graph task
-    stays in space 0 (RING). See src/common/host_build_graph/task_id_encoding.h.
+    ``host_build_graph`` puts a materialized node in id space 1 (IN_GRAPH) with
+    ``local=(graph_local_id << 10) | task_index``; the stream-visible outer Graph task
+    stays in space 0 (GLOBAL). See src/common/host_build_graph/task_id_encoding.h.
     """
     tid = normalize_task_id_int(task_id)
     if tid is None or ((tid >> 32) & 0xFFFFFFFF) != 1:
