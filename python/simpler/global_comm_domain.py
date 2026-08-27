@@ -22,17 +22,14 @@ from .comm_endpoints import (
     AdapterKind,
     AdapterProfile,
     AttachmentRole,
-<<<<<<< HEAD
     BufferAccessQuery,
     EndpointDeployment,
     EndpointIdentity,
     EndpointRecord,
-    _ADAPTER_KIND_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
-    _ADAPTER_PROFILE_IDS,  # noqa: F401 — re-export of the comm_endpoints numeric table
-=======
+    _backend_kind_for_provider,
+    buffer_adapter_candidates,
 )
 from .comm_endpoints import (
->>>>>>> 72e5e286 (Add: private delegated-region scene tests and Worker wrapper)
     _adapter_kind_from_id as _neutral_adapter_kind_from_id,
 )
 from .comm_endpoints import (
@@ -43,8 +40,6 @@ from .comm_endpoints import (
 )
 from .comm_endpoints import (
     _adapter_profile_id as _neutral_adapter_profile_id,
-    _backend_kind_for_provider,
-    buffer_adapter_candidates,
 )
 
 #: Descriptor layout. Paired with ``COMM_GLOBAL_DOMAIN_VERSION`` in

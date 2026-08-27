@@ -29,7 +29,9 @@ from _task_interface import DataType
 from simpler.buffer import mint_owner_instance_id, wrap_device_malloc
 from simpler.callable_identity import CallableHandle
 from simpler.task_interface import CallConfig, TaskArgs, TaskHandle
-from simpler.worker import Worker
+from simpler.worker import RunHandle, Worker, _CloseAttempt, _Lifecycle
+
+from tests.st.worker.comm_region.recursive_single_owner._helpers import close_owned_workers
 
 from ._harness import (
     SIM_PLATFORM,
@@ -751,6 +753,169 @@ class TestW5aFatalBoundary:
         worker._teardown_delegated_fatal_if_safe()
         assert closes == ["close"]
 
+    def test_callback_fatal_rejects_later_submit_and_control(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._lifecycle = _Lifecycle.READY
+        worker._worker = object()
+        first = RuntimeError("callback-fatal")
+        worker._latch_delegated_session_fatal(first)
+        with pytest.raises(RuntimeError, match="no further work is admitted") as submit_exc:
+            worker.submit(lambda *_args, **_kwargs: None)
+        assert submit_exc.value.__cause__ is first
+        with pytest.raises(RuntimeError, match="no further work is admitted") as control_exc:
+            worker._create_delegated_worker_chip_region("L3/L2[0]", 64, 8)
+        assert control_exc.value.__cause__ is first
+        assert worker._delegated_session_fatal is first
+
+    def test_outer_submit_closes_after_lease_depth_returns_to_zero(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._lifecycle = _Lifecycle.READY
+        closes: list[int] = []
+
+        def _close():
+            closes.append(worker._lease_depth.get(threading.get_ident(), 0))
+
+        worker.close = _close
+
+        def _submit_locked(*_args, **_kwargs):
+            worker._latch_delegated_session_fatal(RuntimeError("callback-fatal"))
+            return RunHandle._completed(worker)
+
+        worker._submit_locked = _submit_locked
+        handle = worker.submit(lambda *_args, **_kwargs: None)
+        assert handle.done is True
+        assert closes == [0]
+        assert threading.get_ident() not in worker._lease_depth
+
+    def test_release_fatal_teardown_runs_after_wait_publication(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        published = RuntimeError("published-wait")
+        worker._latch_delegated_session_fatal(published)
+        teardowns: list[tuple[bool, BaseException | None]] = []
+        original = worker._teardown_delegated_fatal_if_safe
+
+        def _teardown(primary_error=None):
+            teardowns.append((handle._terminal, primary_error))
+            original(primary_error)
+
+        worker._teardown_delegated_fatal_if_safe = _teardown
+        worker.close = lambda: None
+        worker._wait_run_handle = lambda *_args, **_kwargs: True
+        worker._finalize_run_handle = lambda *_args, **_kwargs: published
+        handle = RunHandle(worker, run_id=1, keepalive=())
+        with pytest.raises(RuntimeError) as excinfo:
+            handle.wait()
+        assert excinfo.value is published
+        assert handle._terminal is True
+        assert teardowns == [(True, published)]
+
+    def test_explicit_close_drain_fatal_does_not_recurse_into_close(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        attempt = _CloseAttempt()
+        worker._close_completion = attempt
+        closes: list[str] = []
+
+        def _close():
+            closes.append("close")
+            raise AssertionError("recursive close")
+
+        worker.close = _close
+        worker._latch_delegated_session_fatal(RuntimeError("drain-fatal"))
+        worker._teardown_delegated_fatal_if_safe()
+        assert closes == []
+        assert worker._delegated_session_fatal is not None
+
+    def test_submit_primary_close_failure_keeps_primary_and_replays_close(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._lifecycle = _Lifecycle.READY
+        primary = RuntimeError("submit-primary")
+        close_error = RuntimeError("close-failed")
+
+        def _close():
+            prior = worker._close_completion
+            if prior is not None and prior.done:
+                if prior.error is not None:
+                    raise prior.error
+                return
+            attempt = _CloseAttempt()
+            worker._close_completion = attempt
+            attempt.publish(close_error, False)
+            raise close_error
+
+        worker.close = _close
+
+        def _submit_locked(*_args, **_kwargs):
+            worker._latch_delegated_session_fatal(RuntimeError("session-fatal"))
+            raise primary
+
+        worker._submit_locked = _submit_locked
+        with pytest.raises(RuntimeError) as excinfo:
+            worker.submit(lambda *_args, **_kwargs: None)
+        assert excinfo.value is primary
+        assert any(
+            "delegated-fatal teardown failed: RuntimeError: close-failed" in note
+            for note in getattr(primary, "__notes__", [])
+        )
+        with pytest.raises(RuntimeError) as replay:
+            worker.close()
+        assert replay.value is close_error
+
+    def test_waiter_published_close_failure_keeps_published_error_and_replays_close(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        published = RuntimeError("published-wait")
+        close_error = RuntimeError("close-failed")
+        worker._latch_delegated_session_fatal(published)
+
+        def _close():
+            prior = worker._close_completion
+            if prior is not None and prior.done:
+                if prior.error is not None:
+                    raise prior.error
+                return
+            attempt = _CloseAttempt()
+            worker._close_completion = attempt
+            attempt.publish(close_error, False)
+            raise close_error
+
+        worker.close = _close
+        worker._wait_run_handle = lambda *_args, **_kwargs: True
+        worker._finalize_run_handle = lambda *_args, **_kwargs: published
+        handle = RunHandle(worker, run_id=1, keepalive=())
+        with pytest.raises(RuntimeError) as excinfo:
+            handle.wait()
+        assert excinfo.value is published
+        assert any(
+            "delegated-fatal teardown failed: RuntimeError: close-failed" in note
+            for note in getattr(published, "__notes__", [])
+        )
+        with pytest.raises(RuntimeError) as replay:
+            worker.close()
+        assert replay.value is close_error
+
+    def test_teardown_without_primary_propagates_close_failure(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        close_error = RuntimeError("close-failed")
+        worker._latch_delegated_session_fatal(RuntimeError("session-fatal"))
+
+        def _close():
+            prior = worker._close_completion
+            if prior is not None and prior.done:
+                if prior.error is not None:
+                    raise prior.error
+                return
+            attempt = _CloseAttempt()
+            worker._close_completion = attempt
+            attempt.publish(close_error, False)
+            raise close_error
+
+        worker.close = _close
+        with pytest.raises(RuntimeError) as excinfo:
+            worker._teardown_delegated_fatal_if_safe()
+        assert excinfo.value is close_error
+        with pytest.raises(RuntimeError) as replay:
+            worker.close()
+        assert replay.value is close_error
+
     def test_chip_teardown_only_sweeps_store(self):
         source = _WORKER_PY.read_text(encoding="utf-8")
         assert "provider_transaction_table = ProviderTransactionTable()" in source
@@ -760,6 +925,51 @@ class TestW5aFatalBoundary:
         assert "provider_region_store.sweep()" in teardown
         assert "ProviderTransactionTable" not in teardown
         assert "table.execute" not in teardown
+
+
+class _SetupOwnedWorker:
+    def __init__(self, name: str, *, fail: BaseException | None = None) -> None:
+        self.name = name
+        self.fail = fail
+        self.closes: list[str] = []
+
+    def close(self) -> None:
+        self.closes.append(self.name)
+        if self.fail is not None:
+            raise self.fail
+
+
+class TestW5aSetupCleanup:
+    def test_register_setup_failure_closes_constructed_worker_and_reraises_primary(self):
+        primary = RuntimeError("register failed")
+        worker = _SetupOwnedWorker("l3")
+        close_owned_workers(primary, worker)
+        assert worker.closes == ["l3"]
+        with pytest.raises(RuntimeError, match="register failed"):
+            raise primary
+
+    def test_add_worker_setup_failure_closes_l4_then_l3_and_keeps_primary(self):
+        primary = RuntimeError("add_worker failed")
+        l4 = _SetupOwnedWorker("l4")
+        l3 = _SetupOwnedWorker("l3")
+        close_owned_workers(primary, l4, l3)
+        assert l4.closes == ["l4"]
+        assert l3.closes == ["l3"]
+        with pytest.raises(RuntimeError, match="add_worker failed"):
+            raise primary
+
+    def test_init_setup_failure_attaches_cleanup_note_and_keeps_primary(self):
+        primary = RuntimeError("init failed")
+        close_error = RuntimeError("close failed")
+        worker = _SetupOwnedWorker("l4", fail=close_error)
+        l3 = _SetupOwnedWorker("l3")
+        close_owned_workers(primary, worker, l3)
+        assert worker.closes == ["l4"]
+        assert l3.closes == ["l3"]
+        assert any("RuntimeError: close failed" in note for note in getattr(primary, "__notes__", []))
+        with pytest.raises(RuntimeError, match="init failed"):
+            raise primary
+        assert primary is not close_error
 
 
 class TestW5aPhaseAIntegration:

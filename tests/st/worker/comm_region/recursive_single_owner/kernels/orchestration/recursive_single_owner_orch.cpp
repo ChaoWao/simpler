@@ -145,6 +145,7 @@ __attribute__((visibility("default"))) void recursive_single_owner_orchestration
         rt_submit_aiv_task(kTransformFuncId, params);
 
         uint32_t first_index[1] = {0};
+        // The blocking output read orders AIV completion before the host-visible completion signal.
         (void)get_tensor_data<float>(output, 1, first_index);
         if (!endpoint.signal_notify(completion_counter_addr, signal_value, WorkerChipOrchNotifyOp::Set)) {
             report_endpoint_error(endpoint);

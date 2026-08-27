@@ -15,9 +15,6 @@
 #include "pipe_sync.h"
 #include "tensor.h"  // NOLINT(build/include_subdir)
 
-// NOLINTNEXTLINE(build/namespaces)
-using namespace pto;
-
 #ifndef __gm__
 #define __gm__
 #endif
@@ -37,8 +34,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     constexpr int kCols = 128;
     using DynShapeDim5 = pto::Shape<1, 1, 1, kRows, kCols>;
     using DynStrideDim5 = pto::Stride<1, 1, 1, kCols, 1>;
-    using GlobalData = GlobalTensor<float, DynShapeDim5, DynStrideDim5>;
-    using TileData = Tile<TileType::Vec, float, kRows, kCols, BLayout::RowMajor, -1, -1>;
+    using GlobalData = pto::GlobalTensor<float, DynShapeDim5, DynStrideDim5>;
+    using TileData = pto::Tile<pto::TileType::Vec, float, kRows, kCols, pto::BLayout::RowMajor, -1, -1>;
 
     TileData src_tile(kRows, kCols);
     TileData dst_tile(kRows, kCols);

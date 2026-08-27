@@ -63,6 +63,8 @@ from .comm_provider import (
     RegionAllocationError,
     RegionAllocationResult,
     RegionAllocationSpec,
+    RegionControlError,
+    RegionControlErrorKind,
     RegionPartAllocationSpec,
     RegionPartKind,
     RegionPartLocalView,
@@ -1089,45 +1091,59 @@ def materialize_delegated_region_instance(ctx: MaterializationContext) -> Region
             else:
                 reply_payload = staged
             outcome = parse_reply(reply_payload).decode_outcome()
-        if (
-            not isinstance(outcome, DelegatedAllocateReply)
-            or outcome.tag is not DelegatedAllocateReplyTag.ALLOCATED
-            or outcome.result is None
-            or outcome.payload_view is None
-            or outcome.counter_view is None
-        ):
-            raise MaterializationError("delegated allocate did not return a committed ALLOCATED reply")
-        instance._commit_delegated_allocation(int(outcome.result.provider_resource_id))
-        validate_committed_region_allocation(
-            ctx.plan,
-            spec,
-            outcome.result,
-            outcome.payload_view,
-            outcome.counter_view,
-            expected_capability_type=ctx.worker._provider_import_capability_type(),
-            expected_device_id=int(shape.provider_device_id),
+        if isinstance(outcome, DelegatedAllocateReply) and outcome.tag is DelegatedAllocateReplyTag.ALLOCATED:
+            try:
+                if outcome.result is None or outcome.payload_view is None or outcome.counter_view is None:
+                    raise MaterializationError("delegated ALLOCATED reply is missing result or local views")
+                validate_committed_region_allocation(
+                    ctx.plan,
+                    spec,
+                    outcome.result,
+                    outcome.payload_view,
+                    outcome.counter_view,
+                    expected_capability_type=ctx.worker._provider_import_capability_type(),
+                    expected_device_id=int(shape.provider_device_id),
+                )
+            except BaseException as exc:
+                ctx.worker._latch_delegated_session_fatal(exc)
+                raise
+            instance._commit_delegated_allocation(int(outcome.result.provider_resource_id))
+            payload_lease = ctx.worker._import_region_part_lease(
+                instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.payload
+            )
+            instance._payload_mapping = payload_lease
+            counter_lease = ctx.worker._import_region_part_lease(
+                instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.counter
+            )
+            instance._counter_mapping = counter_lease
+            instance._payload_part = PayloadPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
+                _select_host_vmm_copy_access(ctx.plan.payload, instance.provider, instance.consumer, payload_lease),
+            )
+            instance._counter_part = CounterPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
+                _select_host_vmm_copy_access(ctx.plan.counter, instance.provider, instance.consumer, counter_lease),
+            )
+            instance._payload_local_view = outcome.payload_view
+            instance._counter_local_view = outcome.counter_view
+            instance._ever_live = True
+            instance._state = RegionInstanceState.LIVE
+            return instance
+        if isinstance(outcome, DelegatedAllocateReply) and outcome.tag is DelegatedAllocateReplyTag.ERROR:
+            if outcome.error is None:
+                missing = RegionControlError(
+                    RegionControlErrorKind.INTERNAL_INVARIANT,
+                    "delegated allocate ERROR is missing its typed error",
+                )
+                ctx.worker._latch_delegated_session_fatal(missing)
+                raise missing
+            raise outcome.error
+        unexpected = RegionControlError(
+            RegionControlErrorKind.INTERNAL_INVARIANT,
+            "delegated allocate returned an unexpected reply tag",
         )
-        payload_lease = ctx.worker._import_region_part_lease(
-            instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.payload
-        )
-        instance._payload_mapping = payload_lease
-        counter_lease = ctx.worker._import_region_part_lease(
-            instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.counter
-        )
-        instance._counter_mapping = counter_lease
-        instance._payload_part = PayloadPart(
-            RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
-            _select_host_vmm_copy_access(ctx.plan.payload, instance.provider, instance.consumer, payload_lease),
-        )
-        instance._counter_part = CounterPart(
-            RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
-            _select_host_vmm_copy_access(ctx.plan.counter, instance.provider, instance.consumer, counter_lease),
-        )
-        instance._payload_local_view = outcome.payload_view
-        instance._counter_local_view = outcome.counter_view
-        instance._ever_live = True
-        instance._state = RegionInstanceState.LIVE
-        return instance
+        ctx.worker._latch_delegated_session_fatal(unexpected)
+        raise unexpected
     except BaseException as exc:
         if instance._state is None:
             instance._abort_materialization(exc)

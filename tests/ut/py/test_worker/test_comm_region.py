@@ -21,7 +21,10 @@ from simpler import comm_endpoints as ce
 from simpler.comm_provider import (
     ProviderReleaseResult,
     ProviderReleaseStatus,
+    RegionAllocationError,
     RegionAllocationSpec,
+    RegionControlErrorKind,
+    RegionOperationKind,
     RegionPartAllocationSpec,
     RegionPartKind,
 )
@@ -1750,6 +1753,7 @@ class _RecordingLease:
         self.name = name
         self.calls = calls
         self.fail = fail
+        self.handle = 1
 
     def close(self) -> None:
         self.calls.append(self.name)
@@ -1995,23 +1999,110 @@ def _posix_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes
     )
 
 
-def _install_delegated_dispatch(worker: Worker, dispatches: list[bytes]) -> None:
+class _TestDelegatedImportFailure(BaseException):
+    pass
+
+
+def _posix_inconsistent_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
+    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+    from simpler.comm_provider import (
+        PosixShmImport,
+        RegionAllocationResult,
+        RegionExportDescriptor,
+        RegionPartExportDescriptor,
+        RegionPartKind,
+        RegionPartLocalView,
+    )
+
+    result = RegionAllocationResult(
+        provider_resource_id=11,
+        export_descriptor=RegionExportDescriptor(
+            payload=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=payload_bytes,
+                mapping_bytes=payload_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_same_token"),
+            ),
+            counter=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=counter_bytes,
+                mapping_bytes=counter_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_same_token"),
+            ),
+        ),
+    )
+    payload = RegionPartLocalView(part=RegionPartKind.PAYLOAD, local_base=0x1000, logical_bytes=payload_bytes)
+    counter = RegionPartLocalView(part=RegionPartKind.COUNTER, local_base=0x2000, logical_bytes=counter_bytes)
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ALLOCATED,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            result=result,
+            payload_view=payload,
+            counter_view=counter,
+        )
+    )
+
+
+def _backend_failure_reply(session: bytes, transaction_id: int):
+    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ERROR,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            error=RegionAllocationError(
+                provisional_resource_id=7,
+                control_kind=RegionControlErrorKind.BACKEND_FAILURE,
+                failed_part=RegionPartKind.COUNTER,
+                failed_operation=RegionOperationKind.ZERO_BYTES,
+                cleanup_debt_remaining=False,
+            ),
+        )
+    )
+
+
+def _install_delegated_dispatch(
+    worker: Worker,
+    dispatches: list[bytes],
+    *,
+    close_calls: Optional[list[str]] = None,
+    import_calls: Optional[list[str]] = None,
+    fail_on_import: Optional[int] = None,
+    import_error: Optional[BaseException] = None,
+    reply_factory=None,
+) -> None:
     from simpler.comm_delegated_region_control import parse_request
     from simpler.comm_provider import PosixShmImport
 
+    close_calls = close_calls if close_calls is not None else []
+    import_calls = import_calls if import_calls is not None else []
+
     def _dispatch(staged):
-        envelope = parse_request(staged)
+        view = staged if isinstance(staged, memoryview) else memoryview(staged)
+        envelope = parse_request(view)
         request = envelope.decode_terminal()
-        dispatches.append(bytes(envelope.frame))
-        return _posix_allocated_reply(
+        dispatches.append(view.tobytes())
+        factory = reply_factory if reply_factory is not None else _posix_allocated_reply
+        return factory(
             request.session_instance_id,
             request.transaction_id,
             payload_bytes=int(request.payload_logical_bytes),
             counter_bytes=int(request.counter_logical_bytes),
         )
 
+    def _import(*_args, **_kwargs):
+        name = "payload" if len(import_calls) == 0 else "counter"
+        import_calls.append(name)
+        if fail_on_import is not None and len(import_calls) == fail_on_import:
+            assert import_error is not None
+            raise import_error
+        return _RecordingLease(name, close_calls)
+
     worker._dispatch_delegated_allocate = _dispatch
-    worker._import_region_part_lease = lambda *_args, **_kwargs: SimpleNamespace(handle=1)
+    worker._import_region_part_lease = _import
     worker._provider_import_capability_type = lambda: PosixShmImport
 
 
@@ -2044,30 +2135,153 @@ def test_l3_and_l4_plans_use_the_same_delegated_materializer_core():
     assert type(l3_req) is type(l4_req)
     assert l3_req.provider_path == b"L3/L2[1]"
     assert l4_req.provider_path == b"L4/L3[0]/L2[0]"
+    assert len(l3_dispatches[0]) >= 256
+    assert len(l4_dispatches[0]) >= 256
 
 
-def test_delegated_partial_import_failure_sends_one_release():
+@pytest.mark.parametrize(
+    ("fail_on_import", "error_factory", "expected_imports", "expected_closes"),
+    [
+        (1, lambda: RuntimeError("payload import failed"), ["payload"], []),
+        (2, lambda: RuntimeError("counter import failed"), ["payload", "counter"], ["payload"]),
+        (1, lambda: _TestDelegatedImportFailure("payload import failed"), ["payload"], []),
+        (2, lambda: _TestDelegatedImportFailure("counter import failed"), ["payload", "counter"], ["payload"]),
+    ],
+)
+def test_delegated_import_failure_sends_one_release(fail_on_import, error_factory, expected_imports, expected_closes):
     ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
     dispatches: list[bytes] = []
     releases: list[dict[str, object]] = []
-    _install_delegated_dispatch(ctx.worker, dispatches)
-    imports = {"count": 0}
-
-    def _import(*_args, **_kwargs):
-        imports["count"] += 1
-        if imports["count"] == 2:
-            raise RuntimeError("counter import failed")
-        return SimpleNamespace(handle=1)
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+    error = error_factory()
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        fail_on_import=fail_on_import,
+        import_error=error,
+    )
 
     def _release(**kwargs):
         releases.append(kwargs)
         return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
 
-    ctx.worker._import_region_part_lease = _import
     ctx.worker._dispatch_delegated_release = _release
-    with pytest.raises(RuntimeError, match="counter import failed"):
+    with pytest.raises(type(error)) as excinfo:
         materialize_delegated_region_instance(ctx)
-    assert imports["count"] == 2
+    assert excinfo.value is error
+    assert import_calls == expected_imports
+    assert close_calls == expected_closes
     assert len(dispatches) == 1
+    assert len(dispatches[0]) >= 256
     assert len(releases) == 1
-    assert releases[0]["transaction_id"] == 1
+    assert releases[0] == {
+        "session_instance_id": ctx.registry.session_instance_id,
+        "transaction_id": 1,
+        "provider_path": b"L3/L2[1]",
+    }
+    instance = captured["instance"]
+    assert instance._delegated_release_edge is False
+    assert id(instance) not in ctx.worker._region_instance_registry._instances
+    assert ctx.worker._region_instance_registry._next_delegated_transaction_id == 2
+
+
+def test_delegated_malformed_allocated_reply_does_not_import_or_release():
+    ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        reply_factory=_posix_inconsistent_allocated_reply,
+    )
+    ctx.worker._dispatch_delegated_release = lambda **kwargs: releases.append(kwargs) or ProviderReleaseResult(
+        provider_resource_id=11, status=ProviderReleaseStatus.RELEASED
+    )
+    with pytest.raises(RuntimeError, match="POSIX shm tokens must be distinct") as excinfo:
+        materialize_delegated_region_instance(ctx)
+    instance = captured["instance"]
+    fatal = ctx.worker._delegated_session_fatal
+    assert fatal is not None
+    assert excinfo.value is fatal
+    assert instance._delegated_allocation_committed is False
+    assert instance._delegated_release_edge is False
+    assert instance._provider_resource_id == 0
+    assert import_calls == []
+    assert close_calls == []
+    assert releases == []
+    assert ctx.worker._region_instance_registry._delegated_admission_closed is True
+    assert id(instance) not in ctx.worker._region_instance_registry._instances
+
+
+def test_delegated_clean_backend_failure_preserves_typed_fields():
+    ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+
+    def _error_reply(session, transaction_id, **_kwargs):
+        return _backend_failure_reply(session, transaction_id)
+
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        reply_factory=_error_reply,
+    )
+    ctx.worker._dispatch_delegated_release = lambda **kwargs: releases.append(kwargs) or ProviderReleaseResult(
+        provider_resource_id=7, status=ProviderReleaseStatus.RELEASED
+    )
+    with pytest.raises(RegionAllocationError) as excinfo:
+        materialize_delegated_region_instance(ctx)
+    error = excinfo.value
+    assert error.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+    assert error.failed_part is RegionPartKind.COUNTER
+    assert error.failed_operation is RegionOperationKind.ZERO_BYTES
+    assert error.provisional_resource_id == 7
+    assert error.cleanup_debt_remaining is False
+    assert ctx.worker._delegated_session_fatal is None
+    assert ctx.worker._region_instance_registry._delegated_admission_closed is False
+    assert import_calls == []
+    assert close_calls == []
+    assert releases == []
+    instance = captured["instance"]
+    assert instance._delegated_release_edge is False
+    assert ctx.worker._region_instance_registry._next_delegated_transaction_id == 2
+    success_dispatches: list[bytes] = []
+    _install_delegated_dispatch(ctx.worker, success_dispatches)
+    live = materialize_delegated_region_instance(ctx)
+    assert live._delegated_transaction_id == 2
+    assert live.state is RegionInstanceState.LIVE

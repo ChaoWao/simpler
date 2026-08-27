@@ -4321,15 +4321,14 @@ class RunHandle:
                 preferred_error = final_error if final_error is not None else exc
             published_error = self._recover_and_publish_terminal(preferred_error)
 
+        self._teardown_delegated_fatal_after_wait(published_error)
         if published_error is not None:
-            self._teardown_delegated_fatal_after_wait()
             raise published_error
-        self._teardown_delegated_fatal_after_wait()
 
-    def _teardown_delegated_fatal_after_wait(self) -> None:
+    def _teardown_delegated_fatal_after_wait(self, primary_error: BaseException | None = None) -> None:
         teardown = getattr(self._worker, "_teardown_delegated_fatal_if_safe", None)
         if callable(teardown):
-            teardown()
+            teardown(primary_error)
 
     def result(self, timeout: float | None = None) -> None:
         """Alias for :meth:`wait`; successful runs have no return value."""
@@ -8681,12 +8680,20 @@ class Worker:
                 f"Worker.{api}: delegated-region session is fatal and no further work is admitted; close this Worker"
             ) from error
 
-    def _teardown_delegated_fatal_if_safe(self) -> None:
+    def _teardown_delegated_fatal_if_safe(self, primary_error: BaseException | None = None) -> None:
         if self._delegated_session_fatal is None:
             return
         if self._unsafe_to_close_now():
             return
-        self.close()
+        try:
+            self.close()
+        except BaseException as close_error:
+            if primary_error is None:
+                raise
+            try:
+                primary_error.add_note(f"delegated-fatal teardown failed: {type(close_error).__name__}: {close_error}")
+            except BaseException:
+                pass
 
     def _exchange_delegated_region(self, staged: memoryview) -> None:
         _forward_delegated_region(self, self._delegated_control_path, staged)
@@ -11086,9 +11093,12 @@ class Worker:
         """
         try:
             with self._operation_lease("submit"):
-                return self._submit_locked(callable, args, config)
-        finally:
-            self._teardown_delegated_fatal_if_safe()
+                result = self._submit_locked(callable, args, config)
+        except BaseException as primary:
+            self._teardown_delegated_fatal_if_safe(primary)
+            raise
+        self._teardown_delegated_fatal_if_safe()
+        return result
 
     def run(self, callable, args=None, config=None) -> None:
         """Execute one task or DAG synchronously as ``submit(...).wait()``.

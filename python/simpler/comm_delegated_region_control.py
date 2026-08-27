@@ -308,6 +308,12 @@ def encode_request(request: DelegatedAllocateRequest | DelegatedReleaseRequest, 
     return staged
 
 
+def _operation_fixed_reply_bytes(operation: DelegatedRegionOperation) -> int:
+    if operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+        return ALLOCATE_REPLY_BYTES
+    return RELEASE_REPLY_BYTES
+
+
 def parse_request(payload: bytes | bytearray | memoryview) -> DelegatedRegionRequestEnvelope:
     raw = _owned_bytes(payload)
     if len(raw) < REQUEST_HEADER_BYTES:
@@ -329,6 +335,12 @@ def parse_request(payload: bytes | bytearray | memoryview) -> DelegatedRegionReq
         raise RegionControlError(
             RegionControlErrorKind.BAD_MESSAGE_SIZE,
             f"request_bytes {request_size} exceeds hard ceiling {ceiling}",
+        )
+    fixed_reply_bytes = _operation_fixed_reply_bytes(op)
+    if len(raw) < fixed_reply_bytes:
+        raise RegionControlError(
+            RegionControlErrorKind.BAD_MESSAGE_SIZE,
+            "staging is smaller than the operation fixed reply",
         )
     if request_size > len(raw) or request_size < REQUEST_HEADER_BYTES:
         raise RegionControlError(RegionControlErrorKind.BAD_MESSAGE_SIZE, "request_bytes does not fit the payload")
@@ -654,7 +666,7 @@ def _encode_allocate_request(request: DelegatedAllocateRequest) -> bytes:
     provider_path = _require_canonical_path(bytes(request.provider_path), field="provider path")
     _require_first_shape_fields(request)
     try:
-        request.spec
+        _ = request.spec
     except (TypeError, ValueError) as exc:
         raise RegionControlError(
             RegionControlErrorKind.INVALID_FIELD_VALUE,
@@ -745,7 +757,7 @@ def _decode_allocate_request(envelope: DelegatedRegionRequestEnvelope) -> Delega
     )
     _require_first_shape_fields(request)
     try:
-        request.spec
+        _ = request.spec
     except (TypeError, ValueError) as exc:
         raise RegionControlError(
             RegionControlErrorKind.INVALID_FIELD_VALUE,
@@ -1387,6 +1399,7 @@ class _ProviderTransactionRecord:
     state: ProviderTransactionState
     provider_resource_id: int = 0
     allocated_reply: bytes | None = None
+    terminal_operation: DelegatedRegionOperation | None = None
     terminal_reply: bytes | None = None
 
 
@@ -1486,16 +1499,55 @@ class ProviderTransactionTable:
                 )
             return record.allocated_reply
         if record.state is ProviderTransactionState.TERMINAL_FAILURE:
-            if record.terminal_reply is None:
-                raise RegionControlError(
-                    RegionControlErrorKind.INTERNAL_INVARIANT,
-                    "TERMINAL_FAILURE record is missing its diagnostic reply",
-                )
-            return record.terminal_reply
+            return self._terminal_reply_for_operation(record, DelegatedRegionOperation.DELEGATED_ALLOCATE)
         raise RegionControlError(
             RegionControlErrorKind.INTERNAL_INVARIANT,
             f"{record.state.value} is not observable across serial provider-agent calls",
         )
+
+    def _terminal_reply_for_operation(
+        self, record: _ProviderTransactionRecord, operation: DelegatedRegionOperation
+    ) -> bytes:
+        if record.terminal_operation is None or record.terminal_reply is None:
+            raise RegionControlError(
+                RegionControlErrorKind.INTERNAL_INVARIANT,
+                "TERMINAL_FAILURE record is missing its diagnostic reply",
+            )
+        if operation is record.terminal_operation:
+            return record.terminal_reply
+        if operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            return encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ERROR,
+                    session_instance_id=record.session_instance_id,
+                    transaction_id=record.transaction_id,
+                    error_kind=RegionControlErrorKind.STORE_LIFECYCLE,
+                )
+            )
+        if operation is DelegatedRegionOperation.DELEGATED_RELEASE:
+            return encode_reply(
+                DelegatedReleaseReply(
+                    tag=DelegatedReleaseReplyTag.ERROR,
+                    session_instance_id=record.session_instance_id,
+                    transaction_id=record.transaction_id,
+                    error_kind=RegionControlErrorKind.STORE_LIFECYCLE,
+                )
+            )
+        raise RegionControlError(
+            RegionControlErrorKind.INTERNAL_INVARIANT,
+            f"unsupported terminal replay operation {int(operation)}",
+        )
+
+    def _enter_terminal_failure(
+        self,
+        record: _ProviderTransactionRecord,
+        operation: DelegatedRegionOperation,
+        committed: bytes,
+    ) -> bytes:
+        record.terminal_operation = operation
+        record.terminal_reply = committed
+        record.state = ProviderTransactionState.TERMINAL_FAILURE
+        return committed
 
     def _finish_allocate_error(
         self,
@@ -1515,10 +1567,8 @@ class ProviderTransactionTable:
         if error.control_kind is RegionControlErrorKind.BACKEND_FAILURE and not error.cleanup_debt_remaining:
             del self._records[key]
             return committed
-        record.state = ProviderTransactionState.TERMINAL_FAILURE
         record.provider_resource_id = int(error.provisional_resource_id)
-        record.terminal_reply = committed
-        return committed
+        return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_ALLOCATE, committed)
 
     def _finish_allocate_control_error(
         self,
@@ -1537,9 +1587,7 @@ class ProviderTransactionTable:
                 else RegionControlErrorKind.INTERNAL_INVARIANT,
             )
         )
-        record.state = ProviderTransactionState.TERMINAL_FAILURE
-        record.terminal_reply = committed
-        return committed
+        return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_ALLOCATE, committed)
 
     def _compensate_before_allocated_tag(
         self,
@@ -1565,9 +1613,7 @@ class ProviderTransactionTable:
                     ),
                 )
             )
-            record.state = ProviderTransactionState.TERMINAL_FAILURE
-            record.terminal_reply = committed
-            return committed
+            return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_ALLOCATE, committed)
         if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
             del self._records[key]
             return encode_reply(
@@ -1592,9 +1638,7 @@ class ProviderTransactionTable:
                 ),
             )
         )
-        record.state = ProviderTransactionState.TERMINAL_FAILURE
-        record.terminal_reply = committed
-        return committed
+        return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_ALLOCATE, committed)
 
     def _execute_release(self, request: DelegatedReleaseRequest, store: _ProviderRegionStoreOps) -> bytes:
         key = self._key(request.session_instance_id, request.transaction_id)
@@ -1617,12 +1661,7 @@ class ProviderTransactionTable:
                 )
             )
         if record.state is ProviderTransactionState.TERMINAL_FAILURE:
-            if record.terminal_reply is None:
-                raise RegionControlError(
-                    RegionControlErrorKind.INTERNAL_INVARIANT,
-                    "TERMINAL_FAILURE record is missing its diagnostic reply",
-                )
-            return record.terminal_reply
+            return self._terminal_reply_for_operation(record, DelegatedRegionOperation.DELEGATED_RELEASE)
         if record.state is not ProviderTransactionState.ACTIVE:
             raise RegionControlError(
                 RegionControlErrorKind.INTERNAL_INVARIANT,
@@ -1641,9 +1680,7 @@ class ProviderTransactionTable:
                     error_kind=kind,
                 )
             )
-            record.state = ProviderTransactionState.TERMINAL_FAILURE
-            record.terminal_reply = committed
-            return committed
+            return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_RELEASE, committed)
         if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
             committed = encode_reply(
                 DelegatedReleaseReply(
@@ -1671,9 +1708,7 @@ class ProviderTransactionTable:
                 result=result,
             )
         )
-        record.state = ProviderTransactionState.TERMINAL_FAILURE
-        record.terminal_reply = committed
-        return committed
+        return self._enter_terminal_failure(record, DelegatedRegionOperation.DELEGATED_RELEASE, committed)
 
 
 def handle_terminal_delegated_region(
@@ -1702,6 +1737,8 @@ def _publish_invalid_terminal_request(view: memoryview, error: RegionControlErro
         session_id = _require_session(session)
         tx = _require_transaction_id(int(transaction_id))
     except RegionControlError:
+        return
+    if view.nbytes < _operation_fixed_reply_bytes(op):
         return
     if op is DelegatedRegionOperation.DELEGATED_ALLOCATE:
         kind = (

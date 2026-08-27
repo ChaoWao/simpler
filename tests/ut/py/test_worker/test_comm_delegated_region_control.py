@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import struct
 from pathlib import Path
 
 import pytest
+import simpler.comm_delegated_region_control as delegated_control
 from simpler.buffer import BackendKind
 from simpler.comm_delegated_region_control import (
     ALLOCATE_COUNTER_EXPORT_OFFSET,
@@ -922,3 +924,326 @@ def test_hop_staging_copy_uses_max_of_request_and_fixed_reply():
     assert len(release_hop) == max(release_envelope.request_bytes, RELEASE_REPLY_BYTES)
     assert release_hop[: release_envelope.request_bytes] == release_envelope.frame
     assert not any(release_hop[release_envelope.request_bytes :])
+
+
+def _projection_from_valid_allocate() -> bytes:
+    staged = encode_request(_allocate_request(), staged_capacity=256)
+    return bytes(staged[REQUEST_HEADER_BYTES : REQUEST_HEADER_BYTES + ALLOCATE_PROJECTION_BYTES])
+
+
+def _raw_allocate_request(*, initiator_path: bytes, provider_path: bytes = _PROVIDER_PATH) -> bytearray:
+    projection = _projection_from_valid_allocate()
+    request_bytes = REQUEST_HEADER_BYTES + ALLOCATE_PROJECTION_BYTES + len(initiator_path) + len(provider_path)
+    capacity = max(ALLOCATE_REPLY_BYTES, request_bytes)
+    staged = bytearray(capacity)
+    struct.pack_into(
+        "<QII8sQII",
+        staged,
+        0,
+        DELEGATED_REGION_CTRL_MAGIC_VERSION,
+        request_bytes,
+        int(DelegatedRegionOperation.DELEGATED_ALLOCATE),
+        _SESSION,
+        1,
+        len(provider_path),
+        len(initiator_path),
+    )
+    staged[REQUEST_HEADER_BYTES : REQUEST_HEADER_BYTES + ALLOCATE_PROJECTION_BYTES] = projection
+    start = REQUEST_HEADER_BYTES + ALLOCATE_PROJECTION_BYTES
+    staged[start : start + len(initiator_path)] = initiator_path
+    staged[start + len(initiator_path) : request_bytes] = provider_path
+    return staged
+
+
+def test_initiator_path_zero_one_255_256_257():
+    empty = _raw_allocate_request(initiator_path=b"")
+    envelope = parse_request(empty)
+    with pytest.raises(RegionControlError) as empty_exc:
+        envelope.decode_terminal()
+    assert _kind(empty_exc.value) is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+    one = _raw_allocate_request(initiator_path=b"L")
+    one_envelope = parse_request(one)
+    with pytest.raises(RegionControlError) as one_exc:
+        one_envelope.decode_terminal()
+    assert _kind(one_exc.value) is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+    over = _raw_allocate_request(initiator_path=b"A" * 257)
+    with pytest.raises(RegionControlError) as huge:
+        parse_request(over)
+    assert _kind(huge.value) is RegionControlErrorKind.BAD_MESSAGE_SIZE
+
+    path_255 = _canonical_path_of_length(255)
+    staged_255 = encode_request(_allocate_request(initiator_path=path_255), staged_capacity=max(256, 40 + 64 + 255 + 8))
+    decoded_255 = parse_request(staged_255).decode_terminal()
+    assert decoded_255.initiator_path == path_255
+
+    path_256 = _canonical_path_of_length(256)
+    staged_256 = encode_request(_allocate_request(initiator_path=path_256), staged_capacity=max(256, 40 + 64 + 256 + 8))
+    decoded_256 = parse_request(staged_256).decode_terminal()
+    assert decoded_256.initiator_path == path_256
+
+
+def test_provider_path_zero_one_255_256_257_on_allocate_and_release():
+    empty = bytearray(encode_request(_release_request(), staged_capacity=72))
+    struct.pack_into("<I", empty, 32, 0)
+    struct.pack_into("<I", empty, 8, REQUEST_HEADER_BYTES)
+    empty[REQUEST_HEADER_BYTES:] = b"\x00" * (len(empty) - REQUEST_HEADER_BYTES)
+    with pytest.raises(RegionControlError) as empty_exc:
+        parse_request(empty)
+    assert _kind(empty_exc.value) is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+    one = bytearray(encode_request(_release_request(), staged_capacity=72))
+    struct.pack_into("<I", one, 8, REQUEST_HEADER_BYTES + 1)
+    struct.pack_into("<I", one, 32, 1)
+    one[REQUEST_HEADER_BYTES : REQUEST_HEADER_BYTES + 1] = b"L"
+    one[REQUEST_HEADER_BYTES + 1 :] = b"\x00" * (len(one) - REQUEST_HEADER_BYTES - 1)
+    with pytest.raises(RegionControlError) as one_exc:
+        parse_request(one)
+    assert _kind(one_exc.value) is RegionControlErrorKind.INVALID_FIELD_VALUE
+
+    over = _raw_allocate_request(initiator_path=_INITIATOR_PATH, provider_path=b"A" * 257)
+    with pytest.raises(RegionControlError) as huge:
+        parse_request(over)
+    assert _kind(huge.value) is RegionControlErrorKind.BAD_MESSAGE_SIZE
+
+    path_255 = _canonical_path_of_length(255)
+    path_256 = _canonical_path_of_length(256)
+    staged_255 = encode_request(_release_request(provider_path=path_255), staged_capacity=max(72, 40 + 255))
+    staged_256 = encode_request(_release_request(provider_path=path_256), staged_capacity=296)
+    assert parse_request(staged_255).provider_path == path_255
+    assert parse_request(staged_256).provider_path == path_256
+
+    both = encode_request(_allocate_request(initiator_path=path_256, provider_path=path_256), staged_capacity=616)
+    assert len(both) == 616
+    release = encode_request(_release_request(provider_path=path_256), staged_capacity=296)
+    assert len(release) == 296
+    assert parse_request(release).request_bytes == 296
+
+
+def test_table_projection_only_conflict_keeps_active_cache():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+    request = _allocate_request(transaction_id=1)
+    first = table.execute(request, counted)
+    cached = bytes(first)
+    assert counted.allocate_calls == 1
+    conflict_request = dataclasses.replace(request, payload_logical_bytes=128)
+    conflict = _decode_allocate(table.execute(conflict_request, counted))
+    assert conflict.tag is DelegatedAllocateReplyTag.ERROR
+    assert conflict.error_kind is RegionControlErrorKind.INVALID_FIELD_VALUE
+    assert counted.allocate_calls == 1
+    replay = table.execute(request, counted)
+    assert replay == cached
+    assert counted.allocate_calls == 1
+    assert counted.release_calls == 0
+
+
+def test_table_allocated_encode_failure_compensates_once(monkeypatch):
+    store, factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+    real_encode = delegated_control.encode_reply
+    state = {"fail_allocated": True}
+
+    def _encode(reply):
+        if (
+            state["fail_allocated"]
+            and isinstance(reply, DelegatedAllocateReply)
+            and reply.tag is DelegatedAllocateReplyTag.ALLOCATED
+        ):
+            state["fail_allocated"] = False
+            raise RuntimeError("allocated encode failed")
+        return real_encode(reply)
+
+    monkeypatch.setattr(delegated_control, "encode_reply", _encode)
+    failed = _decode_allocate(table.execute(_allocate_request(transaction_id=1), counted))
+    assert counted.local_view_calls == 2
+    assert counted.allocate_calls == 1
+    assert counted.release_calls == 1
+    assert failed.tag is DelegatedAllocateReplyTag.ERROR
+    assert failed.error_kind is RegionControlErrorKind.INTERNAL_INVARIANT
+    assert table._records == {}
+    missing = _decode_release(table.execute(_release_request(transaction_id=1), counted))
+    assert missing.tag is DelegatedReleaseReplyTag.UNKNOWN_TRANSACTION
+    assert counted.release_calls == 1
+    late = _decode_allocate(table.execute(_allocate_request(transaction_id=1), counted))
+    assert late.tag is DelegatedAllocateReplyTag.ERROR
+    assert late.error_kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert counted.allocate_calls == 1
+    assert factory.world.duplicate_releases == []
+
+
+def test_short_staging_does_not_publish_or_touch_store():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+
+    allocate = encode_request(_allocate_request(transaction_id=1), staged_capacity=256)
+    short_allocate = bytearray(allocate[: ALLOCATE_REPLY_BYTES - 1])
+    allocate_snapshot = bytes(short_allocate)
+    handle_terminal_delegated_region(memoryview(short_allocate), table, counted)
+    assert bytes(short_allocate) == allocate_snapshot
+    assert counted.allocate_calls == 0
+    assert counted.release_calls == 0
+    assert table._records == {}
+    assert table._waterline == {}
+
+    release = encode_request(_release_request(transaction_id=1), staged_capacity=72)
+    short_release = bytearray(release[: RELEASE_REPLY_BYTES - 1])
+    release_snapshot = bytes(short_release)
+    handle_terminal_delegated_region(memoryview(short_release), table, counted)
+    assert bytes(short_release) == release_snapshot
+    assert counted.release_calls == 0
+    assert table._records == {}
+    assert table._waterline == {}
+
+
+def test_publish_reply_tag_last_snapshot_keeps_offset_12_zero():
+    real_tag = delegated_control._REPLY_TAG
+    writes: list[tuple[int, int]] = []
+    snapshots: list[bytes] = []
+
+    class _TagProxy:
+        def pack_into(self, buf, offset, value):
+            raw = buf.tobytes() if isinstance(buf, memoryview) else bytes(buf)
+            writes.append((len(raw), int(value)))
+            if int(value) != 0 and len(raw) == 616:
+                snapshots.append(raw)
+            real_tag.pack_into(buf, offset, value)
+
+    delegated_control._REPLY_TAG = _TagProxy()
+    try:
+        leftover = encode_request(_allocate_request(), staged_capacity=616)
+        committed = encode_reply(_allocated_reply())
+        publish_reply(memoryview(leftover), committed)
+    finally:
+        delegated_control._REPLY_TAG = real_tag
+    assert snapshots
+    snapshot = snapshots[-1]
+    assert snapshot == b"\x00" * 616 or snapshot[256:] == b"\x00" * 360
+    assert snapshot[256:] == b"\x00" * 360
+    prefix = bytearray(committed)
+    struct.pack_into("<I", prefix, REPLY_TAG_OFFSET, 0)
+    assert snapshot[:256] == bytes(prefix)
+    assert snapshot[REPLY_TAG_OFFSET : REPLY_TAG_OFFSET + 4] == (0).to_bytes(4, "little")
+    assert writes[-1][1] != 0
+    assert leftover[REPLY_TAG_OFFSET : REPLY_TAG_OFFSET + 4] == int(DelegatedAllocateReplyTag.ALLOCATED).to_bytes(
+        4, "little"
+    )
+
+
+def _assert_inactive_allocate_error(outcome: DelegatedAllocateReply, kind: RegionControlErrorKind) -> None:
+    assert outcome.tag is DelegatedAllocateReplyTag.ERROR
+    assert outcome.error_kind is kind
+    assert outcome.result is None
+    assert outcome.payload_view is None
+    assert outcome.counter_view is None
+    assert outcome.provisional_resource_id == 0
+    assert outcome.failed_part is RegionPartKind.INVALID
+    assert outcome.failed_operation is RegionOperationKind.NONE
+    assert outcome.cleanup_debt_remaining is False
+
+
+def test_allocate_terminal_duplicate_replays_cached_reply():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+    inner = counted._store.allocate_and_export
+
+    def _boom(spec):
+        raise RegionControlError(RegionControlErrorKind.INTERNAL_INVARIANT, "allocate terminal")
+
+    counted._store.allocate_and_export = _boom  # type: ignore[method-assign]
+    first = table.execute(_allocate_request(transaction_id=1), counted)
+    counted._store.allocate_and_export = inner  # type: ignore[method-assign]
+    outcome = _decode_allocate(first)
+    _assert_inactive_allocate_error(outcome, RegionControlErrorKind.INTERNAL_INVARIANT)
+    assert len(first) == ALLOCATE_REPLY_BYTES
+    assert parse_reply(first).reply_tag == int(DelegatedAllocateReplyTag.ERROR)
+    assert parse_reply(first).session_instance_id == _SESSION
+    assert parse_reply(first).transaction_id == 1
+    assert counted.allocate_calls == 1
+    duplicate = table.execute(_allocate_request(transaction_id=1), counted)
+    assert duplicate == first
+    assert counted.allocate_calls == 1
+    assert counted.release_calls == 0
+
+
+def test_allocate_terminal_then_release_returns_store_lifecycle():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+
+    def _boom(spec):
+        raise RegionControlError(RegionControlErrorKind.INTERNAL_INVARIANT, "allocate terminal")
+
+    counted._store.allocate_and_export = _boom  # type: ignore[method-assign]
+    table.execute(_allocate_request(transaction_id=1), counted)
+    released = table.execute(_release_request(transaction_id=1), counted)
+    assert len(released) == RELEASE_REPLY_BYTES
+    outcome = _decode_release(released)
+    assert outcome.tag is DelegatedReleaseReplyTag.ERROR
+    assert outcome.error_kind is RegionControlErrorKind.STORE_LIFECYCLE
+    assert outcome.result is None
+    assert parse_reply(released).session_instance_id == _SESSION
+    assert parse_reply(released).transaction_id == 1
+    assert parse_reply(released).reply_tag == int(DelegatedReleaseReplyTag.ERROR)
+    assert counted.release_calls == 0
+    assert counted.allocate_calls == 1
+
+
+def test_release_terminal_duplicate_replays_cached_reply():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+    allocated = _decode_allocate(table.execute(_allocate_request(transaction_id=1), counted))
+    assert allocated.result is not None
+
+    def _unknown(provider_resource_id):
+        counted.release_calls += 1
+        counted.release_ids.append(int(provider_resource_id))
+        return ProviderReleaseResult(
+            provider_resource_id=int(provider_resource_id),
+            status=ProviderReleaseStatus.UNKNOWN_RESOURCE,
+        )
+
+    counted.release = _unknown  # type: ignore[method-assign]
+    first = table.execute(_release_request(transaction_id=1), counted)
+    outcome = _decode_release(first)
+    assert outcome.tag is DelegatedReleaseReplyTag.UNKNOWN_RESOURCE
+    assert len(first) == RELEASE_REPLY_BYTES
+    assert parse_reply(first).session_instance_id == _SESSION
+    assert parse_reply(first).transaction_id == 1
+    assert counted.release_calls == 1
+    duplicate = table.execute(_release_request(transaction_id=1), counted)
+    assert duplicate == first
+    assert counted.release_calls == 1
+
+
+def test_release_terminal_then_allocate_returns_store_lifecycle():
+    store, _factory = _open_store()
+    counted = _CountingStore(store)
+    table = ProviderTransactionTable()
+    table.execute(_allocate_request(transaction_id=1), counted)
+
+    def _unknown(provider_resource_id):
+        counted.release_calls += 1
+        counted.release_ids.append(int(provider_resource_id))
+        return ProviderReleaseResult(
+            provider_resource_id=int(provider_resource_id),
+            status=ProviderReleaseStatus.UNKNOWN_RESOURCE,
+        )
+
+    counted.release = _unknown  # type: ignore[method-assign]
+    table.execute(_release_request(transaction_id=1), counted)
+    late = table.execute(_allocate_request(transaction_id=1), counted)
+    assert len(late) == ALLOCATE_REPLY_BYTES
+    outcome = _decode_allocate(late)
+    _assert_inactive_allocate_error(outcome, RegionControlErrorKind.STORE_LIFECYCLE)
+    assert parse_reply(late).session_instance_id == _SESSION
+    assert parse_reply(late).transaction_id == 1
+    assert parse_reply(late).reply_tag == int(DelegatedAllocateReplyTag.ERROR)
+    assert counted.allocate_calls == 1
+    assert counted.release_calls == 1

@@ -18,6 +18,8 @@ from ._helpers import (
     _RUNTIME,
     SUCCESS_PLATFORMS,
     build_chip_callable,
+    close_owned_workers,
+    install_lifecycle_recorder,
     make_l3_forward,
     make_l4_submit,
     run_two_lifecycles,
@@ -36,17 +38,29 @@ def test_l4_two_hop_two_lifecycles(st_platform, st_device_ids):
         platform=st_platform,
         runtime=_RUNTIME,
     )
-    chip_handle = l3.register(chip_callable)
-    worker = Worker(level=4, num_sub_workers=0, platform=st_platform, runtime=_RUNTIME)
-    l3_worker_id = worker.add_worker(l3)
-    worker.register(chip_callable)
-    l3_orch_handle = worker.register(make_l3_forward(chip_handle))
-    worker.init()
+    worker = None
+    recorder = None
+    primary = None
     try:
+        chip_handle = l3.register(chip_callable)
+        worker = Worker(level=4, num_sub_workers=0, platform=st_platform, runtime=_RUNTIME)
+        recorder = install_lifecycle_recorder(worker)
+        l3_worker_id = worker.add_worker(l3)
+        worker.register(chip_callable)
+        l3_orch_handle = worker.register(make_l3_forward(chip_handle))
+        worker.init()
         run_two_lifecycles(
             worker,
             provider_path=f"L4/L3[{int(l3_worker_id)}]/L2[0]",
             submit_chip=make_l4_submit(l3_orch_handle, int(l3_worker_id)),
+            recorder=recorder,
         )
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        worker.close()
+        try:
+            close_owned_workers(primary, worker, l3)
+        finally:
+            if recorder is not None and recorder.restore is not None:
+                recorder.restore()

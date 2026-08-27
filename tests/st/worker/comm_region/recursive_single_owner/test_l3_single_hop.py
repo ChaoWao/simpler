@@ -14,7 +14,15 @@ from __future__ import annotations
 import pytest
 from simpler.worker import Worker
 
-from ._helpers import _RUNTIME, SUCCESS_PLATFORMS, build_chip_callable, make_l3_submit, run_two_lifecycles
+from ._helpers import (
+    _RUNTIME,
+    SUCCESS_PLATFORMS,
+    build_chip_callable,
+    close_owned_workers,
+    install_lifecycle_recorder,
+    make_l3_submit,
+    run_two_lifecycles,
+)
 
 
 @pytest.mark.platforms(SUCCESS_PLATFORMS)
@@ -29,9 +37,24 @@ def test_l3_single_hop_two_lifecycles(st_platform, st_device_ids):
         platform=st_platform,
         runtime=_RUNTIME,
     )
-    chip_handle = worker.register(chip_callable)
-    worker.init()
+    recorder = None
+    primary = None
     try:
-        run_two_lifecycles(worker, provider_path="L3/L2[0]", submit_chip=make_l3_submit(chip_handle))
+        recorder = install_lifecycle_recorder(worker)
+        chip_handle = worker.register(chip_callable)
+        worker.init()
+        run_two_lifecycles(
+            worker,
+            provider_path="L3/L2[0]",
+            submit_chip=make_l3_submit(chip_handle),
+            recorder=recorder,
+        )
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        worker.close()
+        try:
+            close_owned_workers(primary, worker)
+        finally:
+            if recorder is not None and recorder.restore is not None:
+                recorder.restore()

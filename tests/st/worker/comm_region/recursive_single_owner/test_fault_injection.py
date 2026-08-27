@@ -25,6 +25,7 @@ from ._helpers import (
     _install_release_probe,
     _stream_config,
     build_chip_callable,
+    close_owned_workers,
     make_l3_forward,
 )
 
@@ -37,9 +38,13 @@ def _l3(platform: str, device_id: int) -> Worker:
         platform=platform,
         runtime=_RUNTIME,
     )
-    worker.register(build_chip_callable(platform))
-    worker.init()
-    return worker
+    try:
+        worker.register(build_chip_callable(platform))
+        worker.init()
+        return worker
+    except BaseException as primary:
+        close_owned_workers(primary, worker)
+        raise
 
 
 def _l4(platform: str, device_id: int) -> Worker:
@@ -50,23 +55,42 @@ def _l4(platform: str, device_id: int) -> Worker:
         platform=platform,
         runtime=_RUNTIME,
     )
-    chip = build_chip_callable(platform)
-    chip_handle = l3.register(chip)
-    worker = Worker(level=4, num_sub_workers=0, platform=platform, runtime=_RUNTIME)
-    worker.add_worker(l3)
-    worker.register(chip)
-    worker.register(make_l3_forward(chip_handle))
-    worker.init()
-    return worker
+    worker = None
+    try:
+        chip = build_chip_callable(platform)
+        chip_handle = l3.register(chip)
+        worker = Worker(level=4, num_sub_workers=0, platform=platform, runtime=_RUNTIME)
+        worker.add_worker(l3)
+        worker.register(chip)
+        worker.register(make_l3_forward(chip_handle))
+        worker.init()
+        return worker
+    except BaseException as primary:
+        close_owned_workers(primary, worker, l3)
+        raise
 
 
 def _create(orch_handle, provider_path: str):
     return orch_handle._worker._create_delegated_worker_chip_region(provider_path, _PAYLOAD_BYTES, _COUNTER_BYTES)
 
 
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return chain
+
+
 def _run_expect_fatal(worker: Worker, orch) -> None:
-    with pytest.raises(Exception, match=r"."):  # noqa: PT011
+    with pytest.raises(BaseException) as excinfo:  # noqa: PT011
         worker.run(orch, args=None, config=_stream_config())
+    fatal = worker._delegated_session_fatal
+    assert fatal is not None
+    assert any(item is fatal for item in _exception_chain(excinfo.value))
 
 
 def _assert_fatal_no_release(worker: Worker, releases: list[dict[str, object]]) -> None:
