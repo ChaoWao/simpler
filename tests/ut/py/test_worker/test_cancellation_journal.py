@@ -18,9 +18,10 @@ import pytest
 import simpler.worker as worker_mod
 from simpler.worker import CleanupJournal, Worker, _journal_child_survivors, _Lifecycle, _shm_name
 
-from ._harness import TEST_WALL_BUDGET_S, hard_timeout
+from ._harness import TEST_WALL_BUDGET_S, TickingClock, hard_timeout
 
 _TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+_DEADLINE_AFTER_WATCHDOG_S = 2 * _TEST_WALL_BUDGET_S
 _hard_timeout = hard_timeout
 
 
@@ -121,6 +122,7 @@ class TestCloseDuringInitializing:
     def test_close_cancels_init_reaches_closed(self, monkeypatch):
         entered = threading.Event()
         release = threading.Event()
+        cancel_latched = threading.Event()
         orig = Worker._start_hierarchical
 
         def paused_start(self):
@@ -129,8 +131,16 @@ class TestCloseDuringInitializing:
             return orig(self)
 
         monkeypatch.setattr(Worker, "_start_hierarchical", paused_start)
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
+        real_monotonic = worker_mod._monotonic
+
+        def observe_cancel():
+            if w._cancel_token:
+                cancel_latched.set()
+            return real_monotonic()
+
+        monkeypatch.setattr(worker_mod, "_monotonic", observe_cancel)
 
         def owner_body():
             _run_catch(w.init)
@@ -143,8 +153,7 @@ class TestCloseDuringInitializing:
                 close_result: list = []
                 ct = threading.Thread(target=lambda: close_result.append(_run_catch(w.close)))
                 ct.start()
-                while not w._cancel_token:
-                    time.sleep(0.001)
+                assert cancel_latched.wait(3.0)
                 release.set()
                 ct.join(10.0)
                 it.join(10.0)
@@ -168,7 +177,9 @@ class TestCloseDuringInitializing:
 
         monkeypatch.setattr(Worker, "_start_hierarchical", paused_start)
         monkeypatch.setattr(worker_mod, "_CLOSE_CANCEL_UNWIND_TIMEOUT_S", 0.5)
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        clock = TickingClock()
+        monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
 
         def owner_body():
@@ -201,7 +212,7 @@ class TestCloseDuringInitializing:
             return orig(self)
 
         monkeypatch.setattr(Worker, "_start_hierarchical", paused_start)
-        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
+        w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w.register(lambda args: None)
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
@@ -300,7 +311,7 @@ class TestJournalInAbortHierarchical:
     def test_fully_reaped_abort_leaves_empty_journal(self, monkeypatch):
         l3 = _l3_child()
         l3.init = _init_raises
-        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=10.0)
+        w4 = Worker(level=4, num_sub_workers=0, startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S)
         w4.register(_trivial_orch)
         w4.add_worker(l3)
         try:

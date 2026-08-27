@@ -75,6 +75,16 @@ _TASK_INTERFACE_CPP = Path(__file__).resolve().parents[4] / "python" / "bindings
 _WORKER_PY = Path(__file__).resolve().parents[4] / "python" / "simpler" / "worker.py"
 _ACCESS_ONBOARD_VMM = 1
 _ACCESS_SIM_POSIX_SHM = 2
+_TEST_WALL_BUDGET_S = 30.0
+_TEST_WALL_BUDGET_NS = int(_TEST_WALL_BUDGET_S * 1_000_000_000)
+
+
+def _wait_until(predicate, failure_message: str) -> None:
+    deadline = time.monotonic() + _TEST_WALL_BUDGET_S
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail(failure_message)
+        time.sleep(0.001)
 
 
 def test_worker_host_mapped_backend_types_are_removed_from_native_implementation():
@@ -1237,15 +1247,18 @@ def test_worker_host_mapped_counter_wait_releases_gil_for_python_notifier():
         handle = int(owner)
 
         def notify() -> None:
-            time.sleep(0.05)
+            _wait_until(
+                lambda: _task_interface_ext._worker_host_mapped_region_active_leases(handle) == 1,
+                "counter wait never acquired its mapped-region lease",
+            )
             _task_interface_ext._worker_host_mapped_counter_notify(handle, 0, 1, int(NotifyOp.Set))
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(notify)
             status, error_kind, observed, matched, message = _task_interface_ext._worker_host_mapped_counter_wait(
-                handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000
+                handle, 0, 1, int(WaitCmp.EQ), _TEST_WALL_BUDGET_NS
             )
-            future.result(timeout=1.0)
+            future.result(timeout=_TEST_WALL_BUDGET_S)
 
         assert (status, error_kind, observed, matched, message) == (0, 0, 1, True, "")
     finally:
@@ -1263,15 +1276,18 @@ def test_region_neutral_counter_wait_releases_gil_for_python_notifier():
         handle = int(owner)
 
         def notify() -> None:
-            time.sleep(0.05)
+            _wait_until(
+                lambda: _task_interface_ext._region_active_leases(handle) == 1,
+                "counter wait never acquired its mapped-region lease",
+            )
             _task_interface_ext._region_counter_notify(handle, 0, 1, int(NotifyOp.Set))
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(notify)
             status, error_kind, observed, matched, message = _task_interface_ext._region_counter_wait(
-                handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000
+                handle, 0, 1, int(WaitCmp.EQ), _TEST_WALL_BUDGET_NS
             )
-            future.result(timeout=1.0)
+            future.result(timeout=_TEST_WALL_BUDGET_S)
 
         assert (status, error_kind, observed, matched, message) == (0, 0, 1, True, "")
     finally:
@@ -1332,13 +1348,13 @@ def test_region_neutral_byte_copy_holds_active_lease_until_native_copy_returns()
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(delayed_copy_to)
-            deadline = time.monotonic() + 1.0
-            while _task_interface_ext._region_active_leases(handle) != 1:
-                assert time.monotonic() < deadline, "byte copy never acquired its mapped-region lease"
-                time.sleep(0.001)
+            _wait_until(
+                lambda: _task_interface_ext._region_active_leases(handle) == 1,
+                "byte copy never acquired its mapped-region lease",
+            )
 
             assert _task_interface_ext._region_active_leases(handle) == 1
-            future.result(timeout=1.0)
+            future.result(timeout=_TEST_WALL_BUDGET_S)
 
         assert _task_interface_ext._region_active_leases(handle) == 0
         assert bytes(cast(memoryview, shm.buf)[16:24]) == bytes(range(1, 9))
@@ -1416,7 +1432,7 @@ def test_region_neutral_concurrent_closes_wait_for_in_flight_counter_wait():
         close_done = [threading.Event(), threading.Event()]
 
         def wait_for_counter():
-            return _task_interface_ext._region_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
+            return _task_interface_ext._region_counter_wait(handle, 0, 1, int(WaitCmp.EQ), _TEST_WALL_BUDGET_NS)
 
         def close_mapping(index: int) -> None:
             close_entered[index].set()
@@ -1425,21 +1441,25 @@ def test_region_neutral_concurrent_closes_wait_for_in_flight_counter_wait():
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             wait_future = executor.submit(wait_for_counter)
-            deadline = time.monotonic() + 1.0
-            while _task_interface_ext._region_active_leases(handle) != 1:
-                assert time.monotonic() < deadline, "counter wait never acquired its mapped-region lease"
-                time.sleep(0.001)
+            _wait_until(
+                lambda: _task_interface_ext._region_active_leases(handle) == 1,
+                "counter wait never acquired its mapped-region lease",
+            )
 
             close_futures = [executor.submit(close_mapping, index) for index in range(2)]
-            assert all(event.wait(1.0) for event in close_entered)
-            assert not any(event.wait(0.05) for event in close_done), (
+            assert all(event.wait(_TEST_WALL_BUDGET_S) for event in close_entered)
+            _wait_until(
+                lambda: _task_interface_ext._region_closing_for_test(handle),
+                "mapped-region close never started waiting for the active lease",
+            )
+            assert not any(event.is_set() for event in close_done), (
                 "a concurrent close returned while a native operation still held the region"
             )
 
             cast(memoryview, shm.buf)[:4] = b"\x01\x00\x00\x00"
-            assert wait_future.result(timeout=1.0) == (0, 0, 1, True, "")
+            assert wait_future.result(timeout=_TEST_WALL_BUDGET_S) == (0, 0, 1, True, "")
             for close_future in close_futures:
-                close_future.result(timeout=1.0)
+                close_future.result(timeout=_TEST_WALL_BUDGET_S)
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
             _task_interface_ext._region_counter_test(handle, 0, 1, int(WaitCmp.EQ))
@@ -1585,7 +1605,9 @@ def test_worker_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
         close_done = [threading.Event(), threading.Event()]
 
         def wait_for_counter():
-            return _task_interface_ext._worker_host_mapped_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
+            return _task_interface_ext._worker_host_mapped_counter_wait(
+                handle, 0, 1, int(WaitCmp.EQ), _TEST_WALL_BUDGET_NS
+            )
 
         def close_mapping(index: int) -> None:
             close_entered[index].set()
@@ -1594,21 +1616,25 @@ def test_worker_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             wait_future = executor.submit(wait_for_counter)
-            deadline = time.monotonic() + 1.0
-            while _task_interface_ext._worker_host_mapped_region_active_leases(handle) != 1:
-                assert time.monotonic() < deadline, "counter wait never acquired its mapped-region lease"
-                time.sleep(0.001)
+            _wait_until(
+                lambda: _task_interface_ext._worker_host_mapped_region_active_leases(handle) == 1,
+                "counter wait never acquired its mapped-region lease",
+            )
 
             close_futures = [executor.submit(close_mapping, index) for index in range(2)]
-            assert all(event.wait(1.0) for event in close_entered)
-            assert not any(event.wait(0.05) for event in close_done), (
+            assert all(event.wait(_TEST_WALL_BUDGET_S) for event in close_entered)
+            _wait_until(
+                lambda: _task_interface_ext._worker_host_mapped_region_closing_for_test(handle),
+                "L3 Host mapped-region close never started waiting for the active lease",
+            )
+            assert not any(event.is_set() for event in close_done), (
                 "a concurrent close returned while a native operation still held the region"
             )
 
             cast(memoryview, shm.buf)[:4] = b"\x01\x00\x00\x00"
-            assert wait_future.result(timeout=1.0) == (0, 0, 1, True, "")
+            assert wait_future.result(timeout=_TEST_WALL_BUDGET_S) == (0, 0, 1, True, "")
             for close_future in close_futures:
-                close_future.result(timeout=1.0)
+                close_future.result(timeout=_TEST_WALL_BUDGET_S)
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
             _task_interface_ext._worker_host_mapped_counter_test(handle, 0, 1, int(WaitCmp.EQ))

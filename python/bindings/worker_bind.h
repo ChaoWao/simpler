@@ -383,6 +383,14 @@ inline void bind_worker(nb::module_ &m) {
             nb::call_guard<nb::gil_scoped_release>(), "Wait up to timeout_seconds for one run to become terminal."
         )
         .def("_run_done", &Orchestrator::run_done, nb::arg("run_id"))
+        .def(
+            "_current_run_failed_for_test", &Orchestrator::current_building_run_failed_for_test,
+            "Report whether an asynchronous failure has reached the run whose graph is still being built."
+        )
+        .def(
+            "_begin_run_waiter_count_for_test", &Orchestrator::begin_run_waiter_count_for_test,
+            "Return the number of begin_run calls currently waiting for a pipeline slot."
+        )
         .def("_release_run", &Orchestrator::release_run, nb::arg("run_id"));
 
     // --- Worker ---
@@ -929,6 +937,29 @@ inline void bind_worker(nb::module_ &m) {
         nb::arg("addr"), nb::arg("expected"), nb::arg("timeout_s"),
         "Block (GIL released) until the mailbox word at `addr` differs from `expected`, a peer "
         "wakes the word, or `timeout_s` elapses. May return spuriously; callers re-check the word."
+    );
+    m.def(
+        "_mailbox_wait_i32_result_for_test",
+        [](uint64_t addr, int32_t expected, double timeout_s) {
+            nb::gil_scoped_release release;
+            switch (mpi_group_mailbox::wait_word(reinterpret_cast<int32_t *>(addr), expected, timeout_s)) {
+            case mpi_group_mailbox::WaitWordResult::NO_WAIT:
+                return std::string("no_wait");
+            case mpi_group_mailbox::WaitWordResult::VALUE_MISMATCH:
+                return std::string("value_mismatch");
+            case mpi_group_mailbox::WaitWordResult::WOKEN:
+                return std::string("woken");
+            case mpi_group_mailbox::WaitWordResult::TIMED_OUT:
+                return std::string("timed_out");
+            case mpi_group_mailbox::WaitWordResult::INTERRUPTED:
+                return std::string("interrupted");
+            case mpi_group_mailbox::WaitWordResult::ERROR:
+                return std::string("error");
+            }
+            return std::string("error");
+        },
+        nb::arg("addr"), nb::arg("expected"), nb::arg("timeout_s"),
+        "Return why a mailbox-word wait ended, for deterministic timeout tests."
     );
     m.def(
         "_mpi_mailbox_layout",

@@ -53,7 +53,8 @@ void count_sigpipe(int) { ++g_sigpipe_count; }
 // Declare before the transport so the transport is destroyed first.
 class ScopedServerThread {
 public:
-    ScopedServerThread() = default;
+    explicit ScopedServerThread(std::atomic<bool> *join_observed = nullptr) :
+        join_observed_(join_observed) {}
     ~ScopedServerThread() { stop_and_join(); }
 
     ScopedServerThread(const ScopedServerThread &) = delete;
@@ -66,12 +67,16 @@ public:
     // destructor then finds nothing joinable.
     void stop_and_join() {
         stop_.store(true, std::memory_order_release);
-        if (thread_.joinable()) thread_.join();
+        if (thread_.joinable()) {
+            thread_.join();
+            if (join_observed_ != nullptr) join_observed_->store(true, std::memory_order_release);
+        }
     }
 
 private:
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> *join_observed_{nullptr};
 };
 
 class ScopedSigpipeCounter {
@@ -258,6 +263,49 @@ start_delayed_reply_server(std::thread &server_thread, std::atomic<bool> &stop, 
                 off += static_cast<size_t>(n);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            ::close(fd);
+        }
+        ::close(listener);
+    });
+    return port;
+}
+
+uint16_t start_gated_reply_server(
+    std::thread &server_thread, std::atomic<bool> &stop, std::atomic<bool> &request_received,
+    std::atomic<bool> &send_reply, uint64_t sequence
+) {
+    uint16_t port = 0;
+    int listener = make_loopback_listener(port);
+    server_thread = std::thread([listener, &stop, &request_received, &send_reply, sequence]() {
+        int fd = accept_until_stop(listener, stop);
+        if (fd >= 0) {
+            std::array<uint8_t, remote_l3::FRAME_HEADER_BYTES> request{};
+            size_t offset = 0;
+            while (offset < request.size()) {
+                ssize_t n = ::recv(fd, request.data() + offset, request.size() - offset, 0);
+                if (n <= 0) break;
+                offset += static_cast<size_t>(n);
+            }
+            if (offset == request.size()) {
+                request_received.store(true, std::memory_order_release);
+                while (!send_reply.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                if (!stop.load(std::memory_order_acquire)) {
+                    remote_l3::FrameHeader header;
+                    header.frame_type = remote_l3::FrameType::COMPLETION;
+                    header.session_id = 1;
+                    header.worker_id = 0;
+                    header.sequence = sequence;
+                    std::vector<uint8_t> frame = remote_l3::encode_frame(header, {});
+                    offset = 0;
+                    while (offset < frame.size()) {
+                        ssize_t n = ::send(fd, frame.data() + offset, frame.size() - offset, MSG_NOSIGNAL);
+                        if (n <= 0) break;
+                        offset += static_cast<size_t>(n);
+                    }
+                }
+            }
             ::close(fd);
         }
         ::close(listener);
@@ -636,18 +684,16 @@ TEST(RemoteSocketTransport, ClosedPeerWriteDoesNotRaiseSigpipe) {
 // accept() is still reapable — the join must not hang.
 TEST(RemoteSocketTransport, ServerThreadIsJoinedWhenTestBodyUnwinds) {
     bool caught = false;
-    auto t0 = std::chrono::steady_clock::now();
+    std::atomic<bool> join_observed{false};
     try {
-        ScopedServerThread server;
+        ScopedServerThread server(&join_observed);
         (void)start_stalling_server(server.thread(), server.stop_flag());
         throw std::runtime_error("stands in for a transport constructor timeout");
     } catch (const std::runtime_error &) {
         caught = true;
     }
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
     EXPECT_TRUE(caught);
-    EXPECT_LT(elapsed, 5.0) << "destructor join should not wait out the server's own cap";
+    EXPECT_TRUE(join_observed.load(std::memory_order_acquire));
 }
 
 TEST(RemoteSocketTransport, CtorRejectsNonPositiveTimeouts) {
@@ -667,10 +713,8 @@ TEST(RemoteSocketTransport, HelloReadBoundedByAttachTimeout) {
     uint16_t port = start_stalling_server(server.thread(), server.stop_flag());
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 0.2, /*runtime*/ 5.0);
 
-    auto t0 = std::chrono::steady_clock::now();
     EXPECT_THROW(transport.expect_hello_ready(1, 0, "sim"), std::runtime_error);
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    EXPECT_LT(elapsed, 1.0);
+    EXPECT_TRUE(transport.last_read_used_attach_deadline_for_test());
 
     transport.shutdown();
     server.stop_and_join();
@@ -697,8 +741,11 @@ TEST(RemoteSocketTransport, RuntimeReadSurvivesElapsedAttachDeadline) {
 }
 
 TEST(RemoteSocketTransport, ProgressPollDoesNotWaitForDelayedReply) {
+    std::atomic<bool> request_received{false};
+    std::atomic<bool> send_reply{false};
     ScopedServerThread server;
-    uint16_t port = start_delayed_reply_server(server.thread(), server.stop_flag(), /*delay_ms=*/500, /*sequence=*/1);
+    uint16_t port =
+        start_gated_reply_server(server.thread(), server.stop_flag(), request_received, send_reply, /*sequence=*/1);
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 2.0);
 
     remote_l3::FrameHeader header;
@@ -709,14 +756,20 @@ TEST(RemoteSocketTransport, ProgressPollDoesNotWaitForDelayedReply) {
     transport.submit_progress_frame(remote_l3::encode_frame(header, {}));
 
     std::vector<uint8_t> reply;
-    auto t0 = std::chrono::steady_clock::now();
     EXPECT_FALSE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply));
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    EXPECT_LT(elapsed, 0.2);
+    for (int i = 0; i < 30000 && !request_received.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(request_received.load(std::memory_order_acquire));
+    // The server has consumed the request and is held behind send_reply, so
+    // no response exists yet. This is an event/state assertion, independent
+    // of how quickly either thread was scheduled.
+    EXPECT_FALSE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply));
 
+    send_reply.store(true, std::memory_order_release);
     bool complete = false;
-    for (int i = 0; i < 100 && !complete; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (int i = 0; i < 30000 && !complete; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         complete = transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply);
     }
     EXPECT_TRUE(complete);
@@ -797,10 +850,17 @@ TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 0.5);
 
     std::vector<uint8_t> big(16 * 1024 * 1024, 0x7E);
-    auto t0 = std::chrono::steady_clock::now();
-    EXPECT_THROW(transport.submit_frame(big), std::runtime_error);
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    EXPECT_LT(elapsed, 3.0);
+    EXPECT_THROW(
+        {
+            try {
+                transport.submit_frame(big);
+            } catch (const std::runtime_error &error) {
+                EXPECT_NE(std::string(error.what()).find("timed out writing frame"), std::string::npos);
+                throw;
+            }
+        },
+        std::runtime_error
+    );
 
     transport.shutdown();
     server.stop_and_join();

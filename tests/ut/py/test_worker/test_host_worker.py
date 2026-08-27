@@ -19,6 +19,7 @@ import dis
 import gc
 import inspect
 import multiprocessing.shared_memory as shared_memory_mod
+import signal
 import struct
 import subprocess
 import sys
@@ -96,11 +97,27 @@ def _native_control_region_release(recorder, worker_id, request_shm_name, reply_
         reply_shm.close()
 
 
-from ._harness import chip_callable, fake_chip_l3, requires_sim_binaries
+from ._harness import (
+    TEST_WALL_BUDGET_S,
+    ObservedCondition,
+    chip_callable,
+    fake_chip_l3,
+    requires_sim_binaries,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+
+
+def _wait_for_observed_state(predicate, failure_message: str) -> None:
+    deadline = time.monotonic() + _TEST_WALL_BUDGET_S
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail(failure_message)
+        time.sleep(0.001)
 
 
 def _make_shared_counter():
@@ -132,6 +149,25 @@ def _set_flag(buf, offset: int, value: int) -> None:
 
 def _get_flag(buf, offset: int) -> int:
     return struct.unpack_from("i", buf, offset)[0]
+
+
+class _ObservedLock:
+    def __init__(self, lock, blocked_attempt: threading.Event) -> None:
+        self._lock = lock
+        self._blocked_attempt = blocked_attempt
+        self._attempts = 0
+        self._attempts_lock = threading.Lock()
+
+    def __enter__(self):
+        with self._attempts_lock:
+            self._attempts += 1
+            if self._attempts == 2:
+                self._blocked_attempt.set()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_exc_info):
+        self._lock.release()
 
 
 def _roundtrip_py_callable_payload(target):
@@ -688,6 +724,8 @@ class _FakeNativeRunImpl:
         self.completed = [threading.Event(), threading.Event()]
         self.prepared = [threading.Event(), threading.Event()]
         self.launched = [threading.Event(), threading.Event()]
+        self._non_head_progress_cv = threading.Condition()
+        self._non_head_progress_counts = [0, 0]
         self.finalized = [threading.Event(), threading.Event()]
         self.launch_errors: dict[tuple[int, int], BaseException] = {}
         self.prepare_errors: dict[tuple[int, int], BaseException] = {}
@@ -705,6 +743,13 @@ class _FakeNativeRunImpl:
     def register_callable_from_blob(self, cid: int, blob_addr: int) -> None:
         self.register_calls.append((int(cid), int(blob_addr)))
         self.register_called.set()
+
+    def wait_for_non_head_progress(self, slot: int, rounds: int = 2) -> bool:
+        with self._non_head_progress_cv:
+            return self._non_head_progress_cv.wait_for(
+                lambda: self._non_head_progress_counts[slot] >= rounds,
+                timeout=5.0,
+            )
 
     def _prepare_native_run_materialized(
         self,
@@ -860,6 +905,11 @@ class _FakeNativeRunImpl:
         if target.terminal:
             return True
         if not self._runs or self._runs[0] is not target:
+            if target.activated:
+                slot = target.submission.slot_id
+                with self._non_head_progress_cv:
+                    self._non_head_progress_counts[slot] += 1
+                    self._non_head_progress_cv.notify_all()
             return False
         self._launch_front()
         self._prepare_successor()
@@ -962,6 +1012,18 @@ class _TwoFrameLoopHarness:
         self.buf = cast(memoryview, self.shm.buf)
         assert self.buf is not None
         self.mailbox_addr = _mailbox_addr(self.shm)
+        self._control_cv = threading.Condition()
+        self._control_reads = 0
+        self._mailbox_load_i32 = worker_mod._mailbox_load_i32
+
+        def observed_mailbox_load(addr: int) -> int:
+            value = self._mailbox_load_i32(addr)
+            if addr == self.mailbox_addr + _OFF_STATE and value == worker_mod._CONTROL_REQUEST:
+                with self._control_cv:
+                    self._control_reads += 1
+                    self._control_cv.notify_all()
+            return value
+
         self.digest = bytes([0x42]) * worker_mod.CALLABLE_HASH_DIGEST_BYTES
         self.cw = _FakeTwoFrameChipWorker(supports_concurrent_native_prepare=supports_concurrent_native_prepare)
         self.registry = {7: object()}
@@ -988,6 +1050,8 @@ class _TwoFrameLoopHarness:
                 "task_frame_count": 2,
             },
         )
+        self._mailbox_load_patch = patch.object(worker_mod, "_mailbox_load_i32", observed_mailbox_load)
+        self._mailbox_load_patch.start()
 
     def _frame_offset(self, index: int) -> int:
         return (1 + index) * worker_mod.MAILBOX_FRAME_SIZE
@@ -1044,19 +1108,23 @@ class _TwoFrameLoopHarness:
             assert time.monotonic() < deadline
             time.sleep(0.001)
 
-    def assert_control_stays_pending(self, duration: float = 0.05) -> None:
-        deadline = time.monotonic() + duration
-        while time.monotonic() < deadline:
-            assert _mailbox_load_i32(self.mailbox_addr + _OFF_STATE) == worker_mod._CONTROL_REQUEST
-            time.sleep(0.001)
+    def assert_control_stays_pending(self, rounds: int = 2) -> None:
+        with self._control_cv:
+            target_reads = self._control_reads + rounds
+            assert self._control_cv.wait_for(lambda: self._control_reads >= target_reads, timeout=5.0)
+        assert _mailbox_load_i32(self.mailbox_addr + _OFF_STATE) == worker_mod._CONTROL_REQUEST
 
     def publish_unregister(self, digest: Optional[bytes] = None) -> None:
+        with self._control_cv:
+            self._control_reads = 0
         digest = self.digest if digest is None else digest
         struct.pack_into("Q", self.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_UNREGISTER)
         self.buf[worker_mod._OFF_CONTROL_CALLABLE_HASH : worker_mod._OFF_CONTROL_CALLABLE_HASH + len(digest)] = digest
         _mailbox_store_i32(self.mailbox_addr + _OFF_STATE, worker_mod._CONTROL_REQUEST)
 
     def publish_register(self, callable_obj: ChipCallable, payload_shm: SharedMemory, digest: bytes) -> None:
+        with self._control_cv:
+            self._control_reads = 0
         struct.pack_into("Q", self.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_REGISTER)
         struct.pack_into("Q", self.buf, worker_mod._CTRL_OFF_ARG0, int(callable_obj.buffer_size()))
         self.buf[worker_mod._OFF_CONTROL_CALLABLE_HASH : worker_mod._OFF_CONTROL_CALLABLE_HASH + len(digest)] = digest
@@ -1078,9 +1146,12 @@ class _TwoFrameLoopHarness:
         assert not self.thread.is_alive()
 
     def close(self) -> None:
-        self.stop()
-        self.shm.close()
-        self.shm.unlink()
+        try:
+            self.stop()
+        finally:
+            self._mailbox_load_patch.stop()
+            self.shm.close()
+            self.shm.unlink()
 
 
 def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
@@ -1153,7 +1224,8 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        assert not harness.cw._impl.launched[1].wait(0.05)
+        assert harness.cw._impl.wait_for_non_head_progress(1)
+        assert not harness.cw._impl.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
         harness.cw._impl.completed[0].set()
@@ -1232,11 +1304,7 @@ def test_two_frame_hbg_prepares_and_launches_reverse_ready_frames_by_dispatch_id
         harness.publish(1, 1)
         harness.start()
 
-        deadline = time.monotonic() + 5.0
-        while not any(event.is_set() for event in harness.cw._impl.launched):
-            assert time.monotonic() < deadline
-            time.sleep(0.001)
-        assert harness.cw._impl.launched[1].is_set()
+        assert harness.cw._impl.launched[1].wait(5.0)
         assert not harness.cw._impl.launched[0].is_set()
         assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 1),
@@ -2504,7 +2572,11 @@ class TestLifecycle:
 
             register_thread = threading.Thread(target=do_register)
             register_thread.start()
-            register_thread.join(timeout=0.05)
+            sub_state_addr = _mailbox_addr(hw._sub_shms[0]) + _OFF_STATE
+            _wait_for_observed_state(
+                lambda: _mailbox_load_i32(sub_state_addr) == _CONTROL_REQUEST,
+                "dynamic register never published its control request to the active sub mailbox",
+            )
             assert register_thread.is_alive()
 
             _set_flag(control_shm.buf, 4, 1)
@@ -3302,15 +3374,20 @@ class TestRunHandle:
 
             second = hw.submit(second_graph)
             assert second_callback_done
-            time.sleep(0.05)
-            assert _get_flag(state_buf, 8) == 0, "prepared run dispatched before the active run became terminal"
+            assert hw._orch is not None
+            native_orch = hw._orch._o
 
             def third_graph(_o, _args, _cfg):
                 third_callback.set()
 
             submitter = threading.Thread(target=lambda: third_result.setdefault("handle", hw.submit(third_graph)))
             submitter.start()
-            assert not third_callback.wait(0.05), "third callback ran before depth-two admission freed a slot"
+            _wait_for_observed_state(
+                lambda: native_orch._begin_run_waiter_count_for_test() == 1,
+                "third submission never reached native pipeline-slot admission wait",
+            )
+            assert _get_flag(state_buf, 8) == 0, "prepared run dispatched before the active run became terminal"
+            assert not third_callback.is_set(), "third callback ran before depth-two admission freed a slot"
 
             _set_flag(state_buf, 4, 1)
             assert third_callback.wait(3.0)
@@ -3371,7 +3448,7 @@ class TestRunHandle:
             counter_shm.close()
             counter_shm.unlink()
 
-    def test_close_drains_accepted_handle_and_rejects_later_submit(self):
+    def test_close_drains_accepted_handle_and_rejects_later_submit(self, monkeypatch):
         state_shm = SharedMemory(create=True, size=4)
         state_buf = state_shm.buf
         assert state_buf is not None
@@ -3386,13 +3463,33 @@ class TestRunHandle:
             target = hw.register(delayed)
             hw.init()
             handle = hw.submit(lambda o, _args, _cfg: o.submit_sub(target))
-            releaser = threading.Thread(target=lambda: (time.sleep(0.1), _set_flag(state_buf, 0, 1)))
+            close_waiting = threading.Event()
+            run_handle_wait = RunHandle.wait
+
+            def observed_wait(self, *args, **kwargs):
+                if self is handle:
+                    close_waiting.set()
+                return run_handle_wait(self, *args, **kwargs)
+
+            monkeypatch.setattr(RunHandle, "wait", observed_wait)
+
+            close_wait_observed: list[bool] = []
+
+            def release_after_close_waits():
+                try:
+                    close_wait_observed.append(close_waiting.wait(5.0))
+                finally:
+                    _set_flag(state_buf, 0, 1)
+
+            releaser = threading.Thread(target=release_after_close_waits)
             releaser.start()
             try:
                 hw.close()
             finally:
                 _set_flag(state_buf, 0, 1)
                 releaser.join(5.0)
+            assert not releaser.is_alive()
+            assert close_wait_observed == [True], "close never waited for the accepted run handle"
             assert handle.done
             with pytest.raises(RuntimeError, match="requires an initialized"):
                 hw.submit(lambda *_args: None)
@@ -3481,9 +3578,10 @@ class TestRunHandle:
         assert worker._close_completion is not None and not worker._close_completion.incomplete
         assert native_closes == ["close"]
 
-    def test_submit_close_race_accepts_and_drains_admitted_run(self):
+    def test_submit_close_race_accepts_and_drains_admitted_run(self, monkeypatch):
         callback_entered = threading.Event()
         callback_release = threading.Event()
+        close_draining = threading.Event()
         result: dict[str, object] = {}
         hw = Worker(level=3, num_sub_workers=0)
         hw.init()
@@ -3495,7 +3593,24 @@ class TestRunHandle:
         submitter = threading.Thread(target=lambda: result.setdefault("handle", hw.submit(orch)))
         submitter.start()
         assert callback_entered.wait(3.0)
-        releaser = threading.Thread(target=lambda: (time.sleep(0.1), callback_release.set()))
+        real_monotonic = worker_mod._monotonic
+
+        def observe_close_drain():
+            if hw._lifecycle is worker_mod._Lifecycle.CLOSED:
+                close_draining.set()
+            return real_monotonic()
+
+        monkeypatch.setattr(worker_mod, "_monotonic", observe_close_drain)
+
+        close_drain_observed: list[bool] = []
+
+        def release_after_close_drains():
+            try:
+                close_drain_observed.append(close_draining.wait(5.0))
+            finally:
+                callback_release.set()
+
+        releaser = threading.Thread(target=release_after_close_drains)
         releaser.start()
         try:
             hw.close()
@@ -3503,6 +3618,8 @@ class TestRunHandle:
             callback_release.set()
             submitter.join(5.0)
             releaser.join(5.0)
+        assert not releaser.is_alive()
+        assert close_drain_observed == [True], "close never reached the accepted-run draining state"
         handle = result["handle"]
         assert isinstance(handle, RunHandle)
         assert handle.done
@@ -3634,14 +3751,21 @@ class TestRunHandle:
                 return error
 
         handle = RunHandle(cast(Worker, FakeWorker.__new__(FakeWorker)), 1, ())
+        wait_attempted = threading.Event()
+        handle._cv = ObservedCondition(  # noqa: SLF001
+            handle._cv,  # noqa: SLF001
+            enter_thread_name="completion-waiter",
+            enter_attempted=wait_attempted,
+        )
         observed: list[bool] = []
         done_thread = threading.Thread(target=lambda: observed.append(handle.done))
-        wait_thread = threading.Thread(target=handle.wait)
+        wait_thread = threading.Thread(target=handle.wait, name="completion-waiter")
         done_thread.start()
         assert done_entered.wait(3.0)
         wait_thread.start()
         try:
-            assert not wait_entered.wait(0.1)
+            assert wait_attempted.wait(3.0)
+            assert not wait_entered.is_set()
         finally:
             done_release.set()
             done_thread.join(5.0)
@@ -4915,6 +5039,8 @@ class TestRunHandle:
         worker = Worker(level=3, num_sub_workers=0)
         worker._worker = cast(Any, object())
         entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7)
+        second_waiting = threading.Event()
+        worker._domain_free_mu = _ObservedLock(worker._domain_free_mu, second_waiting)  # noqa: SLF001
 
         resources = worker_mod._RunResources()
         contested = self._retired_domain(worker, resources, "contested", 7)
@@ -4932,7 +5058,8 @@ class TestRunHandle:
             assert in_backend.wait(5.0), "owner never reached the backend"
             assert not contested.freed, "freed must stay false while the backend call is in flight"
             second.start()
-            assert not second_done.wait(0.5), "the second caller returned while the owner was still releasing"
+            assert second_waiting.wait(5.0)
+            assert not second_done.is_set(), "the second caller returned while the owner was still releasing"
             assert not contested.freed
         finally:
             let_go.set()
@@ -5293,10 +5420,16 @@ class TestDirectControlOrdering:
         control = threading.Thread(target=lambda: self._alloc(worker), daemon=True)
         control.start()
         assert in_control.wait(5.0), "the control call never reached the child"
+        submit_waiting = threading.Event()
+        worker._submit_mu._cv = ObservedCondition(  # noqa: SLF001
+            worker._submit_mu._cv,  # noqa: SLF001
+            wait_entered=submit_waiting,
+        )
 
         submitter = threading.Thread(target=lambda: worker._submit_locked(lambda *a: None, None, None), daemon=True)
         submitter.start()
-        assert not submit_entered.wait(0.5), "a run was admitted while a control call was still in flight"
+        assert submit_waiting.wait(5.0)
+        assert not submit_entered.is_set(), "a run was admitted while a control call was still in flight"
 
         release_control.set()
         control.join(5.0)
@@ -5928,12 +6061,15 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         first_interrupt = KeyboardInterrupt("after confirmed launch")
         raised: list[BaseException] = []
         hook_calls: list[int] = []
+        completion_order: list[str] = []
 
         def target(rank: int) -> None:
             if rank == 0:
                 rank_zero_entered.set()
                 assert allow_rank_zero.wait(5.0)
             calls.append(rank)
+            if rank == 0:
+                completion_order.append("rank_zero")
             if rank == 1:
                 rank_one_completed.set()
 
@@ -5953,6 +6089,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             except BaseException as exc:  # noqa: BLE001
                 raised.append(exc)
             finally:
+                completion_order.append("runner")
                 runner_completed.set()
 
         runner = threading.Thread(target=run_fanout)
@@ -5960,7 +6097,6 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             runner.start()
             assert rank_zero_entered.wait(5.0)
             assert rank_one_completed.wait(5.0), "the later rank was not launched after the boundary interrupt"
-            assert not runner_completed.wait(0.1), "fanout returned while rank zero still owned caller state"
             allow_rank_zero.set()
             runner.join(5.0)
 
@@ -5968,6 +6104,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             assert sorted(calls) == [0, 1]
             assert hook_calls == [0, 1]
             assert raised == [first_interrupt]
+            assert completion_order == ["rank_zero", "runner"]
         finally:
             allow_rank_zero.set()
             runner.join(5.0)
@@ -5980,11 +6117,13 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         first_interrupt = KeyboardInterrupt("phase advance")
         phase_advances: list[int] = []
         raised: list[BaseException] = []
+        completion_order: list[str] = []
 
         def target(rank: int) -> None:
             if rank == 0:
                 rank_zero_entered.set()
                 assert allow_rank_zero.wait(5.0)
+                completion_order.append("rank_zero")
             if rank == 1:
                 rank_one_completed.set()
 
@@ -6004,6 +6143,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             except BaseException as exc:  # noqa: BLE001
                 raised.append(exc)
             finally:
+                completion_order.append("runner")
                 runner_completed.set()
 
         runner = threading.Thread(target=run_fanout)
@@ -6011,13 +6151,13 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             runner.start()
             assert rank_zero_entered.wait(5.0)
             assert rank_one_completed.wait(5.0)
-            assert not runner_completed.wait(0.1), "fanout returned before the launched target released caller state"
             allow_rank_zero.set()
             runner.join(5.0)
 
             assert not runner.is_alive()
             assert phase_advances == [0, 1, 2, 3]
             assert len(raised) == 1 and raised[0] is first_interrupt
+            assert completion_order == ["rank_zero", "runner"]
         finally:
             allow_rank_zero.set()
             runner.join(5.0)
@@ -6075,12 +6215,15 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         rank_one_completed = threading.Event()
         allow_rank_zero = threading.Event()
         calls: list[int] = []
+        completion_order: list[str] = []
 
         def release(chip_idx, _request_name):
             if chip_idx == 0:
                 rank_zero_entered.set()
                 assert allow_rank_zero.wait(5.0)
             calls.append(chip_idx)
+            if chip_idx == 0:
+                completion_order.append("rank_zero")
             if chip_idx == 1:
                 rank_one_completed.set()
 
@@ -6117,6 +6260,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             except BaseException as exc:  # noqa: BLE001
                 raised.append(exc)
             finally:
+                completion_order.append("runner")
                 runner_completed.set()
 
         runner = real_thread(target=run_dispatch)
@@ -6124,13 +6268,13 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             runner.start()
             assert rank_one_completed.wait(5.0), "a later collective rank was not launched"
             assert rank_zero_entered.wait(5.0), "the interrupted rank was not retried"
-            assert not runner_completed.wait(0.1), "fanout returned while the retried rank still owned the request shm"
             allow_rank_zero.set()
             runner.join(5.0)
 
             assert not runner.is_alive()
             assert sorted(calls) == [0, 1]
             assert len(raised) == 1 and isinstance(raised[0], KeyboardInterrupt)
+            assert completion_order == ["rank_zero", "runner"]
         finally:
             allow_rank_zero.set()
             runner.join(5.0)
@@ -6438,15 +6582,21 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
         real_ensure_comm_base = worker._ensure_comm_base
         interrupt_sent = threading.Event()
+        interrupt_observed = threading.Event()
+        previous_sigint = signal.getsignal(signal.SIGINT)
+
+        def observe_interrupt(_signum, _frame):
+            interrupt_observed.set()
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGINT, observe_interrupt)
 
         def interrupt_main() -> None:
             if interrupt_sent.is_set():
                 return
             interrupt_sent.set()
             _thread.interrupt_main()
-            # Keep the lifecycle active long enough for the main thread to
-            # observe the signal while the owned name is still live.
-            time.sleep(0.01)
+            assert interrupt_observed.wait(5.0)
 
         if operation == "comm_init":
             worker._worker = cast(Any, SimpleNamespace(control_comm_init=lambda *_args: interrupt_main()))
@@ -6499,6 +6649,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 with pytest.raises(FileNotFoundError):
                     SharedMemory(name=name)
         finally:
+            signal.signal(signal.SIGINT, previous_sigint)
             monkeypatch.setattr(SharedMemory, "__init__", real_init)
             for shm in created:
                 try:

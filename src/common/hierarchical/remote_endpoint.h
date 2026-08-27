@@ -55,6 +55,11 @@ public:
     bool poll_progress_reply(remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply) override;
     void shutdown() override;
 
+    // Read-only test seam: records the actual deadline passed into the most
+    // recent frame read, so deadline selection can be asserted without timing
+    // the host running the test.
+    bool last_read_used_attach_deadline_for_test() const { return last_read_deadline_ == attach_deadline_; }
+
 private:
     std::string host_;
     uint16_t port_{0};
@@ -79,6 +84,7 @@ private:
     size_t progress_read_offset_{0};
     size_t progress_read_size_{remote_l3::FRAME_HEADER_BYTES};
     std::chrono::steady_clock::time_point progress_deadline_{};
+    std::chrono::steady_clock::time_point last_read_deadline_{};
     bool progress_command_active_{false};
 
     void connect_socket();

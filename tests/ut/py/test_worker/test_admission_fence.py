@@ -40,14 +40,11 @@ import simpler.worker as worker_mod
 from _task_interface import ChipCallable  # pyright: ignore[reportMissingImports]
 from simpler.worker import RemoteCallable, RemoteWorkerSpec, Worker
 
-from ._harness import SIM_PLATFORM, SIM_RUNTIME, install_fake_chip
+from ._harness import SIM_PLATFORM, SIM_RUNTIME, TEST_WALL_BUDGET_S, ObservedCondition, install_fake_chip
 
 # Comfortably above every wait these tests actually take, well under any hang.
-_TEST_WALL_BUDGET_S = 30.0
-# How long close() must be observed NOT to return while a fenced operation is
-# parked mid-transaction. Only has to outlast the scheduling noise of handing
-# the GIL to the close() thread.
-_FENCE_OBSERVATION_S = 1.0
+_TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+_DEADLINE_AFTER_WATCHDOG_S = 2 * _TEST_WALL_BUDGET_S
 
 
 @contextlib.contextmanager
@@ -86,7 +83,7 @@ def ready_worker(monkeypatch):
         platform=SIM_PLATFORM,
         runtime=SIM_RUNTIME,
         num_sub_workers=1,
-        startup_timeout_s=_TEST_WALL_BUDGET_S,
+        startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
     )
     w.init()
     try:
@@ -106,6 +103,7 @@ class _ParkedTransaction:
 
     def __init__(self, obj, name: str):
         self.entered = threading.Event()
+        self.completed = threading.Event()
         self.release = threading.Event()
         self.lease_held: bool | None = None
         self._obj = obj
@@ -118,6 +116,7 @@ class _ParkedTransaction:
             self.lease_held = threading.get_ident() in self._obj._lease_depth
             self.entered.set()
             self.release.wait(timeout=_TEST_WALL_BUDGET_S)
+            self.completed.set()
             return result
 
         setattr(self._obj, self._name, patched)
@@ -132,24 +131,33 @@ class _ParkedTransaction:
         return False
 
 
-def _close_while_parked(worker: Worker, parked: _ParkedTransaction) -> float:
-    """close() the worker from THIS thread while ``parked`` holds a transaction
-    open, and return how long it took.
+def _close_while_parked(worker: Worker, parked: _ParkedTransaction, monkeypatch) -> None:
+    close_waiting = threading.Event()
+    monkeypatch.setattr(
+        worker,
+        "_hierarchical_start_cv",
+        ObservedCondition(worker._hierarchical_start_cv, wait_entered=close_waiting),
+    )
 
-    close() runs on the caller's thread because a worker with a live native tree
-    may only be closed on the thread that init()'d it. A timer releases the
-    parked transaction, so a close() that is properly fenced behind the lease
-    takes at least ``_FENCE_OBSERVATION_S`` and an unfenced one returns at once.
-    """
-    releaser = threading.Timer(_FENCE_OBSERVATION_S, parked.release.set)
+    close_wait_observed: list[tuple[bool, bool]] = []
+
+    def release_after_close_waits():
+        try:
+            observed = close_waiting.wait(5.0)
+            close_wait_observed.append((observed, worker._active_ops > 0))
+        finally:
+            parked.release.set()
+
+    releaser = threading.Thread(target=release_after_close_waits)
     releaser.start()
-    started = time.monotonic()
     try:
         worker.close()
     finally:
-        releaser.cancel()
         parked.release.set()
-    return time.monotonic() - started
+        releaser.join(_TEST_WALL_BUDGET_S)
+    assert not releaser.is_alive()
+    assert close_wait_observed == [(True, True)], "close never waited for an admitted operation lease"
+    assert parked.completed.is_set(), "close returned before the parked transaction completed"
 
 
 def _run_in_thread(fn):
@@ -176,17 +184,16 @@ class TestRegisterAdmissionFence:
         assert parked.lease_held is True
         ready_worker.unregister(handle)
 
-    def test_close_drains_a_register_in_flight(self, ready_worker):
+    def test_close_drains_a_register_in_flight(self, ready_worker, monkeypatch):
         # Parks at the broadcast, not at publication: publication runs under
         # ``_registry_lock``, which close()'s registry detach also takes, so a
         # park there would delay close() even with no lease at all.
         with _ParkedTransaction(ready_worker, "_post_init_register") as parked:
             register_thread, register_box = _run_in_thread(lambda: ready_worker.register(_chip_callable()))
             assert parked.entered.wait(timeout=_TEST_WALL_BUDGET_S), "register never reached its broadcast"
-            elapsed = _close_while_parked(ready_worker, parked)
+            _close_while_parked(ready_worker, parked, monkeypatch)
             register_thread.join(timeout=_TEST_WALL_BUDGET_S)
 
-        assert elapsed >= _FENCE_OBSERVATION_S, "close() tore the worker down while a register was mid-broadcast"
         assert not register_thread.is_alive()
         assert "error" not in register_box, f"register() failed: {register_box.get('error')}"
         # Nothing survives a terminal close: the registration either completed
@@ -234,15 +241,14 @@ class TestUnregisterAdmissionFence:
             ready_worker.unregister(handle)
         assert parked.lease_held is True
 
-    def test_close_cannot_slip_into_the_unregister_broadcast(self, ready_worker):
+    def test_close_cannot_slip_into_the_unregister_broadcast(self, ready_worker, monkeypatch):
         handle = ready_worker.register(_chip_callable())
         with _ParkedTransaction(ready_worker, "_broadcast_unregister") as parked:
             unregister_thread, unregister_box = _run_in_thread(lambda: ready_worker.unregister(handle))
             assert parked.entered.wait(timeout=_TEST_WALL_BUDGET_S), "unregister never reached its broadcast"
-            elapsed = _close_while_parked(ready_worker, parked)
+            _close_while_parked(ready_worker, parked, monkeypatch)
             unregister_thread.join(timeout=_TEST_WALL_BUDGET_S)
 
-        assert elapsed >= _FENCE_OBSERVATION_S, "close() tore the worker down while an unregister was mid-transaction"
         assert not unregister_thread.is_alive()
         assert "error" not in unregister_box, f"unregister() failed: {unregister_box.get('error')}"
         assert ready_worker._identity_registry == {}

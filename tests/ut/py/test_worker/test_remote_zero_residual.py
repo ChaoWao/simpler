@@ -30,10 +30,11 @@ import simpler.worker as worker_mod
 from simpler.worker import RemoteCallable, RemoteWorkerSpec, Worker
 
 from tests.ut.py.test_callable_identity import _free_tcp_port, _RemoteL3Daemon  # noqa: PLC2701
-from tests.ut.py.test_worker._harness import hard_timeout
+from tests.ut.py.test_worker._harness import TEST_WALL_BUDGET_S, hard_timeout
 
 _SHM_ROOT = Path("/dev/shm")
-_TEST_WALL_BUDGET_S = 30.0
+_TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+_DEADLINE_AFTER_WATCHDOG_S = 2 * _TEST_WALL_BUDGET_S
 _CLEANUP_OBSERVE_S = 8.0
 
 pytestmark = pytest.mark.skipif(
@@ -172,8 +173,14 @@ def _start_delayed_daemon(monkeypatch, port: int, import_delay_s: float) -> _Rem
         monkeypatch.delenv("SIMPLER_TEST_REMOTE_IMPORT_DELAY_S")
 
 
+@hard_timeout(_TEST_WALL_BUDGET_S)
 def _assert_daemon_accepts_next_session(port: int) -> None:
-    worker = Worker(level=4, num_sub_workers=0, startup_timeout_s=10.0, remote_session_timeout_s=5.0)
+    worker = Worker(
+        level=4,
+        num_sub_workers=0,
+        startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+        remote_session_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+    )
     try:
         worker.add_remote_worker(_remote_spec(port))
         worker.init()
@@ -254,7 +261,12 @@ def test_later_remote_failure_reclaims_ready_session_and_full_local_tree(monkeyp
 
     monkeypatch.setattr(Worker, "_open_remote_session", observed_open)
     with _unlistening_port() as failing_port:
-        worker = Worker(level=4, num_sub_workers=1, startup_timeout_s=10.0, remote_session_timeout_s=5.0)
+        worker = Worker(
+            level=4,
+            num_sub_workers=1,
+            startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+            remote_session_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+        )
         try:
             daemon.await_ready()
             first_worker_id = worker.add_remote_worker(_remote_spec(port, num_sub_workers=1))
@@ -302,7 +314,12 @@ def test_attach_failure_reclaims_open_session_and_full_local_tree(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(worker_mod, "_Worker", AttachFailingWorker)
             patch.setattr(Worker, "_open_remote_session", observed_open)
-            worker = Worker(level=4, num_sub_workers=1, startup_timeout_s=10.0, remote_session_timeout_s=5.0)
+            worker = Worker(
+                level=4,
+                num_sub_workers=1,
+                startup_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+                remote_session_timeout_s=_DEADLINE_AFTER_WATCHDOG_S,
+            )
             worker_id = worker.add_remote_worker(_remote_spec(port, num_sub_workers=1))
             with (
                 hard_timeout(_TEST_WALL_BUDGET_S),

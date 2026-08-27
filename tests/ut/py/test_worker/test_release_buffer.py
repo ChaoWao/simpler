@@ -32,7 +32,7 @@ from simpler.orchestrator import Orchestrator
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import RunHandle, Worker, _RunResources
 
-from ._harness import fake_chip_l3
+from ._harness import ObservedCondition, fake_chip_l3
 
 _F32 = 0  # DataType.FLOAT32 value
 _OID = mint_owner_instance_id()
@@ -242,7 +242,7 @@ class TestReleaseBuffer:
         w.release_buffer(buf)  # must not raise
         assert buf.closed
 
-    def test_serializes_with_a_racing_orchestration_callback(self):
+    def test_serializes_with_a_racing_orchestration_callback(self, monkeypatch):
         # _submit_l3_locked adds a run's handle to _accepted_run_handles (worker.py:9910) BEFORE
         # its orchestration callback runs -- the callback is what eventually records
         # touched_identities via submit_next_level. Without taking _submit_mu exclusively (the same
@@ -274,6 +274,12 @@ class TestReleaseBuffer:
         callback_thread = threading.Thread(target=fake_orchestration_callback)
         callback_thread.start()
         assert entered_callback.wait(timeout=5)
+        release_waiting = threading.Event()
+        monkeypatch.setattr(
+            w._submit_mu,
+            "_cv",
+            ObservedCondition(w._submit_mu._cv, release_waiting),
+        )
 
         def try_release():
             try:
@@ -287,7 +293,8 @@ class TestReleaseBuffer:
         releaser.start()
         # release_buffer must block behind _submit_mu, not race past it while touched_identities
         # is still empty.
-        assert not release_returned.wait(timeout=0.3)
+        assert release_waiting.wait(timeout=5)
+        assert not release_returned.is_set()
 
         proceed.set()
         callback_thread.join(timeout=5)

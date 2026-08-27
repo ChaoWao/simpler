@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 
@@ -67,24 +68,39 @@ inline void wake_word(int32_t *addr) {
 #endif
 }
 
+enum class WaitWordResult : int32_t {
+    NO_WAIT = 0,
+    VALUE_MISMATCH = 1,
+    WOKEN = 2,
+    TIMED_OUT = 3,
+    INTERRUPTED = 4,
+    ERROR = 5,
+};
+
 // Blocks until the word at `addr` differs from `expected`, a wake arrives, or
 // `timeout_s` elapses. Non-Linux builds have no futex and poll the word until
 // the timeout instead.
-inline void wait_word(int32_t *addr, int32_t expected, double timeout_s) {
-    if (!(timeout_s > 0.0)) return;
+inline WaitWordResult wait_word(int32_t *addr, int32_t expected, double timeout_s) {
+    if (!(timeout_s > 0.0)) return WaitWordResult::NO_WAIT;
 #if defined(__linux__)
     struct timespec ts;
     const int64_t timeout_ns = static_cast<int64_t>(timeout_s * 1e9);
     ts.tv_sec = static_cast<time_t>(timeout_ns / 1000000000);
     ts.tv_nsec = static_cast<long>(timeout_ns % 1000000000);
-    (void)::syscall(SYS_futex, addr, FUTEX_WAIT, expected, &ts, nullptr, 0);
+    long rc = ::syscall(SYS_futex, addr, FUTEX_WAIT, expected, &ts, nullptr, 0);
+    if (rc == 0) return WaitWordResult::WOKEN;
+    if (errno == EAGAIN) return WaitWordResult::VALUE_MISMATCH;
+    if (errno == ETIMEDOUT) return WaitWordResult::TIMED_OUT;
+    if (errno == EINTR) return WaitWordResult::INTERRUPTED;
+    return WaitWordResult::ERROR;
 #else
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
     int32_t value = expected;
     while (std::chrono::steady_clock::now() < deadline) {
         __atomic_load(addr, &value, __ATOMIC_ACQUIRE);
-        if (value != expected) return;
+        if (value != expected) return WaitWordResult::VALUE_MISMATCH;
     }
+    return WaitWordResult::TIMED_OUT;
 #endif
 }
 
