@@ -558,11 +558,10 @@ class CallableNamespace:
 def _pin_l2_round_inputs(worker, test_args: TaskArgsBuilder, orch_signature: list):
     """Pre-upload orchestration IN tensors for multi-round L2 SceneTest reuse.
 
-    Called only when ``rounds > 1`` and ``SceneTestCase.REUSE_L2_IN_ACROSS_ROUNDS``.
-    Each stable IN is ``worker.malloc`` + ``worker.copy_to`` once before the round loop;
-    subsequent rounds pass ``buf.tensor(...)`` so bind skips repeated H2D. OUT/INOUT stay on
-    the host-staging path. Device-pinned IN has no host mapping — HBG orch that reads IN
-    contents via ``data_as`` / ``get_tensor_data`` must leave the opt-in flag False.
+    Called only when ``rounds > 1``. Each nonempty IN is ``worker.malloc`` +
+    ``worker.copy_to`` once before the round loop; subsequent rounds pass the
+    device tensor while retaining the caller buffer as its host-orchestration
+    view. OUT/INOUT stay on the host-staging path.
 
     Returns:
         pinned: name → device ``Tensor`` for each IN
@@ -590,7 +589,15 @@ def _pin_l2_round_inputs(worker, test_args: TaskArgsBuilder, orch_signature: lis
             if direction != ArgDirection.IN:
                 continue
             host = spec.value
+            if host.device.type != "cpu":
+                raise ValueError(f"L2 round input '{spec.name}' must be a CPU tensor, got device={host.device}.")
+            if not host.is_contiguous():
+                raise ValueError(
+                    f"L2 round input '{spec.name}' must be contiguous; call tensor.contiguous() before passing it."
+                )
             nbytes = int(host.numel()) * int(host.element_size())
+            if nbytes == 0:
+                continue
             buf = worker.malloc(nbytes)
             buffers.append(buf)
             worker.copy_to(buf, host)
@@ -612,9 +619,9 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker,
     at L2 there is no fork, so any host tensor resolves in-process); the direction tag is inert at L2
     but set for parity with the L3 path.
 
-    When ``pinned_inputs`` is provided (opt-in ``REUSE_L2_IN_ACROSS_ROUNDS`` with
-    ``--rounds > 1``), orchestration IN tensors use the pre-uploaded device views instead of
-    host staging.
+    When ``pinned_inputs`` is provided, orchestration IN tensors use the
+    pre-uploaded device views instead of host staging. Their original host
+    addresses remain attached as host-only metadata for HBG orchestration.
 
     Returns:
         args: TaskArgs (TensorArg)
@@ -647,6 +654,8 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker,
             else:
                 tensor_arg = make_tensor_arg(worker, spec.value)
             args.add_tensor(tensor_arg, dir2tag.get(direction, TensorArgType.INPUT))
+            if direction == ArgDirection.IN and spec.name in pinned_inputs:
+                args._set_host_view(tensor_idx, int(spec.value.data_ptr()))
             if direction in (ArgDirection.OUT, ArgDirection.INOUT):
                 output_names.append(spec.name)
             tensor_idx += 1
@@ -1565,11 +1574,6 @@ class SceneTestCase:
     # resolved). Prefer a `compare_outputs` override when the output is
     # self-describing enough to still be checked.
     SKIP_GOLDEN: bool = False
-    # When True and ``--rounds > 1``, L2 SceneTest pre-uploads orchestration IN
-    # tensors once (device pin) so later rounds skip repeated H2D. Device-pinned
-    # IN has no host mapping — unsafe for HBG orch that ``data_as`` / host-reads
-    # IN contents. Opt in only for cases that do not (e.g. Qwen3 decode).
-    REUSE_L2_IN_ACROSS_ROUNDS: bool = False
     RUNTIME_ENV: dict = {}
 
     def generate_args(self, params) -> TaskArgsBuilder:
@@ -1780,59 +1784,21 @@ class SceneTestCase:
             handle = worker.register(callable_obj)
             type(self)._st_l2_handle = handle
 
-        # Build args. Opt-in cases (REUSE_L2_IN_ACROSS_ROUNDS) with rounds > 1
-        # pre-upload orchestration IN once so later rounds skip repeated H2D.
         test_args = self.generate_args(params)
-        chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker)
+        pinned_inputs: dict[str, Any] = {}
+        pinned_buffers: list[Any] = []
+        try:
+            if rounds > 1:
+                pinned_inputs, pinned_buffers = _pin_l2_round_inputs(worker, test_args, orch_sig)
+            chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker, pinned_inputs=pinned_inputs)
 
-        # Compute golden (unless skip_golden)
-        golden_args = None
-        if not skip_golden:
-            golden_args = test_args.clone()
-            with _golden_thread_cap():
-                self.compute_golden(golden_args, params)
-
-        _log_torch_backend_autoload_once()
-
-        # Save initial output tensor values for reset between rounds
-        initial_outputs = {}
-        if rounds > 1:
-            for name in output_names:
-                initial_outputs[name] = getattr(test_args, name).clone()
-
-        # Execute rounds. The platform emits `[STRACE]` host/device markers to
-        # stderr on every run; multi-round timing is obtained by teeing stderr
-        # to a file and parsing it offline with
-        # `python -m simpler_setup.tools.strace_timing <log> --rounds-table`
-        # (the scene test no longer captures/parses inline). See
-        # docs/dfx/l2-timing.md.
-        for round_idx in range(rounds):
-            if round_idx > 0:
-                for name, initial in initial_outputs.items():
-                    getattr(test_args, name).copy_(initial)
-
-            # Every diagnostic reaching this loop is already multi-round-safe:
-            # effective_diagnostic_options zeroes all of them when rounds > 1,
-            # so no per-round masking belongs here.
-            config = self._build_config(
-                config_dict,
-                enable_chip_swimlane=enable_chip_swimlane,
-                enable_dump_args=enable_dump_args,
-                enable_pmu=enable_pmu,
-                enable_dep_gen=enable_dep_gen,
-                enable_scope_stats=enable_scope_stats,
-                output_prefix=output_prefix,
-            )
-
-            with _temporary_env(self._resolve_env()):
-                worker.run(handle, chip_args, config=config)
-
-            # Compute golden (unless skip_golden)
             golden_args = None
             if not skip_golden:
                 golden_args = test_args.clone()
                 with _golden_thread_cap():
                     self.compute_golden(golden_args, params)
+
+            _log_torch_backend_autoload_once()
 
             # Save initial output tensor values for reset between rounds
             initial_outputs = {}
@@ -1852,7 +1818,7 @@ class SceneTestCase:
                         getattr(test_args, name).copy_(initial)
 
                 # Every diagnostic reaching this loop is already multi-round-safe:
-                # _effective_diagnostic_options zeroes all of them when rounds > 1,
+                # effective_diagnostic_options zeroes all of them when rounds > 1,
                 # so no per-round masking belongs here.
                 config = self._build_config(
                     config_dict,

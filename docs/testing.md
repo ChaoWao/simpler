@@ -314,7 +314,8 @@ Layer 1  Level axis
     │       └─ Layer 4  Class — one ChipWorker per (runtime, device), reused
     │                   across every class assigned to that device
     │           └─ Layer 5  Case — serial within a class
-    │               └─ Layer 6  Rounds — `--rounds N` loop, reuses Worker
+    │               └─ Layer 6  Rounds — `--rounds N` loop, reuses Worker;
+    │                           L2 read-only inputs are uploaded once when N > 1
 ```
 
 ### Quick examples

@@ -1102,7 +1102,23 @@ extern "C" int bind_callable_to_runtime_impl(
         // as if it were a graph-heap allocation.
         if (t.is_device_memory()) {
             always_assert(t.buffer.addr < HEAP_VIRTUAL_BASE && "caller tensor reaches into the virtual heap window");
-            LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
+            const uint64_t host_view_addr = orch_args->host_view(i);
+            if (host_view_addr != 0) {
+                if (signature == nullptr || i >= sig_count || signature[i] != ArgDirection::IN) {
+                    LOG_ERROR("host-orch: tensor %d has a host view but is not a read-only input", i);
+                    return PTO_RUNTIME_ERR_INTERNAL;
+                }
+                const size_t size = static_cast<size_t>(t.buffer.size);
+                void *host_view = reinterpret_cast<void *>(static_cast<uintptr_t>(host_view_addr));
+                if (!tensor_access.add(t.buffer.addr, size, host_view)) {
+                    LOG_ERROR(
+                        "host-orch: cannot attach host view for device tensor %d (addr 0x%" PRIx64 ", %zu bytes)", i,
+                        t.buffer.addr, size
+                    );
+                    return PTO_RUNTIME_ERR_INTERNAL;
+                }
+            }
+            LOG_DEBUG("  ChipTensor %d: device memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             device_args.add_tensor(t);
             continue;
         }

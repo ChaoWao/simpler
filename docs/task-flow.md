@@ -781,9 +781,10 @@ before execution.
 Tags (IN/OUT/INOUT/…) are used by `Orchestrator::submit_*` to derive TensorMap
 dependencies and nothing else. Scheduler, WorkerThread, child, runtime.so, and
 kernels do not inspect them. Keeping tags only in Layer ① simplifies the blob
-and makes the "tags are Orchestrator input" rule explicit. Matches existing
-runtime: `ChipStorageTaskArgs` (`task_args.h`) is already declared with
-`void` as the TensorTag parameter.
+and makes the "tags are Orchestrator input" rule explicit. The fixed
+`ChipStorageTaskArgs` runtime ABI therefore carries tensors and scalars without
+dependency tags. Its optional host-view sidecar is local materialization
+metadata and does not cross the L3 dispatch wire.
 
 ### Why no `WorkerPayload` wrapper
 
@@ -833,7 +834,7 @@ lives in the mailbox blob bytes on the child side — view doesn't care.
 - [chip-level-arch.md](chip-level-arch.md) — L2 single-chip: three-program
   model (host / AICPU / AICore)
 - [`../src/common/task_interface/task_args.h`](../src/common/task_interface/task_args.h)
-  — `TaskArgsTpl` template and the `ChipStorageTaskArgs` alias
+  — `TaskArgsTpl` template and the `ChipStorageTaskArgs` runtime ABI
 - [`../src/common/task_interface/task_args_wire.h`](../src/common/task_interface/task_args_wire.h)
   — the L3+ `TaskArgs`, `TaskArgsView`, and the mailbox blob codec
 - [`../src/common/task_interface/tensor.h`](../src/common/task_interface/tensor.h)

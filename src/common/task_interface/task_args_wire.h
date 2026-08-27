@@ -54,7 +54,37 @@
 // time and are stripped before the args cross the dispatch boundary. The element
 // is Tensor (self-describing view; L3+ holds no C++ ChipTensor) — the L3→L2 wire
 // carries Tensors, materialized to ChipStorageTaskArgs (ChipTensor) on the L2 child.
-using TaskArgs = TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType>;
+struct TaskArgs : TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType> {
+    using Base = TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType>;
+
+    void add_tensor(const Tensor &t) {
+        Base::add_tensor(t);
+        host_views_.push_back(0);
+    }
+
+    void add_tensor(const Tensor &t, TensorArgType tag) {
+        Base::add_tensor(t, tag);
+        host_views_.push_back(0);
+    }
+
+    void set_host_view(int32_t i, uint64_t addr) {
+        if (i < 0 || i >= tensor_count()) throw std::out_of_range("TaskArgs: host-view index out of range");
+        host_views_[static_cast<size_t>(i)] = addr;
+    }
+
+    uint64_t host_view(int32_t i) const {
+        if (i < 0 || i >= tensor_count()) throw std::out_of_range("TaskArgs: host-view index out of range");
+        return host_views_[static_cast<size_t>(i)];
+    }
+
+    void clear() {
+        Base::clear();
+        host_views_.clear();
+    }
+
+private:
+    std::vector<uint64_t> host_views_;
+};
 
 // ============================================================================
 // TaskArgsView — zero-copy view over a wire blob
