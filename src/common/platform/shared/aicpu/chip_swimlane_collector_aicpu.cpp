@@ -989,12 +989,12 @@ void chip_swimlane_aicpu_record_predicated_skip(
 
 void chip_swimlane_aicpu_record_graph_prepare(
     int thread_idx, uint64_t start_time, uint64_t end_time, uint32_t loop_iter, uint64_t task_id,
-    uint32_t nodes_materialized
+    uint32_t tasks_materialized
 ) {
     auto *record = acquire_sched_phase_record(thread_idx);
     if (record == nullptr) return;
     fill_sched_phase_record(
-        record, ChipSwimlaneSchedPhaseKind::GraphPrepare, start_time, end_time, loop_iter, nodes_materialized,
+        record, ChipSwimlaneSchedPhaseKind::GraphPrepare, start_time, end_time, loop_iter, tasks_materialized,
         /*shared_at_start=*/nullptr, /*shared_at_end=*/nullptr
     );
     record->phase_data.graph_task.local_id = static_cast<uint32_t>(task_id);

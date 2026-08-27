@@ -86,7 +86,7 @@ void layer(const GraphTaskArgs &args, int variant) {
     const simpler::hbg::Tensor gate_view = boundary_gate.view(view_shape.data(), view_offset.data());
 
     // Graph-internal predicate operand: its address is the recording's virtual
-    // one, so replay can only read it once materialize has rebound the node.
+    // one, so replay can only read it once materialize has rebound the tensor.
     const std::array<uint32_t, 1> gate_shape{GATE_ELEMS};
     TensorCreateInfo gate_info(gate_shape.data(), static_cast<uint32_t>(gate_shape.size()), DataType::INT32);
     CoreTaskArgs gate_args;

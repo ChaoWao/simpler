@@ -88,7 +88,7 @@ protected:
         state.any_subtask_deferred.store(true, std::memory_order_relaxed);
         state.completed_subtasks.store(7, std::memory_order_relaxed);
         state.next_block_idx.store(3, std::memory_order_relaxed);
-        state.graph_node_index = 11;
+        state.in_graph_task_index = 11;
         sm_handle->header->tasks.completion_flags[slot].store(1, std::memory_order_relaxed);
     }
 
@@ -144,9 +144,9 @@ TEST_F(HbgSlotClaimTest, GraphOuterTaskClaimsAPoisonedSlot) {
     ASSERT_NE(graph.recording_handle, nullptr);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
@@ -170,9 +170,9 @@ TEST_F(HbgSlotClaimTest, CachedGraphReplayClaimsAPoisonedSlot) {
     const GraphScopeResult recorded = orch.graph_begin(0x51ADC1A2, boundary_args, 0x1736);
     ASSERT_TRUE(recorded.recording);
     ASSERT_TRUE(orch.graph_prepare(recorded.recording_handle, boundary_args));
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
 
     poison_slot(1);

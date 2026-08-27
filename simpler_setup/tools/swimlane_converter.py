@@ -125,10 +125,10 @@ def format_task_display(task_id):
     return f"r{ring}t{local}"
 
 
-def _decode_graph_node_task_id(task_id):
-    """Decode Scheduler-owned Graph-node ids.
+def _decode_in_graph_task_id(task_id):
+    """Decode Scheduler-owned in-graph task ids.
 
-    ``host_build_graph`` puts a materialized node in id space 1 (IN_GRAPH) with
+    ``host_build_graph`` puts a materialized in-graph task in id space 1 (IN_GRAPH) with
     ``local=(graph_local_id << 10) | task_index``; the stream-visible outer Graph task
     stays in space 0 (GLOBAL). See src/common/host_build_graph/task_id_encoding.h.
     """
@@ -140,7 +140,7 @@ def _decode_graph_node_task_id(task_id):
 
 
 def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR0912
-    """Join Graph-node rows to their outer GraphPrepare records."""
+    """Join in-graph task rows to their outer GraphPrepare records."""
     prepare_by_outer = defaultdict(list)
     dummy_rows = []
     for thread_idx, records in enumerate(scheduler_phases or []):
@@ -155,17 +155,17 @@ def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR091
 
     rows_by_outer = defaultdict(list)
     for task in tasks:
-        decoded = _decode_graph_node_task_id(task.get("task_id"))
+        decoded = _decode_in_graph_task_id(task.get("task_id"))
         if decoded is not None:
-            outer_task_id, node_index = decoded
-            rows_by_outer[outer_task_id].append((task, node_index))
+            outer_task_id, task_index = decoded
+            rows_by_outer[outer_task_id].append((task, task_index))
 
     dummy_by_outer = defaultdict(list)
     for record, thread_idx in dummy_rows:
-        decoded = _decode_graph_node_task_id(record.get("task_id"))
+        decoded = _decode_in_graph_task_id(record.get("task_id"))
         if decoded is not None:
-            outer_task_id, node_index = decoded
-            dummy_by_outer[outer_task_id].append((record, node_index, thread_idx))
+            outer_task_id, task_index = decoded
+            dummy_by_outer[outer_task_id].append((record, task_index, thread_idx))
 
     instances = []
     for outer_task_id, prepare_records in prepare_by_outer.items():
@@ -173,8 +173,8 @@ def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR091
         aicpu_rows = dummy_by_outer.get(outer_task_id, [])
         if not rows and not aicpu_rows:
             continue
-        node_indices = {node_index for _, node_index in rows}
-        node_indices.update(node_index for _, node_index, _ in aicpu_rows)
+        task_indices = {task_index for _, task_index in rows}
+        task_indices.update(task_index for _, task_index, _ in aicpu_rows)
         starts = [
             task.get("dispatch_time_us", _task_slice_start_us(task))
             if task.get("dispatch_time_us", -1) >= 0
@@ -193,7 +193,7 @@ def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR091
                 "outer_task_id": outer_task_id,
                 "rows": rows,
                 "aicpu_rows": aicpu_rows,
-                "visible_node_indices": sorted(node_indices),
+                "visible_task_indices": sorted(task_indices),
                 "execution_start_us": min(starts),
                 "execution_end_us": max(ends),
                 "prepare_start_us": prepare_start_us,
@@ -1443,23 +1443,23 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             )
         for instance in graph_instances:
             outer_display = format_task_display(instance["outer_task_id"])
-            node_indices = instance["visible_node_indices"]
+            task_indices = instance["visible_task_indices"]
             events.append(
                 {
                     "args": {
                         "outer_task_id": instance["outer_task_id"],
-                        "visible_node_count": len(node_indices),
-                        "visible_node_index_min": min(node_indices),
-                        "visible_node_index_max": max(node_indices),
+                        "visible_in_graph_task_count": len(task_indices),
+                        "visible_in_graph_task_index_min": min(task_indices),
+                        "visible_in_graph_task_index_max": max(task_indices),
                         "prepare_slice_count": instance["prepare_slice_count"],
                         "prepare_duration_us": instance["prepare_duration_us"],
                         "execution_start_us": instance["execution_start_us"],
                         "execution_duration_us": instance["execution_end_us"] - instance["execution_start_us"],
-                        "synthetic_id_layout": "ring1:(outer_task_id << 10) | node_index",
+                        "synthetic_id_layout": "ring1:(outer_task_id << 10) | in_graph_task_index",
                     },
                     "cat": "graph_execution",
                     "cname": "rail_animation",
-                    "name": f"GraphExecution({outer_display}, {len(node_indices)} visible nodes)",
+                    "name": f"GraphExecution({outer_display}, {len(task_indices)} visible in-graph tasks)",
                     "ph": "X",
                     "pid": 5,
                     "tid": 5000 + instance["lane_idx"],

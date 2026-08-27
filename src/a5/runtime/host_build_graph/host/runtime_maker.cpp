@@ -476,7 +476,7 @@ bool bind_graph_definitions(
             return false;
         }
         GraphExecutionStorageLayout storage_layout{};
-        if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
+        if (definition->task_count == 0 || definition->task_count > MAX_IN_GRAPH_TASKS ||
             definition->full_key != upload->full_key ||
             !graph_execution_storage_layout(
                 static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
@@ -497,16 +497,17 @@ bool bind_graph_definitions(
             return false;
         }
         const uintptr_t storage_addr = outer_base + definition->required_heap;
-        if (storage_addr % alignof(GraphNodeStorage) != 0) {
+        if (storage_addr % alignof(InGraphTaskStorage) != 0) {
             LOG_ERROR("host-orch: Graph runtime storage address is misaligned");
             return false;
         }
         PackedDefinition &packed_definition = object_it->second;
         if (!packed_definition.populations_ready) {
-            const GraphNodeDefinition *nodes =
-                graph_definition_array<GraphNodeDefinition>(*definition, definition->off_nodes, definition->task_count);
-            if (nodes == nullptr) {
-                LOG_ERROR("host-orch: invalid Graph Definition node array");
+            const InGraphTaskDefinition *tasks = graph_definition_array<InGraphTaskDefinition>(
+                *definition, definition->off_in_graph_tasks, definition->task_count
+            );
+            if (tasks == nullptr) {
+                LOG_ERROR("host-orch: invalid Graph Definition in-graph task array");
                 return false;
             }
             for (uint32_t i = 0; i < definition->task_count; ++i) {
@@ -514,9 +515,9 @@ bool bind_graph_definitions(
                 // singles out GRAPH and routes everything else by shape, and a Graph
                 // body member is never the shell, so the shape decides. Derived here
                 // the same way the device derives it, so the two cannot drift.
-                const ActiveMask mask(nodes[i].active_mask);
+                const ActiveMask mask(tasks[i].active_mask);
                 packed_definition.ready_queue_populations.add_task(
-                    mask, TaskAttrs(nodes[i].task_attrs), mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL
+                    mask, TaskAttrs(tasks[i].task_attrs), mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL
                 );
             }
             packed_definition.populations_ready = true;
@@ -860,7 +861,7 @@ int32_t run_host_orchestration(
         reinterpret_cast<uint64_t>(gm_heap) < HEAP_VIRTUAL_BASE && "device memory reaches into the virtual heap window"
     );
     // The alignment bind_graph_definitions checked on the virtual base — a Graph
-    // task's runtime storage must land on alignof(GraphNodeStorage) — carries to
+    // task's runtime storage must land on alignof(InGraphTaskStorage) — carries to
     // the real base only while the two are congruent: both are aligned to
     // kDefaultBaseAlign, and that covers the storage's own requirement.
     static_assert(
@@ -868,8 +869,8 @@ int32_t run_host_orchestration(
         "the virtual heap base must share the committed region's alignment"
     );
     static_assert(
-        alignof(GraphNodeStorage) <= DeviceArena::kDefaultBaseAlign,
-        "a Graph node's storage alignment must be covered by the heap region's base alignment"
+        alignof(InGraphTaskStorage) <= DeviceArena::kDefaultBaseAlign,
+        "an in-graph task's storage alignment must be covered by the heap region's base alignment"
     );
     always_assert(reinterpret_cast<uint64_t>(gm_heap) % DeviceArena::kDefaultBaseAlign == 0);
     const sm_layout::HeapRebase heap_rebase{reinterpret_cast<uint64_t>(gm_heap), heap_bytes};

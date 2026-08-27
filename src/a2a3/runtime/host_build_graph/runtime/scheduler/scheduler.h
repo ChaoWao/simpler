@@ -902,12 +902,12 @@ struct SchedulerState {
     // Scheduler polling only chooses which already-wired producer a consumer
     // waits on at this instant; it never recomputes producer relationships.
     int32_t graph_first_unmet_producer(const GraphExecution &execution, const ChipTaskSlotState &consumer) const {
-        const uint32_t node_index = static_cast<uint32_t>(consumer.graph_node_index);
-        const uint32_t begin = execution.fanin_offsets[node_index];
-        const uint32_t end = execution.fanin_offsets[node_index + 1];
+        const uint32_t task_index = static_cast<uint32_t>(consumer.in_graph_task_index);
+        const uint32_t begin = execution.fanin_offsets[task_index];
+        const uint32_t end = execution.fanin_offsets[task_index + 1];
         for (uint32_t edge = begin; edge < end; ++edge) {
             const uint16_t producer_index = execution.fanin_indices[edge];
-            const ChipTaskSlotState &producer = execution.node_at(producer_index).slot;
+            const ChipTaskSlotState &producer = execution.task_at(producer_index).slot;
             if (producer.task_state.load(std::memory_order_acquire) != CHIP_TASK_COMPLETED) {
                 return static_cast<int32_t>(producer_index);
             }
@@ -935,7 +935,7 @@ struct SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &execution.node_at(unmet_producer).slot;
+            producer = &execution.task_at(unmet_producer).slot;
         }
     }
 
@@ -948,7 +948,7 @@ struct SchedulerState {
             if (unmet_producer < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_graph_wake(execution, &execution.node_at(unmet_producer).slot, waiter);
+                register_graph_wake(execution, &execution.task_at(unmet_producer).slot, waiter);
             }
             consumers_rescanned++;
             waiter = next;
@@ -964,7 +964,7 @@ struct SchedulerState {
     // here — they reach the ready queue through their producers' wake list.
     int32_t graph_route_ready_roots(GraphExecution &execution) {
         if (execution.outer_slot == nullptr || !graph_execution_external_ready(execution)) return 0;
-        const int32_t published = execution.published_nodes.load(std::memory_order_acquire);
+        const int32_t published = execution.published_tasks.load(std::memory_order_acquire);
         int32_t routed = 0;
         while (true) {
             int32_t i = execution.route_cursor.load(std::memory_order_relaxed);
@@ -975,33 +975,33 @@ struct SchedulerState {
                 continue;
             }
             if (execution.fanin_offsets[i] == execution.fanin_offsets[i + 1]) {
-                push_ready_routed(&execution.node_at(i).slot);
+                push_ready_routed(&execution.task_at(i).slot);
                 routed++;
             }
         }
         return routed;
     }
 
-    // Register each newly materialized node [first, last) on its first unmet
+    // Register each newly materialized in-graph task [first, last) on its first unmet
     // producer (or route it immediately when every producer already completed),
     // publish the range for routing, and route any roots the external gate now
     // admits. Runs single-owner per graph via the prepare-queue slot, so the
     // range never overlaps another thread's. register_graph_wake and
     // graph_first_unmet_producer are safe against a producer completing
-    // concurrently, which is what lets a node dispatch before the whole graph is
+    // concurrently, which is what lets a task dispatch before the whole graph is
     // materialized.
     void graph_incremental_publish(GraphExecution &execution, int32_t first, int32_t last) {
         for (int32_t i = first; i < last; ++i) {
             if (execution.fanin_offsets[i] == execution.fanin_offsets[i + 1]) continue;  // root
-            ChipTaskSlotState &node = execution.node_at(i).slot;
-            const int32_t unmet = graph_first_unmet_producer(execution, node);
+            ChipTaskSlotState &task = execution.task_at(i).slot;
+            const int32_t unmet = graph_first_unmet_producer(execution, task);
             if (unmet < 0) {
-                push_ready_routed(&node);
+                push_ready_routed(&task);
             } else {
-                register_graph_wake(execution, &execution.node_at(unmet).slot, &node);
+                register_graph_wake(execution, &execution.task_at(unmet).slot, &task);
             }
         }
-        execution.published_nodes.store(last, std::memory_order_release);
+        execution.published_tasks.store(last, std::memory_order_release);
         graph_route_ready_roots(execution);
     }
 
@@ -1013,16 +1013,16 @@ struct SchedulerState {
     }
 
     GraphMaterializeResult prepare_graph_task(
-        ChipTaskSlotState &outer_slot, int32_t max_nodes = GRAPH_MATERIALIZE_SLICE_NODES,
-        int32_t *nodes_materialized = nullptr
+        ChipTaskSlotState &outer_slot, int32_t max_tasks = GRAPH_MATERIALIZE_SLICE_TASKS,
+        int32_t *tasks_materialized = nullptr
     ) {
         GraphExecution *execution = graph_execution_from_outer_slot(outer_slot);
         if (execution == nullptr) return GraphMaterializeResult::INVALID;
-        const int32_t before = execution->materialized_nodes;
+        const int32_t before = execution->materialized_tasks;
         const GraphMaterializeResult result =
-            graph_execution_materialize_slice(outer_slot, *execution, max_nodes, nodes_materialized);
+            graph_execution_materialize_slice(outer_slot, *execution, max_tasks, tasks_materialized);
         if (result == GraphMaterializeResult::PENDING || result == GraphMaterializeResult::PREPARED) {
-            graph_incremental_publish(*execution, before, execution->materialized_nodes);
+            graph_incremental_publish(*execution, before, execution->materialized_tasks);
         }
         if (result == GraphMaterializeResult::PREPARED && graph_execution_external_ready(*execution)) {
             activate_prepared_graph(*execution);
@@ -1069,26 +1069,26 @@ struct SchedulerState {
         // Membership is established by the branch above: graph_context names this task's
         // execution, and the shell case has already returned.
         GraphExecution *execution = static_cast<GraphExecution *>(slot_state.graph_context);
-        if (execution->definition == nullptr || execution->nodes == nullptr) {
+        if (execution->definition == nullptr || execution->tasks == nullptr) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
-        // Incremental activation routes a node before the graph reaches ACTIVE, so a
-        // node can legitimately complete while the graph is still MATERIALIZING or
-        // PREPARED. Only SUBMITTED (execution not yet bound) and COMPLETED
-        // (execution already retired) are invalid states for a node completion.
+        // Incremental activation routes an in-graph task before the graph reaches
+        // ACTIVE, so one can legitimately complete while the graph is still
+        // MATERIALIZING or PREPARED. Only SUBMITTED (execution not yet bound) and
+        // COMPLETED (execution already retired) are invalid states for such a completion.
         const GraphExecutionState graph_state = graph_execution_state(*execution);
         if (graph_state < GraphExecutionState::MATERIALIZING || graph_state > GraphExecutionState::ACTIVE) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
-        const int32_t saved_node_index = slot_state.graph_node_index;
-        if (saved_node_index < 0) {
+        const int32_t saved_task_index = slot_state.in_graph_task_index;
+        if (saved_task_index < 0) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
-        const uint32_t node_index = static_cast<uint32_t>(saved_node_index);
-        if (node_index >= static_cast<uint32_t>(execution->node_count)) {
+        const uint32_t task_index = static_cast<uint32_t>(saved_task_index);
+        if (task_index >= static_cast<uint32_t>(execution->task_count)) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
@@ -1099,11 +1099,11 @@ struct SchedulerState {
         slot_state.mark_completed();
         outcome.fanout_edges = drain_graph_wake_list(*execution, slot_state);
 
-        const bool graph_completed = graph_execution_complete_node(*execution);
-        graph_execution_retire_node(*execution);
+        const bool graph_completed = graph_execution_complete_in_graph_task(*execution);
+        graph_execution_retire_in_graph_task(*execution);
         if (!graph_completed) return outcome;
 
-        // Internal nodes count as zero stream tasks. The final node publishes
+        // Internal tasks count as zero stream tasks. The final in-graph task publishes
         // the outer task exactly once, waking external consumers and
         // contributing the one task the host actually submitted.
         if (execution->outer_slot != nullptr) {

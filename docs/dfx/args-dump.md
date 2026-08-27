@@ -81,7 +81,7 @@ manifest's `bin_file` is `null`, and every `bin_size` is `0`.
 Level 3 deliberately inherits Level 1's selector semantics; it does not add a
 second mask. `tensormap_and_ringbuffer` registers selection metadata in its
 AICPU per-task table. `host_build_graph` embeds the same mask, ambiguity flags,
-and scalar dtypes in each H2D task image, including cached Graph node
+and scalar dtypes in each H2D task image, including cached in-graph task
 definitions. The device collector consumes either source identically. On `a5`,
 however, the resulting tensor bytes remain untrusted under #1560, so payload
 restoration stays outside this change until that issue is fixed.

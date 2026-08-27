@@ -1,5 +1,12 @@
 # 2026-08 — The host-orchestration phase tail is page faults, not the code in the phase
 
+> **Phase and type names in this entry are the ones the tooling emitted at the
+> time.** The per-in-graph-task record phase was `record_node` and is now
+> `record_in_graph_task`; `GraphRecordedNode` is now `RecordedInGraphTask` and
+> `recording.nodes` is `recording.tasks`. The measurements and the archived run
+> directories below keep the old spellings because that is what the logs say, and
+> `strace_timing.py` still accepts `record_node` so those logs remain readable.
+
 ## Question
 
 `host_build_graph`'s host-side bind path shows two shapes on every swimlane of the

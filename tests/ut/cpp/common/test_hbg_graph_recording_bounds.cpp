@@ -10,7 +10,7 @@
  */
 /**
  * A recorded task's id is what its entry in the recording's hazard map is keyed on,
- * and that map holds GRAPH_MAX_NODES task chains. An IN_GRAPH id's low field is the
+ * and that map holds MAX_IN_GRAPH_TASKS task chains. An IN_GRAPH id's low field is the
  * task's index within its body, so the key is in range however far into a run the
  * Graph begins — which a GLOBAL id carrying the allocator's own local id would not
  * be.
@@ -80,7 +80,7 @@ protected:
     }
 };
 
-// A Graph recorded after GRAPH_MAX_NODES ordinary tasks. Its recorded task registers
+// A Graph recorded after MAX_IN_GRAPH_TASKS ordinary tasks. Its recorded task registers
 // its outputs in the recording hazard map keyed on its own id, so that id decides
 // whether the key lands inside the map's task chains.
 TEST_F(HbgGraphRecordingBoundsTest, RecordedTaskIsKeyedByItsIndexNotByTheRunsNumbering) {
@@ -91,12 +91,12 @@ TEST_F(HbgGraphRecordingBoundsTest, RecordedTaskIsKeyedByItsIndexNotByTheRunsNum
     orch.begin_scope();
     // Move the allocator's local-id counter past the recording map's task-chain
     // count, the way any run that submits a while before its first Graph does.
-    for (uint32_t i = 0; i < GRAPH_MAX_NODES; ++i) {
+    for (uint32_t i = 0; i < MAX_IN_GRAPH_TASKS; ++i) {
         CoreTaskArgs filler;
         filler.add_input(boundary);
         ASSERT_TRUE(orch.submit_dummy_task(filler).task_id().is_valid()) << "filler task " << i;
     }
-    ASSERT_EQ(orch.task_allocator.active_count(), static_cast<int32_t>(GRAPH_MAX_NODES));
+    ASSERT_EQ(orch.task_allocator.active_count(), static_cast<int32_t>(MAX_IN_GRAPH_TASKS));
 
     GraphTaskArgs boundary_args;
     boundary_args.add_input(boundary);
@@ -107,17 +107,17 @@ TEST_F(HbgGraphRecordingBoundsTest, RecordedTaskIsKeyedByItsIndexNotByTheRunsNum
 
     // An INOUT operand is what makes the recorded task register an output: the
     // recording's hazard map exists for exactly the write-in-place shape.
-    CoreTaskArgs node_args;
-    node_args.add_inout(boundary);
-    const TaskId node_id = orch.submit_dummy_task(node_args).task_id();
-    ASSERT_TRUE(node_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_id_space(node_id), simpler::hbg::TaskIdSpace::IN_GRAPH)
+    CoreTaskArgs task_args;
+    task_args.add_inout(boundary);
+    const TaskId in_graph_task_id = orch.submit_dummy_task(task_args).task_id();
+    ASSERT_TRUE(in_graph_task_id.is_valid());
+    EXPECT_EQ(simpler::hbg::task_id_space(in_graph_task_id), simpler::hbg::TaskIdSpace::IN_GRAPH)
         << "a recorded task must not take a GLOBAL id: nothing resolves it against the task table, and its low "
            "field is what keys the recording's hazard map";
-    EXPECT_EQ(simpler::hbg::task_local_id(node_id), 0u)
+    EXPECT_EQ(simpler::hbg::task_local_id(in_graph_task_id), 0u)
         << "the first recorded task's low field is task index 0, independent of how many tasks the run has "
            "already allocated";
-    EXPECT_LT(simpler::hbg::task_local_id(node_id), GRAPH_MAX_NODES);
+    EXPECT_LT(simpler::hbg::task_local_id(in_graph_task_id), MAX_IN_GRAPH_TASKS);
 
     ASSERT_TRUE(orch.graph_end());
 }
@@ -147,9 +147,9 @@ TEST_F(HbgGraphRecordingBoundsTest, PreGraphProducerOfABoundaryTensorContributes
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_inout(boundary);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    CoreTaskArgs task_args;
+    task_args.add_inout(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
 
     const GraphHostDefinitionList published = graph_host_definitions(*graph_state);

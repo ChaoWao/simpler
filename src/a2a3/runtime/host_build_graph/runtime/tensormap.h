@@ -569,7 +569,7 @@ struct ChipTensorMap {
         const int32_t task_slot = local_id;
         // A producer's low id field is a task chain index directly, so the id space a
         // caller inserts under has to be the one this map was dimensioned for: a
-        // whole-run map takes task capacity, a Graph recording's takes GRAPH_MAX_NODES.
+        // whole-run map takes task capacity, a Graph recording's takes MAX_IN_GRAPH_TASKS.
         debug_assert(task_slot >= 0 && task_slot < max_tasks);
 
         entry->producer_task_id = producer_task_id;

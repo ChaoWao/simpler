@@ -175,8 +175,8 @@ public:
         cv_.notify_one();
         // graph_begin() has already installed the keyed in-flight entry and
         // submitted the zero-heap outer shell. Enqueuing the private job is
-        // therefore the last dependency of the caller; graph_prepare() and all
-        // node recording may start after later shells are submitted.
+        // therefore the last dependency of the caller; graph_prepare() and the
+        // recording of the body may start after later shells are submitted.
         return true;
     }
 

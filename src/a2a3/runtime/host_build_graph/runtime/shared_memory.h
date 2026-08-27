@@ -392,7 +392,7 @@ struct HeapRebase {
 // Translate one address the image carries. Anything below HEAP_VIRTUAL_BASE is a
 // real device address the caller owns — a boundary tensor, or an unset field left
 // at 0 — and is returned untouched. At or above it, the address came from the
-// graph heap: a recorded node's outputs live in its Definition as offsets, so no
+// graph heap: a recorded in-graph task's outputs live in its Definition as offsets, so no
 // Graph-recording address (>= GRAPH_RECORD_VIRTUAL_BASE) reaches the image, and
 // the committed-heap bound below rejects one rather than classifying by it.
 inline uint64_t rebased_heap_addr(uint64_t addr, const HeapRebase &rebase) noexcept {
@@ -480,7 +480,7 @@ inline uint64_t compact_live_image(
     const auto *mirror_fanin = reinterpret_cast<const int32_t *>(mirror_base + from.fanin_pool);
     const auto *mirror_tensors = reinterpret_cast<const simpler::hbg::Tensor *>(mirror_base + from.tensor_pool);
     const auto *mirror_scalars = reinterpret_cast<const uint64_t *>(mirror_base + from.scalar_pool);
-    // An unbound region stays unbound: a Graph node's payload never gets a fanin
+    // An unbound region stays unbound: an in-graph task's payload never gets a fanin
     // region, and its count is 0, so no consumer resolves it. A bound one is inside
     // its own mirror pool by construction — the only binder is a bump cursor on that
     // pool — and the translation below depends on it, so it is asserted rather than

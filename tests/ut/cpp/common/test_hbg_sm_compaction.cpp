@@ -105,7 +105,7 @@ public:
                 payloads()[i].fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
             }
             slot_states()[i].last_consumer_local_id = static_cast<int32_t>(i);
-            slot_states()[i].graph_node_index = static_cast<int32_t>(200 + i);
+            slot_states()[i].in_graph_task_index = static_cast<int32_t>(200 + i);
             slot_states()[i].bind_buffers(&payloads()[i], &descriptors()[i]);
             completion_flags()[i].store(static_cast<uint8_t>(i & 1), std::memory_order_relaxed);
         }
@@ -228,7 +228,7 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
         EXPECT_EQ(compacted.payload_at(i)->tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(compacted.payload_at(i)->tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
         EXPECT_EQ(compacted.slot_states()[i].last_consumer_local_id, static_cast<int32_t>(i)) << "slot " << i;
-        EXPECT_EQ(compacted.slot_states()[i].graph_node_index, static_cast<int32_t>(200 + i)) << "slot " << i;
+        EXPECT_EQ(compacted.slot_states()[i].in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;
         EXPECT_EQ(compacted.completion_flags()[i].load(std::memory_order_relaxed), static_cast<uint8_t>(i & 1))
             << "slot " << i;
     }

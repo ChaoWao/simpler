@@ -21,25 +21,25 @@
 namespace {
 
 GraphExecution *acquire_execution_storage(
-    uintptr_t storage_addr, size_t storage_bytes, int32_t node_count, uint32_t tensor_arg_count,
+    uintptr_t storage_addr, size_t storage_bytes, int32_t task_count, uint32_t tensor_arg_count,
     uint32_t scalar_arg_count
 ) {
     GraphExecutionStorageLayout layout{};
-    // GraphNodeStorage, not GraphExecution: the node array's alignment is the widest
-    // the storage carries, and nodes_offset only rounds up relative to this base, so
-    // an under-aligned base would leave every alignas(64) node entry misaligned.
-    if (storage_addr == 0 || storage_addr % alignof(GraphNodeStorage) != 0 ||
-        !graph_execution_storage_layout(node_count, tensor_arg_count, scalar_arg_count, &layout) ||
+    // InGraphTaskStorage, not GraphExecution: the in-graph task array's alignment is the widest
+    // the storage carries, and tasks_offset only rounds up relative to this base, so
+    // an under-aligned base would leave every alignas(64) in-graph task entry misaligned.
+    if (storage_addr == 0 || storage_addr % alignof(InGraphTaskStorage) != 0 ||
+        !graph_execution_storage_layout(task_count, tensor_arg_count, scalar_arg_count, &layout) ||
         layout.total_bytes > storage_bytes) {
         return nullptr;
     }
     auto *execution = new (reinterpret_cast<void *>(storage_addr)) GraphExecution{};
-    execution->node_count = node_count;
-    execution->remaining_nodes.store(node_count, std::memory_order_relaxed);
+    execution->task_count = task_count;
+    execution->remaining_tasks.store(task_count, std::memory_order_relaxed);
     auto *base = reinterpret_cast<uint8_t *>(execution);
-    execution->node_storage = reinterpret_cast<GraphNodeStorage *>(base + layout.nodes_offset);
-    execution->node_tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(base + layout.tensors_offset);
-    execution->node_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
+    execution->task_storage = reinterpret_cast<InGraphTaskStorage *>(base + layout.tasks_offset);
+    execution->task_tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(base + layout.tensors_offset);
+    execution->task_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
     return execution;
 }
 
@@ -64,9 +64,9 @@ bool bind_graph_topology(GraphExecution &execution) {
     // GRAPH_MAX_SCALAR_ARGS, not MAX_SCALAR_ARGS: this counts the scalars the
     // Graph BOUNDARY carries, which the recorder sizes with
     // GraphTaskArgs = Arg<GRAPH_MAX_TENSOR_ARGS, GRAPH_MAX_SCALAR_ARGS> and the
-    // outer Graph payload hands it to GraphExecution, never through a node
+    // outer Graph payload hands it to GraphExecution, never through an in-graph task
     // payload. MAX_SCALAR_ARGS is the per-AICore-task cap (16) and applies to
-    // GraphNodeDefinition::scalar_count below, which is checked separately; using
+    // InGraphTaskDefinition::scalar_count below, which is checked separately; using
     // it here rejected every boundary wider than one kernel call could take.
     if (definition.boundary_scalar_count > GRAPH_MAX_SCALAR_ARGS) return false;
     const uint32_t *fanin_offsets =
@@ -83,12 +83,12 @@ bool bind_graph_topology(GraphExecution &execution) {
             graph_definition_array<uint16_t>(definition, definition.off_fanout_indices, definition.edge_count);
     const uint16_t *roots =
         graph_definition_array<uint16_t>(definition, definition.off_root_indices, definition.root_count);
-    const GraphNodeDefinition *nodes =
-        graph_definition_array<GraphNodeDefinition>(definition, definition.off_nodes, definition.task_count);
-    const uint64_t *node_offsets =
-        graph_definition_array<uint64_t>(definition, definition.off_node_offsets, definition.task_count);
-    if (fanin_offsets == nullptr || fanout_offsets == nullptr || roots == nullptr || nodes == nullptr ||
-        node_offsets == nullptr ||
+    const InGraphTaskDefinition *tasks =
+        graph_definition_array<InGraphTaskDefinition>(definition, definition.off_in_graph_tasks, definition.task_count);
+    const uint64_t *in_graph_task_offsets =
+        graph_definition_array<uint64_t>(definition, definition.off_in_graph_task_offsets, definition.task_count);
+    if (fanin_offsets == nullptr || fanout_offsets == nullptr || roots == nullptr || tasks == nullptr ||
+        in_graph_task_offsets == nullptr ||
         (definition.edge_count != 0 && (fanin_indices == nullptr || fanout_indices == nullptr)) ||
         fanin_offsets[0] != 0 || fanout_offsets[0] != 0 ||
         fanin_offsets[definition.task_count] != definition.edge_count ||
@@ -99,22 +99,22 @@ bool bind_graph_topology(GraphExecution &execution) {
     uint64_t required_heap = 0;
     constexpr uint8_t VALID_ACTIVE_MASK = (1U << SUBTASK_SLOT_COUNT) - 1U;
     for (uint32_t i = 0; i < definition.task_count; ++i) {
-        const GraphNodeDefinition &node = nodes[i];
-        if (node_offsets[i] != required_heap || node.total_output_size < 0 || node.tensor_count < 0 ||
-            node.tensor_count > MAX_TENSOR_ARGS || node.scalar_count < 0 || node.scalar_count > MAX_SCALAR_ARGS ||
-            node.tensor_offset > definition.tensor_arg_count ||
-            static_cast<uint32_t>(node.tensor_count) > definition.tensor_arg_count - node.tensor_offset ||
-            node.scalar_offset > definition.scalar_arg_count ||
-            static_cast<uint32_t>(node.scalar_count) > definition.scalar_arg_count - node.scalar_offset ||
-            (node.active_mask & ~VALID_ACTIVE_MASK) != 0 || node.logical_block_num <= 0 ||
-            node.total_required_subtasks < 0) {
+        const InGraphTaskDefinition &task = tasks[i];
+        if (in_graph_task_offsets[i] != required_heap || task.total_output_size < 0 || task.tensor_count < 0 ||
+            task.tensor_count > MAX_TENSOR_ARGS || task.scalar_count < 0 || task.scalar_count > MAX_SCALAR_ARGS ||
+            task.tensor_offset > definition.tensor_arg_count ||
+            static_cast<uint32_t>(task.tensor_count) > definition.tensor_arg_count - task.tensor_offset ||
+            task.scalar_offset > definition.scalar_arg_count ||
+            static_cast<uint32_t>(task.scalar_count) > definition.scalar_arg_count - task.scalar_offset ||
+            (task.active_mask & ~VALID_ACTIVE_MASK) != 0 || task.logical_block_num <= 0 ||
+            task.total_required_subtasks < 0) {
             return false;
         }
         for (int32_t slot = 0; slot < SUBTASK_SLOT_COUNT; ++slot) {
-            const bool active = (node.active_mask & (1U << slot)) != 0;
-            if (active != (node.kernel_id[slot] != INVALID_KERNEL_ID)) return false;
+            const bool active = (task.active_mask & (1U << slot)) != 0;
+            if (active != (task.kernel_id[slot] != INVALID_KERNEL_ID)) return false;
         }
-        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(node.total_output_size), CHIP_ALIGN_SIZE);
+        const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(task.total_output_size), CHIP_ALIGN_SIZE);
         if (output_bytes > definition.required_heap - required_heap) return false;
         required_heap += output_bytes;
     }
@@ -169,13 +169,13 @@ GraphDefinition *graph_definition_object_framed(GraphDefinitionHeader &header) {
 
 // Rebind one Definition tensor template onto this execution. A BOUNDARY_* ref
 // takes the invocation's boundary tensor; an INTERNAL / OWN_OUTPUT ref takes the
-// producer node's materialized output base. `node_index` is the consuming node,
-// which bounds a producer reference to a node that is already constructed.
+// producer in-graph task's materialized output base. `task_index` is the consuming
+// task, which bounds a producer reference to a task that is already constructed.
 // Returns false when the ref addresses no valid source — the Definition is then
 // invalid, since every ref is written by the recorder from a classified source.
 bool graph_rebind_tensor(
-    const GraphExecution &execution, const GraphNodeDefinition *nodes, const uint64_t *node_offsets,
-    const GraphTensor &tensor_template, const GraphTensorSourceRef &ref, int32_t node_index, GraphTensor *rebound_out
+    const GraphExecution &execution, const InGraphTaskDefinition *tasks, const uint64_t *in_graph_task_offsets,
+    const GraphTensor &tensor_template, const GraphTensorSourceRef &ref, int32_t task_index, GraphTensor *rebound_out
 ) {
     GraphTensor rebound = tensor_template;
     if (!graph_tensor_wire_valid(rebound)) return false;
@@ -195,17 +195,17 @@ bool graph_rebind_tensor(
     } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||
                ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT)) {
         const bool own_output = ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
-        const int32_t producer_index = own_output ? node_index : static_cast<int32_t>(ref.source_index);
-        if (producer_index < 0 || producer_index > node_index || (own_output && ref.source_index != node_index) ||
-            (!own_output && producer_index == node_index)) {
+        const int32_t producer_index = own_output ? task_index : static_cast<int32_t>(ref.source_index);
+        if (producer_index < 0 || producer_index > task_index || (own_output && ref.source_index != task_index) ||
+            (!own_output && producer_index == task_index)) {
             return false;
         }
-        TaskDescriptor &producer = execution.node_at(producer_index).task;
-        const uint64_t producer_bytes = static_cast<uint64_t>(nodes[producer_index].total_output_size);
+        TaskDescriptor &producer = execution.task_at(producer_index).task;
+        const uint64_t producer_bytes = static_cast<uint64_t>(tasks[producer_index].total_output_size);
         const uintptr_t producer_base = reinterpret_cast<uintptr_t>(producer.packed_buffer_base);
         if (ref.packed_offset > producer_bytes || rebound.buffer_size > producer_bytes - ref.packed_offset ||
             ref.packed_offset > UINTPTR_MAX - producer_base ||
-            ref.packed_offset > UINT64_MAX - node_offsets[producer_index]) {
+            ref.packed_offset > UINT64_MAX - in_graph_task_offsets[producer_index]) {
             return false;
         }
         rebound.buffer_addr = producer_base + ref.packed_offset;
@@ -279,7 +279,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     const GraphDefinition *definition = graph_definition_object_framed(*definition_header);
     TaskPayload &payload = *outer_slot.payload;
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
-        definition->task_count > GRAPH_MAX_NODES ||
+        definition->task_count > MAX_IN_GRAPH_TASKS ||
         payload.tensor_count != static_cast<int32_t>(definition->boundary_count) ||
         payload.scalar_count != static_cast<int32_t>(definition->boundary_scalar_count) ||
         (payload.tensor_count != 0 && payload.tensor_data() == nullptr) ||
@@ -307,7 +307,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     execution->boundary_scalars = payload.scalar_data();
     execution->boundary_scalar_count = static_cast<uint32_t>(payload.scalar_count);
     if (!bind_graph_topology(*execution)) {
-        execution->retired_nodes.store(execution->node_count, std::memory_order_relaxed);
+        execution->retired_tasks.store(execution->task_count, std::memory_order_relaxed);
         graph_execution_mark_completed(*execution);
         return nullptr;
     }
@@ -316,12 +316,12 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
 }
 
 GraphMaterializeResult graph_execution_materialize_slice(
-    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized
+    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_tasks, int32_t *tasks_materialized
 ) {
-    if (nodes_materialized != nullptr) *nodes_materialized = 0;
+    if (tasks_materialized != nullptr) *tasks_materialized = 0;
     if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.task == nullptr ||
-        outer_slot.task->packed_buffer_base == nullptr || max_nodes <= 0 || execution.definition == nullptr ||
-        execution.node_storage == nullptr) {
+        outer_slot.task->packed_buffer_base == nullptr || max_tasks <= 0 || execution.definition == nullptr ||
+        execution.task_storage == nullptr) {
         return GraphMaterializeResult::INVALID;
     }
 
@@ -343,22 +343,22 @@ GraphMaterializeResult graph_execution_materialize_slice(
             execution.materialize_busy.store(0, std::memory_order_release);
             return GraphMaterializeResult::BUSY;
         }
-        // Incremental activation reads producer slots through execution.nodes
+        // Incremental activation reads producer slots through execution.tasks
         // while the graph is still materializing, so publish the storage base
-        // once, before the first range. Topological node order guarantees every
-        // producer index a materialized node references is already constructed,
+        // once, before the first range. Topological task order guarantees every
+        // producer index a materialized task references is already constructed,
         // and materialize_busy serializes this with any concurrent slice.
-        execution.nodes = execution.node_storage;
+        execution.tasks = execution.task_storage;
     } else if (state != GraphExecutionState::MATERIALIZING) {
         execution.materialize_busy.store(0, std::memory_order_release);
         return GraphMaterializeResult::INVALID;
     }
 
     const GraphDefinition &definition = *execution.definition;
-    const GraphNodeDefinition *nodes =
-        graph_definition_array<GraphNodeDefinition>(definition, definition.off_nodes, definition.task_count);
-    const uint64_t *node_offsets =
-        graph_definition_array<uint64_t>(definition, definition.off_node_offsets, definition.task_count);
+    const InGraphTaskDefinition *tasks =
+        graph_definition_array<InGraphTaskDefinition>(definition, definition.off_in_graph_tasks, definition.task_count);
+    const uint64_t *in_graph_task_offsets =
+        graph_definition_array<uint64_t>(definition, definition.off_in_graph_task_offsets, definition.task_count);
     const GraphTensor *definition_tensors =
         definition.tensor_arg_count == 0 ?
             nullptr :
@@ -381,7 +381,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         definition.predicate_count == 0 ?
             nullptr :
             graph_definition_array<GraphPredicate>(definition, definition.off_predicates, definition.predicate_count);
-    if (nodes == nullptr || node_offsets == nullptr ||
+    if (tasks == nullptr || in_graph_task_offsets == nullptr ||
         (definition.tensor_arg_count != 0 && (definition_tensors == nullptr || tensor_sources == nullptr)) ||
         (definition.scalar_arg_count != 0 && (definition_scalars == nullptr || scalar_sources == nullptr)) ||
         (definition.predicate_count != 0 && predicates == nullptr)) {
@@ -389,14 +389,14 @@ GraphMaterializeResult graph_execution_materialize_slice(
         return GraphMaterializeResult::INVALID;
     }
 
-    const int32_t first = execution.materialized_nodes;
-    const int32_t last = std::min(execution.node_count, first + max_nodes);
+    const int32_t first = execution.materialized_tasks;
+    const int32_t last = std::min(execution.task_count, first + max_tasks);
     const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
     for (int32_t i = first; i < last; ++i) {
-        GraphNodeStorage *storage = &execution.node_at(i);
-        if (i >= execution.constructed_nodes) {
-            storage = new (storage) GraphNodeStorage;
-            execution.constructed_nodes++;
+        InGraphTaskStorage *storage = &execution.task_at(i);
+        if (i >= execution.constructed_tasks) {
+            storage = new (storage) InGraphTaskStorage;
+            execution.constructed_tasks++;
         }
         TaskDescriptor &task = storage->task;
         TaskPayload &payload = storage->payload;
@@ -405,13 +405,13 @@ GraphMaterializeResult graph_execution_materialize_slice(
         task.task_id = simpler::hbg::make_in_graph_task(
             simpler::hbg::task_local_id(outer_slot.task->task_id), static_cast<uint32_t>(i)
         );
-        const GraphNodeDefinition &source = nodes[i];
-        const uint64_t node_offset = node_offsets[i];
+        const InGraphTaskDefinition &source = tasks[i];
+        const uint64_t task_offset = in_graph_task_offsets[i];
         const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), CHIP_ALIGN_SIZE);
         for (int k = 0; k < SUBTASK_SLOT_COUNT; ++k)
             task.kernel_id[k] = source.kernel_id[k];
-        task.packed_buffer_base = reinterpret_cast<void *>(outer_base + node_offset);
-        task.packed_buffer_end = reinterpret_cast<void *>(outer_base + node_offset + output_bytes);
+        task.packed_buffer_base = reinterpret_cast<void *>(outer_base + task_offset);
+        task.packed_buffer_end = reinterpret_cast<void *>(outer_base + task_offset + output_bytes);
 
         slot.reset_for_reuse();
         slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
@@ -420,7 +420,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         slot.task_attrs = TaskAttrs(source.task_attrs);
         slot.total_required_subtasks = source.total_required_subtasks;
         slot.logical_block_num = source.logical_block_num;
-        slot.graph_node_index = i;
+        slot.in_graph_task_index = i;
         // A task in a Graph body is an ordinary leaf, classified by the same rule as
         // one submitted outside a Graph. Its membership is carried by graph_context.
         slot.task_kind = slot.active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
@@ -437,40 +437,40 @@ GraphMaterializeResult graph_execution_materialize_slice(
             execution.materialize_busy.store(0, std::memory_order_release);
             return GraphMaterializeResult::INVALID;
         }
-        // A node's arguments occupy the same span in this execution's pools as in the
-        // Definition's arg tables, so the region starts at the node's own offset. No
+        // A task's arguments occupy the same span in this execution's pools as in the
+        // Definition's arg tables, so the region starts at the task's own offset. No
         // fanin region: its dependencies come from the Definition's CSR, and
         // reset_graph_payload below keeps fanin_count at 0.
         payload.bind_regions(
-            execution.node_tensor_pool + source.tensor_offset, execution.node_scalar_pool + source.scalar_offset,
+            execution.task_tensor_pool + source.tensor_offset, execution.task_scalar_pool + source.scalar_offset,
             nullptr
         );
-        simpler::hbg::Tensor *node_tensors = payload.tensor_data();
+        simpler::hbg::Tensor *task_tensors = payload.tensor_data();
         for (int32_t j = 0; j < source.tensor_count; ++j) {
             const uint32_t tensor_index = source.tensor_offset + static_cast<uint32_t>(j);
             GraphTensor rebound;
             if (!graph_rebind_tensor(
-                    execution, nodes, node_offsets, definition_tensors[tensor_index], tensor_sources[tensor_index], i,
-                    &rebound
+                    execution, tasks, in_graph_task_offsets, definition_tensors[tensor_index],
+                    tensor_sources[tensor_index], i, &rebound
                 )) {
                 execution.materialize_busy.store(0, std::memory_order_release);
                 return GraphMaterializeResult::INVALID;
             }
             execution.consumed_tensor_args++;
-            graph_tensor_unpack(rebound, &node_tensors[j]);
+            graph_tensor_unpack(rebound, &task_tensors[j]);
         }
-        uint64_t *node_scalars = payload.scalar_data();
+        uint64_t *task_scalars = payload.scalar_data();
         for (int32_t j = 0; j < source.scalar_count; ++j) {
             const uint32_t scalar_index = source.scalar_offset + static_cast<uint32_t>(j);
             const GraphScalarSourceRef &ref = scalar_sources[scalar_index];
             if (ref.source == static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE)) {
-                node_scalars[j] = definition_scalars[scalar_index];
+                task_scalars[j] = definition_scalars[scalar_index];
             } else if (ref.source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY)) {
                 if (ref.source_index >= execution.boundary_scalar_count || execution.boundary_scalars == nullptr) {
                     execution.materialize_busy.store(0, std::memory_order_release);
                     return GraphMaterializeResult::INVALID;
                 }
-                node_scalars[j] = execution.boundary_scalars[ref.source_index];
+                task_scalars[j] = execution.boundary_scalars[ref.source_index];
             } else {
                 execution.materialize_busy.store(0, std::memory_order_release);
                 return GraphMaterializeResult::INVALID;
@@ -478,26 +478,26 @@ GraphMaterializeResult graph_execution_materialize_slice(
         }
         reset_graph_payload(payload);
         // The attribute bit and the predicate slot are written together by the
-        // recorder. A Definition where they disagree would either route the node
+        // recorder. A Definition where they disagree would either route the task
         // through a predicate the scheduler never reads, or leave a resolved
         // predicate that no dispatch consults.
         if (slot.task_attrs.has_predicate() != (source.predicate_slot != 0)) {
             execution.materialize_busy.store(0, std::memory_order_release);
             return GraphMaterializeResult::INVALID;
         }
-        // Resolved after the reset, which clears the predicate every node starts from.
+        // Resolved after the reset, which clears the predicate every task starts from.
         if (source.predicate_slot != 0) {
             const uint32_t predicate_index = static_cast<uint32_t>(source.predicate_slot) - 1;
             GraphTensor operand;
             // OWN_OUTPUT is a valid source for a tensor arg but never for an
-            // operand: it would bind the predicate to the buffer this node has
+            // operand: it would bind the predicate to the buffer this task has
             // yet to write, so the dispatch decision would read whatever the heap
             // last held. The recorder refuses it; so does the image reader.
             if (predicate_index >= definition.predicate_count ||
                 predicates[predicate_index].operand_source.source ==
                     static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT) ||
                 !graph_rebind_tensor(
-                    execution, nodes, node_offsets, predicates[predicate_index].operand,
+                    execution, tasks, in_graph_task_offsets, predicates[predicate_index].operand,
                     predicates[predicate_index].operand_source, i, &operand
                 ) ||
                 !graph_predicate_resolve(operand, predicates[predicate_index], &payload.predicate)) {
@@ -506,15 +506,15 @@ GraphMaterializeResult graph_execution_materialize_slice(
             }
         }
     }
-    execution.materialized_nodes = last;
-    if (nodes_materialized != nullptr) *nodes_materialized = last - first;
+    execution.materialized_tasks = last;
+    if (tasks_materialized != nullptr) *tasks_materialized = last - first;
 
-    if (last < execution.node_count) {
+    if (last < execution.task_count) {
         execution.materialize_busy.store(0, std::memory_order_release);
         return GraphMaterializeResult::PENDING;
     }
 
-    // Every node's [tensor_offset, tensor_offset + tensor_count) range is bounds-
+    // Every task's [tensor_offset, tensor_offset + tensor_count) range is bounds-
     // checked on its own. This total additionally requires the ranges to account
     // for the whole tensor array, rejecting a Definition that under- or
     // over-consumes it.

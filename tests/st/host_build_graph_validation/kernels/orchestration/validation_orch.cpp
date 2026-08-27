@@ -49,7 +49,7 @@ simpler::hbg::Tensor tensor_with_unbound_owner(const simpler::hbg::Tensor &exter
 // An IN_GRAPH id names storage inside one Graph task's body, not a task-table slot,
 // so it can never be a fanin producer. Declaring one as an explicit dependency is
 // the caller error append_fanin_or_fail rejects.
-void submit_task_depending_on_graph_node() {
+void submit_task_depending_on_in_graph_task() {
     const TaskId deps[1] = {simpler::hbg::make_in_graph_task(/*graph_local_id=*/1, /*task_index=*/0)};
     CoreTaskArgs args;
     args.launch_spec.set_block_num(1);
@@ -85,7 +85,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         set_tensor_data<int32_t>(tensor_with_unbound_owner(external), 1, index, 7);
         return;
     case 4:
-        submit_task_depending_on_graph_node();
+        submit_task_depending_on_in_graph_task();
         return;
     default:
         rt_report_fatal(
