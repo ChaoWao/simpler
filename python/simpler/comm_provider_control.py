@@ -14,8 +14,10 @@ import worker-chip compatibility types, W2 planning, or W5a identity.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import struct
+import sys
 from enum import IntEnum
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Protocol, TypeVar
@@ -154,8 +156,6 @@ def _as_memoryview(buf: memoryview | bytes | bytearray, size: int, *, writable: 
             RegionControlErrorKind.BAD_MESSAGE_SIZE,
             f"buffer must hold a {size}-byte wire frame",
         )
-    if view.nbytes > size:
-        view = memoryview(view).cast("B")[:size]
     if writable and view.readonly:
         raise RegionControlError(
             RegionControlErrorKind.INTERNAL_INVARIANT,
@@ -165,7 +165,7 @@ def _as_memoryview(buf: memoryview | bytes | bytearray, size: int, *, writable: 
 
 
 def _require_zero_span(view: memoryview, offset: int, length: int) -> None:
-    if any(view[offset : offset + length]):
+    if any(view[i] for i in range(offset, offset + length)):
         raise RegionControlError(RegionControlErrorKind.RESERVED_NONZERO, "reserved bytes must be zero")
 
 
@@ -220,7 +220,7 @@ def _acquire_tag(view: memoryview) -> int:
 
 def encode_allocate_request(buf: memoryview | bytearray, spec: RegionAllocationSpec) -> None:
     view = _as_memoryview(buf, ALLOCATE_REQUEST_BYTES, writable=True)
-    view[:] = b"\x00" * ALLOCATE_REQUEST_BYTES
+    view[:ALLOCATE_REQUEST_BYTES] = b"\x00" * ALLOCATE_REQUEST_BYTES
     _ALLOCATE_REQUEST.pack_into(
         view,
         0,
@@ -392,8 +392,8 @@ def _decode_local_view(view: memoryview, offset: int, expected: RegionPartKind) 
         ) from exc
 
 
-def _zero_reply(view: memoryview) -> None:
-    view[:] = b"\x00" * view.nbytes
+def _zero_reply(view: memoryview, size: int) -> None:
+    view[:size] = b"\x00" * size
 
 
 def _discard_control_shm(shm: Any) -> None:
@@ -416,6 +416,26 @@ def _discard_control_shm(shm: Any) -> None:
             "provider control shm cleanup failed: name=%s operation=unlink error=%s",
             name,
             exc,
+        )
+
+
+def _release_exported_view(view: memoryview | None) -> None:
+    if view is None:
+        return
+    with contextlib.suppress(ValueError):
+        view.release()
+
+
+def _close_attached_control_shm(shm: SharedMemory, pending: BaseException | None) -> None:
+    try:
+        shm.close()
+    except BufferError:
+        if pending is None:
+            raise
+        logging.getLogger("simpler").warning(
+            "provider control shm cleanup failed: name=%s operation=close error=%s",
+            getattr(shm, "name", "<unnamed>"),
+            sys.exc_info()[1],
         )
 
 
@@ -462,7 +482,7 @@ def encode_allocate_success_reply(
 ) -> None:
     view = _as_memoryview(buf, ALLOCATE_REPLY_BYTES, writable=True)
     validate_independent_local_views(payload_view, counter_view)
-    _zero_reply(view)
+    _zero_reply(view, ALLOCATE_REPLY_BYTES)
     _pack_allocate_header(
         view, resource_id=result.provider_resource_id, error_kind=0, failed_part=0, failed_operation=0, debt=0
     )
@@ -480,14 +500,14 @@ def encode_allocate_request_error_reply(buf: memoryview | bytearray, kind: Regio
             RegionControlErrorKind.INTERNAL_INVARIANT,
             "REQUEST_ERROR kind must be a wire syntax code",
         )
-    _zero_reply(view)
+    _zero_reply(view, ALLOCATE_REPLY_BYTES)
     _pack_allocate_header(view, resource_id=0, error_kind=int(kind), failed_part=0, failed_operation=0, debt=0)
     _publish_tag(view, AllocateReplyTag.REQUEST_ERROR)
 
 
 def encode_allocate_allocation_error_reply(buf: memoryview | bytearray, error: RegionAllocationError) -> None:
     view = _as_memoryview(buf, ALLOCATE_REPLY_BYTES, writable=True)
-    _zero_reply(view)
+    _zero_reply(view, ALLOCATE_REPLY_BYTES)
     _pack_allocate_header(
         view,
         resource_id=error.provisional_resource_id,
@@ -584,7 +604,7 @@ def decode_allocate_reply(
 
 def encode_release_request(buf: memoryview | bytearray, provider_resource_id: int) -> None:
     view = _as_memoryview(buf, RELEASE_REQUEST_BYTES, writable=True)
-    view[:] = b"\x00" * RELEASE_REQUEST_BYTES
+    view[:RELEASE_REQUEST_BYTES] = b"\x00" * RELEASE_REQUEST_BYTES
     _RELEASE_REQUEST.pack_into(
         view,
         0,
@@ -660,7 +680,7 @@ def encode_release_result_reply(buf: memoryview | bytearray, result: ProviderRel
                 RegionControlErrorKind.INTERNAL_INVARIANT,
                 "CLEANUP_INCOMPLETE requires a nonzero failure mask",
             )
-    _zero_reply(view)
+    _zero_reply(view, RELEASE_REPLY_BYTES)
     _pack_release_reply(
         view,
         resource_id=result.provider_resource_id,
@@ -683,7 +703,7 @@ def encode_release_error_reply(
             RegionControlErrorKind.INTERNAL_INVARIANT,
             "RELEASE_ERROR kind must be INVALID_FIELD_VALUE, STORE_LIFECYCLE, or INTERNAL_INVARIANT",
         )
-    _zero_reply(view)
+    _zero_reply(view, RELEASE_REPLY_BYTES)
     _pack_release_reply(
         view,
         resource_id=int(provider_resource_id),
@@ -829,7 +849,7 @@ def decode_release_reply(buf: memoryview | bytes | bytearray) -> ProviderRelease
 
 def handle_ctrl_region_allocate(req_buf: memoryview, reply_buf: memoryview, store: ProviderRegionStore) -> None:
     reply = _as_memoryview(reply_buf, ALLOCATE_REPLY_BYTES, writable=True)
-    _zero_reply(reply)
+    _zero_reply(reply, ALLOCATE_REPLY_BYTES)
     try:
         spec = decode_allocate_request(req_buf)
     except RegionControlError as exc:
@@ -853,7 +873,7 @@ def handle_ctrl_region_allocate(req_buf: memoryview, reply_buf: memoryview, stor
 
 def handle_ctrl_region_release(req_buf: memoryview, reply_buf: memoryview, store: ProviderRegionStore) -> None:
     reply = _as_memoryview(reply_buf, RELEASE_REPLY_BYTES, writable=True)
-    _zero_reply(reply)
+    _zero_reply(reply, RELEASE_REPLY_BYTES)
     try:
         resource_id = decode_release_request(req_buf)
     except RegionControlError as exc:
@@ -886,8 +906,8 @@ class ProviderAllocateClient:
         self.committed_resource_id = 0
         req_shm = SharedMemory(create=True, size=ALLOCATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=ALLOCATE_REPLY_BYTES)
-        req_buf = memoryview(_require_shm_buf(req_shm))
-        reply_buf = memoryview(_require_shm_buf(reply_shm))
+        req_buf = _require_shm_buf(req_shm)
+        reply_buf = _require_shm_buf(reply_shm)
         try:
             encode_allocate_request(req_buf, spec)
             self.dispatch_started = True
@@ -907,8 +927,8 @@ class ProviderAllocateClient:
                 RegionControlErrorKind.INVALID_FIELD_VALUE, "allocate reply is uncommitted"
             )
         finally:
-            del req_buf
-            del reply_buf
+            _release_exported_view(req_buf)
+            _release_exported_view(reply_buf)
             _discard_control_shm(req_shm)
             _discard_control_shm(reply_shm)
 
@@ -951,8 +971,8 @@ class ProviderReleaseClient:
     def _issue(self, provider_resource_id: int) -> ProviderReleaseResult:
         req_shm = SharedMemory(create=True, size=RELEASE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=RELEASE_REPLY_BYTES)
-        req_buf = memoryview(_require_shm_buf(req_shm))
-        reply_buf = memoryview(_require_shm_buf(reply_shm))
+        req_buf = _require_shm_buf(req_shm)
+        reply_buf = _require_shm_buf(reply_shm)
         try:
             encode_release_request(req_buf, provider_resource_id)
             try:
@@ -967,7 +987,7 @@ class ProviderReleaseClient:
                 raise RegionControlProtocolError(decoded.kind, decoded.message or decoded.kind.name)
             return decoded
         finally:
-            del req_buf
-            del reply_buf
+            _release_exported_view(req_buf)
+            _release_exported_view(reply_buf)
             _discard_control_shm(req_shm)
             _discard_control_shm(reply_shm)

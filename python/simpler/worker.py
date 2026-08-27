@@ -182,6 +182,9 @@ from .comm_provider import (
     VmmShareableHandleImport,
 )
 from .comm_provider_control import (
+    _close_attached_control_shm,
+    _release_exported_view,
+    _require_shm_buf,
     handle_ctrl_region_allocate,
     handle_ctrl_region_release,
 )
@@ -2383,15 +2386,19 @@ def _handle_ctrl_region_allocate(buf: memoryview, store: ProviderRegionStore) ->
     reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
     req_shm = SharedMemory(name=request_shm_name)
     reply_shm = SharedMemory(name=reply_shm_name)
-    req_buf = cast(memoryview, req_shm.buf)
-    reply_buf = cast(memoryview, reply_shm.buf)
+    req_buf = _require_shm_buf(req_shm)
+    reply_buf = _require_shm_buf(reply_shm)
+    pending: BaseException | None = None
     try:
         handle_ctrl_region_allocate(req_buf, reply_buf, store)
+    except BaseException as exc:
+        pending = exc
+        raise
     finally:
-        del req_buf
-        del reply_buf
-        req_shm.close()
-        reply_shm.close()
+        _release_exported_view(req_buf)
+        _release_exported_view(reply_buf)
+        _close_attached_control_shm(req_shm, pending)
+        _close_attached_control_shm(reply_shm, pending)
 
 
 def _handle_ctrl_region_release(buf: memoryview, store: ProviderRegionStore) -> None:
@@ -2399,15 +2406,19 @@ def _handle_ctrl_region_release(buf: memoryview, store: ProviderRegionStore) -> 
     reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
     req_shm = SharedMemory(name=request_shm_name)
     reply_shm = SharedMemory(name=reply_shm_name)
-    req_buf = cast(memoryview, req_shm.buf)
-    reply_buf = cast(memoryview, reply_shm.buf)
+    req_buf = _require_shm_buf(req_shm)
+    reply_buf = _require_shm_buf(reply_shm)
+    pending: BaseException | None = None
     try:
         handle_ctrl_region_release(req_buf, reply_buf, store)
+    except BaseException as exc:
+        pending = exc
+        raise
     finally:
-        del req_buf
-        del reply_buf
-        req_shm.close()
-        reply_shm.close()
+        _release_exported_view(req_buf)
+        _release_exported_view(reply_buf)
+        _close_attached_control_shm(req_shm, pending)
+        _close_attached_control_shm(reply_shm, pending)
 
 
 def _open_global_domain_payload(buf: memoryview) -> tuple[SharedMemory, memoryview, int]:
