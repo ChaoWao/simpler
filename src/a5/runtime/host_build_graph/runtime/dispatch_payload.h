@@ -17,13 +17,14 @@
  * array, and embedded SPMD context (LocalContext + GlobalContext).  AICPU
  * maintains a static array of these (one per core).
  *
- * GlobalContext (sub_block_id) is initialized once at runtime startup via
- * init_global_context() and never modified afterwards.
+ * GlobalContext (sub_block_id) is populated by the scheduler path. The legacy
+ * scheduler seeds each per-core slot at startup; resident graph materialization
+ * writes the selected task subslot before every dispatch publication.
  *
  * build_payload() refreshes the function address, LocalContext's hot fields,
  * and either the ready-path argument prefix or the gated-path source pointer.
- * Context pointers, GlobalContext, and the async-completion slab metadata are
- * initialized once per core and payload buffer.
+ * Context pointers and async-completion slab metadata are initialized once per
+ * core and payload buffer.
  *
  * AICore caches a pointer to its per-core slot at startup and reads from
  * it on each dispatch.  The struct is cache-line aligned to avoid false
@@ -71,6 +72,7 @@ constexpr uint32_t TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
 // a region's address is (src + <field offset>) + <the int32 delta stored there>.
 constexpr uint32_t TASKPAYLOAD_TENSORS_DELTA_OFFSET = 12;
 constexpr uint32_t TASKPAYLOAD_SCALARS_DELTA_OFFSET = 16;
+constexpr uint32_t TASKPAYLOAD_FANIN_DELTA_OFFSET = 20;
 // Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate. Scalars follow it,
 // then tensors — the tensor array is last because it is the only region whose used
 // extent varies per task, so a task's read set is a contiguous prefix.
@@ -116,9 +118,10 @@ struct alignas(64) DispatchPayload {
      *  the idle AICore fills them from src_payload during its gate wait. */
     uint64_t args[DISPATCH_MAX_ARGS];
 
-    /** Per-core global context: sub_block_id (AIV lane identity). Cold: written once
-     *  at init, never per dispatch, so it lives in the tail (not the CL0 control
-     *  block). args[SPMD_GLOBAL_CONTEXT_INDEX] points here. */
+    /** Per-dispatch global context: sub_block_id identifies the selected AIV
+     *  task subslot. The resident scheduler writes it during materialization;
+     *  the legacy scheduler seeds the equivalent per-core value at startup.
+     *  args[SPMD_GLOBAL_CONTEXT_INDEX] points here. */
     GlobalContext global_context;
     // No explicit tail padding: alignas(64) rounds sizeof up to 512 (8 cache lines).
 

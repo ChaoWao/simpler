@@ -44,6 +44,7 @@ static_assert(offsetof(TaskPayload, tensor_count) == TASKPAYLOAD_TENSOR_COUNT_OF
 static_assert(offsetof(TaskPayload, scalar_count) == TASKPAYLOAD_SCALAR_COUNT_OFFSET);
 static_assert(offsetof(TaskPayload, tensors) == TASKPAYLOAD_TENSORS_DELTA_OFFSET);
 static_assert(offsetof(TaskPayload, scalars) == TASKPAYLOAD_SCALARS_DELTA_OFFSET);
+static_assert(offsetof(TaskPayload, fanin) == TASKPAYLOAD_FANIN_DELTA_OFFSET);
 static_assert(sizeof(simpler::hbg::Tensor) == TASKPAYLOAD_TENSOR_STRIDE);
 
 // =============================================================================
