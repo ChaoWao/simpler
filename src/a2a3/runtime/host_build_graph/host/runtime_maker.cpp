@@ -191,7 +191,7 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
     auto since = [](uint64_t current, uint64_t mark) {
         return current >= mark ? current - mark : 0;
     };
-    char with_counters[352];
+    char with_counters[kBindAttrsCapacity];
     snprintf(
         with_counters, sizeof(with_counters), "%s%sminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64, attrs,
         *attrs == '\0' ? "" : " ", since(now.minflt, g_bind_counter_mark.minflt),
@@ -656,7 +656,7 @@ int32_t run_host_orchestration(
 
     const int32_t total_tasks = orchestrator.task_allocator.active_count();
     {
-        char attrs[160];
+        char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64 " sm_mirror=%" PRIu64, total_tasks,
             orchestrator.task_allocator.heap_used_bytes(), sm_size
@@ -681,7 +681,7 @@ int32_t run_host_orchestration(
         // objects the recorders could not build in the block, and so is 0 for a bind
         // the retained staging was big enough for. It is deliberately not spelled
         // `copied=`, which on arena_h2d means a zone rather than a count.
-        char attrs[128];
+        char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs), "defs=%zu bytes=%" PRIu64 " submissions=%zu spilled=%zu", definition_uploads.count,
             definition_uploads.bytes, graph_host_upload_count(*graph_state), definition_uploads.spilled
@@ -758,7 +758,7 @@ int32_t run_host_orchestration(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
-        char attrs[96];
+        char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, heap_bytes, device_arena_bytes);
         record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
     }
@@ -773,7 +773,7 @@ int32_t run_host_orchestration(
     void *device_sm = arena_dev + layout.off_copied_end;
     runtime->set_gm_sm_ptr(device_sm);
     {
-        char attrs[96];
+        char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, image_bytes);
         record_bind_phase(HostPhaseKind::BindSharedMem, t_sm_ns, attrs, image_bytes);
     }
@@ -836,9 +836,9 @@ int32_t run_host_orchestration(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
-        // Eight uint64 fields plus their labels; 96 would truncate the trailing
-        // `args=` counts on a large bind, which are the ones this marker exists for.
-        char attrs[224];
+        // The widest attribute string a segment formats: eight uint64 fields plus
+        // their labels, which is what sets kBindAttrsCapacity's margin.
+        char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs),
             "nt=%" PRIu64 " bytes=%" PRIu64 " copied=%" PRIu64 " sm=%" PRIu64 " args=%" PRIu64 "/%" PRIu64 "/%" PRIu64,
@@ -1115,7 +1115,7 @@ extern "C" int bind_callable_to_runtime_impl(
         device_args.add_scalar(orch_args->scalar(i));
     }
     {
-        char attrs[128];
+        char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs), "ntensor=%d staged=%d bytes=%" PRIu64, tensor_count, staged_tensors, staged_bytes
         );
@@ -1141,7 +1141,7 @@ extern "C" int bind_callable_to_runtime_impl(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
-        char attrs[64];
+        char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, static_cast<uint64_t>(layout.arena_size));
         record_bind_phase(HostPhaseKind::BindArenaBuild, t_arena_build_ns, attrs);
     }
@@ -1200,7 +1200,7 @@ extern "C" int bind_callable_to_runtime_impl(
         const int64_t t_view_close_ns = bind_phase_begin();
         tensor_access.close();
         {
-            char attrs[96];
+            char attrs[kBindAttrsCapacity];
             snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, view_count, view_bytes);
             record_bind_phase(HostPhaseKind::BindHostViewClose, t_view_close_ns, attrs);
         }

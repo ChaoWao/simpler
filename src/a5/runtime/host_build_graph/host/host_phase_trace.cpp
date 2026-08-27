@@ -38,17 +38,6 @@
 
 namespace {
 
-// Bind segments carry a few attributes each beyond their duration (byte counts,
-// tensor counts, this thread's fault and context-switch deltas). They are formatted
-// when the segment ends and printed at flush, so a segment's values need not outlive
-// it and the log write stays off the measured path.
-//
-// Sized to the widest buffer any caller formats into (`char attrs[224]` in
-// runtime_maker.cpp), not to what a run happens to produce: the copy in below
-// truncates silently, and the widest segment already formats 86 bytes, so a workload
-// with one wider counter would drop a trailing attribute with nothing to say it had.
-constexpr size_t kBindAttrsCapacity = 224;
-
 // One producer's counters and in-flight claim, on its own cache lines.
 //
 // The producers of a bind are independent -- each records its own Definition and
@@ -99,6 +88,12 @@ struct TraceState {
     std::mutex lifecycle_mutex;
     std::atomic<uint64_t> submitted_tasks{0};
     std::array<ProducerLane, kProducerLanes> lanes;
+    // Each bind segment's attributes beyond its duration (byte counts, tensor
+    // counts, this thread's fault and context-switch deltas), formatted when the
+    // segment ends and printed at flush -- so a segment's values need not outlive
+    // it and the log write stays off the measured path. `kBindAttrsCapacity` is
+    // shared with every caller that formats one, because the copy in truncates
+    // silently.
     std::array<std::array<char, kBindAttrsCapacity>, kHostPhaseKindCount> bind_attrs;
 };
 
@@ -407,10 +402,22 @@ void host_phase_trace_end() {
         // A summed cost share, not an interval: several of these kinds are
         // sub-operations of another, so there is no honest way to draw the total
         // on a timeline. Per-event bars come from the artifact instead.
+        //
+        // `detail_sum` appears only where `detail` counts something. The other
+        // kinds put the identity of what they measured there — a task id, a Graph
+        // key, the submission index — and printing a sum of identities invites a
+        // reader to act on a number that means nothing.
+        if (host_phase_kind_detail_is_quantity(static_cast<HostPhaseKind>(kind))) {
+            LOG_TIMING(
+                "host-orch phase=%s total_ns=%llu count=%llu detail_sum=%llu dropped=%llu", name,
+                static_cast<unsigned long long>(total_ns), static_cast<unsigned long long>(count),
+                static_cast<unsigned long long>(payload_sum), static_cast<unsigned long long>(dropped)
+            );
+            continue;
+        }
         LOG_TIMING(
-            "host-orch phase=%s total_ns=%llu count=%llu detail_sum=%llu dropped=%llu", name,
-            static_cast<unsigned long long>(total_ns), static_cast<unsigned long long>(count),
-            static_cast<unsigned long long>(payload_sum), static_cast<unsigned long long>(dropped)
+            "host-orch phase=%s total_ns=%llu count=%llu dropped=%llu", name, static_cast<unsigned long long>(total_ns),
+            static_cast<unsigned long long>(count), static_cast<unsigned long long>(dropped)
         );
     }
 }

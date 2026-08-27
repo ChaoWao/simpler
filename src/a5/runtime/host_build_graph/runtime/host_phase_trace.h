@@ -11,7 +11,25 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+
+/**
+ * One bind segment's attribute string, for every buffer on the path from the
+ * caller that formats it to the store that holds it until flush.
+ *
+ * It is one number rather than a size per buffer because the two ends have to
+ * agree: a caller formats its own attributes and then `record_bind_phase`
+ * appends this thread's fault and context-switch deltas, and the store copies
+ * the result in with `snprintf`, which truncates in silence. Nine separate
+ * literals cannot state that relationship, and the widest of them was already
+ * larger than the store.
+ *
+ * The margin is deliberate: the widest segment formats about 100 bytes today
+ * (`arena_h2d`'s itemized upload plus the counters), so a workload whose counts
+ * grow a digit does not start dropping a trailing attribute.
+ */
+constexpr size_t kBindAttrsCapacity = 256;
 
 /**
  * Timing of this runtime's prepare path: the bind stage's segments and the host
@@ -76,7 +94,16 @@ uint64_t host_phase_now_ns();
  * orchestrator core declares a weak fallback for this function and is also
  * compiled for the AICPU, where the platform's host headers are absent.
  *
- * @param payload  task id for the kinds that submit a task, else a detail count
+ * A record is an **interval**: this kind's operation, from when it started to
+ * when it ended. `payload` says which one — a task id, a Graph key, the
+ * submission index — or counts what the interval covered, and nothing else. It
+ * is not a slot for a second measurement over the same window: a quantity about
+ * a segment (bytes moved, faults taken, memory used) belongs in that segment's
+ * attribute string, which `host_phase_record_bind` carries and the breakdown
+ * line prints. `host_phase_kind_detail_is_quantity` is what decides whether the
+ * breakdown may sum this field at all.
+ *
+ * @param payload  which operation this interval was, or how much it covered
  * @param index    submit_idx for orchestrator operations, 0 for bind segments
  */
 void host_phase_record(uint64_t start_ns, uint64_t end_ns, uint32_t kind, uint64_t payload, uint32_t index);

@@ -259,6 +259,29 @@ The last three come from the generated orchestration `.so` rather than the runti
 through the ops table's `record_orch_phase`, so they carry submit group 0 rather
 than the submission they belong to.
 
+### A phase is an interval; a quantity is an attribute
+
+The two shapes of information on this path are not interchangeable, and choosing
+the wrong one produces a number that reads as data and is not:
+
+- **A record is an interval** — one operation, start to end. Its `detail` says
+  *which* operation (a task id, a Graph key, the submission index) or *how much*
+  it covered (`build_definition`'s node count, `recording_wait`'s in-flight
+  count). That is the whole contract.
+- **A quantity about a segment is an attribute** — `bytes=`, `heap_used=`,
+  `spilled=`, `minflt=`, `nvcsw=`. It goes in the segment's attribute string,
+  which is what the `bind phase=` line prints.
+
+So: **a new interval to name earns a new kind; a new quantity about an interval
+that already exists is an attribute on it.** Adding a kind to carry a statistic
+puts a measurement into the timeline where a reader expects a duration, and the
+breakdown will then sum it.
+
+Which is exactly why `detail` is summed only where it counts something
+(`host_phase_kind_detail_is_quantity`). Nine of the eleven orchestrator kinds
+carry an identity, and a sum over identities — task ids added together — was
+printed as `detail_sum` for as long as the column was unconditional.
+
 ### The three switches
 
 | Switch | Turns on |
