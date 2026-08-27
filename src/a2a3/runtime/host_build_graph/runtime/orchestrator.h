@@ -61,7 +61,7 @@ struct OrchestratorState {
     SharedMemoryHeader *sm_header;
 
     // === TASK / HEAP ALLOCATION ===
-    // hbg is single-ring, so one allocator covers the whole graph.
+    // hbg has one task table, so one allocator covers the whole graph.
     TaskAllocator task_allocator;
     std::unique_ptr<uint32_t[]> fanin_seen_epoch;
     uint32_t fanin_seen_current_epoch{1};
@@ -109,9 +109,9 @@ struct OrchestratorState {
     // case (max_tasks tasks each at their full cap), so a bump cannot overflow.
     // The bases live here, not in the task header: nothing on the device resolves one.
     //
-    // The fanin cursor does not advance at bind time. FaninBuilder appends and
-    // dedups producers afterwards, so the region's length is known only when the count
-    // is published, and it advances there.
+    // The fanin cursor does not advance at bind time. append_fanin_or_fail appends and
+    // dedups producers afterwards, so the region's length is known only once the last
+    // producer is appended, and it advances there.
     int32_t *fanin_pool{nullptr};
     simpler::hbg::Tensor *tensor_pool{nullptr};
     uint64_t *scalar_pool{nullptr};

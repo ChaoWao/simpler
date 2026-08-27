@@ -181,7 +181,7 @@ JS-safe without burdening Python.
 Task ids are `TaskId::raw`. The low 32 bits are a local id; the high 32 bits
 mean whatever the runtime that minted the record says they mean — a ring index
 (`tensormap_and_ringbuffer`, `0..CHIP_MAX_RING_DEPTH-1`) or an id space
-(`host_build_graph`, `0 = RING`, `1 = GRAPH_NODE`). See
+(`host_build_graph`, `0 = GLOBAL`, `1 = IN_GRAPH`). See
 `src/common/{tensormap_and_ringbuffer,host_build_graph}/task_id_encoding.h`.
 Which one a record carries is a property of its runtime, not of the value:
 

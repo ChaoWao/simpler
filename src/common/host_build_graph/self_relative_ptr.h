@@ -20,7 +20,7 @@
  *
  * The block is `memcpy`'d to the device as one image, so a delta between two
  * addresses inside it is invariant under the move while a raw pointer is not.
- * Every user has to satisfy that precondition: a ring task's payload and
+ * Every user has to satisfy that precondition: a GLOBAL task's payload and
  * descriptor live in the same shared-memory image as its slot state, and a Graph
  * node's live in the same GraphNodeStorage.
  *

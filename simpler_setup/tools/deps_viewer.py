@@ -126,7 +126,7 @@ def _node_id(task_id):
 
     The high field is a ring index under ``tensormap_and_ringbuffer`` (any ring in
     ``0..CHIP_MAX_RING_DEPTH-1``) and an id space under ``host_build_graph``
-    (0 = RING, 1 = GRAPH_NODE), so its meaning depends on which runtime wrote the
+    (0 = GLOBAL, 1 = IN_GRAPH), so its meaning depends on which runtime wrote the
     record. It is printed verbatim either way.
     """
     tid = _normalize_task_id(task_id)

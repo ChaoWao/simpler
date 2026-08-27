@@ -44,13 +44,12 @@
  * away.
  *
  * Performance: Emit and Annotate are template parameters, not std::function. The
- * runtime lambda (capturing fanin_builder + sm_header) instantiates at the call site
- * and inlines through. Do NOT replace with std::function — it would break the
- * inlining and add ~5 ns/call to the orch hot path.
+ * runtime lambda (capturing the consumer's fanin region + count) instantiates at the
+ * call site and inlines through. Do NOT replace with std::function — it would break
+ * the inlining and add ~5 ns/call to the orch hot path.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_
+#pragma once
 
 #include <cstdint>
 
@@ -196,5 +195,3 @@ inline int32_t count_registrable_outputs(const DepInputs &inputs, bool in_manual
     }
     return needed;
 }
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_

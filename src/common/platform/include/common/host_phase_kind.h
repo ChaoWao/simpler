@@ -52,7 +52,7 @@ enum class HostPhaseKind : uint32_t {
     BindArenaH2d,
     BindHostViewClose,
     // Recorded by the host orchestrator (orchestrator_core/orchestrator.cpp).
-    OrchSubmitTask,       // submit_task_common: one ordinary ring task
+    OrchSubmitTask,       // submit_task_common: one ordinary task
     OrchAllocTensors,     // prepare_task: one alloc_tensors slot
     OrchRecordNode,       // graph_record_submit_node: one recorded Graph node
     OrchGraphSubmit,      // graph_submit_definition: one outer GRAPH task

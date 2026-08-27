@@ -273,10 +273,10 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
             // Performance profiling: record task execution.
             // Two identity fields go into the record (different roles):
-            //   - task_token_raw (ring/local) is pulled from the dispatch
+            //   - task_token_raw (the full TaskId) is pulled from the dispatch
             //     payload's LocalContext.async_ctx — already in AICore cache
             //     from the just-completed task, no extra GM load. Host uses
-            //     it as the canonical task identity for JSON output / ring
+            //     it as the canonical task identity for JSON output / task-id
             //     decoding.
             //   - reg_task_id is `task_id` (= reg_val, the per-core dispatch
             //     token AICore just read from DATA_MAIN_BASE). Per-dispatch

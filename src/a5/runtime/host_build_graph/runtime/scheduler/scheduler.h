@@ -571,8 +571,8 @@ struct SchedulerState {
 
     // ---- Polling completion primitives ---------------------------------------
     // Readiness: a task is ready iff every producer named in its inline fanin has
-    // set its completion_flags byte. Single-ring: all producers are ring 0, so
-    // there is no per-edge ring indirection.
+    // set its completion_flags byte. A producer is named by its local id alone, so
+    // there is no per-edge indirection.
 
     // Unmet-fanin classification. Returns -1 (all fanins met -> route to ready)
     // or the index of an unmet fanin (register on that producer's wake list).
@@ -1154,14 +1154,14 @@ struct SchedulerState {
 
     // on_task_release is gone under polling. It existed to bump each producer's
     // fanout_refcount so the host wait_for_consumers could observe consumer
-    // retirement; that signal is now the per-ring completed_watermark advanced by
+    // retirement; that signal is now the completed_watermark advanced by
     // on_mixed_task_complete. There is likewise no self CONSUMED flip (host-orch
     // never reclaimed slots on device).
 
     // === Cold-path API (defined in scheduler.cpp) ===
 
-    // Phase 1: declare every sub-region (ready_queue slots, dummy queue slots,
-    // per-ring dep_pool entries) on the supplied arena.
+    // Phase 1: declare every sub-region (ready_queue slots, dummy queue slots) on
+    // the supplied arena.
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
     static SchedulerLayout reserve_layout(DeviceArena &arena);
@@ -1175,8 +1175,8 @@ struct SchedulerState {
     bool init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base);
 
     // Phase 3b: write the arena-internal pointer fields
-    // (ready_queues[].slots, dummy_ready_queue.slots, dep_pool.base for each
-    // ring). Called on both host and device sides.
+    // (ready_queues[].slots, dummy_ready_queue.slots). Called on both host and
+    // device sides.
     void wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena);
 
     // Phase 3c, device only: bring every queue's slots[] to its empty ramp. The

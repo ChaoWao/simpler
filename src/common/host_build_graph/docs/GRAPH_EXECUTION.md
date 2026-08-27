@@ -6,7 +6,7 @@ MIX, or SPMD task, but contains a recorded task DAG.
 
 Every invocation places exactly one `GRAPH` task in the host task window. On a
 first miss, the caller immediately submits an outer task shell keyed by Graph
-identity while a recording thread records the DAG off the ring. Internal
+identity while a recording thread records the DAG off the ordinary submit path. Internal
 submissions build host-only node metadata and assign output addresses from a
 private bit-63 virtual range instead of consuming task-window slots or heap.
 Later calls for the same in-flight identity submit more shells without waiting
@@ -16,7 +16,7 @@ every recording and fills each shell's heap range and Definition content hash.
 Cached invocations submit the same one `GRAPH` task directly — a cache hit never
 waits on a recording. In both cases the device Scheduler expands the saved
 topology and dispatches the internal nodes; the Host Orchestrator never submits
-those nodes as ring tasks.
+those nodes as tasks of the run itself.
 
 Boundary contracts are checked before an in-flight shell is accepted. Once a
 shell has entered the task/dependency sequence, an unsupported construct found
@@ -368,7 +368,7 @@ outer payload as a kernel payload; device localization reads the compact values
 directly, so boundary metadata does not need to expand to full `ChipTensor`
 records on either side of H2D.
 
-Internal nodes consume no ring task-window slots. Their descriptor, payload, slot
+Internal nodes consume no task-table slots. Their descriptor, payload, slot
 state, and argument pools live in the tail of the outer `GRAPH` task's own heap block,
 past `required_heap`: `[GraphExecution][GraphNodeStorage...][tensor pool][scalar pool]`. One
 `TaskAllocator::alloc` covers both the packed outputs and this execution storage,
@@ -434,7 +434,7 @@ dependency wiring remains an Orchestrator responsibility:
 - materialization registers each non-root on one producer selected from its
   saved fanin CSR;
 - a node's release/acquire `task_state` is its Graph-local completion flag, so
-  internal nodes need neither ring completion flags nor task-window slots;
+  internal nodes need neither shared-memory completion flags nor task-table slots;
 - producer completion closes and drains only its current wake-list rather than
   traversing the saved fanout CSR;
 - a woken consumer scans its saved fanin CSR and either enters its shape queue
@@ -457,8 +457,8 @@ outer GRAPH
   -> final internal completion completes the outer GRAPH
 ```
 
-Internal nodes count as zero outer ring tasks. The final node completes
-the one outer Graph task, publishes the outer ring completion flag, wakes
+Internal nodes count as zero tasks of the run itself. The final node completes
+the one outer Graph task, publishes that task's completion flag, wakes
 external consumers, and contributes one to the host-visible completion count.
 
 Localization or materialization failure is fail-fast: the Scheduler latches an

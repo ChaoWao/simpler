@@ -406,7 +406,6 @@ struct GraphBoundary {
 // recording rather than allocated per recording — see recorder_recording().
 struct GraphRecording {
     uint64_t full_key{0};
-    int32_t start_local_task_id{0};
     uint64_t next_virtual_offset{0};
     // The in-flight entry's boundary copy, bound at graph_prepare and valid until
     // graph_end/graph_abort. Not owned here: the submitting thread reads it for
@@ -463,7 +462,7 @@ struct GraphRecording {
     // Scope depth as the body sees it. begin_scope/end_scope leave the real
     // orchestrator stack untouched while recording (a Graph replays flat), but
     // the manual-scope flag still has to follow the body: a manual scope
-    // suppresses inference on the ring, so it must suppress it here too.
+    // suppresses inference on the ordinary path, so it must suppress it here too.
     int32_t scope_stack_top{-1};
     int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
@@ -497,7 +496,6 @@ enum class GraphRecordingStatus : uint8_t { RECORDING = 0, READY = 1, FAILED = 2
 // nothing here is sized by the graph.
 struct GraphInflightRecording {
     uint64_t full_key{0};
-    int32_t start_local_task_id{0};
     GraphBoundary boundary;
     // Atomic because graph_prepare reads it on the recording thread without
     // taking recording_mutex, by design: acquiring the mutex there lets a
@@ -668,7 +666,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // Entry capacity for one recorded body's hazard map. A Definition is capped at
 // GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
 // args, so this bounds the worst realistic body while staying a small fraction of
-// the ring path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
+// the ordinary path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
 // it marks the recording unsupported, which graph_commit reports as
 // SIMPLER_ERROR_INVALID_ARGS -- the outer shell is already submitted by then, so there
 // is no ordinary-path fallback left to take.
@@ -680,6 +678,14 @@ constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 // so it can finish.
 constexpr size_t GRAPH_RECORD_NODE_TENSOR_POOL_ELEMS =
     static_cast<size_t>(GRAPH_MAX_NODES) * static_cast<size_t>(CORE_MAX_TENSOR_ARGS);
+
+// The graph_local_id a recorded task's IN_GRAPH id carries. A recorded task belongs
+// to no Graph task yet -- every shell replaying the Definition re-mints the id with
+// its own local id at materialize -- so record time names a task by its index alone,
+// and the id's low field is that index and nothing else. That is what keeps the
+// index inside the GRAPH_MAX_NODES task chains the recording's hazard map is
+// dimensioned for.
+constexpr uint32_t GRAPH_RECORD_NO_OWNING_GRAPH = 0;
 
 // Stand the recording's hazard map up on its own allocation. Failure is
 // reported to the caller, which abandons the recording rather than producing a
@@ -813,7 +819,6 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     }
     recording.tensor_map.reset();
     recording.full_key = entry.full_key;
-    recording.start_local_task_id = entry.start_local_task_id;
     recording.boundary = &entry.boundary;
     recording.next_virtual_offset = 0;
     recording.unsupported = false;
@@ -1237,7 +1242,9 @@ GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
     return list;
 }
 
-static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
+// Advances the epoch fanin_mark_seen keys against, so a mark left by an earlier task
+// never reads as a repeat. The table is cleared only on wraparound.
+static void next_fanin_seen_epoch(OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
         memset(
@@ -1246,73 +1253,58 @@ static uint32_t next_fanin_seen_epoch(OrchestratorState *orch) {
         next = 1;
     }
     orch->fanin_seen_current_epoch = next;
-    return next;
 }
 
-// Polling: fanin is a flat array of position-independent producer local ids on
-// the payload (no dep-pool spill, no producer pointers). The builder writes them
-// directly into the payload's fanin region as producers are appended, deduping by
-// slot and hard-capping at CHIP_MAX_FANIN. self_local is this task's own local id
-// (the consumer), used to bump each producer's last_consumer_local_id (the
-// reclaim gate the host wait_for_consumers polls via completed_watermark).
-struct FaninBuilder {
-    FaninBuilder(OrchestratorState *orch, TaskPayload *payload, int32_t self_local, uint32_t seen_epoch) :
-        count(0),
-        orch(orch),
-        seen_epoch(seen_epoch),
-        self_local(self_local),
-        payload(payload),
-        slots(payload->fanin_data()) {}
-    int32_t count{0};
-    OrchestratorState *orch{nullptr};
-    uint32_t seen_epoch{0};
-    int32_t self_local{0};
-    TaskPayload *payload{nullptr};
-    // The payload's fanin region, resolved once: the appends below would otherwise
-    // re-resolve the delta per producer. Requires the regions bound before construction.
-    int32_t *slots{nullptr};
-
-    bool mark_seen(TaskId producer_task_id) {
-        // Dedup only. A negative local id cannot index the epoch table, so it is
-        // reported as not-yet-seen and the caller appends it rather than rejecting
-        // it; append_fanin_or_fail has already established that the producer is a
-        // ring task whose local id is a valid table entry.
-        const int32_t prod_local = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
-        if (prod_local < 0) {
-            return false;
-        }
-        uint32_t *seen = orch->fanin_seen_epoch.get();
-        uint32_t slot = static_cast<uint32_t>(prod_local);
-        if (seen[slot] == seen_epoch) {
-            return true;
-        }
-        seen[slot] = seen_epoch;
+// True when this producer was already appended under the current epoch. A negative
+// local id cannot index the epoch table, so it is reported as not-yet-seen and the
+// caller appends it rather than rejecting it; append_fanin_or_fail has already
+// established that the producer is a GLOBAL task whose local id is a valid table
+// entry.
+static bool fanin_mark_seen(OrchestratorState &orch, TaskId producer_task_id) {
+    const int32_t prod_local = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
+    if (prod_local < 0) {
         return false;
     }
-};
+    uint32_t *seen = orch.fanin_seen_epoch.get();
+    uint32_t slot = static_cast<uint32_t>(prod_local);
+    if (seen[slot] == orch.fanin_seen_current_epoch) {
+        return true;
+    }
+    seen[slot] = orch.fanin_seen_current_epoch;
+    return false;
+}
 
-static bool append_fanin_or_fail(OrchestratorState *orch, TaskId producer_task_id, FaninBuilder *fanin_builder) {
-    // Only a RING-space producer has an entry in the task table. A GRAPH_NODE id's
-    // low bits are a packed (outer task, node index) pair, so using them as a table
+// Polling: fanin is a flat array of position-independent producer local ids in the
+// payload's own fanin region (no dep-pool spill, no producer pointers), deduped
+// against the current fanin_seen epoch and hard-capped at CHIP_MAX_FANIN.
+// fanin_slots and fanin_count are that region and payload.fanin_count itself: the
+// region is named by a SelfRelativePtr delta, so the caller resolves it once, and
+// the count accumulates in place instead of being copied back at the end.
+static bool append_fanin_or_fail(
+    OrchestratorState &orch, TaskId producer_task_id, TaskId self_task_id, int32_t *fanin_slots, int32_t &fanin_count
+) {
+    // Only a GLOBAL producer has an entry in the task table. An IN_GRAPH id's low
+    // bits are a packed (Graph task, task index) pair, so using them as a table
     // index names an unrelated task — or, since get_slot_state_by_task_id does not
-    // bounds-check, no task at all. Nothing inside a Graph is reachable as a
-    // producer here — a recorded node hands out a RING id — so a foreign space is a
-    // caller error, not a case to tolerate.
+    // bounds-check, no task at all. A recorded task's id is IN_GRAPH and the
+    // recorder resolves it against its own body, never here, so a foreign space
+    // reaching this point is an id that escaped its Graph — a caller error, not a
+    // case to tolerate.
     //
     // The table lookup lives here, after this check, rather than at the three call
     // sites: that keeps the id-space invariant in one place and makes it impossible
     // for a caller to form the out-of-bounds slot reference before reaching it.
-    if (!simpler::hbg::is_ring_task(producer_task_id)) {
-        orch->report_fatal(
+    if (!simpler::hbg::is_global_task(producer_task_id)) {
+        orch.report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
-            "producer task %#llx is in id space %u, not RING; host_build_graph resolves every fanin edge against its "
-            "one task table",
+            "producer task %#llx is in id space %u, not GLOBAL; host_build_graph resolves every fanin edge against "
+            "its one task table",
             static_cast<unsigned long long>(producer_task_id.raw),
             static_cast<unsigned int>(simpler::hbg::task_id_space(producer_task_id))
         );
         return false;
     }
-    ChipTaskSlotState *prod_state = &orch->sm_header->tasks.get_slot_state_by_task_id(
+    ChipTaskSlotState *prod_state = &orch.sm_header->tasks.get_slot_state_by_task_id(
         static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id))
     );
     // Skip a stale/reused producer slot: the cached owner id no longer resolves
@@ -1324,29 +1316,30 @@ static bool append_fanin_or_fail(OrchestratorState *orch, TaskId producer_task_i
         return true;
     }
     // Dedup by producer local id, which is also its task-table slot.
-    if (fanin_builder->mark_seen(producer_task_id)) {
+    if (fanin_mark_seen(orch, producer_task_id)) {
         return true;
     }
-    if (fanin_builder->count >= CHIP_MAX_FANIN) {
+    if (fanin_count >= CHIP_MAX_FANIN) {
         LOG_ERROR("========================================");
         LOG_ERROR("FATAL: Fanin Capacity Exhausted!");
         LOG_ERROR("========================================");
         LOG_ERROR("HBG stores every producer dependency in the consumer task's fanin region.");
-        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, CHIP_MAX_FANIN);
-        LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
+        LOG_ERROR("  Fanin:     used=%d/%d", fanin_count, CHIP_MAX_FANIN);
+        LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_count + 1);
         LOG_ERROR("Solution:");
         LOG_ERROR("  Reduce the task fanin to at most CHIP_MAX_FANIN=%d.", CHIP_MAX_FANIN);
         LOG_ERROR("  HBG has no dependency spill pool; runtime_env.ring_dep_pool does not apply.");
         LOG_ERROR("========================================");
-        orch_mark_fatal(orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
+        orch_mark_fatal(&orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;
     }
-    fanin_builder->slots[fanin_builder->count++] = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
+    fanin_slots[fanin_count++] = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
 
     // Reclaim gate: record this task as a consumer of the producer. The producer
-    // slot retires once the per-ring completed_watermark reaches this consumer id.
-    if (fanin_builder->self_local > prod_state->last_consumer_local_id) {
-        prod_state->last_consumer_local_id = fanin_builder->self_local;
+    // slot retires once the completed_watermark reaches this consumer id.
+    const int32_t self_local = static_cast<int32_t>(simpler::hbg::task_local_id(self_task_id));
+    if (self_local > prod_state->last_consumer_local_id) {
+        prod_state->last_consumer_local_id = self_local;
     }
     return true;
 }
@@ -1397,7 +1390,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = simpler::hbg::make_ring_task(static_cast<uint32_t>(out->alloc_result.task_id));
+    out->task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->tasks.get_slot_state_by_task_id(out->alloc_result.task_id);
     out->task = &orch->sm_header->tasks.task_descriptors[out->alloc_result.task_id];
     out->payload = &orch->sm_header->tasks.task_payloads[out->alloc_result.task_id];
@@ -1461,7 +1454,8 @@ static bool prepare_task(
     // it in append_fanin_or_fail. completion_flags for this slot were cleared
     // above (whole-graph-resident hbg never reuses a slot).
     out->slot_state->last_consumer_local_id = static_cast<int32_t>(simpler::hbg::task_local_id(out->task_id));
-    // payload.fanin_count is set in submit_task_common's STEP 6.
+    // payload.fanin_count is left untouched here: submit_task_common zeroes it before
+    // its fanin appends, which accumulate into it in place.
 
     return true;
 }
@@ -1476,14 +1470,14 @@ void OrchestratorState::begin_scope(ScopeMode mode) {
         return;
     }
     // A Graph replays as a flat DAG with no scope structure: scope boundaries only
-    // shape scheduling on the ring, and the shadow-record path submits no ring
-    // tasks. So a scope inside a Graph body must not touch the real scope stack.
-    // Its manual/auto mode still matters, though — the recorder infers a node's
-    // producers with the same compute_task_fanin the ring path uses, and that
-    // inference is suppressed inside a manual scope — so the depth is tracked on
+    // shape scheduling on the ordinary path, and the shadow-record path submits no
+    // ordinary tasks. So a scope inside a Graph body must not touch the real scope
+    // stack. Its manual/auto mode still matters, though — the recorder infers a
+    // node's producers with the same compute_task_fanin the ordinary path uses, and
+    // that inference is suppressed inside a manual scope — so the depth is tracked on
     // the recording instead.
     if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
-        // Reject what the ring rejects. An auto scope inside a manual one is a
+        // Reject what the ordinary path rejects. An auto scope inside a manual one is a
         // fatal below; accepting it here would let a Graph record and replay a
         // body that ordinary submission refuses. The push still happens so
         // end_scope stays balanced -- the recording is doomed either way, since
@@ -1615,9 +1609,13 @@ static TaskOutputTensors submit_task_common(
         );
     }
 
-    FaninBuilder fanin_builder(
-        orch, &payload, static_cast<int32_t>(simpler::hbg::task_local_id(task_id)), next_fanin_seen_epoch(orch)
-    );
+    // The region delta is resolved once here, after prepare_task bound the regions.
+    // Zeroing the count gives the appends their starting point, and is this
+    // device-read field's only write on the submit path — hbg never zero-fills the
+    // task table.
+    next_fanin_seen_epoch(orch);
+    int32_t *fanin_slots = payload.fanin_data();
+    payload.fanin_count = 0;
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -1639,7 +1637,7 @@ static TaskOutputTensors submit_task_common(
         if (capture_dep_graph) {
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
-        if (!append_fanin_or_fail(orch, dep_task_id, &fanin_builder)) {
+        if (!append_fanin_or_fail(*orch, dep_task_id, task_id, fanin_slots, payload.fanin_count)) {
             return result;
         }
     }
@@ -1651,7 +1649,7 @@ static TaskOutputTensors submit_task_common(
     };
 
     auto runtime_emit = [&](TaskId producer_task_id) -> bool {
-        return append_fanin_or_fail(orch, producer_task_id, &fanin_builder);
+        return append_fanin_or_fail(*orch, producer_task_id, task_id, fanin_slots, payload.fanin_count);
     };
 
     // The capture branch instantiates compute_task_fanin with a live Annotate;
@@ -1696,15 +1694,17 @@ static TaskOutputTensors submit_task_common(
     task.packed_buffer_base = prepared.alloc_result.packed_base;
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
-    // append_fanin_or_fail wrote each producer's local id straight into
-    // the payload's fanin region and bumped its last_consumer_local_id; the count is
-    // published in STEP 6 below. payload.init does not touch the fanin region.
+    // append_fanin_or_fail wrote every producer's local id into the payload's fanin
+    // region, counted them in payload.fanin_count, and bumped each producer's
+    // last_consumer_local_id. payload.init writes tensor_count/scalar_count only and
+    // must not touch either, or it would discard that.
     payload.init(args, result, prepared.alloc_result, layout);
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
     // no Arg/simpler::hbg::Tensor access. Both branches write predicate.op explicitly because
-    // payload slots are ring-reused; op == NONE means "always dispatch".
+    // a payload slot is raw shared memory with no constructor; op == NONE means
+    // "always dispatch".
     {
         const CoreTaskPredicate &pred = args.predicate();
         if (pred.op != PredicateOp::NONE && pred.operand.tensor != nullptr && pred.operand.tensor->buffer.addr != 0) {
@@ -1721,10 +1721,10 @@ static TaskOutputTensors submit_task_common(
     }
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 
-    // === STEP 6: publish the inline fanin count (device boot classifies) ===
-    // Polling + host-orch: append_fanin_or_fail already wrote each producer's
-    // local id into the payload's fanin region and bumped its last_consumer_local_id.
-    // All that remains is to record how many. There is NO fanout adjacency, NO
+    // === STEP 6: close the fanin region (device boot classifies) ===
+    // Polling + host-orch: append_fanin_or_fail already wrote each producer's local
+    // id into the payload's fanin region, counted them in payload.fanin_count, and
+    // bumped each producer's last_consumer_local_id. There is NO fanout adjacency, NO
     // dep_pool, and NO ready routing here — the initial device boot scan classifies
     // each task once. A -1 result from classify_fanin_state routes the task through
     // push_ready_routed; otherwise the returned index selects the producer passed
@@ -1733,12 +1733,11 @@ static TaskOutputTensors submit_task_common(
     // The initial scan happens before the scheduler dispatch loop starts. Fanin is
     // a flat array of position-independent integers, so it crosses to the device
     // unchanged.
-    payload.fanin_count = fanin_builder.count;
     // The region's length is settled, so the cursor closes it at the real count. The
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(payload.fanin_count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     (void)sched;
 
@@ -1922,7 +1921,7 @@ bool graph_submit_outer(
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
-    const TaskId task_id = simpler::hbg::make_ring_task(static_cast<uint32_t>(allocation.task_id));
+    const TaskId task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(allocation.task_id));
     SharedMemoryTaskHeader &tasks = orch->sm_header->tasks;
     TaskDescriptor &task = tasks.task_descriptors[allocation.task_id];
     TaskPayload &payload = tasks.task_payloads[allocation.task_id];
@@ -1972,11 +1971,12 @@ bool graph_submit_outer(
         );
     }
 
-    FaninBuilder fanin_builder(
-        orch, &payload, static_cast<int32_t>(simpler::hbg::task_local_id(task_id)), next_fanin_seen_epoch(orch)
-    );
+    // graph_reset_outer_payload above zeroed the count; the region delta is resolved
+    // once here.
+    next_fanin_seen_epoch(orch);
+    int32_t *fanin_slots = payload.fanin_data();
     auto emit = [&](TaskId producer_id) -> bool {
-        return append_fanin_or_fail(orch, producer_id, &fanin_builder);
+        return append_fanin_or_fail(*orch, producer_id, task_id, fanin_slots, payload.fanin_count);
     };
     // An outer GRAPH task is an ordinary task, so the dependency graph
     // has to carry it: without this the whole Graph — and every edge into it —
@@ -2005,12 +2005,11 @@ bool graph_submit_outer(
         return false;
     }
     register_task_outputs(boundary_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
-    payload.fanin_count = fanin_builder.count;
     // The region's length is settled, so the cursor closes it at the real count. The
     // equality holds only while nothing between the bind and here bound another fanin
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
-    orch->fanin_pool_cursor += CHIP_ALIGN_UP(fanin_builder.count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+    orch->fanin_pool_cursor += CHIP_ALIGN_UP(payload.fanin_count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(pending);
@@ -2094,12 +2093,12 @@ TaskOutputTensors graph_record_submit_node(
     GraphRecording &recording = *active_graph_recording(orch);
 
     const size_t node_index = recording.node_count;
-    // A recorded node's index equals its local task id minus the recording
-    // baseline, so its synthetic id keeps classification and explicit-dep
-    // arithmetic identical to the ordinary path.
-    const TaskId task_id = simpler::hbg::make_ring_task(
-        static_cast<uint32_t>(recording.start_local_task_id) + static_cast<uint32_t>(node_index)
-    );
+    // A recorded task lives in the IN_GRAPH id space, so an id the body hands
+    // around says which of the two kinds of thing it names without any arithmetic:
+    // an IN_GRAPH id is a task of this body, indexed by its low field; a GLOBAL id is
+    // a task submitted before the Graph, which nothing in the body may depend on.
+    const TaskId task_id =
+        simpler::hbg::make_in_graph_task(GRAPH_RECORD_NO_OWNING_GRAPH, static_cast<uint32_t>(node_index));
     result.set_task_id(task_id);
 
     if (node_index >= GRAPH_MAX_NODES || args.has_error) {
@@ -2273,7 +2272,7 @@ TaskOutputTensors graph_record_submit_node(
         if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(source.source_index);
     }
 
-    // Inferred hazards, on the same terms as the ring path. The loop above only
+    // Inferred hazards, on the same terms as the ordinary path. The loop above only
     // names the node that ALLOCATED each buffer; every write-then-read through a
     // buffer someone else allocated — an alloc_tensors output written in place
     // with add_inout, or a view of a boundary tensor — needs the last-writer
@@ -2293,7 +2292,10 @@ TaskOutputTensors graph_record_submit_node(
             args.explicit_deps_data(),
         };
         const bool manual_scope = recording.in_manual_scope();
-        if (!recording.storage_ready) {
+        if (!recording.storage_ready || node_index >= GRAPH_MAX_NODES) {
+            // An over-cap body is already abandoned, and its task ids have run past
+            // the index field make_in_graph_task packs them into, so registering one
+            // would key the map outside its task chains.
             recording.unsupported = true;
         } else if (recording.tensor_map.free_entries() < count_registrable_outputs(dep_inputs, manual_scope)) {
             // Recording one more node would assert inside new_entry(). Abandon the
@@ -2305,11 +2307,14 @@ TaskOutputTensors graph_record_submit_node(
             );
             recording.unsupported = true;
         } else {
-            auto emit_inferred = [&recording, &add_fanin, node_index](TaskId producer) -> bool {
-                const int32_t producer_index =
-                    static_cast<int32_t>(simpler::hbg::task_local_id(producer)) - recording.start_local_task_id;
-                if (simpler::hbg::is_ring_task(producer) && producer_index >= 0 &&
-                    producer_index < static_cast<int32_t>(node_index)) {
+            auto emit_inferred = [&add_fanin, node_index](TaskId producer) -> bool {
+                // A GLOBAL producer is a task submitted before the Graph. The outer shell
+                // was submitted through the ordinary path against this same boundary, so
+                // its own fanin already orders the whole body behind that task and the
+                // Definition carries no edge of its own.
+                if (simpler::hbg::is_global_task(producer)) return true;
+                const uint32_t producer_index = simpler::hbg::task_local_id(producer);
+                if (producer_index < static_cast<uint32_t>(node_index)) {
                     add_fanin(static_cast<size_t>(producer_index));
                 }
                 return true;
@@ -2320,13 +2325,14 @@ TaskOutputTensors graph_record_submit_node(
     }
     for (uint32_t i = 0; i < args.explicit_dep_count(); ++i) {
         const TaskId dep = args.explicit_dep(i);
-        const int32_t dep_index =
-            static_cast<int32_t>(simpler::hbg::task_local_id(dep)) - recording.start_local_task_id;
-        if (!dep.is_valid() || !simpler::hbg::is_ring_task(dep) || dep_index >= static_cast<int32_t>(node_index)) {
+        if (!dep.is_valid()) {
             recording.unsupported = true;
             continue;
         }
-        if (dep_index < 0) {
+        if (simpler::hbg::is_global_task(dep)) {
+            // Only the outer shell can order the body behind a pre-Graph task, and it
+            // does so through its boundary args -- so a dep no boundary tensor carries
+            // has no edge in the Definition and the body cannot be recorded.
             const bool represented_by_boundary = std::any_of(
                 recording.boundary_tensors().begin(), recording.boundary_tensors().end(),
                 [dep](const simpler::hbg::Tensor &tensor) {
@@ -2334,9 +2340,16 @@ TaskOutputTensors graph_record_submit_node(
                 }
             );
             if (!represented_by_boundary) recording.unsupported = true;
-        } else {
-            add_fanin(static_cast<size_t>(dep_index));
+            continue;
         }
+        const uint32_t dep_index = simpler::hbg::task_local_id(dep);
+        if (dep_index >= static_cast<uint32_t>(node_index)) {
+            // A task of this body that is not yet recorded: the Definition's edges are
+            // acyclic by construction, so a forward reference cannot be expressed.
+            recording.unsupported = true;
+            continue;
+        }
+        add_fanin(static_cast<size_t>(dep_index));
     }
 
     node.fanin_count = static_cast<uint32_t>(recording.internal_fanins.size() - node.fanin_offset);
@@ -2452,7 +2465,6 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
     // up here would sit on the submitting thread, between two outer shells.
     auto entry = std::make_unique<GraphInflightRecording>();
     entry->full_key = full_key;
-    entry->start_local_task_id = orch->task_allocator.active_count();
     entry->boundary.scalar_count = args.scalar_count();
     entry->boundary.tensors.reserve(static_cast<size_t>(args.tensor_count()));
     entry->boundary.types.reserve(static_cast<size_t>(args.tensor_count()));

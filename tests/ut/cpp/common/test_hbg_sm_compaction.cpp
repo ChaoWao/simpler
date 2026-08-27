@@ -87,7 +87,7 @@ public:
         // orchestrator's bump cursors hand them out, and gets content that identifies
         // the slot so the compaction can be checked element by element.
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
-            descriptors()[i].task_id = simpler::hbg::make_ring_task(static_cast<uint32_t>(i));
+            descriptors()[i].task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(i));
             payloads()[i].tensor_count = TENSORS_PER_TASK;
             payloads()[i].scalar_count = SCALARS_PER_TASK;
             payloads()[i].fanin_count = FANIN_PER_TASK;
@@ -110,7 +110,7 @@ public:
             completion_flags()[i].store(static_cast<uint8_t>(i & 1), std::memory_order_relaxed);
         }
         // A slot past the submitted prefix, to prove it does not travel.
-        descriptors()[SUBMITTED].task_id = simpler::hbg::make_ring_task(0xBEEF);
+        descriptors()[SUBMITTED].task_id = simpler::hbg::make_global_task(0xBEEF);
     }
 
     // Overwrite the three fields that can hold a graph-heap address with ones out

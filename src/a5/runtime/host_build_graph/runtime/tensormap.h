@@ -567,6 +567,10 @@ struct ChipTensorMap {
         uint32_t bucket_index = hash(addr);
         auto local_id = simpler::hbg::task_local_id(producer_task_id);
         const int32_t task_slot = local_id;
+        // A producer's low id field is a task chain index directly, so the id space a
+        // caller inserts under has to be the one this map was dimensioned for: a
+        // whole-run map takes task capacity, a Graph recording's takes GRAPH_MAX_NODES.
+        debug_assert(task_slot >= 0 && task_slot < max_tasks);
 
         entry->producer_task_id = producer_task_id;
 
@@ -605,6 +609,7 @@ struct ChipTensorMap {
             // Entry is the head of its task chain, update task_entry_heads
             int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(entry.producer_task_id));
             const int32_t task_slot = local_id;
+            debug_assert(task_slot >= 0 && task_slot < max_tasks);
             task_entry_heads[task_slot] = entry.next_in_task;
         } else {
             entry.prev_in_task->next_in_task = entry.next_in_task;
