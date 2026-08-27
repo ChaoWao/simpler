@@ -206,26 +206,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: recv_meta_local_inline9405__ssa_v0
-    __gm__ TaskTensor *recv_meta_local_inline9405__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *recv_meta_local_inline9405__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *recv_meta_local_inline9405__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(recv_meta_local_inline9405__ssa_v0_tensor->buffer.addr) +
         recv_meta_local_inline9405__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_r_route_out_inline9369__ssa_v0
-    __gm__ TaskTensor *recv_r_route_out_inline9369__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *recv_r_route_out_inline9369__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *recv_r_route_out_inline9369__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(recv_r_route_out_inline9369__ssa_v0_tensor->buffer.addr) +
         recv_r_route_out_inline9369__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: routed_y_buf__ssa_v0
-    __gm__ TaskTensor *routed_y_buf__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *routed_y_buf__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *routed_y_buf__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(routed_y_buf__ssa_v0_tensor->buffer.addr) +
         routed_y_buf__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_y_flat_inline2828_inline9140__ssa_v0
-    __gm__ TaskTensor *recv_y_flat_inline2828_inline9140__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *recv_y_flat_inline2828_inline9140__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ bfloat16_t *recv_y_flat_inline2828_inline9140__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(recv_y_flat_inline2828_inline9140__ssa_v0_tensor->buffer.addr) +
         recv_y_flat_inline2828_inline9140__ssa_v0_tensor->start_offset;

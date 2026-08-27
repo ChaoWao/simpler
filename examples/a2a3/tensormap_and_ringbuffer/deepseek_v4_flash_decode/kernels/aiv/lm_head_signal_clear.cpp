@@ -147,18 +147,18 @@ lm_head_signal_clear(__gm__ float *v1, __gm__ int32_t *v2, __gm__ int32_t *v3, _
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: logits__rv_v2
-    __gm__ TaskTensor *logits__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *logits__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *logits__rv_v2 =
         reinterpret_cast<__gm__ float *>(logits__rv_v2_tensor->buffer.addr) + logits__rv_v2_tensor->start_offset;
 
     // Unpack tensor: lm_head_hidden_done__ssa_v0
-    __gm__ TaskTensor *lm_head_hidden_done__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *lm_head_hidden_done__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *lm_head_hidden_done__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(lm_head_hidden_done__ssa_v0_tensor->buffer.addr) +
         lm_head_hidden_done__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: lm_head_logits_done__ssa_v0
-    __gm__ TaskTensor *lm_head_logits_done__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *lm_head_logits_done__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *lm_head_logits_done__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(lm_head_logits_done__ssa_v0_tensor->buffer.addr) +
         lm_head_logits_done__ssa_v0_tensor->start_offset;

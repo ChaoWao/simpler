@@ -1976,31 +1976,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: inv_rms_inline15113__ssa_v1
-    __gm__ TaskTensor *inv_rms_inline15113__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *inv_rms_inline15113__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *inv_rms_inline15113__ssa_v1 =
         reinterpret_cast<__gm__ float *>(inv_rms_inline15113__ssa_v1_tensor->buffer.addr) +
         inv_rms_inline15113__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: mixes_raw_inline15136__ssa_v1
-    __gm__ TaskTensor *mixes_raw_inline15136__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *mixes_raw_inline15136__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *mixes_raw_inline15136__ssa_v1 =
         reinterpret_cast<__gm__ float *>(mixes_raw_inline15136__ssa_v1_tensor->buffer.addr) +
         mixes_raw_inline15136__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: hc_base_2d_inline15173__ssa_v0
-    __gm__ TaskTensor *hc_base_2d_inline15173__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *hc_base_2d_inline15173__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *hc_base_2d_inline15173__ssa_v0 =
         reinterpret_cast<__gm__ float *>(hc_base_2d_inline15173__ssa_v0_tensor->buffer.addr) +
         hc_base_2d_inline15173__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: comb_t_inline12239__ssa_v0
-    __gm__ TaskTensor *comb_t_inline12239__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *comb_t_inline12239__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *comb_t_inline12239__ssa_v0 =
         reinterpret_cast<__gm__ float *>(comb_t_inline12239__ssa_v0_tensor->buffer.addr) +
         comb_t_inline12239__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: hc_scale (scale2 read from GM instead of a host-staged scalar)
-    __gm__ TaskTensor *hc_scale_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *hc_scale_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *hc_scale =
         reinterpret_cast<__gm__ float *>(hc_scale_tensor->buffer.addr) + hc_scale_tensor->start_offset;
     float scale2_inline15138__ssa_v0 = hc_scale[2];

@@ -338,20 +338,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: swa_indices_inline636__ssa_v1
-    __gm__ TaskTensor *swa_indices_inline636__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *swa_indices_inline636__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *swa_indices_inline636__ssa_v1 =
         reinterpret_cast<__gm__ int32_t *>(swa_indices_inline636__ssa_v1_tensor->buffer.addr) +
         swa_indices_inline636__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: topk_all_inline11389__ssa_v0
-    __gm__ TaskTensor *topk_all_inline11389__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *topk_all_inline11389__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *topk_all_inline11389__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(topk_all_inline11389__ssa_v0_tensor->buffer.addr) +
         topk_all_inline11389__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: sparse_bias_inline1492_inline11373__ssa_v0
-    __gm__ TaskTensor *sparse_bias_inline1492_inline11373__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *sparse_bias_inline1492_inline11373__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *sparse_bias_inline1492_inline11373__ssa_v0 =
         reinterpret_cast<__gm__ float *>(sparse_bias_inline1492_inline11373__ssa_v0_tensor->buffer.addr) +
         sparse_bias_inline1492_inline11373__ssa_v0_tensor->start_offset;

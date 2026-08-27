@@ -1012,39 +1012,37 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: gate_bias_l0_inline566__ssa_v0
-    __gm__ TaskTensor *gate_bias_l0_inline566__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *gate_bias_l0_inline566__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *gate_bias_l0_inline566__ssa_v0 =
         reinterpret_cast<__gm__ float *>(gate_bias_l0_inline566__ssa_v0_tensor->buffer.addr) +
         gate_bias_l0_inline566__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: xg_buf_inline2582_inline9396__ssa_v0
-    __gm__ TaskTensor *xg_buf_inline2582_inline9396__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *xg_buf_inline2582_inline9396__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *xg_buf_inline2582_inline9396__ssa_v0 =
         reinterpret_cast<__gm__ float *>(xg_buf_inline2582_inline9396__ssa_v0_tensor->buffer.addr) +
         xg_buf_inline2582_inline9396__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: gate_w_l0_inline573__ssa_v0
-    __gm__ TaskTensor *gate_w_l0_inline573__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *gate_w_l0_inline573__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *gate_w_l0_inline573__ssa_v0 =
         reinterpret_cast<__gm__ float *>(gate_w_l0_inline573__ssa_v0_tensor->buffer.addr) +
         gate_w_l0_inline573__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: inv_rms_buf_inline2585_inline9282__ssa_v0
-    __gm__ TaskTensor *inv_rms_buf_inline2585_inline9282__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *inv_rms_buf_inline2585_inline9282__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *inv_rms_buf_inline2585_inline9282__ssa_v0 =
         reinterpret_cast<__gm__ float *>(inv_rms_buf_inline2585_inline9282__ssa_v0_tensor->buffer.addr) +
         inv_rms_buf_inline2585_inline9282__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: route_scores_buf_inline2607_inline9273__ssa_v0
-    __gm__ TaskTensor *route_scores_buf_inline2607_inline9273__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *route_scores_buf_inline2607_inline9273__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ float *route_scores_buf_inline2607_inline9273__ssa_v0 =
         reinterpret_cast<__gm__ float *>(route_scores_buf_inline2607_inline9273__ssa_v0_tensor->buffer.addr) +
         route_scores_buf_inline2607_inline9273__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: __gm_pipe_buffer
-    __gm__ TaskTensor *__gm_pipe_buffer_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ Tensor *__gm_pipe_buffer_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
     // SPMD: shard GM pipe workspace by logical block_idx to avoid overlap.
     int64_t __pypto_gm_block_num = static_cast<int64_t>(__pypto_spmd_block_num);
     if (__pypto_gm_block_num <= 0) __pypto_gm_block_num = 1;

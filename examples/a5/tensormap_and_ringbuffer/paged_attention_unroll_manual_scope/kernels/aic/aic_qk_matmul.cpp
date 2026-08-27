@@ -111,10 +111,10 @@ static __aicore__ void qk_matmul_n_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *qi = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *key_cache = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *block_table_t = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
-    __gm__ TaskTensor *sij_buf = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *qi = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *key_cache = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *block_table_t = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ Tensor *sij_buf = reinterpret_cast<__gm__ Tensor *>(args[3]);
     uint64_t n_blocks = static_cast<uint64_t>(args[4]);
     uint64_t bt_offset = static_cast<uint64_t>(args[5]);
 

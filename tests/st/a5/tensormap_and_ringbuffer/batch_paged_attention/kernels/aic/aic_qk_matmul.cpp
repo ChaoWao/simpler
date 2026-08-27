@@ -38,9 +38,9 @@
 
 template <int M, int K, int N>
 static __aicore__ void qk_matmul_batch_impl(
-    __gm__ TaskTensor *query, __gm__ TaskTensor *key_cache, __gm__ TaskTensor *block_table_t,
-    __gm__ TaskTensor *sij_batch, uint64_t batch_count, uint64_t block_idx, uint64_t q_offset, uint64_t block_num,
-    uint64_t num_heads, uint64_t batch_start
+    __gm__ Tensor *query, __gm__ Tensor *key_cache, __gm__ Tensor *block_table_t, __gm__ Tensor *sij_batch,
+    uint64_t batch_count, uint64_t block_idx, uint64_t q_offset, uint64_t block_num, uint64_t num_heads,
+    uint64_t batch_start
 ) {
     __gm__ bfloat16_t *query_base = reinterpret_cast<__gm__ bfloat16_t *>(query->buffer.addr);
     __gm__ bfloat16_t *key_base = reinterpret_cast<__gm__ bfloat16_t *>(key_cache->buffer.addr);
@@ -112,10 +112,10 @@ static __aicore__ void qk_matmul_batch_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *query = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *key_cache = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *block_table_t = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
-    __gm__ TaskTensor *sij_batch = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *query = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *key_cache = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *block_table_t = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ Tensor *sij_batch = reinterpret_cast<__gm__ Tensor *>(args[3]);
     uint64_t batch_count = static_cast<uint64_t>(args[4]);
     uint64_t block_idx = static_cast<uint64_t>(args[5]);
     uint64_t q_offset = static_cast<uint64_t>(args[6]);

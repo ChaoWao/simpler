@@ -33,9 +33,9 @@ enum InputWindowOp : uint64_t {
 };
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *first_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *second_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *first_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *second_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     uint64_t op = static_cast<uint64_t>(args[3]);
     float scalar = from_u64<float>(static_cast<uint64_t>(args[4]));
 

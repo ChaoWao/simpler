@@ -291,8 +291,7 @@ static __aicore__ void rope_swap(__gm__ int32_t *v1) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: rope_swap_idx_inline1490_inline11789__ssa_v0
-    __gm__ TaskTensor *rope_swap_idx_inline1490_inline11789__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *rope_swap_idx_inline1490_inline11789__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *rope_swap_idx_inline1490_inline11789__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(rope_swap_idx_inline1490_inline11789__ssa_v0_tensor->buffer.addr) +
         rope_swap_idx_inline1490_inline11789__ssa_v0_tensor->start_offset;

@@ -374,21 +374,19 @@ static __aicore__ void quant_2(__gm__ float *v1, __gm__ int8_t *v2, __gm__ float
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: act_scale_dq_inline1577_inline11391__iter_v1
-    __gm__ TaskTensor *act_scale_dq_inline1577_inline11391__iter_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *act_scale_dq_inline1577_inline11391__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *act_scale_dq_inline1577_inline11391__iter_v1 =
         reinterpret_cast<__gm__ float *>(act_scale_dq_inline1577_inline11391__iter_v1_tensor->buffer.addr) +
         act_scale_dq_inline1577_inline11391__iter_v1_tensor->start_offset;
 
     // Unpack tensor: o_r_i8_pad_inline1462_inline11408__iter_v1
-    __gm__ TaskTensor *o_r_i8_pad_inline1462_inline11408__iter_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *o_r_i8_pad_inline1462_inline11408__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int8_t *o_r_i8_pad_inline1462_inline11408__iter_v1 =
         reinterpret_cast<__gm__ int8_t *>(o_r_i8_pad_inline1462_inline11408__iter_v1_tensor->buffer.addr) +
         o_r_i8_pad_inline1462_inline11408__iter_v1_tensor->start_offset;
 
     // Unpack tensor: o_r_pad_inline1536_inline11403__ssa_v3
-    __gm__ TaskTensor *o_r_pad_inline1536_inline11403__ssa_v3_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *o_r_pad_inline1536_inline11403__ssa_v3_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *o_r_pad_inline1536_inline11403__ssa_v3 =
         reinterpret_cast<__gm__ float *>(o_r_pad_inline1536_inline11403__ssa_v3_tensor->buffer.addr) +
         o_r_pad_inline1536_inline11403__ssa_v3_tensor->start_offset;

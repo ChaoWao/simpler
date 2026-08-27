@@ -9,12 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Element-wise TaskTensor Addition Kernel
+ * Element-wise Tensor Addition Kernel
  *
  * Implements: out[i] = src0[i] + src1[i]
  * pto::Tile size: ROWS x COLS
  *
- * Args (TaskTensor*):
+ * Args (Tensor*):
  *   args[0] = src0 (INPUT)  - ROWS x COLS
  *   args[1] = src1 (INPUT)  - ROWS x COLS
  *   args[2] = out (OUTPUT)  - ROWS x COLS
@@ -35,7 +35,7 @@
 #define __aicore__ [aicore]
 #endif
 
-static __aicore__ inline int get_num_tiles(__gm__ TaskTensor *tensor, uint64_t tile_elems) {
+static __aicore__ inline int get_num_tiles(__gm__ Tensor *tensor, uint64_t tile_elems) {
     uint64_t total_elems = tensor->shapes[0];
     return static_cast<int>(total_elems / tile_elems);
 }
@@ -70,9 +70,9 @@ static __aicore__ void add_impl(__gm__ float *src0, __gm__ float *src1, __gm__ f
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *src0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *src1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
 
     constexpr uint64_t TILE_ELEMS = 128 * 128;
     int num_tiles = get_num_tiles(src0_tensor, TILE_ELEMS);

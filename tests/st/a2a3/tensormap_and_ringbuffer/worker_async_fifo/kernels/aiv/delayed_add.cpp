@@ -17,9 +17,9 @@
 #include "pipe_sync.h"
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *src0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *src1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
 
     // Match the repository's bounded slow-producer test shape. The caller uses
     // a loop count calibrated to keep this task on-core long enough to observe

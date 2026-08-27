@@ -653,27 +653,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: biased_scores_buf_inline2564_inline12048__ssa_v3
-    __gm__ TaskTensor *biased_scores_buf_inline2564_inline12048__ssa_v3_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *biased_scores_buf_inline2564_inline12048__ssa_v3_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *biased_scores_buf_inline2564_inline12048__ssa_v3 =
         reinterpret_cast<__gm__ float *>(biased_scores_buf_inline2564_inline12048__ssa_v3_tensor->buffer.addr) +
         biased_scores_buf_inline2564_inline12048__ssa_v3_tensor->start_offset;
 
     // Unpack tensor: route_scores_buf_inline2607_inline11959__ssa_v1
-    __gm__ TaskTensor *route_scores_buf_inline2607_inline11959__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *route_scores_buf_inline2607_inline11959__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *route_scores_buf_inline2607_inline11959__ssa_v1 =
         reinterpret_cast<__gm__ float *>(route_scores_buf_inline2607_inline11959__ssa_v1_tensor->buffer.addr) +
         route_scores_buf_inline2607_inline11959__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: indices_inline11972__ssa_v0
-    __gm__ TaskTensor *indices_inline11972__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *indices_inline11972__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *indices_inline11972__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(indices_inline11972__ssa_v0_tensor->buffer.addr) +
         indices_inline11972__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: weights_inline11962__ssa_v0
-    __gm__ TaskTensor *weights_inline11962__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *weights_inline11962__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *weights_inline11962__ssa_v0 =
         reinterpret_cast<__gm__ float *>(weights_inline11962__ssa_v0_tensor->buffer.addr) +
         weights_inline11962__ssa_v0_tensor->start_offset;

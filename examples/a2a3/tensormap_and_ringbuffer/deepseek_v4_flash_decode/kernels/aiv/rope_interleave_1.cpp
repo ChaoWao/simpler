@@ -575,25 +575,25 @@ static __aicore__ void rope_interleave_1(__gm__ float *v1, __gm__ float *v2, __g
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: cmp_cos_inline11642__rv_v2
-    __gm__ TaskTensor *cmp_cos_inline11642__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *cmp_cos_inline11642__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *cmp_cos_inline11642__rv_v2 =
         reinterpret_cast<__gm__ float *>(cmp_cos_inline11642__rv_v2_tensor->buffer.addr) +
         cmp_cos_inline11642__rv_v2_tensor->start_offset;
 
     // Unpack tensor: cmp_cos_il_inline11581__ssa_v0
-    __gm__ TaskTensor *cmp_cos_il_inline11581__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *cmp_cos_il_inline11581__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *cmp_cos_il_inline11581__ssa_v0 =
         reinterpret_cast<__gm__ float *>(cmp_cos_il_inline11581__ssa_v0_tensor->buffer.addr) +
         cmp_cos_il_inline11581__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: cmp_sin_inline11548__rv_v2
-    __gm__ TaskTensor *cmp_sin_inline11548__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *cmp_sin_inline11548__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *cmp_sin_inline11548__rv_v2 =
         reinterpret_cast<__gm__ float *>(cmp_sin_inline11548__rv_v2_tensor->buffer.addr) +
         cmp_sin_inline11548__rv_v2_tensor->start_offset;
 
     // Unpack tensor: cmp_sin_signed_inline11505__ssa_v0
-    __gm__ TaskTensor *cmp_sin_signed_inline11505__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *cmp_sin_signed_inline11505__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *cmp_sin_signed_inline11505__ssa_v0 =
         reinterpret_cast<__gm__ float *>(cmp_sin_signed_inline11505__ssa_v0_tensor->buffer.addr) +
         cmp_sin_signed_inline11505__ssa_v0_tensor->start_offset;

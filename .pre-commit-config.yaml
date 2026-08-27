@@ -39,6 +39,14 @@ repos:
           language_version: python3
           exclude: ^3rdparty/|vendor/
 
+        - id: check-kernel-wire-isolation
+          name: check-kernel-wire-isolation
+          entry: python tests/lint/check_kernel_wire_isolation.py
+          language: python
+          language_version: python3
+          files: \.(h|hpp|cpp|cc|cxx)$
+          exclude: ^3rdparty/
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:

@@ -247,25 +247,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: csa_idx_wq_b_scale_csa_inline561__ssa_v0
-    __gm__ TaskTensor *csa_idx_wq_b_scale_csa_inline561__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *csa_idx_wq_b_scale_csa_inline561__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *csa_idx_wq_b_scale_csa_inline561__ssa_v0 =
         reinterpret_cast<__gm__ float *>(csa_idx_wq_b_scale_csa_inline561__ssa_v0_tensor->buffer.addr) +
         csa_idx_wq_b_scale_csa_inline561__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_acc_pad_inline2023_inline10773__rv_v2
-    __gm__ TaskTensor *qr_acc_pad_inline2023_inline10773__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *qr_acc_pad_inline2023_inline10773__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *qr_acc_pad_inline2023_inline10773__rv_v2 =
         reinterpret_cast<__gm__ int32_t *>(qr_acc_pad_inline2023_inline10773__rv_v2_tensor->buffer.addr) +
         qr_acc_pad_inline2023_inline10773__rv_v2_tensor->start_offset;
 
     // Unpack tensor: qr_scale_inline10758__ssa_v0
-    __gm__ TaskTensor *qr_scale_inline10758__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *qr_scale_inline10758__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *qr_scale_inline10758__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_scale_inline10758__ssa_v0_tensor->buffer.addr) +
         qr_scale_inline10758__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_proj_inline2001_inline10437__ssa_v0
-    __gm__ TaskTensor *qr_proj_inline2001_inline10437__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *qr_proj_inline2001_inline10437__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *qr_proj_inline2001_inline10437__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_proj_inline2001_inline10437__ssa_v0_tensor->buffer.addr) +
         qr_proj_inline2001_inline10437__ssa_v0_tensor->start_offset;

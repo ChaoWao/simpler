@@ -984,31 +984,31 @@ rmsnorm_rope(__gm__ float *v1, __gm__ float *v2, __gm__ float *v3, __gm__ bfloat
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: step_cos_il_inline10506__ssa_v1
-    __gm__ TaskTensor *step_cos_il_inline10506__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *step_cos_il_inline10506__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *step_cos_il_inline10506__ssa_v1 =
         reinterpret_cast<__gm__ float *>(step_cos_il_inline10506__ssa_v1_tensor->buffer.addr) +
         step_cos_il_inline10506__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: step_sin_signed_inline10441__ssa_v1
-    __gm__ TaskTensor *step_sin_signed_inline10441__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *step_sin_signed_inline10441__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *step_sin_signed_inline10441__ssa_v1 =
         reinterpret_cast<__gm__ float *>(step_sin_signed_inline10441__ssa_v1_tensor->buffer.addr) +
         step_sin_signed_inline10441__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: pooled_kv_inline14646__rv_v2
-    __gm__ TaskTensor *pooled_kv_inline14646__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *pooled_kv_inline14646__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *pooled_kv_inline14646__rv_v2 =
         reinterpret_cast<__gm__ float *>(pooled_kv_inline14646__rv_v2_tensor->buffer.addr) +
         pooled_kv_inline14646__rv_v2_tensor->start_offset;
 
     // Unpack tensor: normed_kv_inline14668__ssa_v0
-    __gm__ TaskTensor *normed_kv_inline14668__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *normed_kv_inline14668__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ bfloat16_t *normed_kv_inline14668__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(normed_kv_inline14668__ssa_v0_tensor->buffer.addr) +
         normed_kv_inline14668__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: norm_w_2d_inline14630__ssa_v0
-    __gm__ TaskTensor *norm_w_2d_inline14630__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *norm_w_2d_inline14630__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ bfloat16_t *norm_w_2d_inline14630__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(norm_w_2d_inline14630__ssa_v0_tensor->buffer.addr) +
         norm_w_2d_inline14630__ssa_v0_tensor->start_offset;

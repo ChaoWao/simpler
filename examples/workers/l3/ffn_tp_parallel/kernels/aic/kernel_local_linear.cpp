@@ -47,8 +47,7 @@ AICORE constexpr inline T CeilAlign(T num_1, T num_2) {
     return (num_1 + num_2 - 1) / num_2 * num_2;
 }
 
-static __aicore__ void
-local_linear_impl(__gm__ TaskTensor *x_tensor, __gm__ TaskTensor *w_tensor, __gm__ TaskTensor *out_tensor) {
+static __aicore__ void local_linear_impl(__gm__ Tensor *x_tensor, __gm__ Tensor *w_tensor, __gm__ Tensor *out_tensor) {
     __gm__ float *x_ptr = reinterpret_cast<__gm__ float *>(x_tensor->buffer.addr) + x_tensor->start_offset;
     __gm__ float *w_ptr = reinterpret_cast<__gm__ float *>(w_tensor->buffer.addr) + w_tensor->start_offset;
     __gm__ float *out_ptr = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
@@ -107,8 +106,8 @@ local_linear_impl(__gm__ TaskTensor *x_tensor, __gm__ TaskTensor *w_tensor, __gm
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *x_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *w_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
-    __gm__ TaskTensor *out_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *x_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *w_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     local_linear_impl(x_tensor, w_tensor, out_tensor);
 }

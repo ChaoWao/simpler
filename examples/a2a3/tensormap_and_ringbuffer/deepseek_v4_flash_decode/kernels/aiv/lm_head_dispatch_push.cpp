@@ -273,31 +273,30 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: x_out__rv_v2
-    __gm__ TaskTensor *x_out__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *x_out__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *x_out__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(x_out__rv_v2_tensor->buffer.addr) + x_out__rv_v2_tensor->start_offset;
 
     // Unpack tensor: logit_row_indices__ssa_v0
-    __gm__ TaskTensor *logit_row_indices__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *logit_row_indices__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *logit_row_indices__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(logit_row_indices__ssa_v0_tensor->buffer.addr) +
         logit_row_indices__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: selected_hidden_inline51_inline13294__ssa_v0
-    __gm__ TaskTensor *selected_hidden_inline51_inline13294__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *selected_hidden_inline51_inline13294__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *selected_hidden_inline51_inline13294__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(selected_hidden_inline51_inline13294__ssa_v0_tensor->buffer.addr) +
         selected_hidden_inline51_inline13294__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: lm_head_hidden_window__ssa_v0
-    __gm__ TaskTensor *lm_head_hidden_window__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *lm_head_hidden_window__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ bfloat16_t *lm_head_hidden_window__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(lm_head_hidden_window__ssa_v0_tensor->buffer.addr) +
         lm_head_hidden_window__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: lm_head_hidden_done__ssa_v0
-    __gm__ TaskTensor *lm_head_hidden_done__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *lm_head_hidden_done__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ int32_t *lm_head_hidden_done__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(lm_head_hidden_done__ssa_v0_tensor->buffer.addr) +
         lm_head_hidden_done__ssa_v0_tensor->start_offset;

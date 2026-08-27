@@ -1064,33 +1064,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: qr_fp32_inline806_inline9638__ssa_v1
-    __gm__ TaskTensor *qr_fp32_inline806_inline9638__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *qr_fp32_inline806_inline9638__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *qr_fp32_inline806_inline9638__ssa_v1 =
         reinterpret_cast<__gm__ float *>(qr_fp32_inline806_inline9638__ssa_v1_tensor->buffer.addr) +
         qr_fp32_inline806_inline9638__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: gamma_cq_l1_inline681__ssa_v0
-    __gm__ TaskTensor *gamma_cq_l1_inline681__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *gamma_cq_l1_inline681__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ bfloat16_t *gamma_cq_l1_inline681__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(gamma_cq_l1_inline681__ssa_v0_tensor->buffer.addr) +
         gamma_cq_l1_inline681__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_scale_view_inline839_inline9742__ssa_v0
-    __gm__ TaskTensor *qr_scale_view_inline839_inline9742__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *qr_scale_view_inline839_inline9742__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *qr_scale_view_inline839_inline9742__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_scale_view_inline839_inline9742__ssa_v0_tensor->buffer.addr) +
         qr_scale_view_inline839_inline9742__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_i8_matmul_inline892_inline9622__ssa_v0
-    __gm__ TaskTensor *qr_i8_matmul_inline892_inline9622__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *qr_i8_matmul_inline892_inline9622__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ int8_t *qr_i8_matmul_inline892_inline9622__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(qr_i8_matmul_inline892_inline9622__ssa_v0_tensor->buffer.addr) +
         qr_i8_matmul_inline892_inline9622__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_view_inline833_inline9681__ssa_v0
-    __gm__ TaskTensor *qr_view_inline833_inline9681__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *qr_view_inline833_inline9681__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ int8_t *qr_view_inline833_inline9681__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(qr_view_inline833_inline9681__ssa_v0_tensor->buffer.addr) +
         qr_view_inline833_inline9681__ssa_v0_tensor->start_offset;

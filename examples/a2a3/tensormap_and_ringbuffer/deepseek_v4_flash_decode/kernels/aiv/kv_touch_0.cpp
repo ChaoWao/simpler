@@ -136,8 +136,7 @@ static __aicore__ void kv_touch_0(__gm__ bfloat16_t *v1, int64_t v2) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: ori_kv_flat_inline2164_inline12781__ssa_v0
-    __gm__ TaskTensor *ori_kv_flat_inline2164_inline12781__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *ori_kv_flat_inline2164_inline12781__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *ori_kv_flat_inline2164_inline12781__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(ori_kv_flat_inline2164_inline12781__ssa_v0_tensor->buffer.addr) +
         ori_kv_flat_inline2164_inline12781__ssa_v0_tensor->start_offset;

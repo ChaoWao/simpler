@@ -24,6 +24,11 @@
 
 // The tensor type of whichever runtime this translation unit is being built for.
 // A kernel reads a payload element and does not care which orchestrator produced
-// it, so kernels name this rather than picking a runtime — several are compiled
-// under both.
-using TaskTensor = simpler::tmr::Tensor;
+// it, so kernels and the orchestration sources shared between runtimes name this
+// rather than picking one — several are compiled under both.
+//
+// The name is unqualified because nothing on a kernel or orchestration include path
+// reaches task_interface/buffer.h, which declares a different `Tensor` — the L3+
+// wire form, at global scope. tests/lint/check_kernel_wire_isolation.py holds that
+// separation; an include that breaks it turns this line into a redeclaration.
+using Tensor = simpler::tmr::Tensor;

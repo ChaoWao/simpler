@@ -297,20 +297,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: lm_head_logits_window__ssa_v0
-    __gm__ TaskTensor *lm_head_logits_window__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *lm_head_logits_window__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *lm_head_logits_window__ssa_v0 =
         reinterpret_cast<__gm__ float *>(lm_head_logits_window__ssa_v0_tensor->buffer.addr) +
         lm_head_logits_window__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: logits_shards_inline40_inline13289__rv_v2
-    __gm__ TaskTensor *logits_shards_inline40_inline13289__rv_v2_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *logits_shards_inline40_inline13289__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *logits_shards_inline40_inline13289__rv_v2 =
         reinterpret_cast<__gm__ float *>(logits_shards_inline40_inline13289__rv_v2_tensor->buffer.addr) +
         logits_shards_inline40_inline13289__rv_v2_tensor->start_offset;
 
     // Unpack tensor: lm_head_logits_done__ssa_v0
-    __gm__ TaskTensor *lm_head_logits_done__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *lm_head_logits_done__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int32_t *lm_head_logits_done__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(lm_head_logits_done__ssa_v0_tensor->buffer.addr) +
         lm_head_logits_done__ssa_v0_tensor->start_offset;

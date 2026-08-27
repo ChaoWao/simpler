@@ -625,21 +625,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: gate_tile_i32_inline2749_inline10057__ssa_v0
-    __gm__ TaskTensor *gate_tile_i32_inline2749_inline10057__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *gate_tile_i32_inline2749_inline10057__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *gate_tile_i32_inline2749_inline10057__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(gate_tile_i32_inline2749_inline10057__ssa_v0_tensor->buffer.addr) +
         gate_tile_i32_inline2749_inline10057__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: recv_x_flat_inline2781_inline10160__ssa_v0
-    __gm__ TaskTensor *recv_x_flat_inline2781_inline10160__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *recv_x_flat_inline2781_inline10160__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int8_t *recv_x_flat_inline2781_inline10160__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(recv_x_flat_inline2781_inline10160__ssa_v0_tensor->buffer.addr) +
         recv_x_flat_inline2781_inline10160__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: routed_w1_l1_inline686__ssa_v0
-    __gm__ TaskTensor *routed_w1_l1_inline686__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *routed_w1_l1_inline686__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ int8_t *routed_w1_l1_inline686__ssa_v0 =
         reinterpret_cast<__gm__ int8_t *>(routed_w1_l1_inline686__ssa_v0_tensor->buffer.addr) +
         routed_w1_l1_inline686__ssa_v0_tensor->start_offset;

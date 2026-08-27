@@ -162,26 +162,25 @@ gate_pre_route(__gm__ float *v1, __gm__ int32_t *v2, __gm__ float *v3, __gm__ fl
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: x_norm_scale_inline9245__ssa_v0
-    __gm__ TaskTensor *x_norm_scale_inline9245__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *x_norm_scale_inline9245__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *x_norm_scale_inline9245__ssa_v0 =
         reinterpret_cast<__gm__ float *>(x_norm_scale_inline9245__ssa_v0_tensor->buffer.addr) +
         x_norm_scale_inline9245__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: indices_inline9286__ssa_v0
-    __gm__ TaskTensor *indices_inline9286__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *indices_inline9286__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *indices_inline9286__ssa_v0 =
         reinterpret_cast<__gm__ int32_t *>(indices_inline9286__ssa_v0_tensor->buffer.addr) +
         indices_inline9286__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: weights_inline9276__ssa_v0
-    __gm__ TaskTensor *weights_inline9276__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *weights_inline9276__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *weights_inline9276__ssa_v0 =
         reinterpret_cast<__gm__ float *>(weights_inline9276__ssa_v0_tensor->buffer.addr) +
         weights_inline9276__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: biased_scores_buf_inline2564_inline9362__ssa_v0
-    __gm__ TaskTensor *biased_scores_buf_inline2564_inline9362__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *biased_scores_buf_inline2564_inline9362__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *biased_scores_buf_inline2564_inline9362__ssa_v0 =
         reinterpret_cast<__gm__ float *>(biased_scores_buf_inline2564_inline9362__ssa_v0_tensor->buffer.addr) +
         biased_scores_buf_inline2564_inline9362__ssa_v0_tensor->start_offset;

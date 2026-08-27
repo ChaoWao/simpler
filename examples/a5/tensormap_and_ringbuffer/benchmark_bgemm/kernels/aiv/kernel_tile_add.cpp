@@ -13,12 +13,12 @@
  *
  * Computes: C_tile = C_tile + P (tile_size x tile_size tile accumulation)
  *
- * Args (TaskTensor*):
+ * Args (Tensor*):
  *   args[0] = C_tile (INOUT: read + write accumulator)
  *   args[1] = P      (INPUT: matmul result to accumulate)
  *
  * The A5 Case0 kernel uses 128 x 128 tiles and derives the tile count from the
- * TaskTensor view created by orchestration.
+ * Tensor view created by orchestration.
  */
 
 #include <cstdint>
@@ -37,7 +37,7 @@
 #define __aicore__ [aicore]
 #endif
 
-static __aicore__ inline int get_num_tiles(__gm__ TaskTensor *tensor, uint64_t tile_elems) {
+static __aicore__ inline int get_num_tiles(__gm__ Tensor *tensor, uint64_t tile_elems) {
     uint64_t total_elems = tensor->shapes[0];
     return static_cast<int>(total_elems / tile_elems);
 }
@@ -72,8 +72,8 @@ static __aicore__ void tile_add_impl(__gm__ float *c_ptr, __gm__ float *p_ptr) {
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ TaskTensor *c_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
-    __gm__ TaskTensor *p_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *c_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *p_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     constexpr uint64_t TILE_ELEMS = 128 * 128;
     int num_tiles = get_num_tiles(c_tensor, TILE_ELEMS);
 

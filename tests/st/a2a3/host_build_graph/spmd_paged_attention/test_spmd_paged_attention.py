@@ -22,7 +22,7 @@ from tests.st.a2a3.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged
 class TestSpmdPagedAttentionHbgA2A3(_TmrBase):
     # Orchestration names one runtime's `Tensor` and builds tensors through that
     # runtime's factory, so it cannot be compiled under both — this runtime has
-    # its own copy under `kernels/`. The MIX kernel names `TaskTensor`, the
+    # its own copy under `kernels/`. The MIX kernel names `Tensor`, the
     # per-translation-unit alias each runtime exports, and is shared.
     _SHARED_DIR = Path(__file__).resolve().parents[2] / "tensormap_and_ringbuffer/spmd_paged_attention"
     CALLABLE = deepcopy(_TmrBase.CALLABLE)

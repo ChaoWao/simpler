@@ -432,33 +432,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: rope_swap_idx_t_inline1970_inline10780__ssa_v1
-    __gm__ TaskTensor *rope_swap_idx_t_inline1970_inline10780__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *rope_swap_idx_t_inline1970_inline10780__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ int32_t *rope_swap_idx_t_inline1970_inline10780__ssa_v1 =
         reinterpret_cast<__gm__ int32_t *>(rope_swap_idx_t_inline1970_inline10780__ssa_v1_tensor->buffer.addr) +
         rope_swap_idx_t_inline1970_inline10780__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: step_cos_il_inline10506__ssa_v1
-    __gm__ TaskTensor *step_cos_il_inline10506__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *step_cos_il_inline10506__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *step_cos_il_inline10506__ssa_v1 =
         reinterpret_cast<__gm__ float *>(step_cos_il_inline10506__ssa_v1_tensor->buffer.addr) +
         step_cos_il_inline10506__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: step_sin_signed_inline10441__ssa_v1
-    __gm__ TaskTensor *step_sin_signed_inline10441__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *step_sin_signed_inline10441__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *step_sin_signed_inline10441__ssa_v1 =
         reinterpret_cast<__gm__ float *>(step_sin_signed_inline10441__ssa_v1_tensor->buffer.addr) +
         step_sin_signed_inline10441__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: qr_proj_flat_inline1973_inline10549__ssa_v0
-    __gm__ TaskTensor *qr_proj_flat_inline1973_inline10549__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *qr_proj_flat_inline1973_inline10549__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *qr_proj_flat_inline1973_inline10549__ssa_v0 =
         reinterpret_cast<__gm__ float *>(qr_proj_flat_inline1973_inline10549__ssa_v0_tensor->buffer.addr) +
         qr_proj_flat_inline1973_inline10549__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_bf16_inline1969_inline10778__ssa_v0
-    __gm__ TaskTensor *qr_bf16_inline1969_inline10778__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *qr_bf16_inline1969_inline10778__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ bfloat16_t *qr_bf16_inline1969_inline10778__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(qr_bf16_inline1969_inline10778__ssa_v0_tensor->buffer.addr) +
         qr_bf16_inline1969_inline10778__ssa_v0_tensor->start_offset;

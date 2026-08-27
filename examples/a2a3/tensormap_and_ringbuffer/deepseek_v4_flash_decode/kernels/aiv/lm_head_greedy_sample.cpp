@@ -621,12 +621,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: logits__rv_v2
-    __gm__ TaskTensor *logits__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *logits__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ float *logits__rv_v2 =
         reinterpret_cast<__gm__ float *>(logits__rv_v2_tensor->buffer.addr) + logits__rv_v2_tensor->start_offset;
 
     // Unpack tensor: sampled_ids__ssa_v0
-    __gm__ TaskTensor *sampled_ids__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *sampled_ids__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *sampled_ids__ssa_v0 = reinterpret_cast<__gm__ int32_t *>(sampled_ids__ssa_v0_tensor->buffer.addr) +
                                           sampled_ids__ssa_v0_tensor->start_offset;
 

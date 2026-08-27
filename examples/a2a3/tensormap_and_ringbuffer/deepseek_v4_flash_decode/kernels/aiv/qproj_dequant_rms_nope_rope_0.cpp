@@ -1200,47 +1200,43 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: q_flat_inline811_inline9596__ssa_v0
-    __gm__ TaskTensor *q_flat_inline811_inline9596__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *q_flat_inline811_inline9596__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *q_flat_inline811_inline9596__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(q_flat_inline811_inline9596__ssa_v0_tensor->buffer.addr) +
         q_flat_inline811_inline9596__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: qr_scale_view_inline839_inline9742__ssa_v1
-    __gm__ TaskTensor *qr_scale_view_inline839_inline9742__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *qr_scale_view_inline839_inline9742__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ float *qr_scale_view_inline839_inline9742__ssa_v1 =
         reinterpret_cast<__gm__ float *>(qr_scale_view_inline839_inline9742__ssa_v1_tensor->buffer.addr) +
         qr_scale_view_inline839_inline9742__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: q_rope_cos_il_inline862_inline9639__ssa_v1
-    __gm__ TaskTensor *q_rope_cos_il_inline862_inline9639__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *q_rope_cos_il_inline862_inline9639__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ float *q_rope_cos_il_inline862_inline9639__ssa_v1 =
         reinterpret_cast<__gm__ float *>(q_rope_cos_il_inline862_inline9639__ssa_v1_tensor->buffer.addr) +
         q_rope_cos_il_inline862_inline9639__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: q_rope_sin_signed_inline898_inline9722__ssa_v1
-    __gm__ TaskTensor *q_rope_sin_signed_inline898_inline9722__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+    __gm__ Tensor *q_rope_sin_signed_inline898_inline9722__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ float *q_rope_sin_signed_inline898_inline9722__ssa_v1 =
         reinterpret_cast<__gm__ float *>(q_rope_sin_signed_inline898_inline9722__ssa_v1_tensor->buffer.addr) +
         q_rope_sin_signed_inline898_inline9722__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: q_rope_swap_idx_inline864_inline9696__ssa_v1
-    __gm__ TaskTensor *q_rope_swap_idx_inline864_inline9696__ssa_v1_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[4]);
+    __gm__ Tensor *q_rope_swap_idx_inline864_inline9696__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
     __gm__ int32_t *q_rope_swap_idx_inline864_inline9696__ssa_v1 =
         reinterpret_cast<__gm__ int32_t *>(q_rope_swap_idx_inline864_inline9696__ssa_v1_tensor->buffer.addr) +
         q_rope_swap_idx_inline864_inline9696__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: q_proj_i32_inline873_inline9807__rv_v2
-    __gm__ TaskTensor *q_proj_i32_inline873_inline9807__rv_v2_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[5]);
+    __gm__ Tensor *q_proj_i32_inline873_inline9807__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
     __gm__ int32_t *q_proj_i32_inline873_inline9807__rv_v2 =
         reinterpret_cast<__gm__ int32_t *>(q_proj_i32_inline873_inline9807__rv_v2_tensor->buffer.addr) +
         q_proj_i32_inline873_inline9807__rv_v2_tensor->start_offset;
 
     // Unpack tensor: wq_b_scale_l1_inline661__ssa_v0
-    __gm__ TaskTensor *wq_b_scale_l1_inline661__ssa_v0_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[6]);
+    __gm__ Tensor *wq_b_scale_l1_inline661__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[6]);
     __gm__ float *wq_b_scale_l1_inline661__ssa_v0 =
         reinterpret_cast<__gm__ float *>(wq_b_scale_l1_inline661__ssa_v0_tensor->buffer.addr) +
         wq_b_scale_l1_inline661__ssa_v0_tensor->start_offset;

@@ -275,21 +275,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: swa_kv_flat_inline1000_inline9849__ssa_v0
-    __gm__ TaskTensor *swa_kv_flat_inline1000_inline9849__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+    __gm__ Tensor *swa_kv_flat_inline1000_inline9849__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ bfloat16_t *swa_kv_flat_inline1000_inline9849__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(swa_kv_flat_inline1000_inline9849__ssa_v0_tensor->buffer.addr) +
         swa_kv_flat_inline1000_inline9849__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: swa_indices_inline636__ssa_v1
-    __gm__ TaskTensor *swa_indices_inline636__ssa_v1_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+    __gm__ Tensor *swa_indices_inline636__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ int32_t *swa_indices_inline636__ssa_v1 =
         reinterpret_cast<__gm__ int32_t *>(swa_indices_inline636__ssa_v1_tensor->buffer.addr) +
         swa_indices_inline636__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: ori_kv_flat_inline1033_inline9732__ssa_v0
-    __gm__ TaskTensor *ori_kv_flat_inline1033_inline9732__ssa_v0_tensor =
-        reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+    __gm__ Tensor *ori_kv_flat_inline1033_inline9732__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
     __gm__ bfloat16_t *ori_kv_flat_inline1033_inline9732__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(ori_kv_flat_inline1033_inline9732__ssa_v0_tensor->buffer.addr) +
         ori_kv_flat_inline1033_inline9732__ssa_v0_tensor->start_offset;
