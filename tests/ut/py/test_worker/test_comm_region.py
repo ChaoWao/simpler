@@ -342,26 +342,20 @@ def test_shape_validation_rejects_direct_map_and_extra_consumers():
 
     worker = _l3(device_ids=[0])
     decisions: dict[
-        tuple[Any, ce.RegionPartKind, ce.AdapterKind, ce.AdapterProfile],
+        tuple[Any, ce.AdapterKind, ce.AdapterProfile],
         Union[ce.RegionAccessDecision, bool],
-    ] = {}
-    for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER):
-        decisions[
-            (
-                ce.BackendKind.VMM_WINDOW,
-                part,
-                ce.AdapterKind.OWNER_DELEGATED_COPY,
-                ce.AdapterProfile.HOST_VMM_COPY,
-            )
-        ] = True
-        decisions[
-            (
-                ce.BackendKind.VMM_WINDOW,
-                part,
-                ce.AdapterKind.DEVICE_PEER,
-                ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT,
-            )
-        ] = True
+    ] = {
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.AdapterKind.OWNER_DELEGATED_COPY,
+            ce.AdapterProfile.HOST_VMM_COPY,
+        ): True,
+        (
+            ce.BackendKind.VMM_WINDOW,
+            ce.AdapterKind.DEVICE_PEER,
+            ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT,
+        ): True,
+    }
     worker._region_access_service = ce.StaticRegionAccessService(decisions)
     extra = _context(
         worker,

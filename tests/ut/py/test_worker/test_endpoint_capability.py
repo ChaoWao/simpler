@@ -25,7 +25,7 @@ from simpler.buffer import (
     mint_owner_instance_id,
     wrap_device_malloc,
 )
-from simpler.comm_endpoints import RegionAccessReasonCode
+from simpler.comm_endpoints import DEVICE_AICPU, HOST_CPU, RegionAccessReasonCode
 from simpler.task_interface import DataType, TaskArgs, TensorArgType
 from simpler.worker import Worker
 
@@ -91,7 +91,7 @@ def test_sub_worker_materialization_refuses_a_device_tensor():
     assert dev.address_space == AddressSpace.DEVICE
     blob = encode_blob([dev.tensor(shapes=(16,), dtype=DataType.FLOAT32)])
     src = ctypes.create_string_buffer(blob, len(blob))
-    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    reg = ImportRegistry(ImportContext(deployment=HOST_CPU))
     try:
         with pytest.raises(ValueError, match="DEVICE-space"):
             reg.mapped_args_from_blob(ctypes.addressof(src), len(blob))
@@ -102,21 +102,23 @@ def test_sub_worker_materialization_refuses_a_device_tensor():
 def test_host_endpoint_materialize_refuses_a_device_tensor_directly():
     # The same backstop, exercised through materialize() itself rather than mapped_args_from_blob —
     # any entry point onto a host ImportRegistry must refuse a DEVICE backing, not just the one that
-    # mapped_args_from_blob happens to guard.
+    # mapped_args_from_blob happens to guard. This endpoint carries no owner nonce, so it is a SUB
+    # child: it can neither map the backing nor ask anyone to copy it. A Worker, the other host
+    # endpoint, does carry one and gets a delegated attachment instead (see test_buffer.py).
     dev = _device_handle()
-    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
-    with pytest.raises(ValueError, match="host endpoint"):
+    reg = ImportRegistry(ImportContext(deployment=HOST_CPU))
+    with pytest.raises(ValueError, match="this endpoint is unrelated to"):
         reg.materialize(dev.to_descriptor())
 
 
 def test_chip_materialization_refuses_a_foreign_chips_device_tensor():
-    # Depth behind the submit-time provenance check (_child_prov_check_dispatch's exact
-    # (target_worker_id, ptr) match): handed a blob directly, a chip endpoint's own ImportRegistry
-    # still refuses a device backing minted for a different chip's owner.
+    # Depth behind the submit-time provenance check (_child_prov_check_dispatch_locked's owner_worker_id
+    # match): handed a blob directly, a chip endpoint's own ImportRegistry still refuses a device
+    # backing minted by a Worker it does not belong to.
     dev = _device_handle()
     foreign_chip_owner = mint_owner_instance_id()
-    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=foreign_chip_owner))
-    with pytest.raises(ValueError, match="different chip's owner"):
+    reg = ImportRegistry(ImportContext(deployment=DEVICE_AICPU, device_owner_instance_id=foreign_chip_owner))
+    with pytest.raises(ValueError, match="this endpoint is unrelated to"):
         reg.materialize(dev.to_descriptor())
 
 
@@ -127,11 +129,11 @@ def test_device_backing_rejections_carry_the_endpoint_relation_reason_code():
     # rejection vocabulary stays in sync rather than drifting back into two freeform strings.
     dev = _device_handle()
 
-    host_reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    host_reg = ImportRegistry(ImportContext(deployment=HOST_CPU))
     with pytest.raises(ValueError, match=re.escape(RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value)):
         host_reg.materialize(dev.to_descriptor())
 
     foreign_chip_owner = mint_owner_instance_id()
-    chip_reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=foreign_chip_owner))
+    chip_reg = ImportRegistry(ImportContext(deployment=DEVICE_AICPU, device_owner_instance_id=foreign_chip_owner))
     with pytest.raises(ValueError, match=re.escape(RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value)):
         chip_reg.materialize(dev.to_descriptor())

@@ -37,6 +37,7 @@ from simpler.callable_identity import (
     parse_python_import_target,
     validate_hashid,
 )
+from simpler.comm_endpoints import HOST_CPU
 from simpler.orchestrator import Orchestrator
 from simpler.remote_l3_protocol import (
     CallableKind,
@@ -105,7 +106,7 @@ def _remote_sleep_orch(orch, args, cfg):
 # A remote runner's orchestration function receives address-free wire ``Tensor`` args, so one that
 # computes in-process reaches the bytes the way every other consumer does: map the embedded
 # descriptor once, keyed by canonical identity, and index the view from the mapped base.
-_REMOTE_ORCH_IMPORTS = ImportRegistry(ImportContext(is_host_endpoint=True))
+_REMOTE_ORCH_IMPORTS = ImportRegistry(ImportContext(deployment=HOST_CPU))
 
 
 def _remote_u8_view(tensor):
