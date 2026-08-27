@@ -86,8 +86,11 @@ in-flight `task-submit` device locks).
 
 Pipeline:
 
-1. `npu-smi info -t board -i 0 -c 0` → get `Chip Name` + `NPU Name`
-   (~600 ms, no ACL init, no device binding).
+1. `npu-smi info -t board -i 0 -c 0` → get `Chip Name` + `NPU Name` (~600 ms,
+   no ACL init, no device binding). On failure the same query is retried as
+   `task-submit --run "…"`, since some shared hosts restrict DCMI to root;
+   without that retry the gate cannot detect silicon there once its cache
+   expires, and a refusal to detect is indistinguishable from a refusal to run.
 2. Construct CANN SoC name per family:
    - `Ascend910` + `B*` NPU → `Ascend910B3` (or B1/B2/B4)
    - `Ascend910` + numeric NPU → `Ascend910_9392` (Atlas A3 SKUs)

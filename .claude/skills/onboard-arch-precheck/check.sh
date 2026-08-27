@@ -47,6 +47,13 @@ esac
 # Uses npu-smi to identify the chip + the CANN platform_config ini to map
 # SoC → Short_SoC_version → repo arch. Same Short_SoC_version → arch table
 # as docs/hardware/chip-architecture.md and tools/cann-examples/query/.
+#
+# npu-smi reads the driver through DCMI, which some shared hosts grant only to
+# root; there the bare call returns no board data. The query occupies no card,
+# so it is retried through the privileged task queue with no --device: it takes
+# no lock and waits behind none. Without that retry this gate cannot detect
+# silicon on such a host once its cache expires, and a refusal to detect reads
+# exactly like a refusal to run.
 detect_silicon() {
     if ! command -v npu-smi >/dev/null 2>&1; then
         echo "onboard-arch-precheck: npu-smi not on PATH — cannot determine silicon. Install the Ascend driver or run on a host with one." >&2
@@ -57,12 +64,19 @@ detect_silicon() {
         return 1
     fi
 
+    # The retry is keyed on the exit status: a DCMI refusal is written to
+    # stdout, so an emptiness test would never fire.
+    local query="npu-smi info -t board -i 0 -c 0"
     local board chip npu
-    board=$(npu-smi info -t board -i 0 -c 0 2>/dev/null)
+    if ! board=$($query 2>/dev/null); then
+        if command -v task-submit >/dev/null 2>&1; then
+            board=$(task-submit --run "$query" 2>/dev/null)
+        fi
+    fi
     chip=$(awk -F: '/Chip Name/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     npu=$(awk -F:  '/NPU Name/  { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     if [ -z "$chip" ] || [ -z "$npu" ]; then
-        echo "onboard-arch-precheck: npu-smi did not return Chip Name + NPU Name (chip='$chip' npu='$npu'). Try \`npu-smi info -t board -i 0 -c 0\` manually." >&2
+        echo "onboard-arch-precheck: npu-smi did not return Chip Name + NPU Name (chip='$chip' npu='$npu'). Run \`$query\` manually to see the driver's own error, and \`task-submit --run \"$query\"\` if this host restricts DCMI to root." >&2
         return 1
     fi
 

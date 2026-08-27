@@ -10,6 +10,50 @@ from grabbing the same device, keeps the `--list` queue accurate, and keeps
 local runs comparable to CI (CI always wraps pytest in `task-submit`, see
 `.github/workflows/ci.yml`).
 
+### Two separable things, and only one of them is about devices
+
+`task-submit` both **arbitrates devices** and **executes as root**. Everything
+below is about the first: a run that occupies a card must hold a lock, on any
+host where the tool exists.
+
+The second is why a *query* can need it too, and it is easy to reason past.
+`npu-smi` occupies no card, so the device-lock argument does not apply to it —
+yet some shared hosts grant DCMI only to root, and there a bare `npu-smi info`
+fails with `dcmi module initialize failed` rather than any device data. Which
+hosts do this is not a property to memorize; it is discovered by trying. **Run
+npu-smi bare, and on failure retry the same query through the queue:**
+
+```bash
+npu-smi info || task-submit --run "npu-smi info"
+```
+
+Three things make that one line safe to apply everywhere:
+
+- **Decide by exit status, never by output.** A DCMI refusal is written to
+  **stdout**, and on the retry path `task-submit` appends its own
+  `=== ... (exit=N) ===` banner there too. So a failed query is never empty
+  output, and `[ -z "$out" ]` is always the wrong test. Reading "no output" as
+  "no NPU" is the same misdiagnosis one layer up.
+- **The retry passes no `--device`,** so it allocates no card and waits behind
+  none. This is about privilege, never about the lock.
+- **It costs nothing where it is not needed.** An unrestricted host succeeds on
+  the bare call and never reaches the retry; a host with no `task-submit`
+  reports npu-smi's own error and status unchanged.
+
+Do not retry a `set`, `clear` or `upgrade` this way. Those modify device
+configuration, and re-running a denied mutation as root grants the caller
+privilege they did not have. The retry is for queries.
+
+### This is npu-smi-specific, not a pattern to copy
+
+`npu-smi` is the only tool here that reads the driver **without occupying a
+card**, which is exactly what puts it outside the device-lock rule while still
+needing privilege. Work that occupies a card is already covered by the explicit
+`task-submit --device … --run "…"` form below, and `msprof op simulator` runs on
+the host CPU and touches no driver at all. So there is no second case: if some
+other tool one day hits a permission wall, work out which of those two
+categories it is in rather than generalizing from this paragraph.
+
 ## Autonomous invocation — detect capability, then run without asking
 
 When a task needs the NPU, do **not** ask the user for permission to run it.
@@ -205,6 +249,13 @@ directly.
 - ❌ Bypassing `onboard-arch-precheck` — the `--platform` mismatch failure
   modes are silent (look like real bugs) and burn hours of investigation
   time. Always run the gate.
+- ❌ Reading a failed `npu-smi` as "this box has no NPU" and falling back to
+  sim. The device-lock argument genuinely does not cover npu-smi; host
+  privilege does. Retry the query through `task-submit --run` before
+  concluding anything about the silicon.
+- ❌ Deciding an npu-smi result by whether it printed anything. A DCMI refusal
+  goes to stdout, and the retry path adds a `task-submit` banner there, so a
+  failed query is never empty output. Read the exit status.
 - ❌ Fishing your run's device log out of the shared `~/ascend/log/debug/`
   by pid/timestamp guesswork. Set `ASCEND_PROCESS_LOG_PATH` to a per-run
   dir up front (see "Device logs" above) so the log is isolated and known.
@@ -219,6 +270,7 @@ directly.
 - **Wait for a submitted task** — `task-submit --wait <task-id>`
 - **Cancel pending** — `task-submit --cancel <task-id>`
 - **Per-die utilization + process table** — `npu-smi info`
+  (on failure: `task-submit --run "npu-smi info"`)
 - **Redirect device log to the run's output** —
   `mkdir -p <outdir>/ascend && export ASCEND_PROCESS_LOG_PATH=<outdir>/ascend`
   (== `task-submit --env ASCEND_PROCESS_LOG_PATH=...`; dir must pre-exist)

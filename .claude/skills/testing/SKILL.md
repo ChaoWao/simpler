@@ -113,14 +113,21 @@ command -v npu-smi &>/dev/null
 | Found | `<arch>sim` (simulation) **and** `<arch>` (hardware) |
 | Not found | Simulation only (default `a2a3sim`) |
 
-**When `npu-smi` is found**, detect the platform by parsing chip name from `npu-smi info` output:
+**When `npu-smi` is found**, detect the platform by parsing chip name from `npu-smi info` output. If that call fails, retry it as `task-submit --run "npu-smi info"` — some shared hosts restrict DCMI to root — and judge by exit status, not by whether output appeared (see [running-onboard.md](../../rules/running-onboard.md#why)):
 
 | Chip name contains | Platform |
 | ------------------ | -------- |
 | `910B` or `910C` | `a2a3` (sim: `a2a3sim`) |
 | `950` | `a5` (sim: `a5sim`) |
 
-Use the detected platform for all subsequent `--platform` flags. If the chip name is unrecognized, warn and default to `a2a3`.
+Use the detected platform for all subsequent `--platform` flags.
+
+Two different failures hide behind an empty chip name, and only one of them is safe to guess past:
+
+- **Both the bare call and the `task-submit` retry exited non-zero** — the silicon was never identified. `command -v npu-smi` above only proves the binary exists, so this is the state on a DCMI-restricted host with no `task-submit`. Report the error and test **simulation only**; do not guess a hardware platform.
+- **The query succeeded but the chip name matches no row** — genuinely unrecognized silicon. Warn and default to `a2a3`.
+
+Guessing `a2a3` in the first case runs hardware tests against silicon nobody has identified, which is the `--platform` mismatch that [onboard-arch-precheck](../onboard-arch-precheck/SKILL.md) exists to refuse.
 
 ### Step 2 — Test Scope
 
@@ -150,7 +157,7 @@ Parallelism is handled by the `#591` scheduler (`simpler_setup/parallel_schedule
 When testing on `a2a3`, detect idle devices:
 
 ```bash
-npu-smi info
+npu-smi info || task-submit --run "npu-smi info"
 ```
 
 Pick devices whose **HBM-Usage is 0** and find the **longest consecutive sub-range** (at most 4). Pass as `--device <start>-<end>` (or `--device <id>` if only one idle device). If no idle device is found, skip hardware testing and warn.
