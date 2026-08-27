@@ -206,11 +206,20 @@ struct TaskAllocResult {
     bool failed() const { return task_id < 0; }
 };
 
+/**
+ * What a task is, independent of where it belongs.
+ *
+ * KERNEL and DUMMY are leaves: KERNEL dispatches to cores, DUMMY carries only
+ * dependencies. GRAPH is a container — a shell that expands into its own body of
+ * tasks and completes when they all have.
+ *
+ * Membership is not a kind: a task inside a Graph body is an ordinary KERNEL or
+ * DUMMY, and `graph_context` names the Graph it belongs to.
+ */
 enum class TaskKind : uint8_t {
     KERNEL = 0,
     DUMMY = 1,
     GRAPH = 2,
-    GRAPH_NODE = 3,
 };
 
 struct OutputLayout {

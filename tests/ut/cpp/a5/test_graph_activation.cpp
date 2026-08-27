@@ -135,7 +135,6 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
     auto complete_in_state = [&](GraphExecutionState state) {
         auto node = std::make_unique<GraphNodeStorage[]>(1);
         memset(node.get(), 0, sizeof(GraphNodeStorage));
-        node[0].slot.task_kind = TaskKind::GRAPH_NODE;
         node[0].slot.graph_node_index = 0;
         node[0].slot.total_required_subtasks = 1;
         node[0].slot.payload.set(&node[0].payload);

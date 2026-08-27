@@ -151,7 +151,7 @@ TEST(HbgReadyQueueSizing, DerivesCapacityForEachReachablePopulation) {
 
     populations.add_task(ActiveMask(SUBTASK_MASK_AIC), TaskAttrs{}, TaskKind::KERNEL, 9400);
     populations.add_task(ActiveMask(SUBTASK_MASK_AIV0), sync_start, TaskKind::KERNEL, 3);
-    populations.add_task(ActiveMask(SUBTASK_MASK_AIC | SUBTASK_MASK_AIV0), predicate, TaskKind::GRAPH_NODE, 5);
+    populations.add_task(ActiveMask(SUBTASK_MASK_AIC | SUBTASK_MASK_AIV0), predicate, TaskKind::KERNEL, 5);
     populations.add_task(ActiveMask{}, TaskAttrs{}, TaskKind::DUMMY);
     populations.add_task(ActiveMask(SUBTASK_MASK_AIV1), predicated_sync_start, TaskKind::KERNEL, 3);
     populations.add_task(ActiveMask{}, TaskAttrs{}, TaskKind::GRAPH, 7);

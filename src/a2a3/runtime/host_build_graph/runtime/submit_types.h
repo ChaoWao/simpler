@@ -136,9 +136,14 @@ public:
 
     uint8_t core_mask() const { return raw_ & 0x07u; }
 
+    // No subtask slot is active, so nothing dispatches to a core. Sole definition
+    // of "dummy": both ResourceShape::DUMMY below and TaskKind::DUMMY derive from
+    // it, so the two cannot disagree.
+    bool is_dummy() const { return core_mask() == 0; }
+
     ResourceShape to_shape() const {
+        if (is_dummy()) return ResourceShape::DUMMY;
         uint8_t cmask = core_mask();
-        if (cmask == 0) return ResourceShape::DUMMY;
         int bit_count = __builtin_popcount(cmask);
         if (bit_count >= 2) return ResourceShape::MIX;
         if (cmask & SUBTASK_MASK_AIC) return ResourceShape::AIC;

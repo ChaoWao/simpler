@@ -1448,7 +1448,7 @@ static bool prepare_task(
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
-    out->slot_state->task_kind = active_mask ? TaskKind::KERNEL : TaskKind::DUMMY;
+    out->slot_state->task_kind = active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
     // Reclaim gate: seed last_consumer to self, so a producer with no consumers
     // is retirable once completed_watermark >= its own id. Each fanin edge bumps
     // it in append_fanin_or_fail. completion_flags for this slot were cleared

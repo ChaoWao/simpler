@@ -643,7 +643,10 @@ TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
 TEST(GraphExecutionErrors, InvalidNodeCompletionIsReported) {
     SchedulerState scheduler{};
     ChipTaskSlotState slot{};
-    slot.task_kind = TaskKind::GRAPH_NODE;
+    // Membership without a usable execution: graph_context names one, but neither its
+    // definition nor its node array was ever bound.
+    GraphExecution execution{};
+    slot.graph_context = &execution;
 
     const SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
 
@@ -662,7 +665,6 @@ TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
     execution.node_count = 1;
     execution.remaining_nodes.store(1, std::memory_order_relaxed);
     graph_execution_set_state(execution, GraphExecutionState::ACTIVE, std::memory_order_relaxed);
-    node.slot.task_kind = TaskKind::GRAPH_NODE;
     node.slot.graph_context = &execution;
     node.slot.graph_node_index = 0;
 
@@ -712,7 +714,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     for (int32_t i = 0; i < execution->node_count; ++i) {
         const GraphNodeStorage &node = execution->node_at(i);
         ASSERT_EQ(node.slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_PENDING);
-        ASSERT_EQ(node.slot.task_kind, TaskKind::GRAPH_NODE);
+        ASSERT_EQ(node.slot.task_kind, TaskKind::KERNEL);
         ASSERT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
         ASSERT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
         ASSERT_EQ(node.payload.tensor_count, 1);

@@ -435,10 +435,6 @@ GraphMaterializeResult graph_execution_materialize_slice(
     ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized = nullptr
 );
 
-inline GraphExecution *graph_execution_from_slot(ChipTaskSlotState &slot) {
-    return slot.task_kind == TaskKind::GRAPH_NODE ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
-}
-
 // An outer GRAPH slot's graph_context holds the shared Definition's device address
 // until graph_execution_localize replaces it with the execution, so this cast is only
 // valid after that call. What makes it safe is the boot sequence, not this slot: every

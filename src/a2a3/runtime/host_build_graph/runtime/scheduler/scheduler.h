@@ -1051,7 +1051,11 @@ struct SchedulerState {
 #endif
     ) {
         TaskCompletionOutcome outcome;
-        if (slot_state.task_kind != TaskKind::GRAPH_NODE) {
+        // A task in a Graph body retires into its execution's counters; everything else
+        // — including the outer GRAPH shell — is a task of the run and releases its
+        // fanout. graph_context is null for the common case, so this short-circuits
+        // before the kind is read.
+        if (slot_state.graph_context == nullptr || slot_state.task_kind == TaskKind::GRAPH) {
 #if SIMPLER_SCHED_PROFILING
             CompletionStats stats = on_task_complete(slot_state, thread_idx);
             outcome.fanout_edges = static_cast<uint32_t>(stats.fanout_edges);
@@ -1062,8 +1066,10 @@ struct SchedulerState {
             return outcome;
         }
 
-        GraphExecution *execution = graph_execution_from_slot(slot_state);
-        if (execution == nullptr || execution->definition == nullptr || execution->nodes == nullptr) {
+        // Membership is established by the branch above: graph_context names this task's
+        // execution, and the shell case has already returned.
+        GraphExecution *execution = static_cast<GraphExecution *>(slot_state.graph_context);
+        if (execution->definition == nullptr || execution->nodes == nullptr) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }

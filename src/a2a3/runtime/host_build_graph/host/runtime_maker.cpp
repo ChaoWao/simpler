@@ -505,8 +505,13 @@ bool bind_graph_definitions(
                 return false;
             }
             for (uint32_t i = 0; i < definition->task_count; ++i) {
+                // Sizing takes the kind materialize will give this task. add_task
+                // singles out GRAPH and routes everything else by shape, and a Graph
+                // body member is never the shell, so the shape decides. Derived here
+                // the same way the device derives it, so the two cannot drift.
+                const ActiveMask mask(nodes[i].active_mask);
                 packed_definition.ready_queue_populations.add_task(
-                    ActiveMask(nodes[i].active_mask), TaskAttrs(nodes[i].task_attrs), TaskKind::GRAPH_NODE
+                    mask, TaskAttrs(nodes[i].task_attrs), mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL
                 );
             }
             packed_definition.populations_ready = true;

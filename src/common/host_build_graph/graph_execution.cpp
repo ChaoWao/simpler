@@ -421,7 +421,9 @@ GraphMaterializeResult graph_execution_materialize_slice(
         slot.total_required_subtasks = source.total_required_subtasks;
         slot.logical_block_num = source.logical_block_num;
         slot.graph_node_index = i;
-        slot.task_kind = TaskKind::GRAPH_NODE;
+        // A task in a Graph body is an ordinary leaf, classified by the same rule as
+        // one submitted outside a Graph. Its membership is carried by graph_context.
+        slot.task_kind = slot.active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
         slot.graph_context = &execution;
         payload.tensor_count = source.tensor_count;
         payload.scalar_count = source.scalar_count;
