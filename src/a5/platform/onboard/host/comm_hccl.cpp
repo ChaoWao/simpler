@@ -1243,6 +1243,12 @@ extern "C" int comm_derive_context(
     CommContext ctx{};
     ctx.workSpace = h->host_ctx.workSpace;
     ctx.workSpaceSize = h->host_ctx.workSpaceSize;
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
+    if (!rank_ids_are_dense_prefix(rank_ids, rank_count)) {
+        ctx.workSpace = 0;
+        ctx.workSpaceSize = 0;
+    }
+#endif
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(rank_count);
     ctx.winSize = window_size;
