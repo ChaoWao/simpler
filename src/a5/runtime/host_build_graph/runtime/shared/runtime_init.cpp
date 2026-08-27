@@ -79,24 +79,30 @@ void SchedulerState::TaskHeaderView::destroy() { tasks = nullptr; }
 
 SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     SchedulerLayout layout{};
-    layout.ready_queue_capacity = CHIP_READY_QUEUE_SIZE;
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; ++i) {
+        layout.capacities.ready[i] = READY_QUEUE_CAPACITY_LIMIT;
+        layout.capacities.ready_sync[i] = READY_QUEUE_CAPACITY_LIMIT;
+    }
+    layout.capacities.dummy = READY_QUEUE_CAPACITY_LIMIT;
+    layout.capacities.graph_ready = READY_QUEUE_CAPACITY_LIMIT;
+    layout.capacities.graph_prepare = READY_QUEUE_CAPACITY_LIMIT;
 
-    // Fixed-capacity early-dispatch queues first, then the CHIP_READY_QUEUE_SIZE
-    // ones. The big nine are the arena's last reservations so that the bytes bind
+    // Fixed-capacity early-dispatch queues first, then the configurable queues.
+    // The big nine are the arena's last reservations so that the bytes bind
     // uploads stay one contiguous range no matter how much of them is in use.
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
     layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     }
-    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
-    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
-    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
+    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
+    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
     // the payload and readiness is via completion_flags.
     return layout;
@@ -115,14 +121,14 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     }
 
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_init_data_from_layout(&sched->ready_queues[i], layout.ready_queue_capacity);
+        ready_queue_init_data_from_layout(&sched->ready_queues[i], layout.capacities.ready[i]);
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_init_data_from_layout(&sched->ready_sync_queues[i], layout.ready_queue_capacity);
+        ready_queue_init_data_from_layout(&sched->ready_sync_queues[i], layout.capacities.ready_sync[i]);
     }
-    ready_queue_init_data_from_layout(&sched->dummy_ready_queue, layout.ready_queue_capacity);
-    ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.ready_queue_capacity);
-    ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.ready_queue_capacity);
+    ready_queue_init_data_from_layout(&sched->dummy_ready_queue, layout.capacities.dummy);
+    ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.capacities.graph_ready);
+    ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.capacities.graph_prepare);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }

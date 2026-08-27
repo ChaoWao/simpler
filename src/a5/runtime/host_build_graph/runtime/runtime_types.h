@@ -128,13 +128,9 @@ inline constexpr uint64_t HEAP_VIRTUAL_CAPACITY = GRAPH_RECORD_VIRTUAL_BASE - HE
 // Scope management
 #define CHIP_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
 
-// Per-shape ready-queue capacity (power of two). This is a ring buffer that
-// bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task
-// count: slots recycle, so capacity need only exceed the most tasks ever
-// simultaneously ready in any one queue. Overflow on the ready/sync/dummy queues
-// latches SIMPLER_ERROR_READY_QUEUE_OVERFLOW (safe-fail), so it must exceed the
-// worst-case ready burst with margin.
-#define CHIP_READY_QUEUE_SIZE 8192
+// Per-queue arena reservation ceiling. Bind configures each queue to the next
+// power of two covering the tasks that can reach it and rejects a larger graph.
+inline constexpr uint64_t READY_QUEUE_CAPACITY_LIMIT = 32768;
 
 // Cross-thread early-dispatch work queue (power of two)
 #define CHIP_EARLY_DISPATCH_QUEUE_SIZE 64

@@ -61,6 +61,7 @@
 #include "../runtime/graph_host_state.h"
 #include "../runtime/host_phase_trace.h"
 #include "../runtime/orchestrator.h"
+#include "../runtime/ready_queue_sizing.h"
 #include "graph_recorder_pool.h"
 #include "../runtime/runtime_core.h"
 #include "../runtime/shared_memory.h"
@@ -378,7 +379,10 @@ struct DefinitionUploads {
 // claimed, so this pass writes the headers, copies in whatever did not fit, and
 // issues a single H2D of the used prefix. The device initial classify then replaces
 // each task's graph_context with an execution constructed in its own heap.
-bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, DefinitionUploads *uploads) {
+bool bind_graph_definitions(
+    const HostApi *api, GraphHostState &graph_state, DefinitionUploads *uploads,
+    ReadyQueuePopulations *ready_queue_populations
+) {
     *uploads = DefinitionUploads{};
     const size_t count = graph_host_upload_count(graph_state);
     GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
@@ -389,6 +393,8 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
         size_t object_offset;   // of the object's header, from the block base
         size_t image_bytes;     // the Definition image alone
         const std::byte *copy;  // the image to copy in, or nullptr when built in place
+        ReadyQueuePopulations ready_queue_populations;
+        bool populations_ready{false};
     };
     std::unordered_map<uint64_t, PackedDefinition> packed;
     // Objects the recorders built already occupy the arena's used prefix at the
@@ -398,12 +404,12 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
     for (const GraphHostDefinition &entry : definitions.entries) {
         if (entry.bytes < sizeof(GraphDefinition)) continue;
         if (entry.spill == nullptr) {
-            packed.emplace(entry.full_key, PackedDefinition{entry.object_offset, entry.bytes, nullptr});
+            packed.emplace(entry.full_key, PackedDefinition{entry.object_offset, entry.bytes, nullptr, {}, false});
             continue;
         }
         const size_t object_offset = block_bytes;
         block_bytes += align_up(sizeof(GraphDefinitionHeader) + entry.bytes);
-        packed.emplace(entry.full_key, PackedDefinition{object_offset, entry.bytes, entry.spill});
+        packed.emplace(entry.full_key, PackedDefinition{object_offset, entry.bytes, entry.spill, {}, false});
         uploads->spilled++;
     }
 
@@ -495,6 +501,22 @@ bool bind_graph_definitions(const HostApi *api, GraphHostState &graph_state, Def
             LOG_ERROR("host-orch: Graph runtime storage address is misaligned");
             return false;
         }
+        PackedDefinition &packed_definition = object_it->second;
+        if (!packed_definition.populations_ready) {
+            const GraphNodeDefinition *nodes =
+                graph_definition_array<GraphNodeDefinition>(*definition, definition->off_nodes, definition->task_count);
+            if (nodes == nullptr) {
+                LOG_ERROR("host-orch: invalid Graph Definition node array");
+                return false;
+            }
+            for (uint32_t i = 0; i < definition->task_count; ++i) {
+                packed_definition.ready_queue_populations.add_task(
+                    ActiveMask(nodes[i].active_mask), TaskAttrs(nodes[i].task_attrs), TaskKind::GRAPH_NODE
+                );
+            }
+            packed_definition.populations_ready = true;
+        }
+        ready_queue_populations->add(packed_definition.ready_queue_populations);
         upload->outer_slot->graph_context = reinterpret_cast<GraphDefinition *>(
             reinterpret_cast<uintptr_t>(block) + object_it->second.object_offset + sizeof(GraphDefinitionHeader)
         );
@@ -682,12 +704,26 @@ int32_t run_host_orchestration(
     // After the span closes: the reduction walks a few hundred records and emits
     // five markers, which must not be charged to the bind it measures.
 
+    // total_tasks sizes the bounded per-segment H2D copies below; a value outside
+    // [0, task_capacity] would make those copies read/write out of bounds.
+    if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > task_capacity) {
+        LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, task_capacity);
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+
+    ReadyQueuePopulations ready_queue_populations{};
+    SharedMemoryTaskHeader &tasks = host_sm_handle.header->tasks;
+    for (int32_t task_id = 0; task_id < total_tasks; ++task_id) {
+        const ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(task_id);
+        ready_queue_populations.add_task(slot.active_mask, slot.task_attrs, slot.task_kind);
+    }
+
     // Upload each distinct Definition as its own retained device object and bind
     // every outer Graph task to it. Per-invocation data already lives in that
     // task's payload regions and is copied with the shared-memory image below.
     const int64_t t_graph_ns = bind_phase_begin();
     DefinitionUploads definition_uploads{};
-    if (!bind_graph_definitions(api, *graph_state, &definition_uploads)) {
+    if (!bind_graph_definitions(api, *graph_state, &definition_uploads, &ready_queue_populations)) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     {
@@ -705,12 +741,22 @@ int32_t run_host_orchestration(
         record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, definition_uploads.bytes);
     }
 
-    // total_tasks sizes the bounded per-segment H2D copies below; a value outside
-    // [0, task_capacity] would make those copies read/write out of bounds.
-    if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > task_capacity) {
-        LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, task_capacity);
-        return PTO_RUNTIME_ERR_INTERNAL;
+    ReadyQueueCapacities ready_queue_capacities{};
+    const int32_t ready_queue_status =
+        derive_ready_queue_capacities(ready_queue_populations, *host_sm_handle.header, &ready_queue_capacities);
+    if (ready_queue_status != 0) {
+        LOG_ERROR(
+            "host-orch: ready queue reachable population exceeds %" PRIu64 " (ready=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+            ", sync=%" PRIu64 "/%" PRIu64 "/%" PRIu64 ", dummy=%" PRIu64 ", graph=%" PRIu64 "/%" PRIu64 ")",
+            READY_QUEUE_CAPACITY_LIMIT, ready_queue_populations.ready[0], ready_queue_populations.ready[1],
+            ready_queue_populations.ready[2], ready_queue_populations.ready_sync[0],
+            ready_queue_populations.ready_sync[1], ready_queue_populations.ready_sync[2], ready_queue_populations.dummy,
+            ready_queue_populations.graph_ready, ready_queue_populations.graph_prepare
+        );
+        LOG_RUNTIME_FAILURE(SIMPLER_ERROR_NONE, SIMPLER_ERROR_READY_QUEUE_OVERFLOW, ready_queue_status);
+        return ready_queue_status;
     }
+    rt->prebuilt_layout.sched.capacities = ready_queue_capacities;
     host_phase_trace_note_submitted(static_cast<uint64_t>(total_tasks));
 
     // The count travels inside the header the restack copies wholesale, which is
