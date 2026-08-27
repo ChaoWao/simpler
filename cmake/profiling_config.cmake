@@ -9,7 +9,15 @@
 
 set(_SIMPLER_PROFILING_CONFIG_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-function(simpler_configure_profiling target)
+# Generate this build's profiling header and return the directory holding it.
+#
+# Separate from simpler_configure_profiling because a target is not always
+# available: the onboard aicore kernel is an add_custom_target whose compile
+# commands take include directories through a list, so it needs the directory
+# rather than a target to attach it to.
+function(simpler_generate_profiling_header)
+    cmake_parse_arguments(ARG "" "OUT_DIR" "" ${ARGN})
+
     foreach(name IN ITEMS
             SIMPLER_DFX
             SIMPLER_ORCH_PROFILING
@@ -50,5 +58,12 @@ function(simpler_configure_profiling target)
         "${generated_dir}/simpler_profiling_build_config.h"
         @ONLY
     )
+    if(ARG_OUT_DIR)
+        set(${ARG_OUT_DIR} "${generated_dir}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(simpler_configure_profiling target)
+    simpler_generate_profiling_header(OUT_DIR generated_dir)
     target_include_directories(${target} PRIVATE "${generated_dir}")
 endfunction()

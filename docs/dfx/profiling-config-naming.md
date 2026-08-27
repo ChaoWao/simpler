@@ -107,6 +107,16 @@ and emission, so disabled markers do not leave marker-only transfers behind.
 | `SIMPLER_TENSORMAP_PROFILING` | 0 | tensor-map hash-table counters (requires `SIMPLER_ORCH_PROFILING`) |
 | `SIMPLER_HOST_STRACE` | 1 | `[STRACE]` macros (`strace.h`) and onboard capture used only by device-domain markers; independent of `SIMPLER_DFX` |
 
+Set them per build with `build_runtimes.py --profiling-{dfx,orch,sched,tensormap}`,
+on any platform. The four are one configuration: every target of a platform is
+compiled with the same values, because `SIMPLER_DFX` adds fields to a struct the
+host and the AICPU both compile. A build overwrites that platform's ordinary
+runtime artifacts under `build/lib/`, and the counters cost what they report — the
+orchestrator sub-steps measured about 7% of the bind thread's own time on dsv4 —
+so rebuild before quoting a timing from a tree that has profiled.
+`.github/workflows/_profiling-flags-smoke.yml` guards the flag combinations on the
+simulator platforms.
+
 ### Env vars
 
 | Env | Layer | Value | Gates |

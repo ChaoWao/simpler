@@ -515,14 +515,52 @@ class TestRuntimeBuilderGetBinaries:
         host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
         aicore_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "aicore")
         aicpu_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "aicpu")
+        # Every target of a platform is compiled with the same profiling configuration,
+        # so each call carries it alongside whatever else that target needs.
+        profiling = {
+            "SIMPLER_DFX": "1",
+            "SIMPLER_ORCH_PROFILING": "0",
+            "SIMPLER_SCHED_PROFILING": "0",
+            "SIMPLER_TENSORMAP_PROFILING": "0",
+        }
         assert host_call.kwargs["cmake_defines"] == {
+            **profiling,
             "PTO_ISA_ROOT": "/tmp/pto-isa",
             "SIMPLER_PTO_ISA_BUILD_COMMIT": pin,
         }
         # aicore needs the checkout path too, for the SDMA warmup kernel's
         # vector-only target, but not the commit stamp (that keys the host ccache).
-        assert aicore_call.kwargs["cmake_defines"] == {"PTO_ISA_ROOT": "/tmp/pto-isa"}
-        assert aicpu_call.kwargs["cmake_defines"] is None
+        assert aicore_call.kwargs["cmake_defines"] == {**profiling, "PTO_ISA_ROOT": "/tmp/pto-isa"}
+        assert aicpu_call.kwargs["cmake_defines"] == profiling
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_partial_profiling_config_is_completed_from_the_defaults(self, MockCompiler, tmp_path, monkeypatch):
+        """A caller may name one macro; cmake must still receive all four.
+
+        cmake/profiling_config.cmake defaults only the variables that are undefined,
+        and a name left out of a partial mapping is still defined in the target's cache
+        from whatever configured it last — so a partial mapping that reached cmake
+        unchanged would take stale values for the names it omits.
+        """
+        from simpler_setup import pto_isa  # noqa: PLC0415
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        self._make_runtime(tmp_path, "a2a3")
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "a" * 40)
+        monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
+        monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
+
+        builder = RuntimeBuilder(platform="a2a3")
+        builder.get_binaries("test_rt", build=True, profiling_config={"SIMPLER_ORCH_PROFILING": "1"})
+
+        for call in mock_instance.compile.call_args_list:
+            defines = call.kwargs["cmake_defines"]
+            assert defines["SIMPLER_ORCH_PROFILING"] == "1"
+            assert defines["SIMPLER_DFX"] == "1"
+            assert defines["SIMPLER_SCHED_PROFILING"] == "0"
+            assert defines["SIMPLER_TENSORMAP_PROFILING"] == "0"
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_a5_default_build_writes_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
