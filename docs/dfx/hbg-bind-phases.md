@@ -101,10 +101,19 @@ Four switches and one flag make the measurement, and each is load-bearing:
 | Switch | Why |
 | ------ | --- |
 | `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` | emits the `bind phase=` lines at all |
-| `SIMPLER_LOG_LEVEL=TIMING` | the level they are emitted at |
-| `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | otherwise `torch_npu` grabs a device on import, which a host-only measurement does not want — and nothing in the log records whether it was set |
+| `--log-level timing` | enables the TIMING records used by the report; this is the SceneTest default |
+| `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | keeps CPU golden imports from loading `torch_npu`; the `torch_backend_autoload` timing record confirms the effective setting and observed module state |
 | `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
 | `--skip-golden` | with the device skipped the outputs a golden check compares are never produced, so a checking case such as qwen otherwise fails at validation with the whole measurement already complete in the log. On dsv4 it also skips the fixture upload its driver does by default, which is 42.6 GiB per rank of H2D you are not measuring |
+
+SceneTest emits one `torch_backend_autoload` record per interpreter after
+torch-dependent argument preparation and before the first dispatch. `effective`
+reports the environment's dispatch-time intent using torch's current private
+autoload predicate; `torch_npu_loaded` reports the observed module state and is
+the authoritative field if the environment changed after torch was imported.
+`raw` is the JSON-encoded environment value (`null` when unset); values longer
+than 64 characters carry their first 64 characters and
+`raw_truncated=true`, keeping the record single-line and bounded.
 
 **`SIMPLER_SKIP_DEVICE_RUN` is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still
 skips; `unset` it. It is a temporary handle from the dsv4 bring-up and is deleted
@@ -191,10 +200,14 @@ its failure modes have already produced wrong answers on this box.
 **Both arms must be the same ruler, and the log is the only witness you get.** A
 baseline missing `TORCH_DEVICE_BACKEND_AUTOLOAD=0` produced a wrong number once:
 it alone paid for `torch_npu` grabbing a device on import, and the difference was
-attributed to the branch. Nothing in this repo reads that variable — it is
-`torch_npu`'s own — so no log line records whether it was set. The recipe
-therefore echoes the command it is about to run, verbatim, as the log's first
-line, and `hbg_bind_phases` prints that line above the table:
+attributed to the branch. Compare the `torch_backend_autoload` timing record in
+both logs; the measurement recipe produces
+`setting=0 raw="0" raw_truncated=false effective=disabled torch_imported=true torch_npu_loaded=false`.
+`hbg_bind_phases` prints every distinct record above its table and warns when the
+log does not carry one.
+
+The recipe also echoes the command it is about to run, verbatim, as the log's
+first line, and `hbg_bind_phases` prints that line above the table:
 
 ```bash
 diff <(head -1 base.log) <(head -1 measure.log)   # must differ only in the commit

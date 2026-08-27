@@ -22,10 +22,10 @@ HEAD_SHA=$(git rev-parse --short HEAD)
 LOG="outputs/bind_${HEAD_SHA}.log"; mkdir -p outputs
 MARK="outputs/.bind_start"; : >"$MARK"   # fixed mtime; "$LOG" keeps being appended to
 
-ENVS="SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 SIMPLER_LOG_LEVEL=TIMING \
+ENVS="SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 \
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 SIMPLER_SKIP_DEVICE_RUN=1"          # + mode delta
 CASE="examples/.../<entry>.py -p a2a3"                # exactly as the case table gives it
-TAIL="--rounds 6"                                                    # per mode
+TAIL="--rounds 6 --log-level timing"                                 # per mode
 
 .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
 echo "[stamp] $HEAD_SHA env $ENVS python $CASE $TAIL" >"$LOG"
@@ -65,7 +65,7 @@ while the run still passed.)
 | Field | numbers | timeline |
 | ----- | ------- | -------- |
 | `ENVS` delta | none | `+ SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
-| `TAIL` | `--rounds 6` | `--rounds 1 --enable-pmu 2` |
+| `TAIL` | `--rounds 6 --log-level timing` | `--rounds 1 --enable-pmu 2 --log-level timing` |
 | finish with | the parser, below | `strace_timing`, below |
 
 `--rounds > 1` force-disables every diagnostic (it warns per flag), so one run
