@@ -36,6 +36,10 @@ Runtime::Runtime() {
     aicpu_launch_count = 0;
     host_total_tasks = 0;
     sm_image_bytes = 0;
+    scheduler_state_base = nullptr;
+    scheduler_state_allocation = nullptr;
+    scheduler_state_allocation_size = 0;
+    scheduler_layout = {};
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;
@@ -60,7 +64,6 @@ Runtime::Runtime() {
 // Shared-memory / orchestration argument plumbing
 // =============================================================================
 
-void *Runtime::get_gm_sm_ptr() const { return gm_sm_ptr_; }
 const simpler::hbg::EntryArgsStorage &Runtime::get_orch_args() const { return orch_args_storage_; }
 void Runtime::set_gm_sm_ptr(void *p) { gm_sm_ptr_ = p; }
 void Runtime::set_slot_states_ptr(void *p) { slot_states_ptr_ = p; }

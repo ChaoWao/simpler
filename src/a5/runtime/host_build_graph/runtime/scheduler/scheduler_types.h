@@ -17,8 +17,12 @@
 #include "common/core_type.h"
 #include "common/platform_config.h"
 #include "dispatch_payload.h"
+
+#if !defined(__CCE_AICORE__)
 #include "runtime_types.h"
+#if __has_include("spin_hint.h")
 #include "spin_hint.h"
+#endif
 
 // host_build_graph host-orch build: RuntimeContext embeds SchedulerState by
 // value, so this header is compiled into the host libhost_runtime.so. The AICPU
@@ -28,7 +32,9 @@
 // host). host_runtime_EXPORTS is CMake's auto-define for the host shared-lib
 // target, so the AICPU/AICore builds keep the real platform constant.
 #ifdef host_runtime_EXPORTS
-constexpr int32_t PLATFORM_SCHEDULER_TIMEOUT_MS = 2000;
+constexpr int32_t HBG_LEGACY_SCHEDULER_TIMEOUT_MS = 2000;
+#else
+constexpr int32_t HBG_LEGACY_SCHEDULER_TIMEOUT_MS = PLATFORM_ONBOARD_SCHEDULER_TIMEOUT_MS;
 #endif
 
 // =============================================================================
@@ -80,7 +86,7 @@ constexpr int32_t FATAL_ERROR_CHECK_INTERVAL = 1024;  // Check orchestrator erro
 // the AICPU can flush diagnostics before the host-visible timeout chain fires.
 // Sim has no STARS or ACL stream-sync timeout, but uses the same no-progress
 // watchdog shape. See spin_hint.h for the per-variant rationale.
-constexpr int32_t SCHEDULER_TIMEOUT_MS = PLATFORM_SCHEDULER_TIMEOUT_MS;
+constexpr int32_t SCHEDULER_TIMEOUT_MS = HBG_LEGACY_SCHEDULER_TIMEOUT_MS;
 constexpr uint64_t SCHEDULER_TIMEOUT_CYCLES =
     static_cast<uint64_t>(SCHEDULER_TIMEOUT_MS) * (PLATFORM_PROF_SYS_CNT_FREQ / 1000);
 constexpr int32_t STALL_DUMP_READY_MAX = 8;
@@ -608,6 +614,8 @@ inline uint64_t sync_start_drain_next_attempt(uint64_t attempt) {
 inline uint64_t sync_start_drain_ack_subtree_token(uint64_t attempt) {
     return attempt | SYNC_START_DRAIN_ACK_SUBTREE_READY;
 }
+
+#endif
 
 // =============================================================================
 // Resident AICore scheduler wire contracts

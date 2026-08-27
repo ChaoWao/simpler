@@ -40,6 +40,7 @@
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
+#include "scheduler/scheduler_types.h"
 #include "task_args.h"
 #include "host_build_graph/entry_args.h"  // EntryArgsStorage
 
@@ -181,6 +182,13 @@ public:
     // names its argument regions by delta.
     uint64_t sm_image_bytes;
 
+    // Per-run mutable AICore scheduler state. Device code uses the aligned
+    // base; Host cleanup retains the original device allocation.
+    void *scheduler_state_base;
+    void *scheduler_state_allocation;
+    uint64_t scheduler_state_allocation_size;
+    AicoreSchedulerLayout scheduler_layout;
+
 private:
     // Kernel binary tracking for cleanup
 
@@ -242,7 +250,7 @@ public:
     // Shared-memory / orchestration argument plumbing
     // =========================================================================
 
-    void *get_gm_sm_ptr() const;
+    void *get_gm_sm_ptr() const { return gm_sm_ptr_; }
     const simpler::hbg::EntryArgsStorage &get_orch_args() const;
     void set_gm_sm_ptr(void *p);
     void set_slot_states_ptr(void *p);
