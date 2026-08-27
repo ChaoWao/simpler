@@ -108,10 +108,20 @@ TEST_F(HbgTensorMapTest, DistinctLocalIdsGetDistinctTaskChains) {
         std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(LAST_TASK)), producers.end()
     );
 
-    // Unlinking the head of one chain leaves the other chain's entry alone, which it
-    // could not if the two ids had folded onto one chain.
-    tmap.remove_entry(*result.entries[0].entry);
+    // Each producer's chain head is its own entry, and LAST_TASK reaches the last
+    // reserved chain rather than folding onto a lower one. Read the heads directly:
+    // an entry count cannot tell one chain per producer from one shared chain.
+    ASSERT_NE(tmap.task_entry_heads[0], nullptr);
+    ASSERT_NE(tmap.task_entry_heads[LAST_TASK], nullptr);
+    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, simpler::hbg::make_global_task(0));
+    EXPECT_EQ(tmap.task_entry_heads[LAST_TASK]->producer_task_id, simpler::hbg::make_global_task(LAST_TASK));
+
+    // Unlinking a chain's only entry empties that chain and leaves the other intact.
+    tmap.remove_entry(*tmap.task_entry_heads[LAST_TASK]);
     EXPECT_EQ(tmap.valid_count(), 1);
+    EXPECT_EQ(tmap.task_entry_heads[LAST_TASK], nullptr);
+    ASSERT_NE(tmap.task_entry_heads[0], nullptr);
+    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, simpler::hbg::make_global_task(0));
 }
 
 // Without an explicit semantic removal, direct inserts consume one pool entry
