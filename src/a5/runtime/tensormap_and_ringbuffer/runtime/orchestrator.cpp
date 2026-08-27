@@ -62,7 +62,8 @@ static_assert(
 // (same pattern as get_sys_cnt_aicpu / chip_swimlane_aicpu_record_orch_phase below).
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_dep_gen_enabled() { return false; }
 __attribute__((weak, visibility("hidden"))) void dep_gen_aicpu_record_submit(
-    uint64_t, bool, bool, int, const void *const *, const uint8_t *, int, const uint64_t *, int, const int32_t[3]
+    uint64_t, bool, bool, int, const void *const *, const uint8_t *, int, const uint64_t *, const uint8_t *, uint8_t,
+    int, const int32_t[3]
 ) {}
 
 // Scope_stats enable gate, queried via the same predicate idiom as
@@ -938,7 +939,8 @@ static TaskOutputTensors submit_task_common(
         dep_gen_aicpu_record_submit(
             task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), tc, tensor_ptrs, arg_types_u8,
             static_cast<int>(args.explicit_dep_count()), reinterpret_cast<const uint64_t *>(args.explicit_deps_data()),
-            args.launch_spec.core_num(), kernel_ids_capture
+            reinterpret_cast<const uint8_t *>(args.explicit_dep_kinds_data()),
+            static_cast<uint8_t>(DEP_WAIT | DEP_RETAIN), args.launch_spec.core_num(), kernel_ids_capture
         );
     }
 #endif

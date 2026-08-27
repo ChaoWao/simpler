@@ -42,8 +42,10 @@
  * knows to mirror the change in the annot pass.
  *
  * STEP 1 (explicit_deps) is emitted at the call site (per dep_compute.h's
- * "kept at call site" note); both passes run the same explicit-deps loop, so
- * the comparison covers it too.
+ * "kept at call site" note). Both passes seed explicit edges from the same
+ * captured dep/kind arrays, so the differential check includes their effect
+ * but cannot independently validate those bytes. Scene tests validate the
+ * capture/replay round-trip for explicit kinds.
  *
  * STEP 4 (`register_task_outputs`) runs on BOTH tensor maps after both passes
  * complete, keeping `tm_oracle` and `tm_annot` bit-equivalent for the next
@@ -545,10 +547,12 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     // (producer, flags) mapping rather than the producer-ID set alone.
     std::unordered_map<uint64_t, DepFlags> oracle_preds;
     std::unordered_map<uint64_t, DepFlags> annot_preds;
+    std::unordered_map<uint64_t, size_t> explicit_edge_index;
 
     // Scratch buffer for assembling full dep lists across overflow chains.
     // Declared outside the loop so it can be reused (clear() keeps capacity).
     std::vector<uint64_t> full_deps_buf;
+    std::vector<uint8_t> full_kinds_buf;
 
     for (size_t rec_i = 0; rec_i < num_records; rec_i++) {
         const DepGenRecord &rec = records[rec_i];
@@ -563,6 +567,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
 
         oracle_preds.clear();
         annot_preds.clear();
+        explicit_edge_index.clear();
 
         int32_t tc = static_cast<int32_t>(rec.tensor_count);
         if (tc > CORE_MAX_TENSOR_ARGS) {
@@ -575,16 +580,18 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
 
         // Assemble the full dep list. Fast path: ≤ DEP_GEN_MAX_EXPLICIT_DEPS,
         // no chain, point straight at rec.explicit_deps. Slow path: gather
-        // base + chain into full_deps_buf and point at the buffer.
+        // base + chain into full_deps_buf/full_kinds_buf and point at the buffers.
         //
         // `explicit_dep_count` / `over->dep_count` originate from device
         // shared memory and are bounded by the writer to the array sizes, but
         // we clamp on read too so a corrupted record never drives an OOB read
-        // off the end of rec.explicit_deps[64] / over->deps[582].
+        // off the end of rec.explicit_deps[64] / over->deps[524].
         const uint64_t *deps_data;
+        const uint8_t *kinds_data;
         int32_t dc;
         if (rec.flags & DEP_GEN_FLAG_HAS_OVERFLOW) {
             full_deps_buf.clear();
+            full_kinds_buf.clear();
             uint16_t base_dc = rec.explicit_dep_count;
             if (base_dc > DEP_GEN_MAX_EXPLICIT_DEPS) {
                 LOG_ERROR(
@@ -594,7 +601,9 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 base_dc = DEP_GEN_MAX_EXPLICIT_DEPS;
             }
             full_deps_buf.reserve(static_cast<size_t>(base_dc) + DEP_GEN_OVERFLOW_DEPS_PER_RECORD);
+            full_kinds_buf.reserve(static_cast<size_t>(base_dc) + DEP_GEN_OVERFLOW_DEPS_PER_RECORD);
             full_deps_buf.insert(full_deps_buf.end(), rec.explicit_deps, rec.explicit_deps + base_dc);
+            full_kinds_buf.insert(full_kinds_buf.end(), rec.explicit_dep_kinds, rec.explicit_dep_kinds + base_dc);
             bool chain_complete = false;
             for (size_t j = rec_i + 1; j < num_records; j++) {
                 const DepGenRecord &maybe = records[j];
@@ -623,6 +632,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                     over_dc = DEP_GEN_OVERFLOW_DEPS_PER_RECORD;
                 }
                 full_deps_buf.insert(full_deps_buf.end(), over->deps, over->deps + over_dc);
+                full_kinds_buf.insert(full_kinds_buf.end(), over->kinds, over->kinds + over_dc);
                 if (over->flags & DEP_GEN_FLAG_LAST_OVERFLOW) {
                     chain_complete = true;
                     break;
@@ -636,9 +646,11 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 );
             }
             deps_data = full_deps_buf.data();
+            kinds_data = full_kinds_buf.data();
             dc = static_cast<int32_t>(full_deps_buf.size());
         } else {
             deps_data = rec.explicit_deps;
+            kinds_data = rec.explicit_dep_kinds;
             uint16_t base_dc = rec.explicit_dep_count;
             if (base_dc > DEP_GEN_MAX_EXPLICIT_DEPS) {
                 LOG_ERROR(
@@ -698,27 +710,43 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         task_table.push_back(std::move(task_entry));
 
         // ============ STEP 1 — explicit_deps (call-site emit) ============
-        // Same loop on both passes; they MUST produce identical sets here
-        // because they read the same record. Annot records explicit edges
-        // with consumer_arg_idx = -1 (not tied to any tensor arg). Reads
-        // from deps_data (base record's explicit_deps[] on fast path, the
-        // gathered base+chain buffer on overflow path).
+        // Both passes seed explicit edges from the same captured record. The
+        // differential check therefore covers their interaction with creator
+        // and tensormap edges, while scene tests independently validate the
+        // captured kind bytes. Annot records explicit edges with
+        // consumer_arg_idx = -1 (not tied to any tensor arg). deps_data comes
+        // from the base record on the fast path or the gathered base+chain
+        // buffer on overflow; kinds_data is its parallel semantics array.
         for (int32_t i = 0; i < dc; i++) {
             uint64_t pred_raw = deps_data[i];
-            // Explicit deps are recorded conservatively as DEP_WAIT|DEP_RETAIN;
-            // the DepGenRecord does not carry per-dep kinds, matching Arg's
-            // set_dependencies default.
-            oracle_preds[pred_raw] |= (DEP_WAIT | DEP_RETAIN);
+            const uint8_t raw_kind = kinds_data[i];
+            constexpr uint8_t kKnownDepFlags = static_cast<uint8_t>(DEP_WAIT | DEP_RETAIN);
+            if ((raw_kind & static_cast<uint8_t>(~kKnownDepFlags)) != 0) {
+                // Unknown semantics make the artifact untrustworthy. Reject
+                // the trace instead of emitting a plausible but altered graph.
+                LOG_ERROR(
+                    "dep_gen replay: invalid explicit dep flags 0x%02x at task_id=%" PRIu64 " dep_idx=%d", raw_kind,
+                    rec.task_id, i
+                );
+                tm_oracle.destroy();
+                tm_annot.destroy();
+                return -7;
+            }
+            const DepFlags kind = static_cast<DepFlags>(raw_kind);
+            oracle_preds[pred_raw] |= kind;
             bool first = annot_preds.find(pred_raw) == annot_preds.end();
-            annot_preds[pred_raw] |= (DEP_WAIT | DEP_RETAIN);
+            annot_preds[pred_raw] |= kind;
             if (first) {
                 EdgeAnnot e{};
                 e.pred = pred_raw;
                 e.succ = rec.task_id;
                 e.consumer_arg_idx = -1;
                 e.source = EdgeSource::EXPLICIT;
-                e.flags = DEP_WAIT | DEP_RETAIN;
+                e.flags = kind;
+                explicit_edge_index.emplace(pred_raw, annot_edges.size());
                 annot_edges.push_back(e);
+            } else {
+                annot_edges[explicit_edge_index.at(pred_raw)].flags |= kind;
             }
         }
 
@@ -742,6 +770,10 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 bool first = annot_preds.find(producer.raw) == annot_preds.end();
                 annot_preds[producer.raw] |= (DEP_WAIT | DEP_RETAIN);
                 if (!first) {
+                    auto explicit_it = explicit_edge_index.find(producer.raw);
+                    if (explicit_it != explicit_edge_index.end()) {
+                        annot_edges[explicit_it->second].flags |= (DEP_WAIT | DEP_RETAIN);
+                    }
                     return;  // already covered by an earlier emit on this record
                 }
                 EdgeAnnot e{};

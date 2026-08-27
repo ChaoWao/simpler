@@ -496,6 +496,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     }
 
     const TaskId *explicit_deps_data() const { return explicit_deps_; }
+    const DepFlags *explicit_dep_kinds_data() const { return explicit_dep_kinds_; }
 
     /**
      * Add scalar values. Types are deduced per argument; each value is

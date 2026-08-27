@@ -117,6 +117,33 @@ TEST(ProfilerDeviceEngineTest, SwitchPublishesOldBufferAndPopsReplacement) {
     EXPECT_EQ(new_buffer.count, 0u);
 }
 
+TEST(ProfilerDeviceEngineTest, SwitchDoesNotReusePublishedBufferAfterPushGateTimeout) {
+    FakeHeader header;
+    FakeState state;
+    FakeBuffer old_buffer;
+    FakeBuffer new_buffer;
+    FakeBuffer *current = &old_buffer;
+    state.current_ptr = reinterpret_cast<uint64_t>(&old_buffer);
+    state.current_seq = 7;
+    old_buffer.count = 3;
+    header.backpressure.rq_freeze_active = 1;
+    state.free_queue.buffer_ptrs[0] = reinterpret_cast<uint64_t>(&new_buffer);
+    state.free_queue.tail = 1;
+
+    Engine::switch_buffer(context(&header, &current), &state);
+
+    EXPECT_EQ(header.queue_tails[0], 1u);
+    EXPECT_EQ(header.queues[0][0].buffer_ptr, reinterpret_cast<uint64_t>(&old_buffer));
+    EXPECT_EQ(header.queues[0][0].buffer_seq, 7u);
+    EXPECT_EQ(state.dropped, 0u);
+    EXPECT_EQ(old_buffer.count, 3u);
+    EXPECT_EQ(state.free_queue.head, 1u);
+    EXPECT_EQ(state.current_ptr, reinterpret_cast<uint64_t>(&new_buffer));
+    EXPECT_EQ(state.current_seq, 8u);
+    EXPECT_EQ(current, &new_buffer);
+    EXPECT_EQ(new_buffer.count, 0u);
+}
+
 TEST(ProfilerDeviceEngineTest, SwitchClearsCurrentBufferWhenReplacementIsUnavailable) {
     FakeHeader header;
     FakeState state;

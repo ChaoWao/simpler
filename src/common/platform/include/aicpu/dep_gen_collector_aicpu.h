@@ -34,13 +34,12 @@
  *   - tensor data passed via opaque void* pointers (memcpy'd into the
  *     DEP_GEN_TENSOR_SIZE-byte slot; static_asserted against sizeof(ChipTensor)
  *     in the .cpp)
- *   - explicit_deps passed as uint64*
+ *   - explicit_deps passed as uint64* and per-dep kinds as uint8_t*
  *
  * No-op when dep_gen is disabled (is_dep_gen_enabled() returns false).
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_AICPU_DEP_GEN_COLLECTOR_AICPU_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_AICPU_DEP_GEN_COLLECTOR_AICPU_H_
+#pragma once
 
 #include <cstdint>
 
@@ -104,6 +103,9 @@ void dep_gen_aicpu_init();
  * @param explicit_dep_count  Number of explicit_deps — no static cap; truncated only when the
  *                            chain would not fit in a single DepGenBuffer
  * @param explicit_deps_raw   Per-dep TaskId::raw (length = explicit_dep_count)
+ * @param explicit_dep_kinds_raw Per-dep DepFlags byte, or nullptr to apply
+ *                            default_explicit_dep_kind to every dependency
+ * @param default_explicit_dep_kind DepFlags byte used when explicit_dep_kinds_raw is nullptr
  * @param block_num           SPMD logical block count; 1 means non-SPMD
  * @param kernel_ids          Per-subslot kernel id triple {AIC, AIV0, AIV1};
  *                            inactive subslots use INVALID_KERNEL_ID (-1).
@@ -113,8 +115,8 @@ void dep_gen_aicpu_init();
  */
 void dep_gen_aicpu_record_submit(
     uint64_t task_id_raw, bool in_manual_scope, bool early_dispatch, int tensor_count, const void *const *tensor_ptrs,
-    const uint8_t *arg_types, int explicit_dep_count, const uint64_t *explicit_deps_raw, int block_num,
-    const int32_t kernel_ids[3]
+    const uint8_t *arg_types, int explicit_dep_count, const uint64_t *explicit_deps_raw,
+    const uint8_t *explicit_dep_kinds_raw, uint8_t default_explicit_dep_kind, int block_num, const int32_t kernel_ids[3]
 );
 
 /**
@@ -128,5 +130,3 @@ void dep_gen_aicpu_flush();
  * Clear file-local bookkeeping (current_buf cache, etc.). Called at shutdown.
  */
 void dep_gen_aicpu_finalize();
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_AICPU_DEP_GEN_COLLECTOR_AICPU_H_

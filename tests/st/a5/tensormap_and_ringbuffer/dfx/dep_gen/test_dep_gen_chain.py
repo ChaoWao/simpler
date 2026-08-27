@@ -16,18 +16,19 @@ the tail in deps.json; this test verifies every explicit dep edge survives
 the round-trip writer → host collector → replay → deps.json.
 
 Test shape (chain_barrier_orch.cpp): N producers each INOUT X, then a dummy
-barrier `set_dependencies({all N producer ids})`, then a consumer
-`set_dependencies({barrier_id})` reading X and writing Y. With N spanning
-the {64, 65, 390, 391} boundaries we exercise:
+barrier `set_dependencies_with_kinds({all N producer ids})`, then a consumer
+`add_dep_wait(barrier_id)` reading X and writing Y. With N spanning
+the {64, 65, 588, 589} boundaries we exercise:
 
   - n=64: base only (no chain) — sanity baseline
   - n=65: base + 1 overflow record (1 dep in overflow)
   - n=200: base + 1 overflow (136 deps in overflow)
-  - n=391: base + 2 overflow (326 + 1 deps across two overflows)
+  - n=589: base + 2 overflow (524 + 1 deps across two overflows)
 
 Validation: the barrier task in deps.json must have exactly N predecessors,
 all of which are the producer ids. The consumer must have one explicit
-predecessor — the barrier.
+predecessor — the barrier. A final dummy pair verifies that an explicit WAIT
+and creator retention for the same producer merge into one WAIT|RETAIN edge.
 """
 
 import json
@@ -105,11 +106,11 @@ class TestDepGenChain(SceneTestCase):
             "params": {"n": 200},
         },
         {
-            "name": "n_391_two_overflow",
+            "name": "n_589_two_overflow",
             "platforms": ["a5sim", "a5"],
             "manual": ["a5sim"],
             "config": {"aicpu_thread_num": 2},
-            "params": {"n": 391},
+            "params": {"n": 589},
         },
     ]
 
@@ -126,9 +127,8 @@ class TestDepGenChain(SceneTestCase):
 
     def compute_golden(self, args, params):
         # Producers each write SENTINEL to X[0]; consumer copies X[0] -> Y[0].
-        # If the barrier didn't actually wait for all producers, the consumer
-        # could race ahead and copy INIT_VAL instead — making the host check
-        # a defacto sanity gate even before we look at deps.json.
+        # Tensormap dependencies also order these accesses, so this value check
+        # is an execution sanity gate; deps.json validates the explicit barrier.
         args.x[0] = self.SENTINEL
         args.y[0] = self.SENTINEL
 
@@ -147,8 +147,9 @@ class TestDepGenChain(SceneTestCase):
 
         With dep_gen on, deps.json must contain N edges from the producers to
         the barrier task (one per `set_dependencies` entry the orchestration
-        emitted), plus the consumer's one explicit edge back from the barrier.
-        Pre-chain code would truncate the producer→barrier edge set to 16/64.
+        emitted), plus the consumer's one explicit edge back from the barrier
+        and the final cross-source dedup probe. Pre-chain code would truncate
+        the producer→barrier edge set to 16/64.
         """
         case_name = case["name"]
         n = int(case["params"]["n"])
@@ -174,6 +175,7 @@ class TestDepGenChain(SceneTestCase):
         with deps_path.open() as f:
             deps = json.load(f)
 
+        tasks = deps.get("tasks", [])
         raw_edges = deps.get("edges", [])
         # Project annotated edges → (pred, succ) — we only care about graph
         # structure here; the annot-vs-oracle agreement gate already ran
@@ -209,12 +211,61 @@ class TestDepGenChain(SceneTestCase):
         # round-trip assertion: pre-chain code drops anything past index 63.
         assert len(barrier_preds) == n, f"barrier has {len(barrier_preds)} preds, expected {n}"
 
-        # Consumer must explicit-depend on the barrier — exactly one outgoing
-        # explicit edge from the barrier.
-        outgoing_explicit_from_barrier = {succ for pred, succ in explicit_edges if pred == barrier_id}
+        # Check the raw list before indexing it so duplicate emitted edges
+        # cannot be hidden by the producer-keyed map.
+        barrier_explicit_edge_list = [
+            e
+            for e in raw_edges
+            if isinstance(e, dict) and e.get("source") == "explicit" and int(e.get("succ", -1)) == barrier_id
+        ]
+        assert len(barrier_explicit_edge_list) == n, (
+            f"barrier emitted {len(barrier_explicit_edge_list)} explicit edges, expected exactly {n}"
+        )
+        barrier_explicit_edges = {int(e["pred"]): e for e in barrier_explicit_edge_list}
+        assert len(barrier_explicit_edges) == n
+
+        # Derive producer order from tasks[] rather than TaskId numeric order.
+        # The barrier alternates WAIT and WAIT|RETAIN kinds, validating the
+        # parallel kind array across the base and every overflow record.
+        barrier_task_idx = next((idx for idx, task in enumerate(tasks) if int(task["task_id"]) == barrier_id), None)
+        assert barrier_task_idx is not None, f"barrier task {barrier_id} is missing from tasks[]"
+        producer_ids = [
+            int(task["task_id"]) for task in tasks[:barrier_task_idx] if int(task["task_id"]) in barrier_preds
+        ]
+        assert len(producer_ids) == n, f"found {len(producer_ids)} ordered barrier producers, expected {n}"
+        for idx, producer_id in enumerate(producer_ids):
+            edge = barrier_explicit_edges[producer_id]
+            expected_flags = ["wait"] if idx % 2 == 0 else ["wait", "retain"]
+            assert edge.get("flags") == expected_flags, (
+                f"barrier dep {idx} flags are {edge.get('flags')}, expected {expected_flags}"
+            )
+
+        # Consumer must have one ordering-only explicit edge from the barrier.
+        outgoing_explicit_from_barrier = [
+            e for e in raw_edges if e.get("source") == "explicit" and int(e.get("pred", -1)) == barrier_id
+        ]
         assert len(outgoing_explicit_from_barrier) == 1, (
             f"barrier {barrier_id} has {len(outgoing_explicit_from_barrier)} outgoing explicit edges, "
             f"expected 1 (the consumer)"
+        )
+        assert outgoing_explicit_from_barrier[0].get("flags") == ["wait"], (
+            f"barrier ordering edge flags are {outgoing_explicit_from_barrier[0].get('flags')}, expected ['wait']"
+        )
+
+        # The final two dummy tasks exercise cross-source dedup: the consumer
+        # explicitly waits on the producer and reads its runtime-owned output.
+        assert len(tasks) >= 2
+        combined_pred = int(tasks[-2]["task_id"])
+        combined_succ = int(tasks[-1]["task_id"])
+        combined_edges = [
+            e for e in raw_edges if int(e.get("pred", -1)) == combined_pred and int(e.get("succ", -1)) == combined_succ
+        ]
+        assert len(combined_edges) == 1, (
+            f"combined dependency {combined_pred}->{combined_succ} has {len(combined_edges)} edges, expected 1"
+        )
+        assert combined_edges[0].get("source") == "explicit"
+        assert combined_edges[0].get("flags") == ["wait", "retain"], (
+            f"combined dependency flags are {combined_edges[0].get('flags')}, expected ['wait', 'retain']"
         )
 
 

@@ -337,14 +337,14 @@ constexpr int PLATFORM_PMU_TIMEOUT_SECONDS = 30;
 
 /**
  * Number of DepGenRecord entries per DepGenBuffer.
- * Each DepGenRecord is 4672 B (16 ChipTensor blobs + small header), so a buffer
+ * Each DepGenRecord is 4736 B (32 ChipTensor blobs + small header), so a buffer
  * of 1024 records is ~4.6 MB; draining one copies that over SVM.
  * Guaranteed one-shot capacity = BUFFERS_PER_INSTANCE × RECORDS_PER_BUFFER
  * records — the size of a back-to-back submit flood the pool absorbs even if
  * the host never drains. At 4×1024 that is 4096 submits, which aligns
  * dep_gen's in-flight record count with the scope_stats / l2 AicoreTask pools
  * (also 4096) per the #977 cross-subsystem review. By in-flight BYTES dep_gen
- * cannot align (its 4672 B record is 70–90× the others); that tension is
+ * cannot align (its 4736 B record is 70–90× the others); that tension is
  * inherent — see docs/dfx/dfx-buffer-capacity-audit.md.
  * History: original 32 (commit 77ef83c0) → #977 commit 3f977e54 overshot to
  * 2048 → 1024 here (#977 Primary's actual proposal; the 2× was no gain).

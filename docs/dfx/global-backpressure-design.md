@@ -86,9 +86,16 @@ Every barrier and contention spin is bounded by
 scales per arch — a2a3 50 MHz, a5 1000 MHz). The budget exists **only** to break
 an infinite spin on host crash or hardware failure; it is not a normal-path
 wait. When it expires the writer breaks to its single failure exit
-(`return false`), and the caller (`switch_buffer`) accounts the dropped records.
-A 30-second expiry therefore means "the host is gone", not "the buffer was
-briefly full".
+(`return false`) only while ownership remains on the device: a full ready queue
+before publication, or an empty free queue while claiming a replacement. The
+caller then accounts the affected records as dropped.
+
+The push gate runs after the writer publishes the ready entry and advances the
+queue tail. That tail advance transfers ownership to the host and cannot be
+rolled back, so a push-gate timeout ends the park but the enqueue remains
+successful; reporting failure there would let the caller clear and reuse a
+host-owned buffer. A 30-second expiry still means "the host is gone", not "the
+buffer was briefly full".
 
 ## Host side — the freeze state machine
 

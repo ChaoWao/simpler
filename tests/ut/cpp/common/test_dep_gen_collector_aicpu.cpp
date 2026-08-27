@@ -26,6 +26,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+
+#include "types.h"
 
 namespace {
 
@@ -72,12 +75,18 @@ protected:
         free(shm_);
     }
 
-    void record_one_submit(uint64_t task_id_raw) {
+    void record_one_submit(uint64_t task_id_raw) { record_submit(task_id_raw, 0, nullptr, nullptr); }
+
+    void record_submit(
+        uint64_t task_id_raw, int explicit_dep_count, const uint64_t *explicit_deps_raw,
+        const uint8_t *explicit_dep_kinds_raw,
+        uint8_t default_explicit_dep_kind = static_cast<uint8_t>(DEP_WAIT | DEP_RETAIN)
+    ) {
         const int32_t kernel_ids[3] = {-1, -1, -1};
         dep_gen_aicpu_record_submit(
             task_id_raw, /*in_manual_scope=*/false, /*early_dispatch=*/false, /*tensor_count=*/0,
-            /*tensor_ptrs=*/nullptr, /*arg_types=*/nullptr, /*explicit_dep_count=*/0, /*explicit_deps_raw=*/nullptr,
-            /*block_num=*/1, kernel_ids
+            /*tensor_ptrs=*/nullptr, /*arg_types=*/nullptr, explicit_dep_count, explicit_deps_raw,
+            explicit_dep_kinds_raw, default_explicit_dep_kind, /*block_num=*/1, kernel_ids
         );
     }
 
@@ -115,6 +124,72 @@ TEST_F(DepGenCollectorAicpuTest, SubmitAfterOrchThreadIdxIsRecordedAndFlushed) {
     EXPECT_EQ(header_->queue_tails[0], 1u);
     EXPECT_EQ(header_->queues[0][0].buffer_ptr, reinterpret_cast<uint64_t>(buffer_));
     EXPECT_EQ(state_->current_buf_ptr, 0u);
+}
+
+TEST_F(DepGenCollectorAicpuTest, NullKindsUseDefaultForEveryDependency) {
+    dep_gen_aicpu_set_orch_thread_idx(0);
+    constexpr int kDepCount = DEP_GEN_MAX_EXPLICIT_DEPS + 1;
+    std::vector<uint64_t> deps(kDepCount);
+    for (int i = 0; i < kDepCount; ++i) {
+        deps[i] = 0x100u + static_cast<uint64_t>(i);
+    }
+
+    record_submit(0x1234, kDepCount, deps.data(), nullptr, /*default_explicit_dep_kind=*/3);
+
+    ASSERT_EQ(buffer_->count, 2u);
+    const DepGenRecord &record = buffer_->records[0];
+    ASSERT_EQ(record.explicit_dep_count, DEP_GEN_MAX_EXPLICIT_DEPS);
+    for (int i = 0; i < DEP_GEN_MAX_EXPLICIT_DEPS; ++i) {
+        EXPECT_EQ(record.explicit_deps[i], deps[i]);
+        EXPECT_EQ(record.explicit_dep_kinds[i], 3u);
+    }
+
+    const auto *overflow = reinterpret_cast<const DepGenOverflowRecord *>(&buffer_->records[1]);
+    ASSERT_EQ(overflow->dep_count, 1u);
+    EXPECT_EQ(overflow->deps[0], deps.back());
+    EXPECT_EQ(overflow->kinds[0], 3u);
+}
+
+TEST_F(DepGenCollectorAicpuTest, MixedKindsSurviveTwoOverflowRecords) {
+    dep_gen_aicpu_set_orch_thread_idx(0);
+    constexpr int kDepCount = DEP_GEN_MAX_EXPLICIT_DEPS + DEP_GEN_OVERFLOW_DEPS_PER_RECORD + 1;
+    std::vector<uint64_t> deps(kDepCount);
+    std::vector<uint8_t> kinds(kDepCount);
+    for (int i = 0; i < kDepCount; ++i) {
+        deps[i] = 0x1000u + static_cast<uint64_t>(i);
+        kinds[i] = (i % 2 == 0) ? 1u : 3u;
+    }
+
+    record_submit(0x5678, kDepCount, deps.data(), kinds.data());
+
+    ASSERT_EQ(buffer_->count, 3u);
+    EXPECT_EQ(state_->total_record_count, 1u);
+    EXPECT_EQ(state_->total_overflow_record_count, 2u);
+
+    const DepGenRecord &base = buffer_->records[0];
+    ASSERT_EQ(base.explicit_dep_count, DEP_GEN_MAX_EXPLICIT_DEPS);
+    EXPECT_NE(base.flags & DEP_GEN_FLAG_HAS_OVERFLOW, 0u);
+    for (int i = 0; i < DEP_GEN_MAX_EXPLICIT_DEPS; ++i) {
+        EXPECT_EQ(base.explicit_deps[i], deps[i]);
+        EXPECT_EQ(base.explicit_dep_kinds[i], kinds[i]);
+    }
+
+    const auto *first = reinterpret_cast<const DepGenOverflowRecord *>(&buffer_->records[1]);
+    ASSERT_EQ(first->dep_count, DEP_GEN_OVERFLOW_DEPS_PER_RECORD);
+    EXPECT_NE(first->flags & DEP_GEN_FLAG_OVERFLOW, 0u);
+    EXPECT_EQ(first->flags & DEP_GEN_FLAG_LAST_OVERFLOW, 0u);
+    for (int i = 0; i < DEP_GEN_OVERFLOW_DEPS_PER_RECORD; ++i) {
+        const int dep_idx = DEP_GEN_MAX_EXPLICIT_DEPS + i;
+        EXPECT_EQ(first->deps[i], deps[dep_idx]);
+        EXPECT_EQ(first->kinds[i], kinds[dep_idx]);
+    }
+
+    const auto *last = reinterpret_cast<const DepGenOverflowRecord *>(&buffer_->records[2]);
+    ASSERT_EQ(last->dep_count, 1u);
+    EXPECT_NE(last->flags & DEP_GEN_FLAG_OVERFLOW, 0u);
+    EXPECT_NE(last->flags & DEP_GEN_FLAG_LAST_OVERFLOW, 0u);
+    EXPECT_EQ(last->deps[0], deps.back());
+    EXPECT_EQ(last->kinds[0], kinds.back());
 }
 
 }  // namespace
