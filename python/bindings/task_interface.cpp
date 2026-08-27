@@ -14,7 +14,8 @@
  * Wraps DataType, ChipTensor, ChipStorageTaskArgs, TaskArgs (unified
  * vector-backed builder with per-tensor TensorArgType tags), TensorArgType,
  * ArgDirection, CoreCallable, ChipCallable, and helper functions from
- * data_type.h / tensor.h / task_args.h / arg_direction.h / callable.h.
+ * data_type.h / tensor.h / task_args.h / task_args_wire.h / arg_direction.h /
+ * callable.h.
  */
 
 #include <nanobind/nanobind.h>
@@ -66,7 +67,7 @@
 #include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
 #include "worker_bind.h"
-#include "task_args.h"
+#include "task_args_wire.h"
 #include "tensor.h"
 
 namespace nb = nanobind;
@@ -1946,8 +1947,8 @@ NB_MODULE(_task_interface, m) {
     // that does not fit its backing cannot be built in the first place.
     //
     // No bytes cross this binding in either direction. Python builds a Tensor from its fields and
-    // receives one already decoded; turning mailbox bytes into a Tensor is task_args.h's job, and
-    // keeping that the only decode path is what makes validate_tensor a gate rather than a habit.
+    // receives one already decoded; turning mailbox bytes into a Tensor is task_args_wire.h's job,
+    // and keeping that the only decode path is what makes validate_tensor a gate rather than a habit.
     nb::class_<Tensor>(m, "Tensor")
         .def(
             "__init__",

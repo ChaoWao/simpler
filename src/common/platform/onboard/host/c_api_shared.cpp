@@ -29,7 +29,7 @@
 #include "device_runner_base.h"
 #include "prepare_callable_common.h"
 #include "runtime_c_api.h"
-#include "task_args.h"
+#include "task_args_wire.h"
 #include "native_run_context.h"
 
 #include <acl/acl.h>

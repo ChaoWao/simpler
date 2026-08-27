@@ -43,7 +43,7 @@
 
 #include "../task_interface/call_config.h"
 #include "../task_interface/data_type.h"
-#include "../task_interface/task_args.h"
+#include "../task_interface/task_args_wire.h"
 #include "../task_interface/tensor.h"
 #include "../worker/pipeline_slot_pool.h"
 #include "../worker/device_memory_info.h"
