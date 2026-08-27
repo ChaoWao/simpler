@@ -44,7 +44,7 @@
 #include <vector>
 
 #include "../task_interface/call_config.h"
-#include "../task_interface/task_args.h"
+#include "../task_interface/task_args_wire.h"
 #include "../worker/runtime_c_api.h"
 
 // =============================================================================

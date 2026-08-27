@@ -30,7 +30,7 @@
 #include "common/host_api.h"
 #include "cpu_sim_context.h"
 #include "host/raii_scope_guard.h"
-#include "task_args.h"
+#include "task_args_wire.h"
 #include "utils/elf_build_id.h"
 
 namespace simpler::common::sim_host {

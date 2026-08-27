@@ -151,7 +151,7 @@ Relevant code paths:
   - `submit_next_level()` stores `TaskArgs`, `CallConfig`,
   `CallableIdentity`, and the required target worker in a parent-side slot.
   - Dependency inference happens before dispatch from tags in `TaskArgs`.
-- `src/common/task_interface/task_args.h`
+- `src/common/task_interface/task_args_wire.h`
   - Process dispatch writes `[T][S][ChipTensor x T][uint64 x S]`.
   - Tags are stripped after submit.
 - `docs/comm-domain.md`

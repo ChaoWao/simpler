@@ -50,7 +50,7 @@
 #include "host_log.h"
 #include "platform_comm/comm.h"
 #include "runtime_c_api.h"
-#include "task_args.h"
+#include "task_args_wire.h"
 #include "utils/elf_build_id.h"
 // `runtime.h` (pulled in via `device_runner_helpers.h` in the base header)
 // supplies the per-arch `Handshake` + `Runtime` types used by

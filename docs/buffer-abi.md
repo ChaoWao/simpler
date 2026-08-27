@@ -37,14 +37,18 @@ forget it on.
 the address is resolved on the consuming endpoint, and the C++ orchestration on
 the chip receives the resolved form.
 
-**A kernel translation unit sees only the last two rows.** A `#include "tensor.h"`
-on a runtime's include path supplies `ChipTensor` and that runtime's `Tensor`
-(aliased `TaskTensor`), and reaches neither `task_interface/task_args.h` nor the
-wire `Tensor` in `task_interface/buffer.h`. The runtime's own entry-arg storage,
-which does need both, sits in `entry_args.h` beside it rather than in `tensor.h`.
-Since the wire type and the runtime type are both spelled `Tensor` — one at global
-scope, one in `simpler::{hbg,tmr}` — an include that reintroduces that edge makes
-the two names collide inside every kernel that picks up the header.
+**A kernel or orchestration translation unit sees only the last two rows.** A
+`#include "tensor.h"` on a runtime's include path supplies `ChipTensor` and that
+runtime's `Tensor` (aliased `TaskTensor`), and neither it nor `orchestration_api.h`
+reaches the wire `Tensor` in `task_interface/buffer.h`. Two headers keep that true:
+the runtime's entry-arg storage, which needs the argument template, sits in
+`entry_args.h` beside `tensor.h` rather than inside it; and `task_args.h` carries
+only the template and the L2 ABI alias, while the L3+ `TaskArgs`, the blob codec and
+the submit checks — the parts whose element *is* the wire `Tensor` — sit in
+`task_args_wire.h`. Since the wire type and a runtime type are both spelled `Tensor`
+— one at global scope, one in `simpler::{hbg,tmr}` — an include that reintroduces
+that edge makes the two names collide in every kernel and orchestration source that
+picks up the header.
 
 > **Status.** `TaskArgs.add_tensor` takes a `Tensor`, and `simpler.task_interface`
 > re-exports it: the public submit surface names the type its own submit call accepts.
@@ -352,9 +356,9 @@ enforced where a task is submitted rather than where it is materialized.
 
 **There is no second blob format.** A `Tensor` travels in the TaskArgs mailbox
 blob that `write_blob` / `read_blob` implement in
-[`task_args.h`](../src/common/task_interface/task_args.h); that blob's element is
-the `Tensor`, and `TaskArgsView::tensors` validates each one as it decodes it.
-`ChipTensor` survives only in `ChipStorageTaskArgs`, the POD `ChipWorker`
+[`task_args_wire.h`](../src/common/task_interface/task_args_wire.h); that blob's
+element is the `Tensor`, and `TaskArgsView::tensors` validates each one as it decodes
+it. `ChipTensor` survives only in `ChipStorageTaskArgs`, the POD `ChipWorker`
 consumes — an L2 worker materializes into it inside `run` before calling down.
 
 Single-machine (host + device) L3→L2 and L4→L3→L2 dispatch is implemented and

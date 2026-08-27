@@ -14,7 +14,7 @@
 
 #include <gtest/gtest.h>
 
-#include "task_args.h"
+#include "task_args_wire.h"
 
 // ---------------------------------------------------------------------------
 // ChipTensor layout
