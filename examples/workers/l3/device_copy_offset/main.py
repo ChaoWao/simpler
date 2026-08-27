@@ -66,12 +66,22 @@ def _pattern(nbytes: int, seed: int) -> bytes:
 
 
 def _view(handle) -> memoryview:
-    """The host-visible bytes of a ``create_buffer`` backing."""
+    """The ``handle.nbytes`` host-visible bytes of a ``create_buffer`` backing.
+
+    Sliced to the Buffer's own extent rather than handed over whole: a POSIX shm mapping is
+    page-rounded, and a page is 4 KiB on x86-64 and aarch64 Linux but 16 KiB on Apple silicon, so
+    the mapping is a multiple of the requested size on one platform and larger than it on another.
+    The copies themselves are unaffected -- they take their length from ``Buffer.nbytes`` -- but a
+    whole-mapping view would make every bound below relative to the page size instead of the
+    backing.
+    """
     shm = handle.shm
     assert shm is not None
     buf = shm.buf
     assert buf is not None
-    return buf
+    view = buf[: int(handle.nbytes)]
+    assert len(view) == int(handle.nbytes)
+    return view
 
 
 def _first_diff(got: bytes, want: bytes, base: int) -> str:
