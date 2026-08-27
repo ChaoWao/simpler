@@ -62,6 +62,21 @@ class TestPagedAttentionUnrollHostBuildGraph(SceneTestCase):
 
     CASES = [
         {
+            "name": "SmallCaseMixedGroups",
+            "platforms": ["a5sim", "a5"],
+            "params": {
+                "batch": 2,
+                "num_heads": 16,
+                "kv_head_num": 1,
+                "head_dim": 128,
+                "block_size": 128,
+                "context_len": 8193,
+                "context_lens_list": [8193, 257],
+                "max_model_len": 8448,
+                "dtype": "bfloat16",
+            },
+        },
+        {
             "name": "Case1",
             "platforms": ["a5"],
             "params": {

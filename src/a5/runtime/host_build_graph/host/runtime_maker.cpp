@@ -602,12 +602,6 @@ bool create_scheduler_state(
             return false;
         }
         const uint32_t logical_block_num = static_cast<uint32_t>(slot.logical_block_num);
-        if (active_subtasks != 1 || logical_block_num != 1 || slot.task_attrs.requires_sync_start()) {
-            LOG_ERROR(
-                "A5 HBG AICore scheduler: task id=%" PRId64 " requires MIX, SPMD, or sync-start scheduling", task_id
-            );
-            return false;
-        }
         if (logical_block_num > UINT16_MAX / active_subtasks) {
             LOG_ERROR(
                 "A5 HBG AICore scheduler: task id=%" PRId64 " block/subtask product exceeds scheduler state capacity",

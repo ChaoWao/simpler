@@ -189,6 +189,7 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
     }
 
     const uint64_t executable_task_count = runtime->scheduler_layout.executable_task_count;
+    const bool has_gang_tasks = runtime->scheduler_layout.gang_task_count != 0;
     const int32_t requested_aic = static_cast<int32_t>(std::min<uint64_t>(
         aic_count, std::max(runtime->scheduler_layout.aic_worker_demand, runtime->scheduler_layout.aic_task_count)
     ));
@@ -200,9 +201,12 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
         (static_cast<uint64_t>(requested_aiv) + PLATFORM_AIV_CORES_PER_BLOCKDIM - 1) / PLATFORM_AIV_CORES_PER_BLOCKDIM
     );
     if (executable_task_count != 0) required_clusters = std::max<uint64_t>(required_clusters, 1);
+    if (has_gang_tasks) required_clusters = static_cast<uint64_t>(aic_count);
     const int32_t active_clusters = static_cast<int32_t>(std::min<uint64_t>(required_clusters, aic_count));
-    if (runtime->scheduler_layout.aic_worker_demand > static_cast<uint64_t>(aic_count) ||
-        runtime->scheduler_layout.aiv_worker_demand > static_cast<uint64_t>(aiv_count) ||
+    if ((runtime->scheduler_layout.aic_worker_demand > static_cast<uint64_t>(aic_count) &&
+         runtime->scheduler_layout.gang_task_count == 0) ||
+        (runtime->scheduler_layout.aiv_worker_demand > static_cast<uint64_t>(aiv_count) &&
+         runtime->scheduler_layout.gang_task_count == 0) ||
         (executable_task_count != 0 && active_clusters == 0)) {
         LOG_ERROR(
             "A5 HBG AICore scheduler: topology cannot execute graph (demand AIC=%" PRIu64 " AIV=%" PRIu64
@@ -226,8 +230,9 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
             const bool resolver_lane = static_cast<uint64_t>(worker) == resolver_worker;
             const bool additional_aiv_lane =
                 lane != 0 && !resolver_lane && cluster * PLATFORM_AIV_CORES_PER_BLOCKDIM + 1 < requested_aiv;
-            const bool active_lane = cluster < active_clusters &&
-                                     (resolver_lane || (lane == 0 && cluster < requested_aic) || additional_aiv_lane);
+            const bool active_lane =
+                cluster < active_clusters &&
+                (has_gang_tasks || resolver_lane || (lane == 0 && cluster < requested_aic) || additional_aiv_lane);
             contexts[worker].active = active_lane ? 1 : 0;
             contexts[worker].cluster_count = static_cast<uint64_t>(active_clusters);
             contexts[worker].cluster_index = static_cast<uint64_t>(cluster);
@@ -252,6 +257,11 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
     run_control->aic_active_worker_count = static_cast<uint64_t>(active_aic);
     run_control->aiv_active_worker_count = static_cast<uint64_t>(active_aiv);
     run_control->resolver_count = static_cast<uint64_t>(active_clusters);
+    auto *coordinator = scheduler_state_at<SchedulerGangCoordinator>(
+        runtime->scheduler_state_base, runtime->scheduler_layout.gang_coordinator_offset
+    );
+    coordinator->resolver_count = static_cast<uint64_t>(active_clusters);
+    cache_flush_range(coordinator, sizeof(*coordinator));
     if (executable_task_count == 0) {
         run_control->bootstrap_scan_arrived_count = static_cast<uint64_t>(active_clusters);
         run_control->bootstrap_scan_complete = 1;

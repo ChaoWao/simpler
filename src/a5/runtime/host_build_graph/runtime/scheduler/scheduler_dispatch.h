@@ -74,6 +74,15 @@ inline __aicore__ bool scheduler_fill_cluster_normal_slots(
     const uint32_t aic_core_type = static_cast<uint32_t>(CoreType::AIC);
     uint64_t stage_start = timing == nullptr ? 0 : scheduler_cycles();
     uint64_t detail_start = timing == nullptr ? 0 : scheduler_normal_dispatch_detail_cycles(*timing, aic_core_type);
+    __gm__ SchedulerGangCoordinator *coordinator = scheduler_gang_coordinator_at(scheduler_state_base, resolver);
+    if (coordinator->gang_task_count != 0) {
+        scheduler_observe_cache_line(coordinator);
+        scheduler_observe_cache_line(&coordinator->active_dispatch_cohort);
+        if (coordinator->ready_priority_bits != 0 || coordinator->active_dispatch_cohort != UINT64_MAX) {
+            scheduler_finish_normal_dispatch_stage(timing, aic_core_type, stage_start, detail_start);
+            return false;
+        }
+    }
     bool progress = false;
 
     // AIC has no peer lane in its Cluster, so preserve the existing slot order.
