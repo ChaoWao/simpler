@@ -61,7 +61,7 @@ struct OrchestratorState {
     SharedMemoryHeader *sm_header;
 
     // === TASK / HEAP ALLOCATION ===
-    // hbg is single-ring, so one allocator covers the whole graph.
+    // hbg has one task table, so one allocator covers the whole graph.
     TaskAllocator task_allocator;
     std::unique_ptr<uint32_t[]> fanin_seen_epoch;
     uint32_t fanin_seen_current_epoch{1};

@@ -188,7 +188,7 @@ constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  *                         hidden alloc completed inline by the orchestrator
  *
  * COMPLETED is terminal: no slot is recycled before the run ends, so nothing
- * advances a task past it. Consumer retirement is observed through the per-ring
+ * advances a task past it. Consumer retirement is observed through the
  * completed_watermark instead.
  */
 typedef enum {
@@ -236,7 +236,7 @@ struct ChipTaskSlotState;  // Forward declaration (defined below)
 /**
  * Task descriptor structure (shared memory)
  *
- * Stored in the TaskDescriptor ring buffer in shared memory.
+ * Stored in the TaskDescriptor table in shared memory.
  * Contains static identification and buffer pointers only.
  * Dynamic scheduling state (fanin/fanout/task_state) is in ChipTaskSlotState.
  *
@@ -268,8 +268,8 @@ static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer
  * Task payload data (cold path - only accessed during orchestration and dispatch)
  *
  * Layout: metadata + inline fanin packed in the first 9 cache lines, followed
- * by bulk tensor and scalar data. Small fanins stay fully inline; larger
- * fanins spill into a per-ring ring buffer slice.
+ * by bulk tensor and scalar data. Fanin is always inline: it is hard-capped at
+ * CHIP_MAX_FANIN and there is no spill pool.
  */
 // Early-dispatch claim states for TaskPayload::early_dispatch_state.
 enum EarlyDispatchState : uint8_t {
@@ -317,9 +317,9 @@ struct TaskPayload {
     // the mirror when the slot is claimed, and against the image in
     // compact_live_image, which re-pitches the segments.
     //
-    // fanin holds flat position-independent producer local task ids. Single-ring
-    // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned by
-    // classify_fanin_state against the ring completion_flags. Hard-capped at
+    // fanin holds flat position-independent producer local task ids. A producer is
+    // named by its local id alone, so no per-edge indirection is stored. Scanned by
+    // classify_fanin_state against the shared-memory completion_flags. Hard-capped at
     // CHIP_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<simpler::hbg::Tensor> tensors;
@@ -470,8 +470,8 @@ struct TaskPayload {
         // zero additional cost.
         memcpy(scalar_data(), args.scalars(), CHIP_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
-        // The ring's payload storage is reused raw memory that no constructor runs
-        // over, so an unset predicate reads back as whatever the slot last held —
+        // The task table's payload storage is raw shared memory that no constructor
+        // runs over, so an unset predicate reads back as whatever the slot last held —
         // and compact_live_image translates predicate.addr as a graph-heap address
         // for every submitted slot. An ordinary task overwrites this right
         // after init(); a hidden-alloc task has nothing following it, so this is
@@ -542,7 +542,7 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
  *
  * 64 bytes = one cache line. Under the polling completion model a task's
- * readiness is derived from its producers' completion_flags (in the ring
+ * readiness is derived from its producers' completion_flags (in the SM
  * header); producer completion is published by setting this task's own
  * completion_flag + draining its wake list. There is no fanout adjacency,
  * refcount, or per-task lock here.
@@ -554,7 +554,7 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  */
 struct alignas(64) ChipTaskSlotState {
     // Highest local task id among this slot's consumers. Reclaim gate: the slot
-    // is safe to retire once the per-ring completed_watermark reaches this id.
+    // is safe to retire once the completed_watermark reaches this id.
     // Whole-graph-resident hbg never reclaims at runtime, so this is
     // inert-but-scaffolded for parity. Seeded to own local_id in prepare_task;
     // bumped via max() at submit for each consumer.

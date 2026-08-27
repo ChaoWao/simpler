@@ -462,7 +462,7 @@ struct GraphRecording {
     // Scope depth as the body sees it. begin_scope/end_scope leave the real
     // orchestrator stack untouched while recording (a Graph replays flat), but
     // the manual-scope flag still has to follow the body: a manual scope
-    // suppresses inference on the ring, so it must suppress it here too.
+    // suppresses inference on the ordinary path, so it must suppress it here too.
     int32_t scope_stack_top{-1};
     int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
@@ -666,7 +666,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // Entry capacity for one recorded body's hazard map. A Definition is capped at
 // GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
 // args, so this bounds the worst realistic body while staying a small fraction of
-// the ring path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
+// the ordinary path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
 // it marks the recording unsupported, which graph_commit reports as
 // SIMPLER_ERROR_INVALID_ARGS -- the outer shell is already submitted by then, so there
 // is no ordinary-path fallback left to take.
@@ -1215,7 +1215,7 @@ static void next_fanin_seen_epoch(OrchestratorState *orch) {
 // True when this producer was already appended under the current epoch. A negative
 // local id cannot index the epoch table, so it is reported as not-yet-seen and the
 // caller appends it rather than rejecting it; append_fanin_or_fail has already
-// established that the producer is a ring task whose local id is a valid table
+// established that the producer is a GLOBAL task whose local id is a valid table
 // entry.
 static bool fanin_mark_seen(OrchestratorState &orch, TaskId producer_task_id) {
     const int32_t prod_local = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
@@ -1293,7 +1293,7 @@ static bool append_fanin_or_fail(
     fanin_slots[fanin_count++] = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
 
     // Reclaim gate: record this task as a consumer of the producer. The producer
-    // slot retires once the per-ring completed_watermark reaches this consumer id.
+    // slot retires once the completed_watermark reaches this consumer id.
     const int32_t self_local = static_cast<int32_t>(simpler::hbg::task_local_id(self_task_id));
     if (self_local > prod_state->last_consumer_local_id) {
         prod_state->last_consumer_local_id = self_local;
@@ -1411,7 +1411,8 @@ static bool prepare_task(
     // it in append_fanin_or_fail. completion_flags for this slot were cleared
     // above (whole-graph-resident hbg never reuses a slot).
     out->slot_state->last_consumer_local_id = static_cast<int32_t>(simpler::hbg::task_local_id(out->task_id));
-    // payload.fanin_count is set in submit_task_common's STEP 6.
+    // payload.fanin_count is left untouched here: submit_task_common zeroes it before
+    // its fanin appends, which accumulate into it in place.
 
     return true;
 }
@@ -1426,14 +1427,14 @@ void OrchestratorState::begin_scope(ScopeMode mode) {
         return;
     }
     // A Graph replays as a flat DAG with no scope structure: scope boundaries only
-    // shape scheduling on the ring, and the shadow-record path submits no ring
-    // tasks. So a scope inside a Graph body must not touch the real scope stack.
-    // Its manual/auto mode still matters, though — the recorder infers a node's
-    // producers with the same compute_task_fanin the ring path uses, and that
-    // inference is suppressed inside a manual scope — so the depth is tracked on
+    // shape scheduling on the ordinary path, and the shadow-record path submits no
+    // ordinary tasks. So a scope inside a Graph body must not touch the real scope
+    // stack. Its manual/auto mode still matters, though — the recorder infers a
+    // node's producers with the same compute_task_fanin the ordinary path uses, and
+    // that inference is suppressed inside a manual scope — so the depth is tracked on
     // the recording instead.
     if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
-        // Reject what the ring rejects. An auto scope inside a manual one is a
+        // Reject what the ordinary path rejects. An auto scope inside a manual one is a
         // fatal below; accepting it here would let a Graph record and replay a
         // body that ordinary submission refuses. The push still happens so
         // end_scope stays balanced -- the recording is doomed either way, since
@@ -1659,7 +1660,8 @@ static TaskOutputTensors submit_task_common(
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
     // no Arg/simpler::hbg::Tensor access. Both branches write predicate.op explicitly because
-    // payload slots are ring-reused; op == NONE means "always dispatch".
+    // a payload slot is raw shared memory with no constructor; op == NONE means
+    // "always dispatch".
     {
         const CoreTaskPredicate &pred = args.predicate();
         if (pred.op != PredicateOp::NONE && pred.operand.tensor != nullptr && pred.operand.tensor->buffer.addr != 0) {
@@ -2227,7 +2229,7 @@ TaskOutputTensors graph_record_submit_node(
         if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(source.source_index);
     }
 
-    // Inferred hazards, on the same terms as the ring path. The loop above only
+    // Inferred hazards, on the same terms as the ordinary path. The loop above only
     // names the node that ALLOCATED each buffer; every write-then-read through a
     // buffer someone else allocated — an alloc_tensors output written in place
     // with add_inout, or a view of a boundary tensor — needs the last-writer

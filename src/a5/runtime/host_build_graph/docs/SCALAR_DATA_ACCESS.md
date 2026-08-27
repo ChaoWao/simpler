@@ -70,8 +70,8 @@ it derives for itself, from a heap block whose prior contents it never reads.
 
 Before a wait slot is used, the runtime verifies:
 
-- the task ID is valid and lies in the `RING` id space — a `GRAPH_NODE` id packs
-  its outer task and node index into the low bits, so it indexes no task table
+- the task ID is valid and lies in the `GLOBAL` id space — an `IN_GRAPH` id packs
+  its Graph task and task index into the low bits, so it indexes no task table
   slot (see `src/common/host_build_graph/task_id_encoding.h`);
 - the task table slot that ID indexes has a bound task descriptor; and
 - the descriptor's full task ID matches the tensor's owner/producer ID.

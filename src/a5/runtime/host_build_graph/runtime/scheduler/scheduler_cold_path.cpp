@@ -129,7 +129,7 @@ LoopAction SchedulerContext::check_idle_fatal_error(int32_t thread_idx, SharedMe
 //
 // Categories (and which thread emits them):
 //   SUMMARY  — completed / total counts and scan totals               (thread 0 only)
-//   TASK     — one per non-completed task scanned from shared rings   (thread 0 only)
+//   TASK     — one per non-completed task in the shared table          (thread 0 only)
 //              - state=RUNNING: includes running_on=[...] cross-ref
 //              - state=READY:   fanin satisfied but no idle core yet
 //              - state=WAIT:    includes missing_deps=N
