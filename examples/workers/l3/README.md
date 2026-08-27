@@ -68,6 +68,7 @@ has its own README with the run commands and what the golden check proves.
 | [`multi_chip_dispatch/`](multi_chip_dispatch/) | Two chips + one SubWorker. An orchestration fn dispatches a `ChipCallable` to each chip, then submits a Python callable to collect/verify results. The smallest correct L3 program. |
 | [`child_memory/`](child_memory/) | `orch.malloc` + `ChipTensor(child_memory=True)` to load a weight once and reuse it across multiple kernel invocations on the same chip. |
 | [`per_task_runtime_env/`](per_task_runtime_env/) | One L3 launch where each L2 task binds its own ring sizes through `CallConfig.runtime_env`. |
+| [`step_jitter_repro/`](step_jitter_repro/) | Sustained four-chip depth-two dispatch with STRACE analysis for host scheduling and validation latency outliers. |
 
 ### Communication domains and collectives
 

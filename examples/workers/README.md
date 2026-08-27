@@ -33,6 +33,7 @@ workers/
   l3/                       # Multi-chip examples (host-level DAG)
     multi_chip_dispatch/    # Worker(level=3) + orchestration + SubWorker
     child_memory/           # orch.malloc + child_memory=True, weight reuse across tasks
+    step_jitter_repro/      # Four-chip sustained dispatch + host STRACE analysis
   l4/                       # Multi-machine examples (one L3 here, one over TCP or mpirun)
     vector_add_mixed_l3/    # Worker(level=4) + add_remote_worker, golden checked on both sides
     global_tload_mixed_l3/  # Global CommDomain build + cross-machine peer TLOAD on both ranks
@@ -144,6 +145,7 @@ python examples/workers/l2/worker_malloc/main.py -p a2a3sim -d 0
 python examples/workers/l2/vector_add/main.py -p a2a3sim -d 0
 python examples/workers/l3/multi_chip_dispatch/main.py -p a2a3sim -d 0-1
 python examples/workers/l3/child_memory/main.py -p a2a3sim -d 0
+python examples/workers/l3/step_jitter_repro/main.py -p a2a3sim -d 0-3 --rounds 10
 ```
 
 Flags:
