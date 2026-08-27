@@ -69,13 +69,13 @@ device lock for the whole job (see
 | Property | qwen3-14b decode | DeepSeek-V4 FLASH decode |
 | -------- | ---------------- | ------------------------ |
 | Path | `examples/a2a3/host_build_graph/qwen3_14b_decode/` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/` |
-| Entry point | `SceneTestCase` at level 2, run through the module runner | standalone `main.py`, which owns its L3 `Worker` |
+| Entry point | standalone `main.py`, which owns its L2 `Worker` | standalone `main.py`, which owns its L3 `Worker` |
 | Devices | 1 | 2 (EP2/TP2) |
 | Host tasks | 47 | 1131 |
 | Graph replays | 40, of a 277-node Definition | 20, of a 743-node Definition |
 | Graph boundary | 26 tensors | 118 tensors, 31 scalars |
 | First-run compile | seconds | **minutes** (369 kernel sources + an 11.6k-line orchestration) |
-| Parameters | host fixture per run | child memory, and `--skip-golden` leaves it uninitialized |
+| Parameters | device memory; valid fixture streamed once before all rounds | child memory, and `--skip-golden` leaves it uninitialized |
 | Marked | `manual` | `manual`, and it has no golden |
 
 The entry point decides how a case's output is captured, which is what the recipe
@@ -104,29 +104,24 @@ Four switches and one flag make the measurement, and each is load-bearing:
 | `--log-level timing` | enables the TIMING records used by the report; this is the SceneTest default |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | keeps CPU golden imports from loading `torch_npu`; the `torch_backend_autoload` timing record confirms the effective setting and observed module state |
 | `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
-| `--skip-golden` | with the device skipped the outputs a golden check compares are never produced, so a checking case such as qwen otherwise fails at validation with the whole measurement already complete in the log. On dsv4 it also skips the fixture upload its driver does by default, which is 42.6 GiB per rank of H2D you are not measuring |
+| `--skip-golden` | with the device skipped the outputs a golden check compares are never produced. Qwen still streams its valid fixture once before the measured rounds; on dsv4 the flag also skips the 42.6 GiB-per-rank fixture upload |
 
-SceneTest emits one `torch_backend_autoload` record per interpreter after
-torch-dependent argument preparation and before the first dispatch. `effective`
-reports the environment's dispatch-time intent using torch's current private
-autoload predicate; `torch_npu_loaded` reports the observed module state and is
-the authoritative field if the environment changed after torch was imported.
-`raw` is the JSON-encoded environment value (`null` when unset); values longer
-than 64 characters carry their first 64 characters and
-`raw_truncated=true`, keeping the record single-line and bounded.
+SceneTest and the standalone Qwen driver emit one `torch_backend_autoload`
+record per interpreter after torch-dependent argument preparation and before
+the first dispatch. `effective` reports the environment's dispatch-time intent
+using torch's current private autoload predicate; `torch_npu_loaded` reports the
+observed module state and is the authoritative field if the environment changed
+after torch was imported. `raw` is the JSON-encoded environment value (`null`
+when unset); values longer than 64 characters carry their first 64 characters
+and `raw_truncated=true`, keeping the record single-line and bounded.
 
 **`SIMPLER_SKIP_DEVICE_RUN` is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still
 skips; `unset` it. It is a temporary handle from the dsv4 bring-up and is deleted
 once that case's device execution works.
 
-**A case driven through the module runner as an L3 child needs
-`--runtime host_build_graph --level 3`.** A `SceneTestCase` whose
-`device_count > 1` is otherwise dispatched as one subprocess per class, and
-`run_jobs` captures that subprocess's stdout and prints it only on failure — so a
-passing run yields a log with **no** `bind phase=` lines at all. Neither of the
-two cases here needs it any more: qwen is `level=2`, and dsv4's `main.py` runs the
-L3 `Worker` in the invoked process, so its chip children write to the log
-directly.
+Both cases now run through standalone `main.py` drivers. Qwen owns its L2
+`Worker` in the invoked process, while dsv4 owns its L3 `Worker`; neither needs
+module-runner `--runtime` / `--level` forwarding to expose `bind phase=` lines.
 
 A 2-rank case emits one bind per rank per round, so six rounds is twelve binds.
 Pass `--rounds` to the parser so it infers the rank count and drops one cold bind

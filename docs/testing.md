@@ -112,10 +112,10 @@ no warm-up step and use the same automatic token pool during cold pytest runs.
 
 The tool walks `SceneTestCase` classes, so it does not reach a standalone case
 that owns its own `Worker`. Such a case warms the same cache itself: the
-DeepSeek smokes are compiled by
-`examples/a2a3/<runtime>/deepseek_v4_flash_decode/main.py --compile-only`,
-which calls the same `scene_test.compile_chip_callable_spec` and takes the same
-`--compile-workers`.
+DeepSeek smokes and Qwen daily cases are compiled by their respective
+`examples/<arch>/<runtime>/<model>/main.py --compile-only` entry points. Those
+drivers call the same `scene_test.compile_chip_callable_spec` and take the same
+`--compile-workers` option.
 
 The persistent cache has two levels. An unchanged callable loads its complete
 `callable.bin` directly. When that entry misses, each incore kernel loads an

@@ -136,6 +136,26 @@ def _log_torch_backend_autoload_once() -> None:
     )
 
 
+def log_torch_backend_autoload_once() -> None:
+    """Emit the shared autoload-state record from a standalone driver."""
+    _log_torch_backend_autoload_once()
+
+
+def standalone_pytest_options(request) -> dict:
+    """Forward the common scene-test CLI surface through a thin pytest wrapper."""
+    getoption = request.config.getoption
+    return {
+        "rounds": getoption("--rounds", default=1),
+        "skip_golden": getoption("--skip-golden", default=False),
+        "enable_chip_swimlane": getoption("--enable-chip-swimlane", default=0),
+        "dump_args": getoption("--dump-args", default=0),
+        "enable_pmu": getoption("--enable-pmu", default=0),
+        "enable_dep_gen": getoption("--enable-dep-gen", default=False),
+        "enable_scope_stats": getoption("--enable-scope-stats", default=False),
+        "enable_swimlane_overhead": getoption("--enable-swimlane-overhead", default=False),
+    }
+
+
 def _pto_isa_compile_cache_token() -> str:
     """Pin SHA included in session compile-cache keys.
 
@@ -1173,6 +1193,26 @@ def _plot_case_scope_stats(case_label: str, output_prefix: Path) -> None:
         sys.path.remove(str(tools_dir))
 
 
+def finalize_diagnostic_outputs(
+    case_label: str,
+    output_prefix: str | Path,
+    *,
+    callable_spec: dict | None = None,
+    chip_swimlane: int = 0,
+    dep_gen: bool = False,
+    scope_stats: bool = False,
+    swimlane_overhead: bool = False,
+) -> None:
+    """Run the postprocessors shared by SceneTest and standalone drivers."""
+    prefix = Path(output_prefix)
+    if chip_swimlane:
+        _convert_case_swimlane(case_label, prefix, callable_spec=callable_spec, enable_overhead=swimlane_overhead)
+    if dep_gen:
+        _graph_case_dep_gen(case_label, prefix, callable_spec=callable_spec)
+    if scope_stats:
+        _plot_case_scope_stats(case_label, prefix)
+
+
 def _name_failing_case(exc: BaseException, cls_name: str, case_name: str) -> None:
     """Prefix `exc`'s message with the class and case that raised it, in place.
 
@@ -1259,17 +1299,15 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
             _name_failing_case(exc, cls_name, case["name"])
             raise
         finally:
-            if enable_chip_swimlane:
-                _convert_case_swimlane(
-                    case_label,
-                    prefix,
-                    callable_spec=callable_spec,
-                    enable_overhead=enable_swimlane_overhead,
-                )
-            if enable_dep_gen:
-                _graph_case_dep_gen(case_label, prefix, callable_spec=callable_spec)
-            if enable_scope_stats:
-                _plot_case_scope_stats(case_label, prefix)
+            finalize_diagnostic_outputs(
+                case_label,
+                prefix,
+                callable_spec=callable_spec,
+                chip_swimlane=enable_chip_swimlane,
+                dep_gen=enable_dep_gen,
+                scope_stats=enable_scope_stats,
+                swimlane_overhead=enable_swimlane_overhead,
+            )
 
 
 def _compare_outputs(test_args, golden_args, output_names, rtol, atol):

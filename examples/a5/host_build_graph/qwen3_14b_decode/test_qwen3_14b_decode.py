@@ -7,46 +7,39 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A5 Qwen3-14B decode migrated from TMR to host-build-graph."""
+"""Hardware ST wrapper for Qwen3-14B decode on host_build_graph."""
 
-from copy import deepcopy
+import importlib.util
+import sys
+from pathlib import Path
 
-from examples.a5.tensormap_and_ringbuffer.qwen3_14b_decode.test_qwen3_14b_decode import (
-    TestQwen314BDecode as _TmrQwen314BDecode,
-)
-from simpler_setup import SceneTestCase, scene_test
-from simpler_setup.goldens.qwen3_14b_decode import compute_golden, generate_inputs
+import pytest
 
+from simpler_setup.scene_test import standalone_pytest_options
 
-def _host_build_graph_callable():
-    callable_config = deepcopy(_TmrQwen314BDecode.CALLABLE)
-    callable_config["orchestration"]["source"] = "kernels/orchestration/decode_fwd_layers.cpp"
-    return callable_config
+_DRIVER_NAME = "_qwen3_14b_a5_hbg_driver"
 
 
-@scene_test(level=2, runtime="host_build_graph")
-class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
-    """Qwen3-14B decode using the A5 TMR incores with HBG orchestration."""
+def _driver():
+    cached = sys.modules.get(_DRIVER_NAME)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(_DRIVER_NAME, Path(__file__).resolve().parent / "main.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load the Qwen3-14B host_build_graph driver")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_DRIVER_NAME] = module
+    spec.loader.exec_module(module)
+    return module
 
-    RTOL = _TmrQwen314BDecode.RTOL
-    ATOL = _TmrQwen314BDecode.ATOL
-    CALLABLE = _host_build_graph_callable()
 
-    CASES = [
-        {
-            "name": "GraphExecutionBatch16Seq3500",
-            "platforms": ["a5"],
-            "manual": True,
-            "params": {"seed": 1234, "seq_len": 3500},
-        },
-    ]
-
-    def generate_args(self, params):
-        return generate_inputs(params["seed"], params["seq_len"], n_layers=40)
-
-    def compute_golden(self, args, params):
-        compute_golden(args, n_layers=40)
+@pytest.mark.manual
+@pytest.mark.platforms(["a5"])
+@pytest.mark.runtime("host_build_graph")
+@pytest.mark.device_count(1)
+def test_qwen3_14b_decode_host_build_graph(st_platform, st_device_ids, request):
+    assert _driver().run(st_device_ids, st_platform, **standalone_pytest_options(request)) == 0
 
 
 if __name__ == "__main__":
-    SceneTestCase.run_module(__name__)
+    sys.exit(_driver().main())

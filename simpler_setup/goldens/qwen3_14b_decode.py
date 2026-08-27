@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Golden reference + fixture for the Qwen3-14B 40-layer decode SceneTestCase.
+"""Golden reference and streaming fixture for Qwen3-14B 40-layer decode.
 
 Ported from pypto-lib ``models/qwen3/14b/decode_fwd.py`` (entry
 ``decode_fwd_layers`` with ``_CHUNK_NLAYERS == 40``): the full Qwen3-14B decode
@@ -32,6 +32,9 @@ Weight matrices are ``[in_features, out_features]`` -> ``y = x @ w``.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import NamedTuple
 
 import torch
 
@@ -88,6 +91,42 @@ INPUT_NAMES = (
 )
 
 
+class ParamSpec(NamedTuple):
+    """One device-resident entry parameter."""
+
+    name: str
+    shape: tuple[int, ...]
+    dtype: str
+
+
+def param_specs(n_layers: int = N_LAYERS) -> list[ParamSpec]:
+    """Return the allocation-only parameter table for ``n_layers``."""
+    if n_layers <= 0:
+        raise ValueError(f"n_layers must be positive, got {n_layers}")
+    return [
+        ParamSpec("hidden_states", (BATCH, HIDDEN), "BFLOAT16"),
+        ParamSpec("input_rms_weight", (n_layers, HIDDEN), "FLOAT32"),
+        ParamSpec("wq", (n_layers * HIDDEN, HIDDEN), "BFLOAT16"),
+        ParamSpec("wk", (n_layers * HIDDEN, KV_HIDDEN), "BFLOAT16"),
+        ParamSpec("wv", (n_layers * HIDDEN, KV_HIDDEN), "BFLOAT16"),
+        ParamSpec("q_norm_weight", (n_layers, HEAD_DIM), "FLOAT32"),
+        ParamSpec("k_norm_weight", (n_layers, HEAD_DIM), "FLOAT32"),
+        ParamSpec("seq_lens", (BATCH,), "INT32"),
+        ParamSpec("block_table", (BATCH * MAX_BLOCKS_PER_SEQ,), "INT32"),
+        ParamSpec("slot_mapping", (BATCH,), "INT32"),
+        ParamSpec("rope_cos", (MAX_SEQ, HEAD_DIM), "FLOAT32"),
+        ParamSpec("rope_sin", (MAX_SEQ, HEAD_DIM), "FLOAT32"),
+        ParamSpec("k_cache", (n_layers * CACHE_ROWS, HEAD_DIM), "BFLOAT16"),
+        ParamSpec("v_cache", (n_layers * CACHE_ROWS, HEAD_DIM), "BFLOAT16"),
+        ParamSpec("wo", (n_layers * HIDDEN, HIDDEN), "BFLOAT16"),
+        ParamSpec("w_gate", (n_layers * HIDDEN, INTERMEDIATE), "BFLOAT16"),
+        ParamSpec("w_up", (n_layers * HIDDEN, INTERMEDIATE), "BFLOAT16"),
+        ParamSpec("w_down", (n_layers * INTERMEDIATE, HIDDEN), "BFLOAT16"),
+        ParamSpec("post_rms_weight", (n_layers, HIDDEN), "FLOAT32"),
+        ParamSpec("out", (BATCH, HIDDEN), "BFLOAT16"),
+    ]
+
+
 def _bf16(t: torch.Tensor) -> torch.Tensor:
     return t.to(torch.bfloat16).to(torch.float32)
 
@@ -115,20 +154,21 @@ def _paged_block_table_slot_mapping(seq_lens: torch.Tensor) -> tuple[torch.Tenso
     return block_table, slot_mapping
 
 
-def generate_inputs(
+def param_tensors(
     seed: int = 1234,
     seq_len: int = DEFAULT_SEQ_LEN,
     n_layers: int = N_LAYERS,
-) -> TaskArgsBuilder:
-    """Deterministic fixture for decode_fwd_layers, stacked along dim 0.
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield the deterministic fixture one entry parameter at a time.
 
     Every lane uses sequence length ``seq_len`` (default 3500, the stress prompt).
     Per-layer weights are replicated (stack0) so every layer reuses layer 0's
     weights, matching the lib's const-layer-0 stacked-fwd reference; each layer
     still has its own KV pool.
 
-    At the default 40 layers, the stacks are the bulk of the fixture:
-    ~24.6 GiB of weights plus ~13.4 GiB of paged KV at this regime.
+    The consumer must finish with each yielded tensor before advancing. At the
+    default 40 layers this bounds live host data to one parameter instead of the
+    full ~38 GiB fixture.
     """
     if not (1 <= seq_len <= MAX_SEQ):
         raise ValueError(f"seq_len must be in [1, {MAX_SEQ}], got {seq_len}")
@@ -151,30 +191,36 @@ def generate_inputs(
     rope_cos = torch.cat([ang.cos(), ang.cos()], dim=1).float()
     rope_sin = torch.cat([ang.sin(), ang.sin()], dim=1).float()
 
-    tensors = {
-        "hidden_states": rn([BATCH, HIDDEN], 1.0).to(torch.bfloat16),
-        "input_rms_weight": s0(rn([1, HIDDEN], 0.1, 1.0).float()),
-        "wq": s0(rn([HIDDEN, HIDDEN], 0.02).to(torch.bfloat16)),
-        "wk": s0(rn([HIDDEN, KV_HIDDEN], 0.02).to(torch.bfloat16)),
-        "wv": s0(rn([HIDDEN, KV_HIDDEN], 0.02).to(torch.bfloat16)),
-        "q_norm_weight": s0(rn([1, HEAD_DIM], 0.1, 1.0).float()),
-        "k_norm_weight": s0(rn([1, HEAD_DIM], 0.1, 1.0).float()),
-        "seq_lens": seq_lens,
-        "block_table": block_table,
-        "slot_mapping": slot_mapping,
-        "rope_cos": rope_cos,
-        "rope_sin": rope_sin,
-        "k_cache": s0(rn([CACHE_ROWS, HEAD_DIM], 0.01).to(torch.bfloat16)),
-        "v_cache": s0(rn([CACHE_ROWS, HEAD_DIM], 0.02, 0.3).to(torch.bfloat16)),
-        "wo": s0(rn([HIDDEN, HIDDEN], 0.0006).to(torch.bfloat16)),
-        "w_gate": s0(rn([HIDDEN, INTERMEDIATE], 0.02).to(torch.bfloat16)),
-        "w_up": s0(rn([HIDDEN, INTERMEDIATE], 0.02).to(torch.bfloat16)),
-        "w_down": s0(rn([INTERMEDIATE, HIDDEN], 0.0004).to(torch.bfloat16)),
-        "post_rms_weight": s0(rn([1, HIDDEN], 0.1, 1.0).float()),
-    }
-    specs = [TensorArg(name, tensors[name]) for name in INPUT_NAMES]
-    specs.append(TensorArg("out", torch.zeros([BATCH, HIDDEN], dtype=torch.bfloat16)))
-    return TaskArgsBuilder(*specs)
+    yield "hidden_states", rn([BATCH, HIDDEN], 1.0).to(torch.bfloat16)
+    yield "input_rms_weight", s0(rn([1, HIDDEN], 0.1, 1.0).float())
+    yield "wq", s0(rn([HIDDEN, HIDDEN], 0.02).to(torch.bfloat16))
+    yield "wk", s0(rn([HIDDEN, KV_HIDDEN], 0.02).to(torch.bfloat16))
+    yield "wv", s0(rn([HIDDEN, KV_HIDDEN], 0.02).to(torch.bfloat16))
+    yield "q_norm_weight", s0(rn([1, HEAD_DIM], 0.1, 1.0).float())
+    yield "k_norm_weight", s0(rn([1, HEAD_DIM], 0.1, 1.0).float())
+    yield "seq_lens", seq_lens
+    yield "block_table", block_table
+    yield "slot_mapping", slot_mapping
+    yield "rope_cos", rope_cos
+    yield "rope_sin", rope_sin
+    yield "k_cache", s0(rn([CACHE_ROWS, HEAD_DIM], 0.01).to(torch.bfloat16))
+    yield "v_cache", s0(rn([CACHE_ROWS, HEAD_DIM], 0.02, 0.3).to(torch.bfloat16))
+    yield "wo", s0(rn([HIDDEN, HIDDEN], 0.0006).to(torch.bfloat16))
+    yield "w_gate", s0(rn([HIDDEN, INTERMEDIATE], 0.02).to(torch.bfloat16))
+    yield "w_up", s0(rn([HIDDEN, INTERMEDIATE], 0.02).to(torch.bfloat16))
+    yield "w_down", s0(rn([INTERMEDIATE, HIDDEN], 0.0004).to(torch.bfloat16))
+    yield "post_rms_weight", s0(rn([1, HIDDEN], 0.1, 1.0).float())
+    yield "out", torch.zeros([BATCH, HIDDEN], dtype=torch.bfloat16)
+
+
+def generate_inputs(
+    seed: int = 1234,
+    seq_len: int = DEFAULT_SEQ_LEN,
+    n_layers: int = N_LAYERS,
+) -> TaskArgsBuilder:
+    """Materialize the legacy full fixture for the torch golden path."""
+    tensors = dict(param_tensors(seed=seed, seq_len=seq_len, n_layers=n_layers))
+    return TaskArgsBuilder(*(TensorArg(name, tensors[name]) for name in (*INPUT_NAMES, "out")))
 
 
 def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:

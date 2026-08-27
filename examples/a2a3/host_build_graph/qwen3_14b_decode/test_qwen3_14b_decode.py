@@ -7,66 +7,39 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Qwen3-14B 40-layer decode using one recorded host-built Graph per layer."""
+"""Hardware ST wrapper for Qwen3-14B decode on host_build_graph."""
 
-import copy
 import importlib.util
 import sys
 from pathlib import Path
 
-from simpler_setup import SceneTestCase, scene_test
-from simpler_setup.goldens.qwen3_14b_decode import compute_golden as _decode_golden
-from simpler_setup.goldens.qwen3_14b_decode import generate_inputs as _decode_generate_inputs
+import pytest
 
-N_LAYERS = 40
-HERE = Path(__file__).resolve().parent
-QWEN_CASE_DIR = HERE.parents[1] / "tensormap_and_ringbuffer/qwen3_14b_decode"
+from simpler_setup.scene_test import standalone_pytest_options
+
+_DRIVER_NAME = "_qwen3_14b_a2a3_hbg_driver"
 
 
-def _load_qwen_case():
-    module_name = "_qwen3_14b_host_build_graph_base"
-    spec = importlib.util.spec_from_file_location(module_name, QWEN_CASE_DIR / "test_qwen3_14b_decode.py")
+def _driver():
+    cached = sys.modules.get(_DRIVER_NAME)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(_DRIVER_NAME, Path(__file__).resolve().parent / "main.py")
     if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load the Qwen3-14B decode case")
+        raise RuntimeError("cannot load the Qwen3-14B host_build_graph driver")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
+    sys.modules[_DRIVER_NAME] = module
     spec.loader.exec_module(module)
-    return module.TestQwen314BDecode
+    return module
 
 
-def _callable():
-    callable_cfg = copy.deepcopy(_load_qwen_case().CALLABLE)
-    callable_cfg["orchestration"]["source"] = str(HERE / "kernels/orchestration/decode_fwd_layers.cpp")
-    for incore in callable_cfg["incores"]:
-        incore["source"] = str(QWEN_CASE_DIR / incore["source"])
-    return callable_cfg
-
-
-@scene_test(level=2, runtime="host_build_graph")
-class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
-    RTOL = 5e-2
-    ATOL = 1e-1
-    CALLABLE = _callable()
-
-    CASES = [
-        {
-            "name": "GraphExecutionBatch16Seq3500",
-            "platforms": ["a2a3"],
-            "manual": True,
-            "params": {"seed": 1234, "seq_len": 3500},
-        },
-    ]
-
-    def generate_args(self, params):
-        return _decode_generate_inputs(
-            seed=params.get("seed", 1234),
-            seq_len=params.get("seq_len", 3500),
-            n_layers=N_LAYERS,
-        )
-
-    def compute_golden(self, args, params):
-        _decode_golden(args, n_layers=N_LAYERS)
+@pytest.mark.manual
+@pytest.mark.platforms(["a2a3"])
+@pytest.mark.runtime("host_build_graph")
+@pytest.mark.device_count(1)
+def test_qwen3_14b_decode_host_build_graph(st_platform, st_device_ids, request):
+    assert _driver().run(st_device_ids, st_platform, **standalone_pytest_options(request)) == 0
 
 
 if __name__ == "__main__":
-    SceneTestCase.run_module(__name__)
+    sys.exit(_driver().main())

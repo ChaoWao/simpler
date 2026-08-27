@@ -207,17 +207,48 @@ def test_arch_runtime_quadrants_route_to_independent_corpora(
     ],
 )
 def test_qwen_benchmark_cases_are_manual(relative_path: str, case_name: str) -> None:
-    tree = ast.parse((REPO_ROOT / relative_path).read_text())
-    cases = [
-        case
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "CASES" for target in node.targets)
-        for case in ast.literal_eval(node.value)
+    wrapper_path = REPO_ROOT / relative_path
+    wrapper_tree = ast.parse(wrapper_path.read_text())
+    manual_wrappers = [
+        node
+        for node in ast.walk(wrapper_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(decorator, ast.Attribute)
+            and decorator.attr == "manual"
+            and isinstance(decorator.value, ast.Attribute)
+            and decorator.value.attr == "mark"
+            and isinstance(decorator.value.value, ast.Name)
+            and decorator.value.value.id == "pytest"
+            for decorator in node.decorator_list
+        )
     ]
+    assert manual_wrappers
 
-    selected = next(case for case in cases if case["name"] == case_name)
-    assert selected["manual"] is True
+    # The wrapper must forward the global pytest CLI contract rather than
+    # silently running the standalone driver with all defaults.
+    assert any(
+        keyword.arg is None
+        and isinstance(keyword.value, ast.Call)
+        and isinstance(keyword.value.func, ast.Name)
+        and keyword.value.func.id == "standalone_pytest_options"
+        for wrapper in manual_wrappers
+        for call in ast.walk(wrapper)
+        if isinstance(call, ast.Call)
+        for keyword in call.keywords
+    )
+
+    driver_tree = ast.parse((wrapper_path.parent / "main.py").read_text())
+    driver_case_names = []
+    for node in ast.walk(driver_tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        target_names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        if "CASES" in target_names:
+            driver_case_names.extend(case["name"] for case in ast.literal_eval(node.value))
+        if "CASE_NAME" in target_names:
+            driver_case_names.append(ast.literal_eval(node.value))
+    assert case_name in driver_case_names
 
 
 def test_default_runtime_remains_tensormap_and_ringbuffer(tmp_path: Path) -> None:
