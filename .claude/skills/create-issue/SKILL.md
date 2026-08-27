@@ -114,7 +114,7 @@ Each template has **required fields** (marked `required: true` in the YAML). You
 - **Git Commit ID**: Run `git rev-parse HEAD` to get the current commit
 - **Title prefix**: Use the template's title prefix (`[Bug]`, `[Feature]`, etc.)
 - **Host Platform**: Run `uname -s -m` to detect OS and arch. Map to: `Linux aarch64` → `Linux (aarch64)`, `Linux x86_64` → `Linux (x86_64)`, `Darwin arm64` → `macOS (aarch64)`. Fall back to `Other` if unrecognized.
-- **NPU Kind**: Run `npu-smi info 2>/dev/null` to detect NPU. If command not found or no output, default to `N/A (not hardware-specific)` (or `N/A (simulation only)` for `performance_issue.yml`). Parse model name to map to Ascend 910B/910C if present.
+- **NPU Kind**: Run `npu-smi info`, and on failure retry it as `task-submit --run "npu-smi info"` (some shared hosts restrict DCMI to root, so a bare failure does not mean there is no NPU). **Branch on the exit status, not on whether it printed anything** — a DCMI refusal goes to stdout and the retry adds a `task-submit` banner there, so output is non-empty even when the query failed. If both fail, default to `N/A (not hardware-specific)` (or `N/A (simulation only)` for `performance_issue.yml`) and quote the error in the issue so the reason is visible. On success, parse model name to map to Ascend 910B/910C if present.
 
 ## Step 5: Format the Issue Body
 

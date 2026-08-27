@@ -52,7 +52,10 @@ Sim variants are silicon-agnostic — no precheck, no device.
 ## C. Select idle device(s)
 
 An *idle* device is one whose **HBM-Usage is 0** in `npu-smi info` output.
-(Mirrors the `benchmark` skill's Step 2.)
+(Mirrors the `benchmark` skill's Step 2.) If that call fails, retry it as
+`task-submit --run "npu-smi info"` — some shared hosts restrict DCMI to root —
+and decide by exit status, never by whether output was produced. See
+[running-onboard.md](../rules/running-onboard.md#why).
 
 - **Single device:** pick the lowest-ID idle device. If none is free, report
   and stop.

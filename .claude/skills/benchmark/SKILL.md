@@ -77,10 +77,9 @@ fi
 
 When `task-submit` is available, allocate the requested device IDs or use
 `--device auto`; run the architecture gate as the first command inside that
-allocation, then pass `$TASK_DEVICE` to every benchmark command. Some shared
-hosts expose DCMI only inside `task-submit`, so a lock-external precheck cannot
-detect their silicon. Hold one allocation for the whole baseline/current
-sequence. When `task-submit` is unavailable, follow
+allocation, then pass `$TASK_DEVICE` to every benchmark command. Hold one
+allocation for the whole baseline/current sequence. When `task-submit` is
+unavailable, follow
 `.claude/lib/onboard-detection.md` and clearly report that the fallback run is
 unlocked.
 
