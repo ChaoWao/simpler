@@ -329,6 +329,8 @@ signal than any duration on a shared box.
 | Summing per-segment minima by hand | a total no bind achieved; can invert the sign | read the tool's `total` row — the minimum of the per-bind sums |
 | `--rounds 1` for numbers | the tool refuses: every bind is a rank's warm-up | six rounds; `--keep-first` only to look at the cold bind deliberately |
 | Single bind, or comparing across differently-loaded moments | swings of 3.5× | six rounds, compare minima, keep an untouched segment as a control |
+| Reading a **warm** bind as a **steady-state** one | the first few warm binds carry several hundred more `minflt` than the last ones, and a per-bind average built from them is a warm-up figure wearing a steady-state label | the parser drops the cold bind per rank, not the decay after it: on dsv4 `host_orch`'s `minflt` runs 989, 983 (cold), then 114, 173, 54, 3, 13, 13, 11, 8. Take **twelve** rounds and read the last binds, or check the count column is flat before quoting a duration |
+| Dividing a total by the bind count | a per-bind figure no bind ever had, inflated by the cold and decaying ones | bucket by bind first and look at the sequence; only quote a mean over binds whose counts already agree |
 | `base` then `measure`, sequentially | a load drift reads as the branch's effect | interleave the arms and require the sign to agree per repetition |
 | Stale build | mass collection errors, or a `launch_aicpu_num (0)` failure | `pip install --no-build-isolation -e .` after every `HEAD` move |
 
@@ -336,11 +338,17 @@ signal than any duration on a shared box.
 
 Both columns are one measurement session on `main` at **`777d4171`**, host
 `host_build_graph`, on one a2a3 die for qwen and two for dsv4, four rounds each with
-the warm-up bind dropped — 3 steady-state binds for qwen and 6 for dsv4, since a
+the warm-up bind dropped — 3 warm binds for qwen and 6 for dsv4, since a
 2-rank case emits one bind per rank per round and the parser drops one cold bind per
 rank. Durations are the full **range** across those
 binds; `heap_used`, every `bytes=` and every count are exact and repeat
 byte-identically.
+
+**Warm, not steady-state.** Dropping one cold bind per rank does not reach the steady
+state: the decay behind it takes about six binds on dsv4, so a four-round session spends
+most of its warm binds inside it. Both columns therefore sit somewhere in the warm-up,
+which is another reason to treat them as orientation rather than as a baseline — see the
+trap table above.
 
 **For orientation, not thresholds, and pinned to a commit for a reason.** The
 machine's other tenants move every duration here, so the range is the point: a

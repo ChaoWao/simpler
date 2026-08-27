@@ -424,22 +424,43 @@ Those arenas only grow; nothing shrinks them back. That is why #2015 — which s
 every recorder array from its contract at thread stand-up and never grows one again —
 removes the writer, and why it is the first change here to buy time.
 
-### The residual faults are not a performance item
+### The residual faults are a warm-up cost, and they end
 
-`standups=0` and `slots_created=0` on a warm bind, and still roughly 10 MB of resident
-pages re-faulting per bind, mechanism undetermined: it survived #1981, #1988, #2013 and
- #2015. **The tunable arm removed 86% of them and showed no measurable latency change**,
-which is the strongest statement the measurement supports — not that those faults cannot
-cost time in another workload or allocator state, but that nothing here has been able to
-price them.
+Every figure above this line calls its per-bind counts steady-state. **They are not.**
+Measured at `f40cacf30`, with #1988, #2013, #2015, #2019 and #2022 all in, `host_orch`'s
+`minflt` per bind in arrival order, on three runs at different round counts:
 
-Stated plainly because it has been chased as a latency problem three times: **the
-residual fault count is not currently established as a performance defect**, so an
-argument for working on it has to come from memory residency or determinism, or from a
-measurement that prices it. Userspace tools are exhausted
-— `mincore` reports presence, not writability; pagemap's bit 56 is `mapcount == 1`, also
-not writability; no interface exposes a PTE's write bit — so any next step is `bpftrace`
-on `handle_mm_fault` under root.
+| run | cold binds | then, bind by bind |
+| --- | ---------- | ------------------ |
+| `--rounds 2` (4 binds) | 992, 949 | 165, 130 |
+| `--rounds 5` (10 binds) | 989, 983 | 114, 173, 54, **3, 13, 13, 11, 8** |
+| `--rounds 8` (16 binds) | 931, 837 | 112, 216, 164, 10, 2, 1, 1, 8, 57, 10, 8, 11, **0, 0** |
+
+`args` follows the same curve (699310 on the cold bind, then 0–2) and so does
+`graph_upload` (246 cold, 0 after). So the tail **decays over roughly six binds and then
+reaches zero**; the ~1100 faults this entry chased for three rounds are a warm-up cost,
+not a per-bind one.
+
+**Which is why the per-bind counts here are wrong, all of them.** They came from runs of
+three to six rounds, divided by the bind count — so each one averages two cold binds and
+three or four still-decaying ones into a figure presented as steady state. The correction
+is not a smaller number; it is that the quantity being divided was never per-bind. See
+[`docs/dfx/hbg-bind-phases.md`](../dfx/hbg-bind-phases.md)'s trap on warm not meaning
+steady-state, which this measurement is what added.
+
+What still holds from the arms above: the tunable arm and #2015 do point in opposite
+directions, so within the warm-up window the count is not a lever and the price is. What
+does not hold is that anything "survived" the four changes — in the steady state there is
+nothing left to survive, and **the mechanism that went undetermined for three rounds
+turned out not to need determining.** Userspace tools were exhausted on it — `mincore`
+reports presence, not writability; pagemap's bit 56 is `mapcount == 1`, also not
+writability; no interface exposes a PTE's write bit — and none of that mattered.
+
+Where the control plane stands at `f40cacf30`, `--rounds 5`, the 8 warm binds: total
+0.529 ms min / 0.570 median, of which `host_orch` 0.341/0.364, `graph_upload`
+0.129/0.133, `arena_h2d` 0.056/0.058. Two of those 8 are still decaying (0.443 and 0.427
+against 0.341–0.397 for the rest), so even this is not a steady-state figure — it is the
+best available one, and it needs `--rounds 12` to become clean.
 
 ### What the per-site attribution produced, and its shelf life
 
