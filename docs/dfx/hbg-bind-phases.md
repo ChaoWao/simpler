@@ -184,6 +184,47 @@ is a copy count of the other.)
 The first bind of each rank is warm-up and belongs in neither statistic; drop it
 explicitly rather than letting a minimum quietly exclude it.
 
+### Was the segment running or waiting?
+
+Every line also carries the kernel counters, which say what a duration cannot. Each
+covers the same span the duration does.
+
+| Field | Source | What it says |
+| ----- | ------ | ------------ |
+| `cpu_ns` | the bind thread's `CLOCK_THREAD_CPUTIME_ID` | how much of the segment that thread spent **running**, so `dur_ns - cpu_ns` is what it spent **off CPU** — blocked *and* runnable-but-preempted, which the two `*csw` counters separate |
+| `rec_cpu_ns` | every recording worker's CPU clock, summed | how many threads' worth of work ran **alongside** — a ratio to `dur_ns`, never something to subtract from it |
+| `minflt` / `tminflt` | `getrusage` `RUSAGE_SELF` / `RUSAGE_THREAD` | minor faults for the whole process, and the bind thread's share of them; the difference is the recorders' |
+| `nvcsw` / `nivcsw` | `getrusage` `RUSAGE_SELF` | voluntary and involuntary context switches **for the whole process**, so the recorders' switches are in here too. A high `nivcsw` says the box was loaded, not that this code was; neither counter isolates the bind thread — `tminflt` is the only thread-scoped field |
+
+**`rec_cpu_ns` and `tminflt` are Linux-only, and read zero elsewhere.** Sampling
+another thread's CPU clock needs `pthread_getcpuclockid` and a per-thread fault count
+needs `getrusage(RUSAGE_THREAD)`; Darwin provides neither. That costs nothing where it
+matters — a bind is profiled on the silicon it binds to — but on a `*sim` platform
+built for macOS a `reccpu` of 0 means "not measurable here", not "nothing ran
+alongside". `cpu_ns` uses `CLOCK_THREAD_CPUTIME_ID` for the calling thread and works
+everywhere.
+
+```bash
+python -m simpler_setup.tools.phase_time_split <log>          # cold and warm, per segment
+python -m simpler_setup.tools.phase_time_split <log> --phase host_orch
+```
+
+**CPU time comes from per-thread clocks and never from rusage.** `ru_utime` and
+`ru_stime` are accounted per scheduler tick — 10 ms at `CLK_TCK=100` — so on a segment
+of a millisecond they quantise to either zero or a whole tick, and the values look
+plausible one at a time while being noise. A per-thread clock reads the scheduler's
+running total in nanoseconds; measured against a busy and a sleeping thread over a
+1.29 ms window it resolved both to under 10 µs. The three counters stay on rusage
+because they are event counts, which do not quantise.
+
+**On-CPU sends you somewhere different from off-CPU.** A segment that is mostly
+on-CPU is running, so split it further by the fault count and by the syscalls inside
+its window. A segment that is mostly off-CPU is waiting, and `nvcsw` versus `nivcsw`
+says whether it blocked or merely lost the CPU. Reading a fault count without this
+split is what let a page-fault tail be chased three times on a segment whose faults
+were on threads with spare parallelism — see
+[`docs/investigations/2026-08-host-orch-phase-tail-is-page-faults.md`](../investigations/2026-08-host-orch-phase-tail-is-page-faults.md).
+
 Device wall clock for the same rounds comes from the `[STRACE]` markers, on a run
 that did not skip the device:
 
