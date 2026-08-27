@@ -669,6 +669,19 @@ inline bool host_phase_kind_is_device_upload(HostPhaseKind kind) {
            kind == HostPhaseKind::BindArenaH2d;
 }
 
+/**
+ * Whether a kind's `detail` is a quantity, i.e. whether summing it across a bind
+ * means anything.
+ *
+ * Most kinds put in `detail` the identity of what their interval measured — a
+ * task id, a Graph key, the submission index — and a sum over identities is a
+ * number no reader can act on. Only the kinds that carry a count get the summed
+ * column in the breakdown; the rest print their count and total alone.
+ */
+inline bool host_phase_kind_detail_is_quantity(HostPhaseKind kind) {
+    return kind == HostPhaseKind::OrchBuildDefinition || kind == HostPhaseKind::OrchRecordingWait;
+}
+
 inline const char *host_phase_kind_name(HostPhaseKind kind) {
     switch (kind) {
     case HostPhaseKind::BindArgs:
