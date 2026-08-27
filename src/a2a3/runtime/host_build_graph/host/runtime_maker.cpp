@@ -143,41 +143,89 @@ static int64_t bind_now_ns() { return static_cast<int64_t>(host_phase_now_ns());
 // once per page, and the bind maps its shared-memory mirror and arenas per call, so
 // a phase's fault count is what separates work from page-table cost — a count, so it
 // does not move with how loaded the box is.
+//
+// CPU time answers what a count cannot: whether a phase's wall time was spent running
+// or waiting. It comes from per-thread CPU clocks and never from rusage —
+// `ru_utime`/`ru_stime` are accounted per scheduler tick, 10 ms at CLK_TCK=100, so on
+// a phase of a millisecond they quantise to either zero or a whole tick and no split
+// survives. A per-thread clock reads the scheduler's running total in nanoseconds.
+//
+// Two CPU figures, because a phase runs on more than one thread. `cpu_ns` is the bind
+// thread's own, so a phase's `dur - cpu_ns` is the time that thread spent off CPU;
+// `recorder_cpu_ns` is every recording worker's summed, so its ratio to `dur` is how
+// many threads' worth of work ran alongside. Only the first can be subtracted from the
+// wall. `thread_minflt` is the same split applied to the fault count: it says how much
+// of `minflt` the bind thread took rather than the recorders.
 struct BindKernelCounters {
     uint64_t minflt;
+    uint64_t thread_minflt;
     uint64_t nivcsw;  // involuntary: the scheduler took the CPU away
     uint64_t nvcsw;   // voluntary: the thread blocked
+    uint64_t cpu_ns;
+    uint64_t recorder_cpu_ns;
 };
 
+static uint64_t thread_cpu_ns() {
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+}
+
 static BindKernelCounters bind_kernel_counters() {
+    BindKernelCounters counters{};
     rusage usage{};
-    if (getrusage(RUSAGE_SELF, &usage) != 0) return BindKernelCounters{};
-    return BindKernelCounters{
-        static_cast<uint64_t>(usage.ru_minflt), static_cast<uint64_t>(usage.ru_nivcsw),
-        static_cast<uint64_t>(usage.ru_nvcsw)
-    };
-}
-
-// A phase's own counts are the delta since its own start, so they cover the same
-// span its duration does. The markers do not partition the bind: the stretches
-// between one phase's close and the next one's open belong to neither, in counts
-// exactly as in time. Process-wide, so a phase that runs while the Graph recorders
-// are working is charged their faults too — which is the intent: it is the bind's
-// total page-table cost that is being attributed, not one thread's.
-static BindKernelCounters g_bind_counter_mark{};
-
-// Open one segment: the instant its duration measures from, and the counter mark
-// its faults measure from. Every phase start comes from here, so a phase's two
-// spans cannot drift apart — a fault count taken over a wider span than the clock
-// describes work the phase does not contain.
-static int64_t bind_phase_begin() {
-    if (host_phase_breakdown_enabled()) {
-        g_bind_counter_mark = bind_kernel_counters();
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        counters.minflt = static_cast<uint64_t>(usage.ru_minflt);
+        counters.nivcsw = static_cast<uint64_t>(usage.ru_nivcsw);
+        counters.nvcsw = static_cast<uint64_t>(usage.ru_nvcsw);
     }
-    return bind_now_ns();
+#if defined(__linux__)
+    // RUSAGE_THREAD is a Linux extension. Darwin has no per-thread rusage, so
+    // thread_minflt stays zero there and the process total in minflt is the whole of
+    // what is available.
+    rusage thread_usage{};
+    if (getrusage(RUSAGE_THREAD, &thread_usage) == 0) {
+        counters.thread_minflt = static_cast<uint64_t>(thread_usage.ru_minflt);
+    }
+#endif
+    counters.cpu_ns = thread_cpu_ns();
+    counters.recorder_cpu_ns = graph_recorder_pool().worker_cpu_ns();
+    return counters;
 }
 
-static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *attrs = "", uint64_t payload = 0) {
+// One segment's two origins: the instant its duration measures from and the counter
+// mark its faults measure from. Both live in the caller's frame, so a phase that
+// opens while another is still open cannot disturb it — the two would share a single
+// mark if one were held here, and the outer phase would then report counts measured
+// from the inner phase's start while its duration still spanned its own.
+//
+// A phase's own counts are the delta since its own start, so they cover the same
+// span its duration does. The marks do not partition the bind: the stretches
+// between one phase's close and the next one's open belong to neither, in counts
+// exactly as in time. The process-wide counters are process-wide on purpose, so a
+// phase that runs while the Graph recorders are working is charged their faults too
+// — it is the bind's total page-table cost that is being attributed, not one
+// thread's.
+struct BindPhaseMark {
+    int64_t start_ns{0};
+    BindKernelCounters counters{};
+};
+
+// Open one segment. Every phase start comes from here, so a phase's two spans cannot
+// drift apart — a fault count taken over a wider span than the clock describes work
+// the phase does not contain.
+static BindPhaseMark bind_phase_begin() {
+    BindPhaseMark mark{};
+    if (host_phase_breakdown_enabled()) {
+        mark.counters = bind_kernel_counters();
+    }
+    mark.start_ns = bind_now_ns();
+    return mark;
+}
+
+static void
+record_bind_phase(HostPhaseKind kind, const BindPhaseMark &mark, const char *attrs = "", uint64_t payload = 0) {
+    const int64_t start_ns = mark.start_ns;
     if (!host_phase_breakdown_enabled()) {
         host_phase_record_bind(static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), attrs, payload);
         return;
@@ -194,9 +242,13 @@ static void record_bind_phase(HostPhaseKind kind, int64_t start_ns, const char *
     };
     char with_counters[kBindAttrsCapacity];
     snprintf(
-        with_counters, sizeof(with_counters), "%s%sminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64, attrs,
-        *attrs == '\0' ? "" : " ", since(now.minflt, g_bind_counter_mark.minflt),
-        since(now.nivcsw, g_bind_counter_mark.nivcsw), since(now.nvcsw, g_bind_counter_mark.nvcsw)
+        with_counters, sizeof(with_counters),
+        "%s%sminflt=%" PRIu64 " tminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64 " cpu_ns=%" PRIu64
+        " rec_cpu_ns=%" PRIu64,
+        attrs, *attrs == '\0' ? "" : " ", since(now.minflt, mark.counters.minflt),
+        since(now.thread_minflt, mark.counters.thread_minflt), since(now.nivcsw, mark.counters.nivcsw),
+        since(now.nvcsw, mark.counters.nvcsw), since(now.cpu_ns, mark.counters.cpu_ns),
+        since(now.recorder_cpu_ns, mark.counters.recorder_cpu_ns)
     );
     host_phase_record_bind(
         static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload,
@@ -630,7 +682,7 @@ int32_t run_host_orchestration(
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
-    const int64_t t_orch_ns = bind_phase_begin();
+    const BindPhaseMark orch_phase = bind_phase_begin();
     rt_scope_begin(rt);
     entry_points->entry(orch_l2);
     rt_scope_end(rt);
@@ -683,7 +735,7 @@ int32_t run_host_orchestration(
             attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64 " sm_mirror=%" PRIu64, total_tasks,
             orchestrator.task_allocator.heap_used_bytes(), sm_size
         );
-        record_bind_phase(HostPhaseKind::BindHostOrch, t_orch_ns, attrs);
+        record_bind_phase(HostPhaseKind::BindHostOrch, orch_phase, attrs);
     }
     // After the span closes: the reduction walks a few hundred records and emits
     // five markers, which must not be charged to the bind it measures.
@@ -705,7 +757,7 @@ int32_t run_host_orchestration(
     // Upload each distinct Definition as its own retained device object and bind
     // every outer Graph task to it. Per-invocation data already lives in that
     // task's payload regions and is copied with the shared-memory image below.
-    const int64_t t_graph_ns = bind_phase_begin();
+    const BindPhaseMark graph_phase = bind_phase_begin();
     DefinitionUploads definition_uploads{};
     if (!bind_graph_definitions(api, *graph_state, &definition_uploads, &ready_queue_populations)) {
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -722,7 +774,7 @@ int32_t run_host_orchestration(
             attrs, sizeof(attrs), "defs=%zu bytes=%" PRIu64 " submissions=%zu spilled=%zu", definition_uploads.count,
             definition_uploads.bytes, graph_host_upload_count(*graph_state), definition_uploads.spilled
         );
-        record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, definition_uploads.bytes);
+        record_bind_phase(HostPhaseKind::BindGraphUpload, graph_phase, attrs, definition_uploads.bytes);
     }
 
     ReadyQueueCapacities ready_queue_capacities{};
@@ -779,7 +831,7 @@ int32_t run_host_orchestration(
     // region and short-circuits a request an existing one already covers, so a
     // repeated workload pays for neither twice and the heap is grow-only across a
     // Worker's binds.
-    const int64_t t_static_arena_ns = bind_phase_begin();
+    const BindPhaseMark static_arena_phase = bind_phase_begin();
     // The compact shared-memory image is the only per-run tail in the device
     // arena. GraphExecution is initialized later in each outer Graph heap.
     const uint64_t device_arena_bytes = layout.off_copied_end + image_bytes;
@@ -806,10 +858,10 @@ int32_t run_host_orchestration(
     {
         char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "heap=%" PRIu64 " arena=%" PRIu64, heap_bytes, device_arena_bytes);
-        record_bind_phase(HostPhaseKind::BindStaticArena, t_static_arena_ns, attrs);
+        record_bind_phase(HostPhaseKind::BindStaticArena, static_arena_phase, attrs);
     }
 
-    const int64_t t_sm_ns = bind_phase_begin();
+    const BindPhaseMark sm_phase = bind_phase_begin();
     void *device_arena = api->acquire_pooled_runtime_arena();
     if (device_arena == nullptr) {
         LOG_ERROR("%s", "host-orch: failed to acquire the pooled runtime arena");
@@ -821,12 +873,12 @@ int32_t run_host_orchestration(
     {
         char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, image_bytes);
-        record_bind_phase(HostPhaseKind::BindSharedMem, t_sm_ns, attrs, image_bytes);
+        record_bind_phase(HostPhaseKind::BindSharedMem, sm_phase, attrs, image_bytes);
     }
 
-    const int64_t t_heap_ns = bind_phase_begin();
+    const BindPhaseMark heap_phase = bind_phase_begin();
     void *gm_heap = api->acquire_pooled_gm_heap();
-    record_bind_phase(HostPhaseKind::BindGmHeap, t_heap_ns);
+    record_bind_phase(HostPhaseKind::BindGmHeap, heap_phase);
     if (gm_heap == nullptr) {
         LOG_ERROR("host-orch: failed to acquire the pooled GM heap");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -876,7 +928,7 @@ int32_t run_host_orchestration(
     );
     always_assert(compacted == image_bytes);
 
-    const int64_t t_h2d_ns = bind_phase_begin();
+    const BindPhaseMark h2d_phase = bind_phase_begin();
     if (api->copy_to_device(arena_dev + layout.off_copied_begin, upload_base, upload_bytes) != 0) {
         LOG_ERROR("host-orch: H2D of the runtime image failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -891,7 +943,7 @@ int32_t run_host_orchestration(
             nt, upload_bytes, copied_bytes, image_bytes, bind_usage.fanin_elems, bind_usage.tensor_elems,
             bind_usage.scalar_elems
         );
-        record_bind_phase(HostPhaseKind::BindArenaH2d, t_h2d_ns, attrs, upload_bytes);
+        record_bind_phase(HostPhaseKind::BindArenaH2d, h2d_phase, attrs, upload_bytes);
     }
     return total_tasks;
 }
@@ -1090,7 +1142,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // the point at which a task could make it stale.
     HostTensorAccessor tensor_access(api);
 
-    const int64_t t_args_ns = bind_phase_begin();
+    const BindPhaseMark args_phase = bind_phase_begin();
     uint64_t staged_bytes = 0;
     int staged_tensors = 0;
     for (int i = 0; i < tensor_count; i++) {
@@ -1165,7 +1217,7 @@ extern "C" int bind_callable_to_runtime_impl(
         snprintf(
             attrs, sizeof(attrs), "ntensor=%d staged=%d bytes=%" PRIu64, tensor_count, staged_tensors, staged_bytes
         );
-        record_bind_phase(HostPhaseKind::BindArgs, t_args_ns, attrs);
+        record_bind_phase(HostPhaseKind::BindArgs, args_phase, attrs);
     }
 
     // Lay out the per-Worker static device arena. The GM heap and the prebuilt
@@ -1179,7 +1231,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // the reserve sequence on a host-side arena.
     uint64_t sm_size = SharedMemoryHandle::calculate_size(task_capacity);
 
-    const int64_t t_arena_build_ns = bind_phase_begin();
+    const BindPhaseMark arena_build_phase = bind_phase_begin();
     DeviceArena host_arena;
     RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, task_capacity);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
@@ -1189,7 +1241,7 @@ extern "C" int bind_callable_to_runtime_impl(
     {
         char attrs[kBindAttrsCapacity];
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, static_cast<uint64_t>(layout.arena_size));
-        record_bind_phase(HostPhaseKind::BindArenaBuild, t_arena_build_ns, attrs);
+        record_bind_phase(HostPhaseKind::BindArenaBuild, arena_build_phase, attrs);
     }
 
     // The shared memory is placed at the end of orchestration, so until then this
@@ -1210,7 +1262,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // boot becomes attach + wire (cheap pointer fixup) + sm_handle->init (SM
     // reset) + a handful of device-only field fixups.
     // -------------------------------------------------------------------------
-    const int64_t t_runtime_init_ns = bind_phase_begin();
+    const BindPhaseMark runtime_init_phase = bind_phase_begin();
     // No SM base: the scheduler and sm_handle are device-written now, so nothing
     // here stores one, and the region is not even committed yet.
     RuntimeContext *rt =
@@ -1227,7 +1279,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // on the host Runtime (set_prebuilt_arena below), since the AICPU needs that
     // pointer before it can dereference the image.
     rt->prebuilt_layout = layout;
-    record_bind_phase(HostPhaseKind::BindRuntimeInit, t_runtime_init_ns);
+    record_bind_phase(HostPhaseKind::BindRuntimeInit, runtime_init_phase);
 
     if (host_orch_func_ptr == nullptr) {
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
@@ -1243,12 +1295,12 @@ extern "C" int bind_callable_to_runtime_impl(
         // owns these buffers, so drop the window on both exits.
         const size_t view_count = tensor_access.mapping_count();
         const uint64_t view_bytes = tensor_access.mapped_bytes();
-        const int64_t t_view_close_ns = bind_phase_begin();
+        const BindPhaseMark view_close_phase = bind_phase_begin();
         tensor_access.close();
         {
             char attrs[kBindAttrsCapacity];
             snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, view_count, view_bytes);
-            record_bind_phase(HostPhaseKind::BindHostViewClose, t_view_close_ns, attrs);
+            record_bind_phase(HostPhaseKind::BindHostViewClose, view_close_phase, attrs);
         }
         if (total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");

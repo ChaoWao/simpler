@@ -193,6 +193,40 @@ public:
         });
     }
 
+    // Sum of every recording worker's CPU time. Differencing this across a phase says
+    // how many threads' worth of work ran alongside the thread that runs the bind,
+    // which a wall-clock duration cannot: the recorders overlap it.
+    //
+    // A per-thread CPU clock is the only instrument that resolves a phase of a
+    // millisecond. rusage times are accounted per scheduler tick, 10 ms at
+    // CLK_TCK=100, so on such a phase they quantise to either zero or a whole tick.
+    //
+    // Read under this pool's own mutex, from whichever thread asks, so no handle is
+    // sampled while it is being created or destroyed: create_worker_locked() runs under
+    // that mutex, and shutdown() empties workers_ under it before it joins anything. A
+    // thread that has already exited answers EINVAL and contributes nothing, which is
+    // correct: its time belongs to no phase still being measured.
+    //
+    // Linux only, and zero elsewhere: reading another thread's CPU clock needs
+    // pthread_getcpuclockid, which Darwin does not provide. The bind breakdown profiles
+    // onboard runs, so the platforms that lack it are the ones that never take this
+    // measurement -- but rec_cpu_ns carries no information there, and the tooling says so.
+    uint64_t worker_cpu_ns() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t total = 0;
+#if defined(__linux__)
+        for (std::thread &worker : workers_) {
+            if (!worker.joinable()) continue;
+            clockid_t clock_id{};
+            if (pthread_getcpuclockid(worker.native_handle(), &clock_id) != 0) continue;
+            timespec ts{};
+            if (clock_gettime(clock_id, &ts) != 0) continue;
+            total += static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+        }
+#endif
+        return total;
+    }
+
 private:
     bool storage_failed_{false};
 
@@ -272,12 +306,19 @@ private:
 
     void shutdown() {
         wait();
+        std::vector<std::thread> draining;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
+            // The handles leave workers_ under the lock and are joined without it.
+            // Joining while holding mutex_ deadlocks: a worker reacquires it inside
+            // cv_.wait to observe stopping_ and return. Emptying workers_ here is also
+            // what keeps worker_cpu_ns() off a handle mid-join, since it samples under
+            // this same mutex and so sees an empty pool for the rest of teardown.
+            draining.swap(workers_);
         }
         cv_.notify_all();
-        for (std::thread &worker : workers_) {
+        for (std::thread &worker : draining) {
             if (worker.joinable()) worker.join();
         }
     }

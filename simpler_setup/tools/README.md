@@ -15,6 +15,7 @@ no repo checkout required.
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
 - **[strace_timing](#strace_timing)** — per-stage `chip.run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
 - **[hbg_bind_phases](#hbg_bind_phases)** — `host_build_graph` `bind`-stage phases from `bind phase=` log markers → per-phase min/median/max plus the control-plane total
+- **[phase_time_split](#phase_time_split)** — the same `bind phase=` markers split into on-CPU and off-CPU per phase, from per-thread CPU clocks, with cold and warm binds reported separately
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
 
@@ -415,6 +416,44 @@ excluded with a warning. If the log's first line is a `[stamp]` line naming the
 command and commit, it is echoed above the table. Distinct
 `torch_backend_autoload` records are printed alongside it. Missing stamps or
 autoload records produce an explicit comparison warning.
+
+---
+
+## phase_time_split
+
+The same `bind phase=` markers, read for a different question: was a segment
+**running** or **waiting**? A duration cannot say, and the answer decides where to
+look next — an on-CPU segment is split further by its fault count and by the
+syscalls inside its window, while an off-CPU one is a wait, and `nvcsw` versus
+`nivcsw` suggests whether the waiting was blocking or losing the CPU to a loaded box.
+Both come from `RUSAGE_SELF` and so count the whole process, recorders included, which
+is why they suggest rather than decide.
+
+```bash
+python -m simpler_setup.tools.phase_time_split path/to/log
+python -m simpler_setup.tools.phase_time_split path/to/log --phase host_orch
+```
+
+`cpu` is the bind thread's own CPU time, so `dur - cpu` is what it spent off CPU.
+`reccpu` is every Graph recording worker's summed, so `rec/dur` is how many threads'
+worth of work ran alongside — a concurrency ratio, not a share of the wall. One
+recorder busy for the whole segment reads about 1, partial overlap reads below it, and
+only aggregate recorder CPU exceeding one wall-time interval — two or more busy at
+once — pushes it above 1. `reccpu` and `tminflt` need Linux
+(`pthread_getcpuclockid`, `getrusage(RUSAGE_THREAD)`); on a log from a macOS `*sim`
+build they are 0 because they cannot be sampled, not because nothing ran.
+
+Cold and warm binds are reported as separate rows rather than the cold one being
+dropped: a cold bind pays the one-off cost of standing recorder storage and the arenas
+up, and its size is the thing worth knowing when the goal is to move that cost to
+`Worker.init()`.
+
+Times come from per-thread CPU clocks, in nanoseconds. rusage times are not used:
+`ru_utime`/`ru_stime` are accounted per scheduler tick, 10 ms at `CLK_TCK=100`, so on a
+segment of a millisecond they quantise to either zero or a whole tick — plausible
+one at a time, noise in aggregate. A log written before the clocks existed is refused
+rather than reported as all-on-CPU. See
+[docs/dfx/hbg-bind-phases.md](../../docs/dfx/hbg-bind-phases.md) for the field table.
 
 ---
 
