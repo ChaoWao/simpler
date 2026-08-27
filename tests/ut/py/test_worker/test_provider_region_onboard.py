@@ -14,7 +14,7 @@ from __future__ import annotations
 import ctypes
 
 import pytest
-from simpler import comm_provider_control, comm_region
+from simpler import comm_region
 from simpler import worker as worker_module
 from simpler.task_interface import DataType
 from simpler.worker import Worker
@@ -39,7 +39,7 @@ def _install_lifecycle_spies(monkeypatch) -> list[tuple]:
     events: list[tuple] = []
     original_import = worker_module._worker_host_mapped_region_import_onboard
     original_close = comm_region._worker_host_mapped_region_close
-    original_release = comm_provider_control.ProviderReleaseClient.release
+    original_release = Worker._dispatch_delegated_release
 
     def spy_import(device_id, shareable_handle, mapping_bytes, owner_token):
         handle = original_import(device_id, shareable_handle, mapping_bytes, owner_token)
@@ -50,13 +50,19 @@ def _install_lifecycle_spies(monkeypatch) -> list[tuple]:
         events.append(("close", int(handle)))
         return original_close(handle)
 
-    def spy_release(self, provider_resource_id):
-        events.append(("release", int(provider_resource_id)))
-        return original_release(self, provider_resource_id)
+    def spy_release(self, *, session_instance_id, transaction_id, provider_path):
+        result = original_release(
+            self,
+            session_instance_id=session_instance_id,
+            transaction_id=transaction_id,
+            provider_path=provider_path,
+        )
+        events.append(("release", int(result.provider_resource_id)))
+        return result
 
     monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_onboard", spy_import)
     monkeypatch.setattr(comm_region, "_worker_host_mapped_region_close", spy_close)
-    monkeypatch.setattr(comm_provider_control.ProviderReleaseClient, "release", spy_release)
+    monkeypatch.setattr(Worker, "_dispatch_delegated_release", spy_release)
     return events
 
 
