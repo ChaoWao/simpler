@@ -58,11 +58,19 @@ detect_silicon() {
     fi
 
     local board chip npu
-    board=$(npu-smi info -t board -i 0 -c 0 2>/dev/null)
+    # The board query takes an NPU ID only. `-c` is not valid for this query
+    # on A5 and makes npu-smi return no board fields. Some shared hosts also
+    # restrict DCMI access to the root task runner, so retry through a
+    # no-device task-submit job (it does not acquire an NPU lock).
+    board=$(npu-smi info -t board -i 0 2>/dev/null || true)
+    if ! grep -q 'Chip Name' <<<"$board" && command -v task-submit >/dev/null 2>&1; then
+        board=$(task-submit --timeout 60 --max-time 30 --run \
+            "npu-smi info -t board -i 0" 2>/dev/null || true)
+    fi
     chip=$(awk -F: '/Chip Name/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     npu=$(awk -F:  '/NPU Name/  { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     if [ -z "$chip" ] || [ -z "$npu" ]; then
-        echo "onboard-arch-precheck: npu-smi did not return Chip Name + NPU Name (chip='$chip' npu='$npu'). Try \`npu-smi info -t board -i 0 -c 0\` manually." >&2
+        echo "onboard-arch-precheck: npu-smi did not return Chip Name + NPU Name (chip='$chip' npu='$npu'). Try \`npu-smi info -t board -i 0\` manually or through a no-device task-submit job." >&2
         return 1
     fi
 
@@ -84,7 +92,7 @@ detect_silicon() {
     # Construct candidate SoC ini filename. Naming differs per family:
     #   910B series:  Ascend910B3   (chip + npu, no separator)
     #   910 9xxx:     Ascend910_9392 (chip _ npu)
-    #   950 DT/PR:    Ascend950DT_9586 / Ascend950PR_9579 (need glob)
+    #   950 DT/PR:    Ascend950DT_9586 / Ascend950PR_9579
     local soc=""
     case "$chip" in
         Ascend910)
@@ -94,7 +102,12 @@ detect_silicon() {
                 soc="${chip}_${npu}"
             fi
             ;;
+        Ascend950DT|Ascend950PR)
+            soc="${chip}_${npu}"
+            ;;
         Ascend950)
+            # Compatibility with driver versions that report only the family
+            # in Chip Name and leave the DT/PR variant to the CANN filename.
             for prefix in DT PR; do
                 if [ -f "${config_dir}/${chip}${prefix}_${npu}.ini" ]; then
                     soc="${chip}${prefix}_${npu}"

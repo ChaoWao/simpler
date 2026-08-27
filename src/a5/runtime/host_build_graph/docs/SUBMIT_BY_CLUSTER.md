@@ -80,8 +80,8 @@ must launch as one cohort:
 2. TensorMap and explicit dependencies append producer local IDs to the payload's
    fanin region.
 3. Submit publishes only the finished graph data; it does not push ready tasks.
-4. After H2D, device boot scans every submitted task exactly once.
-5. A task with every fanin complete is routed to its ready queue; otherwise it
+4. After H2D, AIV Resolvers collectively scan every submitted task exactly once.
+5. A task with every fanin complete is routed to its Resolver-owner Ready inbox; otherwise it
    registers on its latest-submitted unmet producer's wake list, minimising
    transfers between wake lists and their CAS contention.
 6. Producer completion reclassifies wake-list consumers until they become ready.
@@ -90,22 +90,23 @@ Completion flags are monotonic, so a task never needs periodic fanin polling.
 
 ## Dispatch and Completion
 
-- AIC and AIV tasks claim as many free cores as the current scheduler owns and
-  requeue remaining logical blocks for later waves.
-- MIX placement selects whole clusters whose used lanes can all accept the
-  task. High cluster offsets are represented by the runtime's 128-bit bitset.
-- `require_sync_start` uses local staging when possible and a generation-tagged
-  global drain when the cohort spans scheduler ownership domains.
-- Each completed lane increments `completed_subtasks`; the mixed task completes
-  exactly once when it reaches `block_num * popcount(active_mask)`.
+- Single-lane tasks use two generation-tagged dispatch slots per worker and may
+  directly refill a slot while resolving its previous completion.
+- MIX placement atomically reserves every active lane of a physical cluster.
+- SPMD and `require_sync_start` tasks enter the Gang scheduler. Admission order
+  is sync-start, MIX, then single-lane SPMD; generation-tagged drain/stage/
+  release tokens prevent a previous cohort from satisfying the next one.
+- Resolver-local participant records aggregate completed subtasks, and the
+  cohort retires the graph task exactly once.
 
 ## Executor Model
 
 The host loads and executes the orchestration shared object synchronously. The
-device has no orchestration thread: every launched AICPU thread participates in
-scheduling its assigned cores after the boot thread attaches the prebuilt graph.
+device has no orchestration thread. AICPU performs AICore lifecycle management;
+resident AIV Resolvers own dependency resolution, Ready routing, and dispatch.
 Cluster ownership is assigned during the AICore handshake and remains stable for
-the run.
+the run. Graph replay temporarily uses a separately selected AICPU compatibility
+executor until its node execution is represented in the resident graph view.
 
 ## Capacity
 

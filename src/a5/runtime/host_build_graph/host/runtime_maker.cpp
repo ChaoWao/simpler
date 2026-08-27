@@ -1584,6 +1584,225 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, runtime_status);
     }
 
+    if (runtime->scheduler_state_base != nullptr && execution_rc == 0) {
+        const uint64_t scheduler_state_size = runtime->scheduler_layout.total_size;
+        std::vector<uint8_t> scheduler_state_storage(
+            static_cast<size_t>(scheduler_state_size + SCHEDULER_STATE_ALIGNMENT - 1)
+        );
+        uintptr_t host_scheduler_state_address =
+            (reinterpret_cast<uintptr_t>(scheduler_state_storage.data()) + SCHEDULER_STATE_ALIGNMENT - 1) &
+            ~(static_cast<uintptr_t>(SCHEDULER_STATE_ALIGNMENT) - 1);
+        void *host_scheduler_state = reinterpret_cast<void *>(host_scheduler_state_address);
+        int scheduler_state_rc = api->copy_from_device(
+            host_scheduler_state, runtime->scheduler_state_base, static_cast<size_t>(scheduler_state_size)
+        );
+        if (scheduler_state_rc != 0) {
+            LOG_ERROR("A5 HBG AICore scheduler: failed to copy scheduler state from device: %d", scheduler_state_rc);
+            rc = scheduler_state_rc;
+        } else {
+            const auto *control = scheduler_state_at<SchedulerRunControl>(
+                host_scheduler_state, runtime->scheduler_layout.run_control_offset
+            );
+            const auto *contexts = scheduler_state_at<SchedulerWorkerContext>(
+                host_scheduler_state, runtime->scheduler_layout.worker_contexts_offset
+            );
+            const auto *task_controls = scheduler_state_at<SchedulerTaskControl>(
+                host_scheduler_state, runtime->scheduler_layout.task_controls_offset
+            );
+            const auto *completion_inboxes = scheduler_state_at<SchedulerCompletionInbox>(
+                host_scheduler_state, runtime->scheduler_layout.completion_inboxes_offset
+            );
+            const auto *ready_inboxes = scheduler_state_at<SchedulerReadyInbox>(
+                host_scheduler_state, runtime->scheduler_layout.ready_inboxes_offset
+            );
+            const auto *ready_directory = scheduler_state_at<SchedulerReadyDirectory>(
+                host_scheduler_state, runtime->scheduler_layout.ready_directory_offset
+            );
+            const auto *dispatch_slots = scheduler_state_at<SchedulerDispatchSlot>(
+                host_scheduler_state, runtime->scheduler_layout.dispatch_slots_offset
+            );
+            uint64_t active_workers = 0;
+            uint64_t worker_executed = 0;
+            uint64_t bootstrap_tasks = 0;
+            uint64_t ready_enqueues = 0;
+            uint64_t ready_batches = 0;
+            uint64_t ready_pops = 0;
+            uint64_t ready_steals = 0;
+            uint64_t ready_cas_retries = 0;
+            uint64_t ready_link_waits = 0;
+            uint64_t ready_link_wait_max = 0;
+            uint64_t state_polls = 0;
+            uint64_t fanin_loads = 0;
+            uint64_t wake_registers = 0;
+            uint64_t wake_cas_retries = 0;
+            uint64_t wake_closed_retries = 0;
+            uint64_t wake_migrations = 0;
+            uint64_t wake_closes = 0;
+            uint64_t completion_enqueues = 0;
+            uint64_t completion_resolves = 0;
+            uint64_t ready_to_kernel_cycles = 0;
+            uint64_t ready_to_kernel_max_cycles = 0;
+            uint64_t idle_iterations = 0;
+            uint64_t backoff_cycles = 0;
+            uint64_t payload_cycles = 0;
+            uint64_t kernel_cycles = 0;
+            uint64_t completion_cycles = 0;
+            const uint64_t executable_task_count = runtime->scheduler_layout.executable_task_count;
+            const uint64_t executable_subtask_count = runtime->scheduler_layout.executable_subtask_count;
+            const uint64_t ordinary_task_count = executable_task_count - runtime->scheduler_layout.gang_task_count;
+            for (int32_t i = 0; i < runtime->worker_count; ++i) {
+                if (contexts[i].active != 0) ++active_workers;
+                worker_executed += contexts[i].executed_task_count;
+                bootstrap_tasks += contexts[i].bootstrap_task_count;
+                ready_enqueues += contexts[i].ready_enqueue_count;
+                ready_batches += contexts[i].ready_batch_count;
+                ready_pops += contexts[i].ready_pop_count;
+                ready_steals += contexts[i].ready_steal_count;
+                ready_cas_retries += contexts[i].ready_cas_retry_count;
+                ready_link_waits += contexts[i].ready_link_wait_count;
+                ready_link_wait_max = std::max(ready_link_wait_max, contexts[i].ready_link_wait_max);
+                state_polls += contexts[i].task_state_poll_count;
+                fanin_loads += contexts[i].fanin_state_load_count;
+                wake_registers += contexts[i].wake_register_count;
+                wake_cas_retries += contexts[i].wake_cas_retry_count;
+                wake_closed_retries += contexts[i].wake_closed_retry_count;
+                wake_migrations += contexts[i].wake_migrate_count;
+                wake_closes += contexts[i].wake_close_count;
+                completion_enqueues += contexts[i].completion_enqueue_count;
+                completion_resolves += contexts[i].completion_resolve_count;
+                ready_to_kernel_cycles += contexts[i].ready_to_kernel_cycles;
+                ready_to_kernel_max_cycles =
+                    std::max(ready_to_kernel_max_cycles, contexts[i].ready_to_kernel_max_cycles);
+                idle_iterations += contexts[i].idle_iteration_count;
+                backoff_cycles += contexts[i].backoff_cycles;
+                payload_cycles += contexts[i].payload_cycles;
+                kernel_cycles += contexts[i].kernel_cycles;
+                completion_cycles += contexts[i].completion_enqueue_cycles;
+            }
+            bool completion_inboxes_empty = true;
+            for (int32_t worker = 0; worker < runtime->worker_count; ++worker) {
+                if (contexts[worker].active == 0) continue;
+                if (completion_inboxes[worker].completed_generations[0] != 0 ||
+                    completion_inboxes[worker].completed_generations[1] != 0) {
+                    LOG_ERROR(
+                        "A5 HBG AICore scheduler: completion line=%d not empty generations={%" PRIu32 ",%" PRIu32 "}",
+                        worker, completion_inboxes[worker].completed_generations[0],
+                        completion_inboxes[worker].completed_generations[1]
+                    );
+                    completion_inboxes_empty = false;
+                    break;
+                }
+            }
+            bool ready_inboxes_empty = true;
+            for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT && ready_inboxes_empty; ++type) {
+                for (uint64_t inbox = 0; inbox < control->resolver_count; ++inbox) {
+                    uint64_t linear = static_cast<uint64_t>(type) * SCHEDULER_WORKER_CAPACITY + inbox;
+                    if (ready_inboxes[linear].head != SCHEDULER_INBOX_EMPTY) {
+                        LOG_ERROR(
+                            "A5 HBG AICore scheduler: ready type=%u inbox=%" PRIu64 " not empty head=%" PRId64, type,
+                            inbox, ready_inboxes[linear].head
+                        );
+                        ready_inboxes_empty = false;
+                        break;
+                    }
+                }
+            }
+            bool ready_directory_empty = true;
+            for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT; ++type) {
+                for (uint32_t shard = 0; shard < SCHEDULER_READY_DIRECTORY_SHARD_COUNT; ++shard)
+                    ready_directory_empty = ready_directory_empty && ready_directory->core_types[type][shard].bits == 0;
+            }
+            bool task_controls_valid = true;
+            for (int32_t task_id = 0; task_id < runtime->host_total_tasks; ++task_id) {
+                if (task_controls[task_id].state != static_cast<int64_t>(SchedulerTaskState::DONE) ||
+                    task_controls[task_id].wake_list_head != SCHEDULER_WAKE_LIST_CLOSED) {
+                    LOG_ERROR(
+                        "A5 HBG AICore scheduler: invalid task control id=%d state=%" PRId64 " wake_head=%" PRId64,
+                        task_id, task_controls[task_id].state, task_controls[task_id].wake_list_head
+                    );
+                    task_controls_valid = false;
+                    break;
+                }
+            }
+            bool dispatch_slots_free = true;
+            for (int32_t worker = 0; worker < runtime->worker_count && dispatch_slots_free; ++worker) {
+                if (contexts[worker].active == 0) continue;
+                if (contexts[worker].bootstrap_done == 0) {
+                    LOG_ERROR("A5 HBG AICore scheduler: worker=%d dispatch bootstrap incomplete", worker);
+                    dispatch_slots_free = false;
+                    break;
+                }
+                for (uint32_t slot = 0; slot < SCHEDULER_PENDING_SLOT_COUNT; ++slot) {
+                    uint64_t linear = static_cast<uint64_t>(worker) * SCHEDULER_PENDING_SLOT_COUNT + slot;
+                    const SchedulerDispatchSlot &dispatch = dispatch_slots[linear];
+                    if (dispatch.task_id != SCHEDULER_TASK_ID_INVALID ||
+                        static_cast<SchedulerDispatchSlotState>(dispatch.publication & UINT64_C(0xff)) !=
+                            SchedulerDispatchSlotState::FREE) {
+                        LOG_ERROR(
+                            "A5 HBG AICore scheduler: worker=%d slot=%u not free task=%" PRId64 " publication=%" PRIu64,
+                            worker, slot, dispatch.task_id, dispatch.publication
+                        );
+                        dispatch_slots_free = false;
+                        break;
+                    }
+                }
+            }
+            if (control->scheduler_error != 0 ||
+                control->expected_task_count != static_cast<uint64_t>(runtime->host_total_tasks) ||
+                worker_executed != executable_subtask_count || bootstrap_tasks != executable_task_count ||
+                active_workers != control->active_worker_count ||
+                control->bootstrap_scan_arrived_count != control->resolver_count ||
+                control->bootstrap_scan_complete == 0 || control->bootstrap_arrived_count != control->resolver_count ||
+                control->bootstrap_complete == 0 || control->resolved_task_count != executable_task_count ||
+                wake_closes != executable_task_count || wake_registers != wake_migrations ||
+                completion_enqueues != executable_subtask_count || completion_resolves != executable_task_count ||
+                ready_enqueues != ordinary_task_count || ready_pops != ordinary_task_count || !task_controls_valid ||
+                !completion_inboxes_empty || !ready_inboxes_empty || !ready_directory_empty || !dispatch_slots_free) {
+                LOG_ERROR(
+                    "A5 HBG AICore scheduler: invalid final state expected=%" PRIu64 " executed=%" PRIu64
+                    " executable=%" PRIu64 " inline=%" PRIu64 " active=%" PRIu64 " bootstrap=%" PRIu64
+                    " resolved=%" PRIu64 " wake_registers=%" PRIu64 " wake_migrations=%" PRIu64 " wake_closes=%" PRIu64
+                    " completion_enqueues=%" PRIu64 " completion_resolves=%" PRIu64 " ready_enqueues=%" PRIu64
+                    " ready_pops=%" PRIu64 " error=%" PRIu64,
+                    control->expected_task_count, worker_executed, executable_task_count,
+                    control->inline_completed_count, active_workers, bootstrap_tasks, control->resolved_task_count,
+                    wake_registers, wake_migrations, wake_closes, completion_enqueues, completion_resolves,
+                    ready_enqueues, ready_pops, control->scheduler_error
+                );
+                if (control->scheduler_error != 0) {
+                    LOG_ERROR(
+                        "A5 HBG AICore scheduler: first error task=%" PRIu64 " status=%" PRIu64 " core=%" PRIu64
+                        " type=%" PRIu64 " graph_tasks=%" PRIu64 " descriptors=0x%" PRIx64 " payloads=0x%" PRIx64
+                        " mask=0x%" PRIx64,
+                        control->error_task_id, control->scheduler_error, control->error_core_id,
+                        control->error_core_type, control->error_graph_task_count, control->error_descriptors_address,
+                        control->error_payloads_address, control->error_task_window_mask
+                    );
+                }
+                rc = -1;
+            } else if (control->expected_task_count != 0) {
+                LOG_INFO(
+                    "A5 HBG AICore scheduler HOST TIMING: payload=%" PRIu64 " kernel=%" PRIu64 " completion=%" PRIu64
+                    " backoff=%" PRIu64 " cycles",
+                    payload_cycles, kernel_cycles, completion_cycles, backoff_cycles
+                );
+                LOG_INFO(
+                    "A5 HBG AICore scheduler COUNTERS: bootstrap_tasks=%" PRIu64 " ready_enqueues=%" PRIu64
+                    " ready_batches=%" PRIu64 " ready_pops=%" PRIu64 " ready_steals=%" PRIu64
+                    " ready_cas_retries=%" PRIu64 " ready_link_waits=%" PRIu64 " ready_link_wait_max=%" PRIu64
+                    " state_polls=%" PRIu64 " fanin_loads=%" PRIu64 " wake_registers=%" PRIu64
+                    " wake_cas_retries=%" PRIu64 " wake_closed_retries=%" PRIu64 " wake_migrations=%" PRIu64
+                    " wake_closes=%" PRIu64 " completion_enqueues=%" PRIu64 " completion_resolves=%" PRIu64
+                    " ready_to_kernel_cycles=%" PRIu64 " ready_to_kernel_max=%" PRIu64 " idle_iterations=%" PRIu64,
+                    bootstrap_tasks, ready_enqueues, ready_batches, ready_pops, ready_steals, ready_cas_retries,
+                    ready_link_waits, ready_link_wait_max, state_polls, fanin_loads, wake_registers, wake_cas_retries,
+                    wake_closed_retries, wake_migrations, wake_closes, completion_enqueues, completion_resolves,
+                    ready_to_kernel_cycles, ready_to_kernel_max_cycles, idle_iterations
+                );
+            }
+        }
+    }
+
     if (skip_tensor_copy_back) {
         LOG_WARN("Skipping tensor copy-back because execution failed");
     } else {

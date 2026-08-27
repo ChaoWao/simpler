@@ -6,8 +6,9 @@
 device launch. The device boots scheduler-only, so its device log contains no
 orchestrator-thread block and no device-side `dlopen` timing.
 
-Host graph-construction timing belongs in host-side diagnostics. This guide is
-only for the AICPU scheduler portion of a run.
+Host graph-construction timing belongs in host-side diagnostics. Ordinary DAG
+runs schedule on resident AICore workers; AICPU logs cover lifecycle timing only.
+Graph replay continues to emit the compatibility AICPU scheduler records.
 
 ## Finding the Log
 
@@ -17,37 +18,40 @@ On hardware, AICPU `LOG_INFO` records are written by CANN's dlog subsystem:
 $HOME/ascend/log/debug/device-<device_id>/device-<pid>_<timestamp>.log
 ```
 
-Find the newest file and filter the current scheduler records:
+Find the newest file and filter the current scheduler and lifecycle records:
 
 ```bash
 ls -t "$HOME/ascend/log/debug/device-<device_id>"/device-*.log | head -1
-grep -E "sched_start=|Scheduler summary|Scheduler Phase Breakdown" <logfile>
+grep -E "A5 HBG AICore scheduler|AicoreLifecycle|sched_start=" <logfile>
 ```
 
-## Scheduler Summary
+## Resident Scheduler Summary
 
-With `SIMPLER_DFX` enabled, each scheduler thread emits timing bounds and a
-summary when its dispatch loop completes:
+After a successful resident run, Host validation emits aggregate timing and
+protocol counters copied from every active worker:
 
 ```text
-Thread 0: sched_start=... sched_end=... sched_cost=3477.420us
-Thread 0: Scheduler summary: total_time=3460.100us, loops=147, tasks_scheduled=352
+A5 HBG AICore scheduler HOST TIMING: payload=... kernel=... completion=... backoff=... cycles
+A5 HBG AICore scheduler COUNTERS: bootstrap_tasks=... ready_enqueues=... ready_pops=...
 ```
 
 | Field | Meaning |
 | ----- | ------- |
-| `sched_cost` | Wall time from scheduler-loop entry to exit |
-| `total_time` | Accounted complete + dispatch + idle cycles |
-| `loops` | Scheduler-loop iterations |
-| `tasks_scheduled` | Mixed tasks this thread completed |
+| `bootstrap_tasks` | Executable tasks classified during Resolver bootstrap |
+| `ready_enqueues` / `ready_pops` | Ordinary tasks published to and claimed from Ready inboxes |
+| `completion_enqueues` | Completed AIC/AIV subtasks reported to their Resolver |
+| `completion_resolves` | Graph tasks retired after completion aggregation |
+| `ready_to_kernel_*` | Aggregate and maximum Ready-to-kernel latency |
+| `backoff` / `idle_iterations` | Resident-loop idle cost and iterations |
 
-All launched AICPU threads participate in scheduling their assigned cores. The
-highest-index thread performs one-time prebuilt-runtime attachment before it
-enters the same scheduler path; it is not an orchestrator thread.
+Validation also rejects nonempty Ready/completion state, occupied dispatch slots,
+open wake lists, incomplete bootstrap, or inconsistent execution counts. These
+errors are correctness failures, not profiling warnings.
 
-## Optional Phase Breakdown
+## Compatibility Scheduler Records
 
-When `SIMPLER_SCHED_PROFILING` is also enabled, the summary includes:
+Only Graph replay uses the AICPU scheduler phase records. With
+`SIMPLER_SCHED_PROFILING` enabled, they include:
 
 ```text
 Thread 0: === Scheduler Phase Breakdown: total=3460.100us, 352 tasks ===
