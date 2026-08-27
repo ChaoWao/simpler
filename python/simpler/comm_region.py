@@ -71,7 +71,6 @@ from .comm_provider import (
     VmmShareableHandleImport,
     validate_independent_local_views,
 )
-from .comm_provider_control import ProviderAllocateClient, ProviderReleaseClient
 
 _GENERATION_COUNTER = itertools.count(1)
 _MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
@@ -329,6 +328,10 @@ class DelegatedSingleOwnerRegionShape:
     first_hop_child_id: int
     provider_device_id: int
 
+    @property
+    def worker_id(self) -> int:
+        return int(self.first_hop_child_id)
+
 
 def _require_session_instance_id(value: object) -> bytes:
     if isinstance(value, memoryview):
@@ -490,8 +493,6 @@ class RegionInstance:
         self._payload_local_view: RegionPartLocalView | None = None
         self._counter_local_view: RegionPartLocalView | None = None
         self._provider_resource_id = 0
-        self._release_client: ProviderReleaseClient | None = None
-        self._allocate_client: ProviderAllocateClient | None = None
         self._delegated_session_instance_id: bytes | None = None
         self._delegated_transaction_id: int = 0
         self._delegated_provider_path: bytes | None = None
@@ -579,73 +580,6 @@ class RegionInstance:
         self._worker._require_region_control_before_submit("region_instance.close")
         self._worker._region_instance_registry.close(self)
 
-    def _materialize(self, spec: RegionAllocationSpec) -> None:
-        plan = self.plan
-        if not isinstance(plan, BackendPlan):
-            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
-        prior = self._worker._consume_worker_host_mapped_cleanup_error("region_instance.materialize")
-        if prior is not None:
-            raise prior
-        native = self._worker._worker
-        if native is None:
-            raise RuntimeError("region instance materialize requires Worker.init()")
-        self._allocate_client = ProviderAllocateClient(native, self.worker_id)
-        try:
-            result, payload_view, counter_view = self._allocate_client.allocate(spec)
-        except RegionAllocationError as exc:
-            self._provider_resource_id = int(exc.provisional_resource_id)
-            if exc.cleanup_debt_remaining:
-                error = self._worker._record_unreclaimable(
-                    f"region instance: allocation left cleanup debt for resource "
-                    f"{exc.provisional_resource_id} on worker {self.worker_id}; no further work is admitted",
-                    exc,
-                )
-                self._fail_terminal(error)
-                raise error
-            self._state = RegionInstanceState.CLOSED
-            raise
-        except BaseException:
-            committed = int(self._allocate_client.committed_resource_id)
-            if committed:
-                self._provider_resource_id = committed
-                self._release_client = ProviderReleaseClient(native, self.worker_id)
-            raise
-        self._provider_resource_id = int(result.provider_resource_id)
-        self._release_client = ProviderReleaseClient(native, self.worker_id)
-        try:
-            validate_committed_region_allocation(
-                plan,
-                spec,
-                result,
-                payload_view,
-                counter_view,
-                expected_capability_type=self._worker._provider_import_capability_type(),
-                expected_device_id=self._worker._provider_import_device_id(self.worker_id),
-            )
-            payload_lease = self._worker._import_region_part_lease(
-                self.worker_id, self._provider_resource_id, result.export_descriptor.payload
-            )
-            self._payload_mapping = payload_lease
-            counter_lease = self._worker._import_region_part_lease(
-                self.worker_id, self._provider_resource_id, result.export_descriptor.counter
-            )
-            self._counter_mapping = counter_lease
-            self._payload_part = PayloadPart(
-                RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
-                _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, payload_lease),
-            )
-            self._counter_part = CounterPart(
-                RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
-                _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, counter_lease),
-            )
-            self._payload_local_view = payload_view
-            self._counter_local_view = counter_view
-        except BaseException as exc:
-            self._abort_materialization(exc)
-            raise
-        self._ever_live = True
-        self._state = RegionInstanceState.LIVE
-
     def _bind_delegated_identity(self, session_instance_id: bytes, transaction_id: int, provider_path: bytes) -> None:
         self._worker._region_instance_registry._require_tracked(self)
         session = _require_session_instance_id(session_instance_id)
@@ -676,8 +610,7 @@ class RegionInstance:
         if isinstance(cause, RegionAllocationError):
             poison = bool(cause.cleanup_debt_remaining)
         else:
-            client = self._allocate_client
-            poison = bool(client is not None and client.dispatch_started)
+            poison = False
         close_error: BaseException | None = None
         try:
             self._close_owned(poison_on_error=False)
@@ -717,13 +650,7 @@ class RegionInstance:
     def _release_provider_resource(self) -> BaseException | None:
         if self._delegated_release_edge:
             return self._release_delegated_resource()
-        if self._release_client is None or int(self._provider_resource_id) == 0:
-            return None
-        try:
-            result = self._release_client.release(int(self._provider_resource_id))
-        except BaseException as exc:  # noqa: BLE001
-            return exc
-        return self._interpret_provider_release(result)
+        return None
 
     def _release_delegated_resource(self) -> BaseException | None:
         if (
@@ -824,74 +751,7 @@ def project_region_allocation_spec(plan: object, layout: object) -> RegionAlloca
     )
 
 
-def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwnerRegionShape:  # noqa: PLR0912
-    _validate_registry_matches_worker(ctx)
-    plan = ctx.plan
-    if isinstance(plan, UnsupportedRegionPlan):
-        raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, plan.message)
-    if not isinstance(plan, BackendPlan):
-        raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materializer expects a BackendPlan")
-    if int(getattr(ctx.worker, "level", -1)) != 3:
-        raise MaterializationRefusal(
-            RefusalReason.NEEDS_DELEGATION,
-            "Only L3-local worker-chip regions can be materialized directly; higher-level roots require delegation",
-        )
-    if not isinstance(plan.topology_plan, SingleOwnerPlan):
-        raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "Only SingleOwner region plans are supported")
-    provider = _record_for(ctx, plan.topology_plan.provider_endpoint)
-    if not provider.path.startswith("L3/"):
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider path requires delegated materialization")
-    if provider.deployment is not DEVICE_AICPU:
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT,
-            "Only DEVICE_AICPU providers are supported for worker-chip regions",
-        )
-    try:
-        provider_path = parse_endpoint_path(provider.path, root_level=ctx.registry.root_level)
-    except ValueError as exc:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint") from exc
-    if len(provider_path.segments) != 2:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    _root, child = provider_path.segments
-    if child.level != 2 or child.index is None:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    worker_id = int(child.index)
-    try:
-        ctx.worker._validate_worker_chip_id(worker_id)
-    except ValueError as exc:
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            f"provider worker_id {worker_id} is outside the current L3 device list",
-        ) from exc
-    member_records = tuple(_record_for(ctx, member) for member in plan.ordered_members)
-    if len(member_records) != 2:
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "Only one host consumer and one device provider are supported",
-        )
-    host_consumers = [member for member in member_records if member.deployment is HOST_CPU]
-    if len(host_consumers) != 1 or host_consumers[0].path != "L3":
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "The current L3 HOST_CPU endpoint must be the only consumer",
-        )
-    consumer = host_consumers[0]
-    if provider.identity not in plan.ordered_members or consumer.identity not in plan.ordered_members:
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "Ordered members must contain the provider and consumer endpoints",
-        )
-    if not ctx.registry.same_node(provider, consumer):
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "Worker-chip region materialization only supports local endpoints",
-        )
-    _validate_part(plan.payload, provider, consumer)
-    _validate_part(plan.counter, provider, consumer)
-    return SingleOwnerRegionShape(provider=provider, consumer=consumer, worker_id=worker_id)
-
-
-def validate_delegated_single_owner_region_shape(ctx: MaterializationContext) -> DelegatedSingleOwnerRegionShape:
+def validate_single_owner_region_shape(ctx: MaterializationContext) -> DelegatedSingleOwnerRegionShape:
     _validate_registry_matches_worker(ctx)
     plan = ctx.plan
     if isinstance(plan, UnsupportedRegionPlan):
@@ -1061,8 +921,8 @@ def _delegated_allocate_request(
     )
 
 
-def materialize_delegated_region_instance(ctx: MaterializationContext) -> RegionInstance:
-    shape = validate_delegated_single_owner_region_shape(ctx)
+def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
+    shape = validate_single_owner_region_shape(ctx)
     spec = project_region_allocation_spec(ctx.plan, ctx.layout)
     instance = RegionInstance.planned(ctx, shape)
     resources = getattr(ctx.worker, "_building_run_resources", None)
@@ -1144,24 +1004,6 @@ def materialize_delegated_region_instance(ctx: MaterializationContext) -> Region
         )
         ctx.worker._latch_delegated_session_fatal(unexpected)
         raise unexpected
-    except BaseException as exc:
-        if instance._state is None:
-            instance._abort_materialization(exc)
-        ctx.worker._region_instance_registry._settle(instance)
-        raise
-
-
-def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
-    shape = validate_single_owner_region_shape(ctx)
-    spec = project_region_allocation_spec(ctx.plan, ctx.layout)
-    instance = RegionInstance.planned(ctx, shape)
-    resources = getattr(ctx.worker, "_building_run_resources", None)
-    ctx.worker._region_instance_registry.track(instance, resources)
-    if resources is not None:
-        resources.requires_ordered_cleanup = True
-    try:
-        instance._materialize(spec)
-        return instance
     except BaseException as exc:
         if instance._state is None:
             instance._abort_materialization(exc)

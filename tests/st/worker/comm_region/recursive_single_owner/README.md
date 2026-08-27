@@ -10,10 +10,10 @@ under architecture-specific `comm_region` or `worker/comm_domain` trees.
 | [`test_l4_two_hop.py`](test_l4_two_hop.py) | L4 → L3 → L2 | `a2a3sim`, `a2a3`, `a5sim`, `a5` |
 | [`test_fault_injection.py`](test_fault_injection.py) | L3/L4 fatal edges | `a2a3sim`, `a5sim` |
 
-Each success case uses `python/simpler/worker.py::Worker._create_delegated_worker_chip_region`
-and `python/simpler/comm_region.py::materialize_delegated_region_instance`. The
-compatibility facade `Worker._create_worker_chip_region` and commands 16/17 are
-not called here.
+Each L3 success case uses `Orchestrator.create_worker_chip_region`. Each L4
+success case uses `Worker._materialize_region_instance`. Both enter the same
+DRCT v1 materializer. Commands 16/17 remain in the tree for old-stack
+regression until the next subtraction.
 
 ## Contract under test
 

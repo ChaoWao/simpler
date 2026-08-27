@@ -754,17 +754,18 @@ class TestW5aFatalBoundary:
         assert closes == ["close"]
 
     def test_callback_fatal_rejects_later_submit_and_control(self):
-        worker = Worker(level=3, num_sub_workers=0)
+        worker = Worker(level=3, device_ids=[0], num_sub_workers=0)
         worker._lifecycle = _Lifecycle.READY
         worker._worker = object()
+        worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [0]}
         first = RuntimeError("callback-fatal")
         worker._latch_delegated_session_fatal(first)
+        with pytest.raises(RuntimeError, match="no further work is admitted") as control_exc:
+            worker._create_worker_chip_region(0, 64, 8)
+        assert control_exc.value.__cause__ is first
         with pytest.raises(RuntimeError, match="no further work is admitted") as submit_exc:
             worker.submit(lambda *_args, **_kwargs: None)
         assert submit_exc.value.__cause__ is first
-        with pytest.raises(RuntimeError, match="no further work is admitted") as control_exc:
-            worker._create_delegated_worker_chip_region("L3/L2[0]", 64, 8)
-        assert control_exc.value.__cause__ is first
         assert worker._delegated_session_fatal is first
 
     def test_outer_submit_closes_after_lease_depth_returns_to_zero(self):
@@ -991,7 +992,7 @@ class TestW5aPhaseAIntegration:
                 for alias in node.names:
                     assert "comm_provider_control" not in alias.name
 
-    def test_compatibility_entry_still_uses_w4_5_materializer(self):
+    def test_compatibility_entry_uses_unified_materializer(self):
         tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
         create = None
         materialize = None
@@ -1002,34 +1003,29 @@ class TestW5aPhaseAIntegration:
                         create = item
                     if isinstance(item, ast.FunctionDef) and item.name == "_materialize_region_instance":
                         materialize = item
+                    assert not isinstance(item, ast.FunctionDef) or item.name not in {
+                        "_create_delegated_worker_chip_region",
+                        "_admitted_delegated_region_context",
+                    }
         assert create is not None and materialize is not None
-        create_names = {n.id for n in ast.walk(create) if isinstance(n, ast.Name)}
-        materialize_names = {n.id for n in ast.walk(materialize) if isinstance(n, ast.Name)}
-        assert "materialize_region_instance" in create_names
+
+        def _names(node):
+            found = set()
+            for item in ast.walk(node):
+                if isinstance(item, ast.Name):
+                    found.add(item.id)
+                elif isinstance(item, ast.Attribute):
+                    found.add(item.attr)
+            return found
+
+        create_names = _names(create)
+        materialize_names = _names(materialize)
+        assert "_materialize_region_instance" in create_names
+        assert "materialize_region_instance" in materialize_names
         assert "materialize_delegated_region_instance" not in create_names
         assert "materialize_delegated_region_instance" not in materialize_names
         assert callable(Worker._dispatch_delegated_allocate)
         assert callable(Worker._dispatch_delegated_release)
-
-    def test_private_delegated_wrapper_uses_w5a_materializer(self):
-        tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
-        create = None
-        context = None
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef) and node.name == "Worker":
-                for item in node.body:
-                    if isinstance(item, ast.FunctionDef) and item.name == "_create_delegated_worker_chip_region":
-                        create = item
-                    if isinstance(item, ast.FunctionDef) and item.name == "_admitted_delegated_region_context":
-                        context = item
-        assert create is not None and context is not None
-        create_names = {n.id for n in ast.walk(create) if isinstance(n, ast.Name)}
-        context_names = {n.id for n in ast.walk(context) if isinstance(n, ast.Name)}
-        assert "materialize_delegated_region_instance" in create_names
-        assert "materialize_region_instance" not in create_names
-        assert "validate_delegated_single_owner_region_shape" in context_names
-        assert "validate_single_owner_region_shape" not in context_names
-        assert "create_worker_chip_region" not in create_names
 
     def test_w5a_runtime_helpers_do_not_call_old_codec(self):
         tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
@@ -1039,8 +1035,8 @@ class TestW5aPhaseAIntegration:
             "_handle_ctrl_delegated_region_terminal",
             "_dispatch_delegated_allocate",
             "_dispatch_delegated_release",
-            "_admitted_delegated_region_context",
-            "_create_delegated_worker_chip_region",
+            "_create_worker_chip_region",
+            "_materialize_region_instance",
         }
         forbidden = {"handle_ctrl_region_allocate", "handle_ctrl_region_release"}
         for node in ast.walk(tree):

@@ -18,14 +18,13 @@ import pytest
 from simpler.worker import Worker
 
 from ._helpers import (
-    _COUNTER_BYTES,
-    _PAYLOAD_BYTES,
     _RUNTIME,
     FAULT_PLATFORMS,
     _install_release_probe,
     _stream_config,
     build_chip_callable,
     close_owned_workers,
+    create_live_region,
     make_l3_forward,
 )
 
@@ -71,7 +70,7 @@ def _l4(platform: str, device_id: int) -> Worker:
 
 
 def _create(orch_handle, provider_path: str):
-    return orch_handle._worker._create_delegated_worker_chip_region(provider_path, _PAYLOAD_BYTES, _COUNTER_BYTES)
+    return create_live_region(orch_handle, provider_path)
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:

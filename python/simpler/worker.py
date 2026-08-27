@@ -213,10 +213,8 @@ from .comm_region import (
     RegionInstance,
     RegionInstanceRegistry,
     RegionInstanceState,
-    materialize_delegated_region_instance,
     materialize_region_instance,
     project_region_allocation_spec,
-    validate_delegated_single_owner_region_shape,
     validate_single_owner_region_shape,
 )
 from .global_comm_domain import (
@@ -6597,21 +6595,6 @@ class Worker:
         validate_single_owner_region_shape(ctx)
         return ctx
 
-    def _admitted_delegated_region_context(
-        self, provider_path: str, payload_bytes: int, counter_bytes: int
-    ) -> MaterializationContext:
-        root_path = _format_worker_path(int(self.level))
-        provider = at(str(provider_path), DEVICE_AICPU)
-        layout = RegionLayoutSpec(payload_bytes=int(payload_bytes), counter_bytes=int(counter_bytes))
-        members = (at(root_path, HOST_CPU), provider)
-        topology = SingleOwner(provider=provider)
-        registry = self._get_endpoint_registry()
-        resolved = registry.resolve_region_spec(members, topology)
-        plan = BackendResolver(registry, self._get_region_access_service()).plan(resolved, layout)
-        ctx = MaterializationContext(worker=self, registry=registry, plan=plan, layout=layout)
-        validate_delegated_single_owner_region_shape(ctx)
-        return ctx
-
     def _project_admitted_worker_chip_region_spec(
         self, worker_id: int, payload_bytes: int, counter_bytes: int
     ) -> RegionAllocationSpec:
@@ -8579,8 +8562,13 @@ class Worker:
         region = None
         required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
         try:
-            ctx = self._admitted_worker_chip_region_context(int(worker_id), int(payload_bytes), int(counter_bytes))
-            instance = materialize_region_instance(ctx)
+            root_path = _format_worker_path(int(self.level))
+            provider_path = _format_worker_path(2, parent_path=root_path, index=int(worker_id))
+            provider = at(provider_path, DEVICE_AICPU)
+            layout = RegionLayoutSpec(payload_bytes=int(payload_bytes), counter_bytes=int(counter_bytes))
+            members = (at(root_path, HOST_CPU), provider)
+            topology = SingleOwner(provider=provider)
+            instance = self._materialize_region_instance(members, topology, layout)
             payload_view = instance.local_view(RegionPartKind.PAYLOAD)
             counter_view = instance.local_view(RegionPartKind.COUNTER)
             if payload_view is None or counter_view is None:
@@ -8613,57 +8601,6 @@ class Worker:
                 raise self._record_unreclaimable(
                     f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
                     f"{region_id} on worker {int(worker_id)}; it is leaked and no further work is admitted",
-                    deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error,
-                )
-            raise
-
-    def _create_delegated_worker_chip_region(self, provider_path: str, payload_bytes: int, counter_bytes: int):
-        if payload_bytes <= 0:
-            raise ValueError("create_delegated_worker_chip_region: payload_bytes must be positive")
-        if counter_bytes <= 0 or counter_bytes % 4 != 0:
-            raise ValueError("create_delegated_worker_chip_region: counter_bytes must be positive and a multiple of 4")
-        if self.level < 3:
-            raise RuntimeError("create_delegated_worker_chip_region requires a hierarchical Worker")
-        if self._worker is None:
-            raise RuntimeError("create_delegated_worker_chip_region requires Worker.init()")
-        self._require_no_delegated_session_fatal("create_delegated_worker_chip_region")
-        resources = self._building_run_resources
-        instance: RegionInstance | None = None
-        required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
-        try:
-            ctx = self._admitted_delegated_region_context(str(provider_path), int(payload_bytes), int(counter_bytes))
-            instance = materialize_delegated_region_instance(ctx)
-            payload_view = instance.local_view(RegionPartKind.PAYLOAD)
-            counter_view = instance.local_view(RegionPartKind.COUNTER)
-            if payload_view is None or counter_view is None:
-                raise RuntimeError("create_delegated_worker_chip_region: materialized instance is missing local views")
-            desc = worker_chip_orch_region_desc_from_local_views(
-                instance.provider_resource_id, payload_view, counter_view
-            )
-            region = WorkerChipOrchRegion(self, instance, desc)
-            if resources is not None:
-                resources.requires_ordered_cleanup = True
-            return region
-        except BaseException:
-            if resources is not None:
-                resources.requires_ordered_cleanup = required_ordered_cleanup_before
-            if instance is not None and instance._state is RegionInstanceState.LIVE and not instance._close_attempted:
-                try:
-                    self._region_instance_registry.close(instance)
-                except BaseException as close_exc:  # noqa: BLE001
-                    raise self._record_unreclaimable(
-                        "create_delegated_worker_chip_region: rollback could not close the host mapping for "
-                        f"region {int(instance.provider_resource_id)}; it is leaked and no further work is admitted",
-                        close_exc,
-                    )
-            deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error(
-                "create_delegated_worker_chip_region rollback"
-            )
-            if deferred_native_cleanup_error is not None:
-                region_id = int(instance.provider_resource_id) if instance is not None else 0
-                raise self._record_unreclaimable(
-                    "create_delegated_worker_chip_region: rollback could not close the host mapping for "
-                    f"region {region_id}; it is leaked and no further work is admitted",
                     deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error,
                 )
             raise

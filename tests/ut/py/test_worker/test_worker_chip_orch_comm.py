@@ -47,13 +47,9 @@ from simpler.comm_provider_control import (
     RELEASE_REQUEST_BYTES,
     AllocateReplyTag,
     decode_allocate_reply,
-    decode_allocate_request,
     decode_release_reply,
-    decode_release_request,
     encode_allocate_request,
-    encode_allocate_success_reply,
     encode_release_request,
-    encode_release_result_reply,
 )
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType
@@ -162,9 +158,10 @@ class _FakeDirectCWorker:
         mapping_bytes: Optional[int] = None,
         corrupt_access_profile: bool = False,
     ):
-        self.create_calls: list[tuple[int, str, str]] = []
+        self.create_calls: list[tuple[int, int]] = []
         self.release_calls: list[tuple[int, int]] = []
         self.next_region_id = 1
+        self._last_resource_id = 0
         self.payload_base = int(payload_base)
         self.counter_base = int(counter_base)
         self.access_profile = int(access_profile)
@@ -179,16 +176,26 @@ class _FakeDirectCWorker:
     def close(self) -> None:
         return None
 
-    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        self.create_calls.append((int(worker_id), str(request_shm_name), str(reply_shm_name)))
-        req_shm = SharedMemory(name=request_shm_name)
-        reply_shm = SharedMemory(name=reply_shm_name)
-        req_buf = req_shm.buf
-        reply_buf = reply_shm.buf
-        assert req_buf is not None
-        assert reply_buf is not None
-        try:
-            spec = decode_allocate_request(req_buf)
+    def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+        from simpler.comm_delegated_region_control import (
+            DelegatedAllocateReply,
+            DelegatedAllocateReplyTag,
+            DelegatedRegionOperation,
+            DelegatedReleaseReply,
+            DelegatedReleaseReplyTag,
+            encode_reply,
+            parse_request,
+            publish_reply,
+        )
+        from simpler.worker import _CTRL_DELEGATED_REGION
+
+        assert int(sub_cmd) == _CTRL_DELEGATED_REGION
+        staged = bytearray(payload)
+        envelope = parse_request(staged)
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            self.create_calls.append((int(worker_id), int(sub_cmd)))
+            request = envelope.decode_terminal()
+            spec = request.spec
             self.allocate_specs.append(spec)
             region_id = int(self.region_id) if self.region_id is not None else self.next_region_id
             if self.region_id is None:
@@ -221,41 +228,38 @@ class _FakeDirectCWorker:
                     ),
                 ),
             )
-            encode_allocate_success_reply(
-                reply_buf,
-                result,
-                RegionPartLocalView(RegionPartKind.PAYLOAD, self.payload_base, payload_bytes),
-                RegionPartLocalView(RegionPartKind.COUNTER, self.counter_base, counter_bytes),
+            committed = encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ALLOCATED,
+                    session_instance_id=envelope.session_instance_id,
+                    transaction_id=envelope.transaction_id,
+                    result=result,
+                    payload_view=RegionPartLocalView(RegionPartKind.PAYLOAD, self.payload_base, payload_bytes),
+                    counter_view=RegionPartLocalView(RegionPartKind.COUNTER, self.counter_base, counter_bytes),
+                )
             )
+            publish_reply(memoryview(staged), committed)
             if region_id == 0:
-                struct.pack_into("<Q", reply_buf, 16, 0)
+                struct.pack_into("<Q", staged, 40, 0)
             if self.reply_magic is not None:
-                struct.pack_into("<Q", reply_buf, 0, int(self.reply_magic))
-        finally:
-            del req_buf
-            del reply_buf
-            req_shm.close()
-            reply_shm.close()
-
-    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        req_shm = SharedMemory(name=request_shm_name)
-        reply_shm = SharedMemory(name=reply_shm_name)
-        req_buf = req_shm.buf
-        reply_buf = reply_shm.buf
-        assert req_buf is not None
-        assert reply_buf is not None
-        try:
-            resource_id = decode_release_request(req_buf)
-            self.release_calls.append((int(worker_id), int(resource_id)))
-            encode_release_result_reply(
-                reply_buf,
-                ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+                struct.pack_into("<Q", staged, 0, int(self.reply_magic))
+            self._last_resource_id = max(region_id, 1) if region_id != 0 else 0
+            return bytes(staged)
+        resource_id = int(getattr(self, "_last_resource_id", 1))
+        self.release_calls.append((int(worker_id), resource_id))
+        committed = encode_reply(
+            DelegatedReleaseReply(
+                tag=DelegatedReleaseReplyTag.RELEASED,
+                session_instance_id=envelope.session_instance_id,
+                transaction_id=envelope.transaction_id,
+                result=ProviderReleaseResult(
+                    provider_resource_id=resource_id,
+                    status=ProviderReleaseStatus.RELEASED,
+                ),
             )
-        finally:
-            del req_buf
-            del reply_buf
-            req_shm.close()
-            reply_shm.close()
+        )
+        publish_reply(memoryview(staged), committed)
+        return bytes(staged)
 
 
 class _EndpointFailingOrch:
@@ -300,6 +304,7 @@ def _make_started_sim_worker() -> tuple[Worker, SharedMemory, _FakeDirectCWorker
     fake_c_worker = _FakeDirectCWorker()
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = fake_c_worker
+    worker._next_level_worker_ids = [0]
     worker._chip_shms = [shm]
     return worker, shm, fake_c_worker
 
@@ -315,6 +320,7 @@ def _make_started_onboard_worker(platform: str = "a2a3") -> tuple[Worker, Shared
     )
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = fake_c_worker
+    worker._next_level_worker_ids = [0]
     worker._chip_shms = [shm]
     return worker, shm, fake_c_worker
 
@@ -449,9 +455,8 @@ def test_sim_direct_create_import_failure_rolls_back_l2_host_region(monkeypatch)
 
         assert fake_c_worker.create_calls
         assert fake_c_worker.release_calls == [(0, 1)]
-        unpublished = tuple(worker._region_instance_registry._instances.values())
-        assert len(unpublished) == 1
-        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
+        assert worker._region_instance_registry._instances == {}
+        assert worker._delegated_session_fatal is None
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -465,10 +470,9 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
         with pytest.raises(RuntimeError, match="committed import capability does not match"):
             worker._create_worker_chip_region(0, 64, 128)
 
-        assert fake_c_worker.release_calls == [(0, 1)]
-        unpublished = tuple(worker._region_instance_registry._instances.values())
-        assert len(unpublished) == 1
-        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
+        assert fake_c_worker.release_calls == []
+        assert worker._region_instance_registry._instances == {}
+        assert worker._delegated_session_fatal is not None
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -478,14 +482,19 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
 @pytest.mark.parametrize(
     ("reply_updates", "exc_type", "match", "released_id"),
     [
-        ({"reply_magic": 0xBAD}, RegionControlError, "unsupported provider control version", None),
-        ({"reply_magic": 0x4C334C3200020000}, RegionControlError, "unsupported provider control version", None),
-        ({"region_id": 0}, RegionControlError, "SUCCESS requires a resource id", None),
+        ({"reply_magic": 0xBAD}, RegionControlError, "unsupported delegated-region version", None),
+        (
+            {"reply_magic": 0x4C334C3200020000},
+            RegionControlError,
+            "unsupported delegated-region version",
+            None,
+        ),
+        ({"region_id": 0}, RegionControlError, "ALLOCATED requires a resource id", None),
         (
             {"access_profile": _ACCESS_ONBOARD_VMM},
             RuntimeError,
             "committed import capability does not match",
-            1,
+            None,
         ),
     ],
 )
@@ -498,9 +507,8 @@ def test_direct_create_validation_failure_rolls_back_l2_host_region(reply_update
             worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.release_calls == ([] if released_id is None else [(0, released_id)])
-        unpublished = tuple(worker._region_instance_registry._instances.values())
-        assert len(unpublished) == 1
-        assert unpublished[0]._state is comm_region.RegionInstanceState.CLOSE_FAILED
+        assert worker._region_instance_registry._instances == {}
+        assert worker._delegated_session_fatal is not None
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -1825,21 +1833,18 @@ def test_sim_direct_counter_failure_poisons_only_region(monkeypatch):
 def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     events: list[tuple[str, int]] = []
-    original_release = fake_c_worker.control_region_release
+    original_payload = fake_c_worker.control_payload
 
-    def release(worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        req_shm = SharedMemory(name=request_shm_name)
-        req_buf = req_shm.buf
-        assert req_buf is not None
-        try:
-            events.append(("release", int(decode_release_request(req_buf))))
-        finally:
-            del req_buf
-            req_shm.close()
-        original_release(worker_id, request_shm_name, reply_shm_name)
+    def payload(worker_type, worker_id, sub_cmd, request, timeout):
+        from simpler.comm_delegated_region_control import DelegatedRegionOperation, parse_request
+
+        envelope = parse_request(request)
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_RELEASE:
+            events.append(("release", int(getattr(fake_c_worker, "_last_resource_id", 1))))
+        return original_payload(worker_type, worker_id, sub_cmd, request, timeout)
 
     try:
-        fake_c_worker.control_region_release = release
+        fake_c_worker.control_payload = payload
         monkeypatch.setattr(
             worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 77
         )
@@ -1939,15 +1944,6 @@ def test_compat_descriptor_uses_independent_local_views_and_bumped_magic(monkeyp
 def test_public_create_worker_chip_region_uses_admitted_w2_plan_and_two_imports(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     imports: list[tuple[str, int]] = []
-    captured: dict[str, Any] = {}
-    original_ctx = worker._admitted_worker_chip_region_context
-
-    def spy_ctx(worker_id, payload_bytes, counter_bytes):
-        ctx = original_ctx(worker_id, payload_bytes, counter_bytes)
-        captured["ctx"] = ctx
-        return ctx
-
-    monkeypatch.setattr(worker, "_admitted_worker_chip_region_context", spy_ctx)
     monkeypatch.setattr(
         worker_module,
         "_worker_host_mapped_region_import_sim",
@@ -1957,8 +1953,7 @@ def test_public_create_worker_chip_region_uses_admitted_w2_plan_and_two_imports(
     try:
         orch = Orchestrator(MagicMock(), worker)
         region = orch.create_worker_chip_region(worker_id=0, payload_bytes=64, counter_bytes=128)
-        ctx = captured["ctx"]
-        plan = ctx.plan
+        plan = region._instance.plan
         assert isinstance(plan, ce.BackendPlan)
         assert isinstance(plan.topology_plan, ce.SingleOwnerPlan)
         registry = worker._get_endpoint_registry()
