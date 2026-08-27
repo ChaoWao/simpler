@@ -564,8 +564,7 @@ class TestGeneralised_Worker:
 
 
 # ---------------------------------------------------------------------------
-# W5a A7/A8/A9: delegated-region routing, fatal latch, migration coexistence
-# ---------------------------------------------------------------------------
+# Delegated-region routing, fatal latch, and unified materializer entry
 
 
 _SESSION = b"\x11\x22\x33\x44\x55\x66\x77\x88"
@@ -585,7 +584,7 @@ class _RecordingNative:
 
 
 def _allocate_request(*, initiator_path: bytes, provider_path: bytes, transaction_id: int = 1):
-    from simpler.comm_delegated_region_control import DelegatedAllocateRequest  # noqa: PLC0415
+    from simpler.comm_provider_control import DelegatedAllocateRequest  # noqa: PLC0415
 
     return DelegatedAllocateRequest(
         session_instance_id=_SESSION,
@@ -598,14 +597,14 @@ def _allocate_request(*, initiator_path: bytes, provider_path: bytes, transactio
 
 
 def _backend_error_reply(payload: bytes) -> bytes:
-    from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+    from simpler.comm_provider import RegionControlErrorKind  # noqa: PLC0415
+    from simpler.comm_provider_control import (  # noqa: PLC0415
         DelegatedAllocateReply,
         DelegatedAllocateReplyTag,
         encode_reply,
         parse_request,
         publish_reply,
     )
-    from simpler.comm_provider import RegionControlErrorKind  # noqa: PLC0415
 
     envelope = parse_request(payload)
     committed = encode_reply(
@@ -621,9 +620,9 @@ def _backend_error_reply(payload: bytes) -> bytes:
     return bytes(staged)
 
 
-class TestW5aDelegatedRouting:
+class TestDelegatedRouting:
     def test_l3_to_l2_forwards_unchanged_active_bytes(self):
-        from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+        from simpler.comm_provider_control import (  # noqa: PLC0415
             ALLOCATE_REPLY_BYTES,
             encode_request,
             parse_request,
@@ -648,7 +647,7 @@ class TestW5aDelegatedRouting:
         assert not any(hop[envelope.request_bytes :])
 
     def test_l4_to_l3_to_l2_keeps_request_bytes_and_creates_no_table(self):
-        from simpler.comm_delegated_region_control import (  # noqa: PLC0415
+        from simpler.comm_provider_control import (  # noqa: PLC0415
             ProviderTransactionTable,
             encode_request,
             parse_request,
@@ -697,8 +696,8 @@ class TestW5aDelegatedRouting:
             ProviderTransactionTable.__init__ = original_init
 
     def test_routing_rejects_before_control_payload(self):
-        from simpler.comm_delegated_region_control import encode_request  # noqa: PLC0415
         from simpler.comm_provider import RegionControlError  # noqa: PLC0415
+        from simpler.comm_provider_control import encode_request  # noqa: PLC0415
         from simpler.worker import _forward_delegated_region  # noqa: PLC0415
 
         native = _RecordingNative(_backend_error_reply)
@@ -728,7 +727,7 @@ class TestW5aDelegatedRouting:
         assert native.calls == []
 
 
-class TestW5aFatalBoundary:
+class TestFatalBoundary:
     def test_fatal_latch_is_first_wins_and_does_not_close_inside_lease(self):
         worker = Worker(level=3, num_sub_workers=0)
         first = RuntimeError("first-fatal")
@@ -940,7 +939,7 @@ class _SetupOwnedWorker:
             raise self.fail
 
 
-class TestW5aSetupCleanup:
+class TestSetupCleanup:
     def test_register_setup_failure_closes_constructed_worker_and_reraises_primary(self):
         primary = RuntimeError("register failed")
         worker = _SetupOwnedWorker("l3")
@@ -981,16 +980,19 @@ class TestW5aSetupCleanup:
         assert getattr(primary, "__notes__", []) == ["RuntimeError: close failed"]
 
 
-class TestW5aPhaseAIntegration:
-    def test_w5a_module_does_not_import_old_codec(self):
-        path = _REPO_ROOT / "python" / "simpler" / "comm_delegated_region_control.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+class TestDelegatedIntegration:
+    def test_canonical_control_module_does_not_keep_transition_path(self):
+        delegated = _REPO_ROOT / "python" / "simpler" / "comm_delegated_region_control.py"
+        canonical = _REPO_ROOT / "python" / "simpler" / "comm_provider_control.py"
+        assert canonical.is_file()
+        assert not delegated.exists()
+        tree = ast.parse(canonical.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and "comm_provider_control" in node.module:
-                raise AssertionError("W5a control module must not import comm_provider_control")
+            if isinstance(node, ast.ImportFrom) and node.module and "comm_delegated_region_control" in node.module:
+                raise AssertionError("canonical control module must not import the transition path")
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    assert "comm_provider_control" not in alias.name
+                    assert "comm_delegated_region_control" not in alias.name
 
     def test_compatibility_entry_uses_unified_materializer(self):
         tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
@@ -1027,7 +1029,7 @@ class TestW5aPhaseAIntegration:
         assert callable(Worker._dispatch_delegated_allocate)
         assert callable(Worker._dispatch_delegated_release)
 
-    def test_w5a_runtime_helpers_do_not_call_old_codec(self):
+    def test_runtime_helpers_do_not_call_retired_region_handlers(self):
         tree = ast.parse(_WORKER_PY.read_text(encoding="utf-8"))
         names = {
             "_forward_delegated_region",

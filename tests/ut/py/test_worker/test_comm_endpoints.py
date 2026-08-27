@@ -17,12 +17,27 @@ from simpler.buffer import _RESOLVERS
 from simpler.buffer import BackendKind as BufferBackendKind
 from simpler.worker import RemoteWorkerSpec, Worker, _Lifecycle
 
-from tests.ut.py.test_worker.w5a_migration_baseline import (
-    FROZEN_ADAPTER_KIND_LE_U32,
-    FROZEN_ADAPTER_KIND_U32,
-    FROZEN_ADAPTER_PROFILE_LE_U32,
-    FROZEN_ADAPTER_PROFILE_U32,
-)
+FROZEN_ADAPTER_KIND_U32 = {
+    None: 0,
+    "DIRECT_MAP": 1,
+    "DEVICE_PEER": 2,
+    "OWNER_DELEGATED_COPY": 3,
+    "EXPLICIT_TRANSFER": 4,
+    "COLLECTIVE": 5,
+}
+FROZEN_ADAPTER_PROFILE_U32 = {
+    None: 0,
+    "HOST_SVM_MAP": 1,
+    "HOST_VMM_COPY": 2,
+    "DEVICE_VMM_PEER_IMPORT": 3,
+    "DEVICE_FABRIC_V2_PEER_IMPORT": 4,
+    "HOST_SHM_MAP": 5,
+    "REMOTE_COPY": 6,
+}
+FROZEN_ADAPTER_KIND_LE_U32 = {name: value.to_bytes(4, "little") for name, value in FROZEN_ADAPTER_KIND_U32.items()}
+FROZEN_ADAPTER_PROFILE_LE_U32 = {
+    name: value.to_bytes(4, "little") for name, value in FROZEN_ADAPTER_PROFILE_U32.items()
+}
 
 
 def _ready(worker: Worker) -> Worker:

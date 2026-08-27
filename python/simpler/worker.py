@@ -146,23 +146,6 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
-from .comm_delegated_region_control import (
-    RELEASE_REPLY_BYTES,
-    REQUEST_HEADER_BYTES,
-    DelegatedAllocateReply,
-    DelegatedAllocateReplyTag,
-    DelegatedReleaseReply,
-    DelegatedReleaseReplyTag,
-    DelegatedReleaseRequest,
-    ProviderTransactionTable,
-    _hop_staging_copy,
-    _inspect_delegated_route,
-    encode_request,
-    handle_terminal_delegated_region,
-    parse_reply,
-    parse_request,
-    publish_reply,
-)
 from .comm_endpoints import (
     DEVICE_AICORE,
     DEVICE_AICPU,
@@ -201,11 +184,21 @@ from .comm_provider import (
     VmmShareableHandleImport,
 )
 from .comm_provider_control import (
-    _close_attached_control_shm,
-    _release_exported_view,
-    _require_shm_buf,
-    handle_ctrl_region_allocate,
-    handle_ctrl_region_release,
+    RELEASE_REPLY_BYTES,
+    REQUEST_HEADER_BYTES,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedReleaseReply,
+    DelegatedReleaseReplyTag,
+    DelegatedReleaseRequest,
+    ProviderTransactionTable,
+    _hop_staging_copy,
+    _inspect_delegated_route,
+    encode_request,
+    handle_terminal_delegated_region,
+    parse_reply,
+    parse_request,
+    publish_reply,
 )
 from .comm_region import (
     MaterializationContext,
@@ -623,9 +616,7 @@ _CTRL_OP_NAMES = {
     _CTRL_IMPORT_RELEASE: "import_release",
 }
 
-
-_CTRL_REGION_ALLOCATE = 16
-_CTRL_REGION_RELEASE = 17
+# 16 and 17 are unused retired control-command numbers and must not be reassigned.
 _CTRL_COMMITTED_DEVICE_MEMORY = 18
 # L4-to-local-L3 envelope for the Global CommDomain control protocol. The
 # enclosed command uses remote_l3_protocol.ControlName; values 18-23 belong to
@@ -2402,46 +2393,6 @@ class _L2GlobalDomainStore:
     domains: dict[int, _L2GlobalDomain] = field(default_factory=dict)
 
 
-def _handle_ctrl_region_allocate(buf: memoryview, store: ProviderRegionStore) -> None:
-    request_shm_name = _read_shm_name(buf, _OFF_ARGS)
-    reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
-    req_shm = SharedMemory(name=request_shm_name)
-    reply_shm = SharedMemory(name=reply_shm_name)
-    req_buf = _require_shm_buf(req_shm)
-    reply_buf = _require_shm_buf(reply_shm)
-    pending: BaseException | None = None
-    try:
-        handle_ctrl_region_allocate(req_buf, reply_buf, store)
-    except BaseException as exc:
-        pending = exc
-        raise
-    finally:
-        _release_exported_view(req_buf)
-        _release_exported_view(reply_buf)
-        _close_attached_control_shm(req_shm, pending)
-        _close_attached_control_shm(reply_shm, pending)
-
-
-def _handle_ctrl_region_release(buf: memoryview, store: ProviderRegionStore) -> None:
-    request_shm_name = _read_shm_name(buf, _OFF_ARGS)
-    reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
-    req_shm = SharedMemory(name=request_shm_name)
-    reply_shm = SharedMemory(name=reply_shm_name)
-    req_buf = _require_shm_buf(req_shm)
-    reply_buf = _require_shm_buf(reply_shm)
-    pending: BaseException | None = None
-    try:
-        handle_ctrl_region_release(req_buf, reply_buf, store)
-    except BaseException as exc:
-        pending = exc
-        raise
-    finally:
-        _release_exported_view(req_buf)
-        _release_exported_view(reply_buf)
-        _close_attached_control_shm(req_shm, pending)
-        _close_attached_control_shm(reply_shm, pending)
-
-
 def _open_ctrl_payload(buf: memoryview, *, what: str) -> tuple[SharedMemory, memoryview, int]:
     payload_size = int(struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0])
     if payload_size <= 0:
@@ -3046,10 +2997,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_release_domain(cw, buf)
             elif sub_cmd == _CTRL_COMM_INIT:
                 _handle_ctrl_comm_init(cw, buf)
-            elif sub_cmd == _CTRL_REGION_ALLOCATE:
-                _handle_ctrl_region_allocate(buf, provider_region_store)
-            elif sub_cmd == _CTRL_REGION_RELEASE:
-                _handle_ctrl_region_release(buf, provider_region_store)
             elif sub_cmd == _CTRL_DELEGATED_REGION:
                 _handle_ctrl_delegated_region_terminal(buf, provider_transaction_table, provider_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:

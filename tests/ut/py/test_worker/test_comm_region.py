@@ -466,7 +466,8 @@ class _FakeNativeWorker:
         self._last_resource_id = 42
 
     def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
-        from simpler.comm_delegated_region_control import (
+        from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus, RegionAllocationError
+        from simpler.comm_provider_control import (
             DelegatedAllocateReply,
             DelegatedAllocateReplyTag,
             DelegatedRegionOperation,
@@ -476,7 +477,6 @@ class _FakeNativeWorker:
             parse_request,
             publish_reply,
         )
-        from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus, RegionAllocationError
         from simpler.worker import _CTRL_DELEGATED_REGION
 
         assert int(sub_cmd) == _CTRL_DELEGATED_REGION
@@ -931,8 +931,8 @@ def test_second_import_failure_closes_first_lease_and_poisons(region_worker):
 
 
 def _overlap_allocated_counter_view(staged: bytearray) -> None:
-    from simpler.comm_delegated_region_control import ALLOCATE_COUNTER_VIEW_OFFSET
     from simpler.comm_provider import RegionPartKind
+    from simpler.comm_provider_control import ALLOCATE_COUNTER_VIEW_OFFSET
 
     struct.pack_into("<IIQQ", staged, ALLOCATE_COUNTER_VIEW_OFFSET, int(RegionPartKind.COUNTER), 0, 0, 128)
 
@@ -1497,7 +1497,7 @@ def test_compatibility_create_uses_projection_result_not_a_fabricated_spec(monke
     captured: dict[str, Any] = {}
 
     def payload(_worker_type, worker_id, sub_cmd, staged, _timeout):
-        from simpler.comm_delegated_region_control import (
+        from simpler.comm_provider_control import (
             DelegatedAllocateReply,
             DelegatedAllocateReplyTag,
             DelegatedRegionOperation,
@@ -1556,7 +1556,7 @@ class _StoreControlMailbox:
         fail_after_allocate: Optional[BaseException] = None,
         reply_mode: str = "handler",
     ) -> None:
-        from simpler.comm_delegated_region_control import ProviderTransactionTable
+        from simpler.comm_provider_control import ProviderTransactionTable
 
         self.store = store
         self.table = ProviderTransactionTable()
@@ -1568,7 +1568,7 @@ class _StoreControlMailbox:
         self._reply_mode = reply_mode
 
     def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
-        from simpler.comm_delegated_region_control import (
+        from simpler.comm_provider_control import (
             DelegatedRegionOperation,
             handle_terminal_delegated_region,
             parse_reply,
@@ -1955,7 +1955,6 @@ def test_delegated_shape_refuses_aicore_without_dispatch():
 
 
 def _posix_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
-    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
     from simpler.comm_provider import (
         PosixShmImport,
         RegionAllocationResult,
@@ -1964,6 +1963,7 @@ def _posix_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes
         RegionPartKind,
         RegionPartLocalView,
     )
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
 
     result = RegionAllocationResult(
         provider_resource_id=11,
@@ -2001,7 +2001,6 @@ class _TestDelegatedImportFailure(BaseException):
 
 
 def _posix_inconsistent_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
-    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
     from simpler.comm_provider import (
         PosixShmImport,
         RegionAllocationResult,
@@ -2010,6 +2009,7 @@ def _posix_inconsistent_allocated_reply(session: bytes, transaction_id: int, *, 
         RegionPartKind,
         RegionPartLocalView,
     )
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
 
     result = RegionAllocationResult(
         provider_resource_id=11,
@@ -2043,7 +2043,7 @@ def _posix_inconsistent_allocated_reply(session: bytes, transaction_id: int, *, 
 
 
 def _backend_failure_reply(session: bytes, transaction_id: int):
-    from simpler.comm_delegated_region_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
 
     return encode_reply(
         DelegatedAllocateReply(
@@ -2071,8 +2071,8 @@ def _install_delegated_dispatch(
     import_error: Optional[BaseException] = None,
     reply_factory=None,
 ) -> None:
-    from simpler.comm_delegated_region_control import parse_request
     from simpler.comm_provider import PosixShmImport
+    from simpler.comm_provider_control import parse_request
 
     close_calls = close_calls if close_calls is not None else []
     import_calls = import_calls if import_calls is not None else []
@@ -2125,7 +2125,7 @@ def test_l3_and_l4_plans_use_the_same_delegated_materializer_core():
     assert l4_instance.state is RegionInstanceState.LIVE
     assert l4_instance._delegated_provider_path == b"L4/L3[0]/L2[0]"
     assert len(l4_dispatches) == 1
-    from simpler.comm_delegated_region_control import parse_request
+    from simpler.comm_provider_control import parse_request
 
     l3_req = parse_request(l3_dispatches[0]).decode_terminal()
     l4_req = parse_request(l4_dispatches[0]).decode_terminal()

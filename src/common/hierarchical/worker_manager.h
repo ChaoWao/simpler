@@ -213,8 +213,7 @@ static constexpr uint64_t CTRL_RELEASE_DOMAIN = 8;
 static constexpr uint64_t CTRL_COMM_INIT = 9;
 static constexpr uint64_t CTRL_PY_REGISTER = 10;
 static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
-static constexpr uint64_t CTRL_REGION_ALLOCATE = 16;
-static constexpr uint64_t CTRL_REGION_RELEASE = 17;
+// 16 and 17 are unused retired control-command numbers and must not be reassigned.
 // Query a chip child's MemoryAllocator-committed HBM (bytes). The child writes
 // the selected chip's value to CTRL_OFF_RESULT.
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
@@ -420,8 +419,6 @@ public:
     virtual void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name);
     virtual void control_release_domain(const char *request_shm_name);
     virtual void control_comm_init(const char *request_shm_name);
-    virtual void control_region_allocate(const char *request_shm_name, const char *reply_shm_name);
-    virtual void control_region_release(const char *request_shm_name, const char *reply_shm_name);
 };
 
 class LocalMailboxEndpoint : public WorkerEndpoint {
@@ -482,8 +479,6 @@ public:
     void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name) override;
     void control_release_domain(const char *request_shm_name) override;
     void control_comm_init(const char *request_shm_name) override;
-    void control_region_allocate(const char *request_shm_name, const char *reply_shm_name) override;
-    void control_region_release(const char *request_shm_name, const char *reply_shm_name) override;
 
 private:
     WorkerEndpointCaps caps_;
@@ -659,8 +654,6 @@ public:
     // Lazy comm_init driver — payload shm carries (rank, nranks, rootinfo_path).
     // Caller dispatches in parallel to every chip; child runs cw.comm_init.
     void control_comm_init(const char *request_shm_name);
-    void control_region_allocate(const char *request_shm_name, const char *reply_shm_name);
-    void control_region_release(const char *request_shm_name, const char *reply_shm_name);
 
 private:
     enum class SubmitDispatchResult : uint8_t {
@@ -759,8 +752,6 @@ public:
     void control_alloc_domain(int worker_id, const char *request_shm_name, const char *reply_shm_name);
     void control_release_domain(int worker_id, const char *request_shm_name);
     void control_comm_init(int worker_id, const char *request_shm_name);
-    void control_region_allocate(int worker_id, const char *request_shm_name, const char *reply_shm_name);
-    void control_region_release(int worker_id, const char *request_shm_name, const char *reply_shm_name);
     ControlResult
     control_digest_only(WorkerType type, int worker_id, uint64_t sub_cmd, const uint8_t *digest, double timeout_s);
     std::vector<uint8_t> control_payload(

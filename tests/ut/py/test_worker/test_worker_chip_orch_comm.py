@@ -29,27 +29,15 @@ from simpler import worker as worker_module
 from simpler.buffer import BackendKind, mint_owner_instance_id, wrap_fork_inherited
 from simpler.comm_provider import (
     PosixShmImport,
-    ProviderRegionStore,
     ProviderReleaseResult,
     ProviderReleaseStatus,
     RegionAllocationResult,
     RegionControlError,
-    RegionControlErrorKind,
     RegionExportDescriptor,
     RegionPartExportDescriptor,
     RegionPartKind,
     RegionPartLocalView,
     VmmShareableHandleImport,
-)
-from simpler.comm_provider_control import (
-    ALLOCATE_REPLY_BYTES,
-    ALLOCATE_REQUEST_BYTES,
-    RELEASE_REQUEST_BYTES,
-    AllocateReplyTag,
-    decode_allocate_reply,
-    decode_release_reply,
-    encode_allocate_request,
-    encode_release_request,
 )
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType
@@ -177,7 +165,7 @@ class _FakeDirectCWorker:
         return None
 
     def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
-        from simpler.comm_delegated_region_control import (
+        from simpler.comm_provider_control import (
             DelegatedAllocateReply,
             DelegatedAllocateReplyTag,
             DelegatedRegionOperation,
@@ -287,13 +275,6 @@ class _EndpointFailingOrch:
 
     def _release_run(self, run_id: int) -> None:
         assert run_id == 1
-
-
-def _write_ctrl_shm_name(buf: memoryview, offset: int, name: str) -> None:
-    encoded = name.encode("utf-8")
-    assert len(encoded) < worker_module._CTRL_SHM_NAME_BYTES
-    buf[offset : offset + worker_module._CTRL_SHM_NAME_BYTES] = b"\x00" * worker_module._CTRL_SHM_NAME_BYTES
-    buf[offset : offset + len(encoded)] = encoded
 
 
 def _make_started_sim_worker() -> tuple[Worker, SharedMemory, _FakeDirectCWorker]:
@@ -1187,194 +1168,6 @@ def test_native_mapping_cleanup_errors_are_keyed_by_owner_token():
     assert _task_interface_ext._worker_host_mapped_region_take_cleanup_error(owner_token) == ""
 
 
-def test_region_allocate_handler_commits_store_success_into_reply_shm():
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _allocation_spec, _sim_context
-
-    req_shm = SharedMemory(create=True, size=ALLOCATE_REQUEST_BYTES)
-    reply_shm = SharedMemory(create=True, size=ALLOCATE_REPLY_BYTES)
-    req_buf = cast(memoryview, req_shm.buf)
-    reply_buf = cast(memoryview, reply_shm.buf)
-    ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
-    ctrl_buf = memoryview(ctrl_storage)
-    try:
-        encode_allocate_request(req_buf, _allocation_spec())
-        _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
-        _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-        worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
-        tag, result, payload_view, counter_view, error = decode_allocate_reply(reply_buf)
-        assert tag is AllocateReplyTag.SUCCESS
-        assert error is None
-        assert result is not None and result.provider_resource_id == 1
-        assert payload_view is not None and counter_view is not None
-        released = store.release(result.provider_resource_id)
-        assert released.status is ProviderReleaseStatus.RELEASED
-    finally:
-        ctrl_buf.release()
-        req_buf.release()
-        reply_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
-def test_region_allocate_handler_writes_request_error_for_bad_magic():
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
-
-    req_shm = SharedMemory(create=True, size=ALLOCATE_REQUEST_BYTES)
-    reply_shm = SharedMemory(create=True, size=ALLOCATE_REPLY_BYTES)
-    req_buf = cast(memoryview, req_shm.buf)
-    reply_buf = cast(memoryview, reply_shm.buf)
-    ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
-    ctrl_buf = memoryview(ctrl_storage)
-    try:
-        req_buf[:ALLOCATE_REQUEST_BYTES] = b"\x00" * ALLOCATE_REQUEST_BYTES
-        struct.pack_into("<QI", req_buf, 0, 0xDEAD, ALLOCATE_REQUEST_BYTES)
-        _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
-        _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-        worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
-        tag, result, _payload, _counter, error = decode_allocate_reply(reply_buf)
-        assert tag is AllocateReplyTag.REQUEST_ERROR
-        assert result is None
-        assert isinstance(error, RegionControlError)
-        assert error.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
-    finally:
-        ctrl_buf.release()
-        req_buf.release()
-        reply_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
-def _page_padded_region_ctrl_pair():
-    req_shm = SharedMemory(create=True, size=4096)
-    reply_shm = SharedMemory(create=True, size=4096)
-    ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
-    ctrl_buf = memoryview(ctrl_storage)
-    _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
-    _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
-    return req_shm, reply_shm, ctrl_buf
-
-
-@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-def test_region_allocate_handler_page_padded_request_error_closes_without_buffer_error():
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
-
-    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
-    try:
-        req_buf = cast(memoryview, req_shm.buf)
-        req_buf[:ALLOCATE_REQUEST_BYTES] = b"\x00" * ALLOCATE_REQUEST_BYTES
-        struct.pack_into("<QI", req_buf, 0, 0xDEAD, ALLOCATE_REQUEST_BYTES)
-        req_buf.release()
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-        worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
-        reply_buf = cast(memoryview, reply_shm.buf)
-        try:
-            tag, result, _payload, _counter, error = decode_allocate_reply(reply_buf)
-        finally:
-            reply_buf.release()
-        assert tag is AllocateReplyTag.REQUEST_ERROR
-        assert result is None
-        assert isinstance(error, RegionControlError)
-        assert error.kind is RegionControlErrorKind.BAD_MAGIC_VERSION
-    finally:
-        ctrl_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
-@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-def test_region_allocate_handler_preserves_store_lifecycle_over_close_buffer_error(monkeypatch):
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _allocation_spec, _sim_context
-
-    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
-    try:
-        req_buf = cast(memoryview, req_shm.buf)
-        encode_allocate_request(req_buf, _allocation_spec())
-        req_buf.release()
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-
-        def _closed(_spec):
-            raise RegionControlError(RegionControlErrorKind.STORE_LIFECYCLE, "store is not OPEN")
-
-        monkeypatch.setattr(store, "allocate_and_export", _closed)
-        with pytest.raises(RegionControlError) as exc_info:
-            worker_module._handle_ctrl_region_allocate(ctrl_buf, store)
-        assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
-        attached_req = SharedMemory(name=req_shm.name)
-        attached_req.close()
-        attached_reply = SharedMemory(name=reply_shm.name)
-        attached_reply.close()
-    finally:
-        ctrl_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
-@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-def test_region_release_handler_page_padded_request_error_closes_without_buffer_error():
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
-
-    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
-    try:
-        req_buf = cast(memoryview, req_shm.buf)
-        req_buf[:RELEASE_REQUEST_BYTES] = b"\x00" * RELEASE_REQUEST_BYTES
-        req_buf.release()
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-        worker_module._handle_ctrl_region_release(ctrl_buf, store)
-        reply_buf = cast(memoryview, reply_shm.buf)
-        try:
-            decoded = decode_release_reply(reply_buf)
-        finally:
-            reply_buf.release()
-        assert isinstance(decoded, RegionControlError)
-        assert decoded.kind is RegionControlErrorKind.INVALID_FIELD_VALUE
-    finally:
-        ctrl_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
-@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-def test_region_release_handler_preserves_backend_failure_over_close_buffer_error(monkeypatch):
-    from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
-
-    req_shm, reply_shm, ctrl_buf = _page_padded_region_ctrl_pair()
-    try:
-        req_buf = cast(memoryview, req_shm.buf)
-        encode_release_request(req_buf, 4)
-        req_buf.release()
-        store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
-
-        def _injected(_resource_id):
-            raise RegionControlError(RegionControlErrorKind.BACKEND_FAILURE, "injected")
-
-        monkeypatch.setattr(store, "release", _injected)
-        with pytest.raises(RegionControlError) as exc_info:
-            worker_module._handle_ctrl_region_release(ctrl_buf, store)
-        assert exc_info.value.kind is RegionControlErrorKind.BACKEND_FAILURE
-        attached_req = SharedMemory(name=req_shm.name)
-        attached_req.close()
-        attached_reply = SharedMemory(name=reply_shm.name)
-        attached_reply.close()
-    finally:
-        ctrl_buf.release()
-        req_shm.close()
-        req_shm.unlink()
-        reply_shm.close()
-        reply_shm.unlink()
-
-
 def test_worker_host_mapped_counter_wait_releases_gil_for_python_notifier():
     shm = SharedMemory(create=True, size=64)
     handle = 0
@@ -1836,7 +1629,7 @@ def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(mo
     original_payload = fake_c_worker.control_payload
 
     def payload(worker_type, worker_id, sub_cmd, request, timeout):
-        from simpler.comm_delegated_region_control import DelegatedRegionOperation, parse_request
+        from simpler.comm_provider_control import DelegatedRegionOperation, parse_request
 
         envelope = parse_request(request)
         if envelope.operation is DelegatedRegionOperation.DELEGATED_RELEASE:

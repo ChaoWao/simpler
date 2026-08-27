@@ -79,7 +79,7 @@ from simpler.global_comm_domain import (
     _adapter_profile_id as _domain_adapter_profile_id,
 )
 
-from tests.ut.py.test_worker.w5a_migration_baseline import (
+from tests.ut.py.test_worker.test_comm_endpoints import (
     FROZEN_ADAPTER_KIND_LE_U32,
     FROZEN_ADAPTER_KIND_U32,
     FROZEN_ADAPTER_PROFILE_LE_U32,

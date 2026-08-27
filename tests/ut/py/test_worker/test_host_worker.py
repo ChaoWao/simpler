@@ -72,7 +72,8 @@ from simpler.worker_level import WorkerLevel
 
 
 def _native_control_payload(recorder, worker_id, payload, *, fail=None):
-    from simpler.comm_delegated_region_control import (
+    from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus
+    from simpler.comm_provider_control import (
         DelegatedRegionOperation,
         DelegatedReleaseReply,
         DelegatedReleaseReplyTag,
@@ -80,7 +81,6 @@ def _native_control_payload(recorder, worker_id, payload, *, fail=None):
         parse_request,
         publish_reply,
     )
-    from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus
 
     staged = bytearray(payload)
     envelope = parse_request(staged)
@@ -7362,18 +7362,18 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _failed(_worker_type, _worker_id, _sub_cmd, payload, _timeout):
-            from simpler.comm_delegated_region_control import (
-                DelegatedAllocateReply,
-                DelegatedAllocateReplyTag,
-                encode_reply,
-                parse_request,
-                publish_reply,
-            )
             from simpler.comm_provider import (
                 RegionAllocationError,
                 RegionControlErrorKind,
                 RegionOperationKind,
                 RegionPartKind,
+            )
+            from simpler.comm_provider_control import (
+                DelegatedAllocateReply,
+                DelegatedAllocateReplyTag,
+                encode_reply,
+                parse_request,
+                publish_reply,
             )
 
             staged = bytearray(payload)

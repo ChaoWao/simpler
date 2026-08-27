@@ -863,16 +863,6 @@ inline void bind_worker(nb::module_ &m) {
             "control_comm_init", &Worker::control_comm_init, nb::arg("worker_id"), nb::arg("request_shm_name"),
             nb::call_guard<nb::gil_scoped_release>(),
             "Drive one NEXT_LEVEL chip child through CTRL_COMM_INIT (lazy base comm init)."
-        )
-        .def(
-            "control_region_allocate", &Worker::control_region_allocate, nb::arg("worker_id"),
-            nb::arg("request_shm_name"), nb::arg("reply_shm_name"), nb::call_guard<nb::gil_scoped_release>(),
-            "Drive one NEXT_LEVEL chip child through CTRL_REGION_ALLOCATE."
-        )
-        .def(
-            "control_region_release", &Worker::control_region_release, nb::arg("worker_id"),
-            nb::arg("request_shm_name"), nb::arg("reply_shm_name"), nb::call_guard<nb::gil_scoped_release>(),
-            "Drive one NEXT_LEVEL chip child through CTRL_REGION_RELEASE."
         );
 
     m.attr("DEFAULT_HEAP_RING_SIZE") = static_cast<uint64_t>(DEFAULT_HEAP_RING_SIZE);

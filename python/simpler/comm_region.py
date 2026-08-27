@@ -29,15 +29,6 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 
 from .buffer import AddressSpace, Buffer
-from .comm_delegated_region_control import (
-    ALLOCATE_REPLY_BYTES,
-    ALLOCATE_REQUEST_HARD_CEILING,
-    DelegatedAllocateReply,
-    DelegatedAllocateReplyTag,
-    DelegatedAllocateRequest,
-    encode_request,
-    parse_reply,
-)
 from .comm_endpoints import (
     DEVICE_AICPU,
     HOST_CPU,
@@ -70,6 +61,15 @@ from .comm_provider import (
     RegionPartLocalView,
     VmmShareableHandleImport,
     validate_independent_local_views,
+)
+from .comm_provider_control import (
+    ALLOCATE_REPLY_BYTES,
+    ALLOCATE_REQUEST_HARD_CEILING,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedAllocateRequest,
+    encode_request,
+    parse_reply,
 )
 
 _GENERATION_COUNTER = itertools.count(1)

@@ -19,16 +19,6 @@ import pytest
 from simpler import comm_region
 from simpler import worker as worker_module
 from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
-from simpler.comm_delegated_region_control import (
-    DelegatedAllocateReply,
-    DelegatedAllocateReplyTag,
-    DelegatedRegionOperation,
-    DelegatedReleaseReply,
-    DelegatedReleaseReplyTag,
-    encode_reply,
-    parse_request,
-    publish_reply,
-)
 from simpler.comm_provider import (
     PosixShmImport,
     ProviderReleaseResult,
@@ -38,6 +28,16 @@ from simpler.comm_provider import (
     RegionPartExportDescriptor,
     RegionPartKind,
     RegionPartLocalView,
+)
+from simpler.comm_provider_control import (
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedRegionOperation,
+    DelegatedReleaseReply,
+    DelegatedReleaseReplyTag,
+    encode_reply,
+    parse_request,
+    publish_reply,
 )
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, get_element_size
