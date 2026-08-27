@@ -29,7 +29,7 @@ from _task_interface import DataType
 from simpler.buffer import mint_owner_instance_id, wrap_device_malloc
 from simpler.callable_identity import CallableHandle
 from simpler.task_interface import CallConfig, TaskArgs, TaskHandle
-from simpler.worker import RunHandle, Worker, _CloseAttempt, _Lifecycle
+from simpler.worker import RunHandle, Worker, _CloseAttempt, _Lifecycle, attach_exception_note
 
 from tests.st.worker.comm_region.recursive_single_owner._helpers import close_owned_workers
 
@@ -970,6 +970,14 @@ class TestW5aSetupCleanup:
         with pytest.raises(RuntimeError, match="init failed"):
             raise primary
         assert primary is not close_error
+
+    def test_attach_exception_note_without_add_note(self):
+        class _LegacyError(RuntimeError):
+            add_note = None
+
+        primary = _LegacyError("init failed")
+        attach_exception_note(primary, "RuntimeError: close failed")
+        assert getattr(primary, "__notes__", []) == ["RuntimeError: close failed"]
 
 
 class TestW5aPhaseAIntegration:

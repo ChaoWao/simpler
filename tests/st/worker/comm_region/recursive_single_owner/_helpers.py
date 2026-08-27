@@ -23,7 +23,7 @@ from simpler import comm_provider
 from simpler.comm_provider import ProviderRegionStore, RegionPartKind
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CallConfig, ChipCallable, CoreCallable, DataType, TaskArgs, scalar_to_uint64
-from simpler.worker import Worker
+from simpler.worker import Worker, attach_exception_note
 from simpler.worker_chip_orch_comm import NotifyOp, WaitCmp
 
 from simpler_setup.elf_parser import extract_text_section
@@ -389,14 +389,14 @@ def close_owned_workers(primary: BaseException | None, *workers: Any) -> None:
         except BaseException as cleanup:
             if primary is not None:
                 try:
-                    primary.add_note(f"{type(cleanup).__name__}: {cleanup}")
+                    attach_exception_note(primary, f"{type(cleanup).__name__}: {cleanup}")
                 except BaseException:
                     pass
             elif first_cleanup is None:
                 first_cleanup = cleanup
             else:
                 try:
-                    first_cleanup.add_note(f"{type(cleanup).__name__}: {cleanup}")
+                    attach_exception_note(first_cleanup, f"{type(cleanup).__name__}: {cleanup}")
                 except BaseException:
                     pass
     if primary is None and first_cleanup is not None:

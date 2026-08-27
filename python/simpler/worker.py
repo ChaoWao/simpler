@@ -4471,6 +4471,22 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
 # ---------------------------------------------------------------------------
 
 
+def attach_exception_note(error: BaseException, note: str) -> None:
+    """Mirror ``BaseException.add_note`` onto ``error.__notes__``.
+
+    Interpreters without ``add_note`` still expose the list on ``__notes__``.
+    """
+    adder = getattr(error, "add_note", None)
+    if callable(adder):
+        adder(note)
+        return
+    notes = getattr(error, "__notes__", None)
+    if isinstance(notes, list):
+        notes.append(note)
+        return
+    object.__setattr__(error, "__notes__", [note])
+
+
 class Worker:
     """Unified worker for all hierarchy levels.
 
@@ -8691,7 +8707,10 @@ class Worker:
             if primary_error is None:
                 raise
             try:
-                primary_error.add_note(f"delegated-fatal teardown failed: {type(close_error).__name__}: {close_error}")
+                attach_exception_note(
+                    primary_error,
+                    f"delegated-fatal teardown failed: {type(close_error).__name__}: {close_error}",
+                )
             except BaseException:
                 pass
 

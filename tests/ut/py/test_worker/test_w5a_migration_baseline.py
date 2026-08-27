@@ -258,6 +258,9 @@ def test_global_comm_domain_adapter_numeric_bytes_match_frozen_baseline():
         value = FROZEN_ADAPTER_KIND_U32[kind.name]
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_KIND_LE_U32[kind.name]
     for profile in AdapterProfile:
+        if profile not in _ADAPTER_PROFILE_IDS:
+            assert profile.name not in FROZEN_ADAPTER_PROFILE_U32
+            continue
         value = FROZEN_ADAPTER_PROFILE_U32[profile.name]
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]
 

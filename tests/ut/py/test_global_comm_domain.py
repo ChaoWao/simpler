@@ -354,7 +354,16 @@ def test_adapter_numeric_authority_is_shared_with_comm_endpoints():
         assert _domain_adapter_kind_id(kind) == value
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_KIND_LE_U32[kind.name]
     for profile in AdapterProfile:
+        numbered = _ADAPTER_PROFILE_IDS.get(profile)
+        if numbered is None:
+            assert profile.name not in FROZEN_ADAPTER_PROFILE_U32
+            with pytest.raises(ValueError, match="adapter_profile is unknown"):
+                _adapter_profile_id(profile)
+            with pytest.raises(ValueError, match="global domain attachment adapter_profile is unknown"):
+                _domain_adapter_profile_id(profile)
+            continue
         value = FROZEN_ADAPTER_PROFILE_U32[profile.name]
+        assert numbered == value
         assert _adapter_profile_id(profile) == value
         assert _domain_adapter_profile_id(profile) == value
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]

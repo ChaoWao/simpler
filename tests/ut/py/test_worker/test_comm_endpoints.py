@@ -361,7 +361,14 @@ def test_adapter_numeric_ids_are_frozen_little_endian_u32_not_enum_order():
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_KIND_LE_U32[kind.name]
         assert ce._adapter_kind_from_id(value) is kind
     for profile in ce.AdapterProfile:
+        numbered = ce._ADAPTER_PROFILE_IDS.get(profile)
+        if numbered is None:
+            assert profile.name not in FROZEN_ADAPTER_PROFILE_U32
+            with pytest.raises(ValueError, match="adapter_profile is unknown"):
+                ce._adapter_profile_id(profile)
+            continue
         value = FROZEN_ADAPTER_PROFILE_U32[profile.name]
+        assert numbered == value
         assert ce._adapter_profile_id(profile) == value
         assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]
         assert ce._adapter_profile_from_id(value) is profile
