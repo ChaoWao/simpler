@@ -112,7 +112,7 @@ register_pto_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsy
     ::pto::comm::sdma::SdmaSession sdma_session;
     ::pto::comm::sdma::detail::LoadSdmaSession(session, sdma_session);
     if (!sdma_session.valid || sdma_session.runtimeCtx.postDoneBase == nullptr) {
-        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return;
     }
 

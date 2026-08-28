@@ -84,17 +84,10 @@ inline void sdma_event_record_retire_op(CompletionCondition &cond) {
     retire_sdma_post_done_record(cond.addr, cond.backend_cookie);
 }
 
-inline CompletionPollResult sdma_post_done_poll_op(const CompletionCondition &cond) {
-    return poll_sdma_post_done(cond.addr, cond.backend_cookie);
-}
-
-inline void sdma_post_done_retire_op(CompletionCondition & /*cond*/) {}
-
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
     static const CompletionBackendOps kOps[] = {
         {counter_poll_op, counter_retire_op},                      // COMPLETION_TYPE_COUNTER = 0
         {sdma_event_record_poll_op, sdma_event_record_retire_op},  // COMPLETION_TYPE_SDMA_EVENT_RECORD = 1
-        {sdma_post_done_poll_op, sdma_post_done_retire_op},        // COMPLETION_TYPE_SDMA_POST_DONE = 2
     };
     constexpr int kOpsCount = static_cast<int>(sizeof(kOps) / sizeof(kOps[0]));
     if (completion_type < 0 || completion_type >= kOpsCount) return nullptr;

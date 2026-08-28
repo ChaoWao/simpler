@@ -19,8 +19,9 @@
    as-is — it already *is* the pinned ISA, so no checkout and no network.
 4. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
    over HTTPS (``--no-checkout`` so the default branch is never materialized)
-   and force-check-out the pin. GitHub is attempted three times; if it cannot
-   provide the complete pinned checkout, fall back to the GitCode mirror.
+   and force-check-out the pin. The configured source is attempted three times;
+   if it cannot provide the complete pinned checkout, fall back to the other
+   known PTO-ISA source.
 4. Verify HEAD exactly matches the pin before returning.
 
 Two deliberate choices:
@@ -63,9 +64,10 @@ _CLONE_RETRY_BACKOFF_S = 2
 
 logger = logging.getLogger(__name__)
 
+_PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/wxwnnzdyd/pto-isa.git"
 _PTO_ISA_GITHUB_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
-_PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+PTO_ISA_CLONE_URL_ENV = "PTO_ISA_CLONE_URL"
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
 
@@ -240,7 +242,13 @@ def get_pto_isa_clone_path() -> Path:
 
 def get_pto_isa_clone_url() -> str:
     """Clone URL for managed PTO-ISA checkouts."""
-    return os.environ.get(PTO_ISA_CLONE_URL_ENV, _PTO_ISA_HTTPS).strip() or _PTO_ISA_HTTPS
+    return os.environ.get(PTO_ISA_CLONE_URL_ENV, _PTO_ISA_GITCODE_HTTPS).strip() or _PTO_ISA_GITCODE_HTTPS
+
+
+def _clone_sources() -> list[str]:
+    """Return distinct PTO-ISA clone sources in preference order."""
+    sources = [get_pto_isa_clone_url(), _PTO_ISA_GITCODE_HTTPS, _PTO_ISA_GITHUB_HTTPS]
+    return list(dict.fromkeys(sources))
 
 
 def get_sibling_pto_isa_checkout_path(clone_path: Optional[Path] = None) -> Path:
@@ -500,9 +508,9 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
 
     Any existing checkout at `target` is removed first, so this always yields a
     clean tree at exactly `commit` — the sync can never be blocked by local
-    modifications in a preexisting (cached/preset) managed checkout. GitHub is
-    tried three times for the complete clone-and-pin operation before GitCode is
-    used as a fallback source.
+    modifications in a preexisting (cached/preset) managed checkout. The
+    configured source is tried three times for the complete clone-and-pin
+    operation before the other known PTO-ISA source is used as a fallback.
     """
     if not _is_git_available():
         if verbose:
@@ -517,20 +525,16 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
         return False
 
     try:
-        if _clone_from_remote(
-            target,
-            commit,
-            _PTO_ISA_GITHUB_HTTPS,
-            attempts=_CLONE_ATTEMPTS,
-            verbose=verbose,
-        ):
-            return True
-
-        logger.warning(
-            f"GitHub could not provide PTO-ISA commit {commit} after {_CLONE_ATTEMPTS} attempts; "
-            f"falling back to {_PTO_ISA_GITCODE_HTTPS}"
-        )
-        return _clone_from_remote(target, commit, _PTO_ISA_GITCODE_HTTPS, attempts=1, verbose=verbose)
+        sources = _clone_sources()
+        for index, remote in enumerate(sources):
+            if _clone_from_remote(target, commit, remote, attempts=_CLONE_ATTEMPTS, verbose=verbose):
+                return True
+            if index + 1 < len(sources):
+                logger.warning(
+                    f"PTO-ISA source {remote} could not provide commit {commit} "
+                    f"after {_CLONE_ATTEMPTS} attempts; trying {sources[index + 1]}"
+                )
+        return False
     except Exception as e:  # noqa: BLE001
         if verbose:
             logger.warning(f"Failed to clone pto-isa: {e}")
@@ -550,14 +554,13 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
         resolved = _ensure_locked(clone_path, required_commit=required_commit, verbose=verbose)
 
     if resolved is None:
-        clone_url = get_pto_isa_clone_url()
         raise OSError(
             f"PTO-ISA not available.\n"
             f"  The managed checkout must live at {clone_path} and match {PROJECT_ROOT / PTO_ISA_PIN_FILE}.\n"
             f"  If auto-clone failed, manually run:\n"
-            f"    git clone {_PTO_ISA_GITHUB_HTTPS} {clone_path}\n"
-            f"  Or use the fallback mirror:\n"
-            f"    git clone {_PTO_ISA_GITCODE_HTTPS} {clone_path}"
+            f"    git clone {get_pto_isa_clone_url()} {clone_path}\n"
+            f"  Or use another known source:\n"
+            f"    git clone {_PTO_ISA_GITHUB_HTTPS} {clone_path}"
         )
     return resolved
 

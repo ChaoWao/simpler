@@ -49,9 +49,6 @@
 #if defined(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE) || defined(SIMPLER_ENABLE_PTO_URMA_WORKSPACE)
 #include "pto/comm/workspace.hpp"
 #endif
-#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-#include "pto/comm/async/urma/urma_workspace_manager.hpp"
-#endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -737,22 +734,29 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
 // aclnnShmemSdmaStarsQuery primitives.
 static void ensure_sdma_workspace(CommHandle h) {
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) return;
-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
-    if (h->sdma_workspace->Init()) {
-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        h->host_ctx.workSpaceSize = 16 * 1024;
-    } else {
-        // SDMA workspace initialization failed - this may occur due to:
-        // 1. Missing ACL symbols in libopapi.so (CANN version compatibility)
-        // 2. Device state issues (e.g., Critical health status)
-        // 3. Resource exhaustion from repeated test runs
-        // The system gracefully degrades to non-SDMA mode when this occurs.
-        h->sdma_workspace.reset();
+    if (h->sdma_workspace.addr != nullptr || h->sdma_workspace.impl != nullptr) return;
+    pto::comm::WorkspaceRequest req{};
+    const auto status = pto::comm::CreateWorkspace(pto::comm::DmaEngine::SDMA, req, &h->sdma_workspace);
+    if (status == pto::comm::WorkspaceStatus::Ok) {
+        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace.addr);
+        h->host_ctx.workSpaceSize = h->sdma_workspace.bytes;
+        return;
     }
     pto::comm::AbandonWorkspace(&h->sdma_workspace);
     h->host_ctx.workSpace = 0;
     h->host_ctx.workSpaceSize = 0;
+#else
+    (void)h;
+#endif
+}
+
+static void reset_base_sdma_workspace(CommHandle h) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    if (h != nullptr) {
+        pto::comm::DestroyWorkspace(&h->sdma_workspace);
+        h->host_ctx.workSpace = 0;
+        h->host_ctx.workSpaceSize = 0;
+    }
 #else
     (void)h;
 #endif
@@ -844,7 +848,7 @@ static bool ensure_base_urma_workspace(CommHandle h) {
 
 static void reset_domain_urma_workspace(DomainAllocation &alloc) {
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    alloc.urma_workspace.reset();
+    pto::comm::DestroyWorkspace(&alloc.urma_workspace);
 #else
     (void)alloc;
 #endif
@@ -852,7 +856,11 @@ static void reset_domain_urma_workspace(DomainAllocation &alloc) {
 
 static void reset_base_urma_workspace(CommHandle h) {
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    h->urma_workspace.reset();
+    if (h != nullptr) {
+        pto::comm::DestroyWorkspace(&h->urma_workspace);
+        h->host_ctx.workSpace = 0;
+        h->host_ctx.workSpaceSize = 0;
+    }
 #else
     (void)h;
 #endif
@@ -1463,6 +1471,7 @@ extern "C" int comm_destroy(CommHandle h) try {
         if (alloc->local_buf) release_own_vmm_window(alloc->local_buf, alloc->own_handle);
     }
     h->domain_allocations.clear();
+    reset_base_sdma_workspace(h);
     reset_base_urma_workspace(h);
     if (h->hccl_comm) {
         HcclResult hret = hccl_comm_destroy(h->hccl_comm);

@@ -65,12 +65,12 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
 
     assert pto_isa._clone(target, PIN_A, verbose=False)
     assert calls == [
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
+        ["clone", "--no-checkout", "https://gitcode.com/wxwnnzdyd/pto-isa.git", str(target)],
         ["checkout", "--detach", "--force", PIN_A],
     ]
 
 
-def test_clone_falls_back_to_gitcode_after_three_github_pin_failures(tmp_path, monkeypatch):
+def test_clone_falls_back_to_github_after_three_gitcode_pin_failures(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
     clone_remotes = []
     land_results = iter([False, False, False, True])
@@ -89,15 +89,15 @@ def test_clone_falls_back_to_gitcode_after_three_github_pin_failures(tmp_path, m
 
     assert pto_isa._clone(target, PIN_A, verbose=False)
     assert clone_remotes == [
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
         "https://github.com/hw-native-sys/pto-isa.git",
-        "https://github.com/hw-native-sys/pto-isa.git",
-        "https://github.com/hw-native-sys/pto-isa.git",
-        "https://gitcode.com/luohuan40/pto-isa.git",
     ]
     assert sleeps == [2, 4]
 
 
-def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path, monkeypatch):
+def test_clone_falls_back_to_github_after_three_gitcode_clone_failures(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
     clone_remotes = []
 
@@ -108,7 +108,7 @@ def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path,
         assert args[:2] == ["clone", "--no-checkout"]
         remote = args[2]
         clone_remotes.append(remote)
-        returncode = 1 if remote == "https://github.com/hw-native-sys/pto-isa.git" else 0
+        returncode = 1 if remote == "https://gitcode.com/wxwnnzdyd/pto-isa.git" else 0
         return subprocess.CompletedProcess(["git", *args], returncode=returncode, stdout="", stderr="unavailable")
 
     monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
@@ -116,10 +116,10 @@ def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path,
 
     assert pto_isa._clone(target, PIN_A, verbose=False)
     assert clone_remotes == [
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
+        "https://gitcode.com/wxwnnzdyd/pto-isa.git",
         "https://github.com/hw-native-sys/pto-isa.git",
-        "https://github.com/hw-native-sys/pto-isa.git",
-        "https://github.com/hw-native-sys/pto-isa.git",
-        "https://gitcode.com/luohuan40/pto-isa.git",
     ]
 
 
