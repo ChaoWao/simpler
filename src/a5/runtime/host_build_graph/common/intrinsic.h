@@ -62,8 +62,8 @@
  *     issue #900 (PR #899 spmd_paged_attention_highperf); the kernel
  *     compiled, ran without error, and produced wrong output. Use
  *     `get_sub_block_id(args)` instead, which reads from the runtime's
- *     `GlobalContext.sub_block_id` that the scheduler initializes per
- *     AIV core in `scheduler_cold_path.cpp::SchedulerContext::init`.
+ *     `GlobalContext.sub_block_id`. Resident graph materialization sets it
+ *     from the selected AIV task subslot before every dispatch publication.
  *
  *   - `get_block_idx()` and `get_block_num()` are not redirected to
  *     simpler's LocalContext either — use the `(args)` variants below
@@ -106,9 +106,9 @@ static constexpr int32_t PAYLOAD_LOCAL_CONTEXT_INDEX = SPMD_LOCAL_CONTEXT_INDEX;
 static constexpr int32_t PAYLOAD_GLOBAL_CONTEXT_INDEX = SPMD_GLOBAL_CONTEXT_INDEX;
 
 /**
- * Per-core global context, stored in DispatchPayload.
- * Initialized once at runtime startup (init_global_context) based on each
- * core's cluster position.  Never modified after initialization.
+ * Per-dispatch global context, stored in DispatchPayload. Resident graph
+ * materialization sets sub_block_id from the selected AIV task subslot; the
+ * legacy scheduler seeds the equivalent per-core value during startup.
  */
 struct GlobalContext {
     // AIV lane within cluster: 0=AIV0(left), 1=AIV1(right).
