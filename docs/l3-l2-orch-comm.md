@@ -134,10 +134,35 @@ checks determine descriptor validity.
 
 ## 3. Control Path
 
-The lifecycle control path carries region create/release commands over the
-existing worker mailbox. Create returns the unchanged six-scalar L2 descriptor
+The lifecycle control path carries one delegated-region control command over the
+existing worker mailbox. The operation — allocate or release — is a field of the
+envelope rather than a separate command number, and request and reply share a
+single staging buffer, so the reply overwrites the request in place and its
+commit tag is written last. Create returns the unchanged six-scalar L2 descriptor
 plus L3 Host-private transport metadata. Release is deferred until submitted L2
 work has drained.
+
+The initiator is any Worker that owns a registry root, so one path serves both an
+L3 providing its own chips and an L4 reaching an L2 through an L3. It plans once
+— topology, provider, backing, layout, and attachments freeze before the first
+hop — and names the provider by canonical endpoint path (`L3/L2[0]`,
+`L4/L3[0]/L2[0]`). Each intermediate hop copies the envelope into a bounded
+staging buffer, requires its own path to be a strict prefix of the provider path,
+forwards the envelope unchanged to the next child, and republishes the reply. It
+creates no region instance and takes no physical ownership. Only the terminal L2
+provider agent keeps a transaction table and calls its region store.
+
+A request is identified by `(session_instance_id, transaction_id)`: the session
+nonce is the initiator Worker's registry identity, and transaction ids are issued
+in increasing order and never reused. An identical repeat replays the provider's
+cached reply instead of allocating again, and a repeat that disagrees on any
+field is refused. Each provider agent also keeps the highest transaction id it
+has admitted per session and refuses anything at or below it without allocating,
+so a request that outlives the eviction of its own record cannot produce a second
+allocation. A transport or identity failure on this path is not confined to one
+region: the initiator latches it as a session-level fatal, admits no further
+delegated work, and tears the Worker down at its next safe boundary. Region
+poison (§8) stays the narrower, per-region outcome for data-plane failures.
 
 Steady-state `payload_write`, `payload_read`, `SIGNAL_NOTIFY`, `SIGNAL_TEST`,
 and `SIGNAL_WAIT` run in the L3 Host against parent-private direct-access
@@ -145,14 +170,14 @@ metadata. The descriptor still contains L2-side payload and counter addresses
 for the L2 AICPU endpoint; L3 Host operations do not dereference descriptor
 addresses.
 
-On onboard platforms, region create allocates one child-owned VMM GM range,
-exports it through a shareable handle, and returns the import metadata to the
-parent. The parent imports that region and closes the mapped VMM import before
-the child frees the physical allocation. The native import remains
-provisionally owned until the Python region is published into its run. An
-interruption during import, wrapper construction, or run publication closes
-the parent mapping and rolls back the child region instead of leaving either
-resource untracked.
+On onboard platforms, region create allocates two independent child-owned VMM GM
+ranges — one for PAYLOAD, one for COUNTER — exports each through its own
+shareable handle, and returns the import metadata to the parent. The parent
+imports both and closes both mapped VMM imports before the child frees the
+physical allocations. The native import remains provisionally owned until the
+Python region is published into its run. An interruption during import, wrapper
+construction, or run publication closes the parent mapping and rolls back the
+child region instead of leaving either resource untracked.
 
 Every native payload, counter, and wait operation holds a lease on that parent
 mapping for the complete GIL-released access. Closing first rejects new leases,

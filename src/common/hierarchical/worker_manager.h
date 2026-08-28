@@ -221,6 +221,9 @@ static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
 // L4-to-local-L3 envelope. Query a chip child's device-wide ACL_HBM_MEM
 // snapshot; the child writes one DeviceMemoryInfo at CTRL_OFF_RESULT.
 static constexpr uint64_t CTRL_DEVICE_MEMORY_INFO = 25;
+// 26 is reserved by the Python delegated-region control. It carries the DRCT
+// envelope on control_payload at every hop of the recursive single-owner
+// region protocol, so no C++ endpoint method claims it.
 
 // Control args occupy the base frame's config-sized region:
 //   offset 16: uint64 arg0 (size for malloc/register; ptr for free)

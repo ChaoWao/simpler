@@ -12,8 +12,8 @@ under architecture-specific `comm_region` or `worker/comm_domain` trees.
 
 Each L3 success case uses `Orchestrator.create_worker_chip_region`. Each L4
 success case uses `Worker._materialize_region_instance`. Both enter the same
-DRCT v1 materializer. Commands 16/17 remain in the tree for old-stack
-regression until the next subtraction.
+DRCT v1 materializer, which is the only region control path in the tree:
+control commands 16 and 17 are retired and their numbers stay unassigned.
 
 ## Contract under test
 
