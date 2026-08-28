@@ -59,8 +59,8 @@
 #include <cstdint>
 
 #include "task_id.h"
-#include "tensormap.h"
-#include "types.h"  // TensorRef
+#include "host_build_graph/tensormap.h"
+#include "host_build_graph/types.h"  // TensorRef
 #include "tensor.h"
 
 // ---------------------------------------------------------------------------

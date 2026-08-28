@@ -33,22 +33,21 @@
 #include <type_traits>
 
 #include "profiling_config.h"
-#include "constants.h"
-#include "runtime_status.h"
+#include "host_build_graph/constants.h"
+#include "host_build_graph/runtime_status.h"
 // NOTE (host_build_graph divergence from tensormap_and_ringbuffer): the
 // dispatch_payload.h include is intentionally dropped here. This header is
-// pulled in by the platform's args_dump.h via a hardcoded
-// "host_build_graph/runtime/runtime_types.h" path, and dispatch_payload.h
-// uses #pragma once (path-keyed), so leaving it in double-defines DispatchPayload
-// against tensormap_and_ringbuffer's copy inside the shared host-dispatcher TU.
+// reached by a path-qualified include, and dispatch_payload.h uses #pragma once
+// (path-keyed), so leaving it in double-defines DispatchPayload against
+// tensormap_and_ringbuffer's copy inside the shared host-dispatcher TU.
 // runtime_types.h never references DispatchPayload itself; consumers that
 // need it include it via runtime.h directly.
 #include "aicore_completion_mailbox.h"
 #include "common/args_dump_task_metadata.h"
 #include "host_build_graph/self_relative_ptr.h"
-#include "submit_types.h"
+#include "host_build_graph/submit_types.h"
 #include "task_id.h"
-#include "types.h"
+#include "host_build_graph/types.h"
 
 // Spin-wait hint for AICPU threads.  On real hardware the AICPU has dedicated
 // ARM A55 cores — no OS yield is needed, so the hint is a no-op.  In simulation
@@ -302,9 +301,10 @@ enum EarlySyncDrainState : uint8_t {
 // it occupies is recorded as a bitmask (staged_core_mask, 1 bit per global
 // core_id); the completion-path release iterates the set bits and rings each
 // core's doorbell from the scheduler's per-core doorbell table. Bounded by the
-// chip's core count (RUNTIME_MAX_WORKER = 72; no two-level pre-dispatch means
+// chip's core count (RUNTIME_MAX_WORKER; no two-level pre-dispatch means
 // gated cores in flight <= core count), NOT by block_num — so a wide SPMD
-// consumer can pre-stage all its idle cores. 2 words = 128 bits >= 72.
+// consumer can pre-stage all its idle cores. Two words cover every
+// architecture's core count, which scheduler_dispatch.cpp static_asserts.
 inline constexpr int EARLY_DISPATCH_CORE_MASK_WORDS = 2;
 
 struct TaskPayload {

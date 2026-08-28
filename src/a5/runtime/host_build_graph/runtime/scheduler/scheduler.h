@@ -40,9 +40,9 @@
 #include "async_wait.h"
 #include "graph_execution.h"
 #include "host_build_graph/task_id_encoding.h"
-#include "task_allocator.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/task_allocator.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 
 #include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
 #if SIMPLER_SCHED_PROFILING

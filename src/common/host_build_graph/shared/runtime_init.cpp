@@ -22,11 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "orchestrator.h"
-#include "runtime_core.h"
-#include "task_allocator.h"
-#include "shared_memory.h"
-#include "tensormap.h"
+#include "host_build_graph/orchestrator.h"
+#include "host_build_graph/runtime_core.h"
+#include "host_build_graph/task_allocator.h"
+#include "host_build_graph/shared_memory.h"
+#include "host_build_graph/tensormap.h"
 #include "scheduler/scheduler.h"
 
 // =============================================================================

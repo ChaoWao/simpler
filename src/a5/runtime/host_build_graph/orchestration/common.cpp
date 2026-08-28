@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include "common.h"
+#include "host_build_graph/common.h"
 
 #ifdef __linux__
 #include <cxxabi.h>

@@ -30,14 +30,14 @@
 #include <memory>
 
 #include "common/chip_swimlane_profiling.h"
-#include "task_allocator.h"
+#include "host_build_graph/task_allocator.h"
 #include "graph_cache.h"
-#include "runtime_types.h"
-#include "submit_types.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/submit_types.h"
 #include "scheduler/scheduler.h"
-#include "shared_memory.h"
-#include "tensormap.h"
-#include "types.h"
+#include "host_build_graph/shared_memory.h"
+#include "host_build_graph/tensormap.h"
+#include "host_build_graph/types.h"
 
 struct GraphHostState;
 

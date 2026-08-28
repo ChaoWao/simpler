@@ -42,10 +42,10 @@
 #include "data_type.h"
 #include "host_build_graph/entry_args.h"  // EntryArgsStorage
 #include "profiling_config.h"
-#include "submit_types.h"
+#include "host_build_graph/submit_types.h"
 #include "task_args.h"
 #include "tensor.h"
-#include "tensor_create_info.h"  // runtime-only TensorCreateInfo + materialization helpers
+#include "host_build_graph/tensor_create_info.h"  // runtime-only TensorCreateInfo + materialization helpers
 
 // TaskAttrs packs the timing tag into a 4-bit field and reports "untagged" as
 // -1, so the tag domain must fit 0..15 and the untagged sentinel must be -1.

@@ -190,7 +190,7 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     int32_t aicpu_allowed_cpu_count;
     // Actual AICPU thread launch count for this run. Host sets from
     // popcount(OCCUPY) via the topology probe. See the matching field in
-    // src/a5/runtime/host_build_graph/runtime/runtime.h for rationale.
+    // src/common/host_build_graph/runtime.h for rationale.
     int32_t aicpu_launch_count;
 
     // kernel binary resolution: kernel_id -> GM function_bin_addr mapping

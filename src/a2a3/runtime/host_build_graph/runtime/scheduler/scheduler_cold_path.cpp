@@ -22,8 +22,8 @@
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
-#include "runtime_core.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_core.h"
+#include "host_build_graph/shared_memory.h"
 #include "runtime.h"
 #include "spin_hint.h"
 

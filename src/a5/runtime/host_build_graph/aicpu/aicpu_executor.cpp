@@ -28,9 +28,9 @@
 #include "spin_hint.h"
 
 // Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
-#include "runtime_core.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_core.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 
 // Performance profiling headers
 #include "aicpu/chip_swimlane_collector_aicpu.h"

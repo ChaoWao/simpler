@@ -17,7 +17,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#include "orchestrator.h"
+#include "host_build_graph/orchestrator.h"
 
 #include <assert.h>
 #include <inttypes.h>
@@ -47,14 +47,14 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_build_graph/dep_gen_host_graph.h"
-#include "dep_compute.h"
+#include "host_build_graph/dep_compute.h"
 #include "graph_execution.h"
 #include "graph_host_state.h"
 #include "host_build_graph/task_id_encoding.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
-#include "tensormap.h"
-#include "types.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
+#include "host_build_graph/tensormap.h"
+#include "host_build_graph/types.h"
 #include "tensor.h"
 
 #if SIMPLER_DFX

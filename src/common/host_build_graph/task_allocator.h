@@ -24,8 +24,8 @@
 #include <inttypes.h>
 #include <type_traits>
 
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 #include "common/unified_log.h"
 
 // =============================================================================

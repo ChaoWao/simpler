@@ -18,7 +18,7 @@
 
 #include "async_kernel_api.h"
 #include "aicore_completion_mailbox_types.h"
-#include "runtime_status.h"
+#include "host_build_graph/runtime_status.h"
 
 #ifndef __aicore__
 #define __aicore__

@@ -16,8 +16,8 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
-#include "completion_token.h"
-#include "runtime_status.h"
+#include "host_build_graph/completion_token.h"
+#include "host_build_graph/runtime_status.h"
 
 inline uintptr_t sdma_completion_cache_line(const volatile void *addr) {
     return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1u);

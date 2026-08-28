@@ -38,7 +38,7 @@
 
 #include "utils/device_arena.h"
 #include "graph_execution.h"
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 
 // =============================================================================
 // Shared Memory Header

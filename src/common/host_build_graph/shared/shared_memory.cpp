@@ -17,7 +17,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#include "shared_memory.h"
+#include "host_build_graph/shared_memory.h"
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>

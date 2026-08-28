@@ -138,6 +138,9 @@ function(add_a2a3_hbg_runtime_test name src)
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
         ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
         ${CMAKE_SOURCE_DIR}/../../../src/common
+        # Mirrors the runtime's own include path: the runtime-agnostic platform and
+        # worker sources reach host_build_graph's runtime.h / types.h by bare name.
+        ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
     )
     target_link_libraries(${name} PRIVATE
         ${GTEST_MAIN_LIB}
@@ -166,6 +169,9 @@ function(add_a5_hbg_runtime_test name src)
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
         ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
         ${CMAKE_SOURCE_DIR}/../../../src/common
+        # Mirrors the runtime's own include path: the runtime-agnostic platform and
+        # worker sources reach host_build_graph's runtime.h / types.h by bare name.
+        ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
     )
     target_link_libraries(${name} PRIVATE
         ${GTEST_MAIN_LIB}
@@ -455,6 +461,8 @@ target_include_directories(test_native_run_acceptance PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/common
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu
+    # native_run_context.h reaches host_build_graph's runtime.h by bare name.
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
 )
 target_link_libraries(test_native_run_acceptance PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
 add_test(NAME test_native_run_acceptance COMMAND test_native_run_acceptance)

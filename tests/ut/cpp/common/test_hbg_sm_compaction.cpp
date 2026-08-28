@@ -25,7 +25,7 @@
 #include <vector>
 
 #include "graph_execution.h"
-#include "shared_memory.h"
+#include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_id_encoding.h"
 
 namespace {

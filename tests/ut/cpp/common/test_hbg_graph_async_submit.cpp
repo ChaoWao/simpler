@@ -20,7 +20,7 @@
 #include <set>
 #include <thread>
 
-#include "graph_recorder_pool.h"
+#include "host_build_graph/graph_recorder_pool.h"
 #include "orchestration_api.h"
 
 namespace {

@@ -28,7 +28,7 @@
 
 #include <cstdint>
 
-#include "runtime.h"
+#include "host_build_graph/runtime.h"
 
 namespace {
 

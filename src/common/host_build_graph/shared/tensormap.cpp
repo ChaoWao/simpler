@@ -24,14 +24,14 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#include "tensormap.h"
+#include "host_build_graph/tensormap.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 #include <new>
 
-#include "common.h"
+#include "host_build_graph/common.h"
 #include "common/unified_log.h"
 
 // =============================================================================

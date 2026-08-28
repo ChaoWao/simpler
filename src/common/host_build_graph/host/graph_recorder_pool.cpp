@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include "graph_recorder_pool.h"
+#include "host_build_graph/graph_recorder_pool.h"
 
 #include <functional>
 #include <utility>
@@ -17,7 +17,7 @@
 // The ops implementations below need the real RuntimeOps/RuntimeContext, which is why the
 // header does not include this: a translation unit cannot see both it and
 // orchestration_api.h's partial declaration.
-#include "runtime_core.h"
+#include "host_build_graph/runtime_core.h"
 
 GraphAsyncRecordingState &graph_recorder_pool() {
     static GraphAsyncRecordingState state;

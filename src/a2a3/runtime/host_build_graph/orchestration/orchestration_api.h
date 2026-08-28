@@ -44,15 +44,15 @@
 #include <vector>
 
 // Type headers needed by orchestration
-#include "common.h"                  // framework_bind_runtime / framework_current_runtime
-#include "common/host_phase_kind.h"  // HostPhaseKind, for the phase records below
-#include "graph_cache.h"             // Graph Execution key and result helpers
-#include "graph_host_state.h"        // GRAPH_MAX_DEFINITIONS
-#include "runtime_types.h"           // SIMPLER_ERROR_*
-#include "submit_types.h"            // MixedKernels, INVALID_KERNEL_ID, subtask slots
-#include "types.h"                   // Arg, TaskOutputTensors, TensorArgType
-#include "task_args.h"               // ChipStorageTaskArgs, simpler::hbg::Tensor
-#include "tensor.h"                  // simpler::hbg::Tensor, TensorCreateInfo
+#include "host_build_graph/common.h"         // framework_bind_runtime / framework_current_runtime
+#include "common/host_phase_kind.h"          // HostPhaseKind, for the phase records below
+#include "graph_cache.h"                     // Graph Execution key and result helpers
+#include "graph_host_state.h"                // GRAPH_MAX_DEFINITIONS
+#include "host_build_graph/runtime_types.h"  // SIMPLER_ERROR_*
+#include "host_build_graph/submit_types.h"   // MixedKernels, INVALID_KERNEL_ID, subtask slots
+#include "types.h"                           // Arg, TaskOutputTensors, TensorArgType
+#include "task_args.h"                       // ChipStorageTaskArgs, simpler::hbg::Tensor
+#include "tensor.h"                          // simpler::hbg::Tensor, TensorCreateInfo
 
 // =============================================================================
 // simpler::hbg::Tensor Factory Helpers

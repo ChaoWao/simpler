@@ -11,7 +11,7 @@
 
 #include "host_build_graph/ready_queue_sizing.h"
 
-#include "runtime_status.h"
+#include "host_build_graph/runtime_status.h"
 
 namespace {
 

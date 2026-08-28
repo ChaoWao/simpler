@@ -18,7 +18,7 @@
  */
 
 #include "host_build_graph/host_phase_trace.h"
-#include "runtime_core.h"
+#include "host_build_graph/runtime_core.h"
 
 #include <stdarg.h>
 #include <stdio.h>

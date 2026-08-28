@@ -15,11 +15,11 @@
  * Task graph construction is handled by RuntimeContext.
  */
 
-#include "runtime.h"
+#include "host_build_graph/runtime.h"
 
 #include "common/unified_log.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 
 // =============================================================================
 // Constructor
