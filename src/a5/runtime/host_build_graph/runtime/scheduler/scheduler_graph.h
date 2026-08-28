@@ -25,10 +25,6 @@
 #define __aicore__
 #endif
 
-#ifndef __host__
-#define __host__
-#endif
-
 inline constexpr uint32_t SCHEDULER_GRAPH_TASK_DESCRIPTOR_STRIDE = 40;
 // TaskPayload includes the early-dispatch cache line in this wire layout.
 inline constexpr uint32_t SCHEDULER_GRAPH_TASK_PAYLOAD_STRIDE = 192;
@@ -90,18 +86,17 @@ static_assert(sizeof(SchedulerTaskInfo) == 24, "root classification result layou
 static_assert(sizeof(SchedulerTaskShape) == 24, "task shape result layout changed");
 static_assert(sizeof(SchedulerDispatchPredicate) == 24, "dispatch predicate layout changed");
 
-inline __host__ __aicore__ __gm__ uint8_t *
-scheduler_graph_descriptor(const SchedulerGraphView &graph, int64_t task_id) {
+inline __aicore__ __gm__ uint8_t *scheduler_graph_descriptor(const SchedulerGraphView &graph, int64_t task_id) {
     uint64_t slot = static_cast<uint64_t>(task_id);
     return reinterpret_cast<__gm__ uint8_t *>(graph.descriptors_address) +
            slot * SCHEDULER_GRAPH_TASK_DESCRIPTOR_STRIDE;
 }
-inline __host__ __aicore__ __gm__ uint8_t *scheduler_graph_payload(const SchedulerGraphView &graph, int64_t task_id) {
+inline __aicore__ __gm__ uint8_t *scheduler_graph_payload(const SchedulerGraphView &graph, int64_t task_id) {
     uint64_t slot = static_cast<uint64_t>(task_id);
     return reinterpret_cast<__gm__ uint8_t *>(graph.payloads_address) + slot * SCHEDULER_GRAPH_TASK_PAYLOAD_STRIDE;
 }
 
-inline __host__ __aicore__ int32_t
+inline __aicore__ int32_t
 scheduler_graph_fanin_id(const SchedulerGraphView &graph, int64_t task_id, int32_t fanin_index) {
     __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_id);
     __gm__ uint8_t *field = payload + TASKPAYLOAD_FANIN_DELTA_OFFSET;
@@ -109,7 +104,7 @@ scheduler_graph_fanin_id(const SchedulerGraphView &graph, int64_t task_id, int32
     return reinterpret_cast<__gm__ int32_t *>(field + delta)[fanin_index];
 }
 
-inline __host__ __aicore__ SchedulerGraphResult
+inline __aicore__ SchedulerGraphResult
 scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_id, SchedulerTaskShape *shape) {
     if (shape == nullptr) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
     *shape = {
@@ -160,7 +155,7 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_id, 
     return SchedulerGraphResult::OK;
 }
 
-inline __host__ __aicore__ SchedulerGraphResult scheduler_materialize_task_payload_resolved(
+inline __aicore__ SchedulerGraphResult scheduler_materialize_task_payload_resolved(
     const SchedulerGraphView &graph, const SchedulerTaskInfo &task, uint64_t function_bin_address,
     __gm__ DispatchPayload *dispatch_payload, int32_t block_idx = 0, int32_t block_num = 1
 ) {
