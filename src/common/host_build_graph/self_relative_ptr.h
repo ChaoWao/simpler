@@ -22,7 +22,7 @@
  * addresses inside it is invariant under the move while a raw pointer is not.
  * Every user has to satisfy that precondition: a GLOBAL task's payload and
  * descriptor live in the same shared-memory image as its slot state, and a Graph
- * node's live in the same GraphNodeStorage.
+ * task's live in the same InGraphTaskStorage.
  *
  * A zero delta means unbound — a field can never coincide with its own target.
  * Zeroed memory therefore reads as null, which is what the slot's pristine state

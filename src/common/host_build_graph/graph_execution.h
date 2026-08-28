@@ -22,12 +22,12 @@
 #include "runtime_types.h"
 #include "tensor.h"
 
-inline constexpr uint32_t GRAPH_MAX_NODES = 1024;
+inline constexpr uint32_t MAX_IN_GRAPH_TASKS = 1024;
 static_assert(
-    GRAPH_MAX_NODES <= (1u << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
-    "a node index must fit the low field of an IN_GRAPH task id"
+    MAX_IN_GRAPH_TASKS <= (1u << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
+    "an in-graph task index must fit the low field of an IN_GRAPH task id"
 );
-inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_NODES = 4;
+inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
 
 enum class GraphTensorSource : uint8_t {
     BOUNDARY_EXACT = 0,
@@ -79,7 +79,7 @@ struct GraphScalarSourceRef {
     uint8_t reserved;
 };
 
-// Wire representation of a node's dispatch predicate. The operand's absolute GM
+// Wire representation of an in-graph task's dispatch predicate. The operand's absolute GM
 // address is not replay-invariant, so the Definition names the tensor the
 // operand element sits in plus its element offset within that tensor;
 // materialize rebinds the tensor for the execution and resolves the pair into
@@ -97,15 +97,15 @@ struct GraphPredicate {
     uint8_t reserved[6];
 };
 
-struct GraphNodeDefinition {
+struct InGraphTaskDefinition {
     int32_t kernel_id[SUBTASK_SLOT_COUNT];
     uint8_t active_mask;
     uint8_t task_attrs;
     int16_t logical_block_num;
     int16_t total_required_subtasks;
-    // One-based index into the Definition's predicate array; 0 means the node
-    // carries no dispatch predicate. Biased so that a zeroed GraphNodeDefinition
-    // is a valid predicate-free node. Predicated nodes are rare, so the
+    // One-based index into the Definition's predicate array; 0 means the task
+    // carries no dispatch predicate. Biased so that a zeroed InGraphTaskDefinition
+    // is a valid predicate-free task. Predicated tasks are rare, so the
     // predicates live in their own array rather than inline.
     uint16_t predicate_slot;
     int32_t tensor_count;
@@ -170,17 +170,18 @@ struct GraphDefinition {
     uint32_t tensor_arg_count;
     uint32_t scalar_arg_count;
     uint32_t predicate_count;
-    // Bytes the GraphExecution header, node array and node argument pools need in
-    // the outer GRAPH task's heap tail. Invocation boundaries live in the outer
-    // task payload's compact argument-pool regions instead.
+    // Bytes the GraphExecution header, in-graph task array and in-graph task
+    // argument pools need in the outer Graph task's heap tail. Invocation
+    // boundaries live in the outer task payload's compact argument-pool regions
+    // instead.
     uint32_t execution_storage_bytes;
     uint32_t off_fanout_offsets;
     uint32_t off_fanout_indices;
     uint32_t off_fanin_offsets;
     uint32_t off_fanin_indices;
     uint32_t off_root_indices;
-    uint32_t off_node_offsets;
-    uint32_t off_nodes;
+    uint32_t off_in_graph_task_offsets;
+    uint32_t off_in_graph_tasks;
     uint32_t off_tensors;
     uint32_t off_tensor_sources;
     uint32_t off_scalars;
@@ -195,8 +196,8 @@ static_assert(std::is_trivially_copyable_v<GraphTensor>);
 static_assert(std::is_standard_layout_v<GraphTensor>);
 static_assert(std::is_trivially_copyable_v<GraphScalarSourceRef>);
 static_assert(std::is_standard_layout_v<GraphScalarSourceRef>);
-static_assert(std::is_trivially_copyable_v<GraphNodeDefinition>);
-static_assert(std::is_standard_layout_v<GraphNodeDefinition>);
+static_assert(std::is_trivially_copyable_v<InGraphTaskDefinition>);
+static_assert(std::is_standard_layout_v<InGraphTaskDefinition>);
 static_assert(std::is_trivially_copyable_v<GraphPredicate>);
 static_assert(std::is_standard_layout_v<GraphPredicate>);
 static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);
@@ -211,7 +212,7 @@ static_assert(std::is_standard_layout_v<GraphDefinition>);
 // type that asked for more would make every one of those stores undefined, with
 // no diagnostic.
 static_assert(
-    alignof(GraphNodeDefinition) <= alignof(std::max_align_t) && alignof(GraphTensor) <= alignof(std::max_align_t) &&
+    alignof(InGraphTaskDefinition) <= alignof(std::max_align_t) && alignof(GraphTensor) <= alignof(std::max_align_t) &&
         alignof(GraphTensorSourceRef) <= alignof(std::max_align_t) &&
         alignof(GraphScalarSourceRef) <= alignof(std::max_align_t) &&
         alignof(GraphBoundarySignature) <= alignof(std::max_align_t) &&
@@ -312,13 +313,13 @@ enum class GraphMaterializeResult : uint8_t {
     PREPARED = 3,
 };
 
-struct alignas(64) GraphNodeStorage {
+struct alignas(64) InGraphTaskStorage {
     TaskDescriptor task;
     ChipTaskSlotState slot;
-    // The payload carries its argument regions as deltas into pools past the node
-    // array, so its size is the same for every node and the slot names it by a delta
+    // The payload carries its argument regions as deltas into pools past the task
+    // array, so its size is the same for every task and the slot names it by a delta
     // from the slot's own address. Field order here therefore constrains nothing, and
-    // node_at strides the storage by this type.
+    // task_at strides the storage by this type.
     TaskPayload payload;
 };
 
@@ -331,27 +332,27 @@ struct GraphExecution {
     // per-submission gate object.
     std::atomic<uint8_t> state{static_cast<uint8_t>(GraphExecutionState::SUBMITTED)};
     std::atomic<uint8_t> materialize_busy{0};
-    std::atomic<int32_t> remaining_nodes{0};
-    std::atomic<int32_t> retired_nodes{0};
-    // Incremental activation: nodes in [0, published_nodes) are fully
+    std::atomic<int32_t> remaining_tasks{0};
+    std::atomic<int32_t> retired_tasks{0};
+    // Incremental activation: tasks in [0, published_tasks) are fully
     // materialized and registered, so a route pass may consider them. route_cursor
-    // is the next such node index a route pass will claim; roots below it have
+    // is the next such task index a route pass will claim; roots below it have
     // been pushed to the ready queue exactly once. Both advance monotonically and
     // reset per (re)submission.
-    std::atomic<int32_t> published_nodes{0};
+    std::atomic<int32_t> published_tasks{0};
     std::atomic<int32_t> route_cursor{0};
-    int32_t node_count{0};
-    int32_t materialized_nodes{0};
-    int32_t constructed_nodes{0};
+    int32_t task_count{0};
+    int32_t materialized_tasks{0};
+    int32_t constructed_tasks{0};
     uint32_t consumed_tensor_args{0};
     ChipTaskSlotState *outer_slot{nullptr};
-    GraphNodeStorage *nodes{nullptr};
-    GraphNodeStorage *node_storage{nullptr};
-    // This execution's node argument pools, in the storage tail past node_storage.
-    // Every node payload's tensor and scalar deltas point here; its pool position is
+    InGraphTaskStorage *tasks{nullptr};
+    InGraphTaskStorage *task_storage{nullptr};
+    // This execution's task argument pools, in the storage tail past task_storage.
+    // Every task payload's tensor and scalar deltas point here; its pool position is
     // the Definition's tensor_offset / scalar_offset.
-    simpler::hbg::Tensor *node_tensor_pool{nullptr};
-    uint64_t *node_scalar_pool{nullptr};
+    simpler::hbg::Tensor *task_tensor_pool{nullptr};
+    uint64_t *task_scalar_pool{nullptr};
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
@@ -360,25 +361,26 @@ struct GraphExecution {
     const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};
 
-    GraphNodeStorage &node_at(int32_t index) const { return node_storage[index]; }
+    InGraphTaskStorage &task_at(int32_t index) const { return task_storage[index]; }
 };
 
-static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
-// The tensor pool starts right after the node array, and the scalar pool starts
+static_assert(std::is_trivially_destructible_v<InGraphTaskStorage>);
+// The tensor pool starts right after the in-graph task array, and the scalar pool starts
 // after a whole number of ChipTensors.
 static_assert(
-    alignof(GraphNodeStorage) % alignof(simpler::hbg::Tensor) == 0,
-    "a node entry must be at least simpler::hbg::Tensor-aligned: the tensor pool follows the node array"
+    alignof(InGraphTaskStorage) % alignof(simpler::hbg::Tensor) == 0,
+    "an in-graph task entry must be at least simpler::hbg::Tensor-aligned: the tensor pool follows the "
+    "in-graph task array"
 );
 static_assert(
     sizeof(simpler::hbg::Tensor) % alignof(uint64_t) == 0, "the tensor stride must keep the scalar pool aligned"
 );
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 // The whole storage is aligned for its widest member, so one base check covers the
-// header as well as the node array that follows it.
+// header as well as the in-graph task array that follows it.
 static_assert(
-    alignof(GraphNodeStorage) % alignof(GraphExecution) == 0,
-    "the node array's alignment must subsume the execution header's"
+    alignof(InGraphTaskStorage) % alignof(GraphExecution) == 0,
+    "the in-graph task array's alignment must subsume the execution header's"
 );
 static_assert(sizeof(GraphTensor) <= sizeof(simpler::hbg::Tensor));
 
@@ -388,42 +390,42 @@ inline constexpr size_t graph_boundary_tensor_pool_slots(uint32_t tensor_count) 
 }
 
 // The outer GRAPH task's heap tail occupies
-// [GraphExecution][GraphNodeStorage x node_count][simpler::hbg::Tensor x tensor_arg_count]
+// [GraphExecution][InGraphTaskStorage x task_count][simpler::hbg::Tensor x tensor_arg_count]
 // [uint64_t x scalar_arg_count].
 //
-// The last two regions are the node payloads' argument pools, indexed by the
+// The last two regions are the in-graph task payloads' argument pools, indexed by the
 // Definition's own tensor_offset / scalar_offset — which is why the Definition's
-// arg-table counts size them rather than a per-node sum: node i's arguments occupy
-// [offset, offset + count) in both the table and the pool. There is no fanin region:
-// node dependencies live in the Definition's fanin CSR, so a node's fanin_count stays
-// 0 and its fanin delta unbound.
+// arg-table counts size them rather than a per-task sum: in-graph task i's arguments
+// occupy [offset, offset + count) in both the table and the pool. There is no fanin
+// region: an in-graph task's dependencies live in the Definition's fanin CSR, so its
+// fanin_count stays 0 and its fanin delta unbound.
 struct GraphExecutionStorageLayout {
-    size_t nodes_offset;
+    size_t tasks_offset;
     size_t tensors_offset;
     size_t scalars_offset;
     size_t total_bytes;
 };
 
 inline bool graph_execution_storage_layout(
-    int32_t node_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, GraphExecutionStorageLayout *out
+    int32_t task_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, GraphExecutionStorageLayout *out
 ) {
-    if (out == nullptr || node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES)) {
+    if (out == nullptr || task_count <= 0 || task_count > static_cast<int32_t>(MAX_IN_GRAPH_TASKS)) {
         return false;
     }
-    constexpr size_t ALIGNMENT = alignof(GraphNodeStorage);
-    out->nodes_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
-    out->tensors_offset = out->nodes_offset + static_cast<size_t>(node_count) * sizeof(GraphNodeStorage);
+    constexpr size_t ALIGNMENT = alignof(InGraphTaskStorage);
+    out->tasks_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    out->tensors_offset = out->tasks_offset + static_cast<size_t>(task_count) * sizeof(InGraphTaskStorage);
     out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(simpler::hbg::Tensor);
     out->total_bytes = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
     return true;
 }
 
 inline bool graph_execution_storage_bytes(
-    int32_t node_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, size_t *storage_bytes
+    int32_t task_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, size_t *storage_bytes
 ) {
     GraphExecutionStorageLayout layout{};
     if (storage_bytes == nullptr ||
-        !graph_execution_storage_layout(node_count, tensor_arg_count, scalar_arg_count, &layout)) {
+        !graph_execution_storage_layout(task_count, tensor_arg_count, scalar_arg_count, &layout)) {
         return false;
     }
     *storage_bytes = layout.total_bytes;
@@ -432,12 +434,8 @@ inline bool graph_execution_storage_bytes(
 
 GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot);
 GraphMaterializeResult graph_execution_materialize_slice(
-    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_nodes, int32_t *nodes_materialized = nullptr
+    ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_tasks, int32_t *tasks_materialized = nullptr
 );
-
-inline GraphExecution *graph_execution_from_slot(ChipTaskSlotState &slot) {
-    return slot.task_kind == TaskKind::GRAPH_NODE ? static_cast<GraphExecution *>(slot.graph_context) : nullptr;
-}
 
 // An outer GRAPH slot's graph_context holds the shared Definition's device address
 // until graph_execution_localize replaces it with the execution, so this cast is only
@@ -494,14 +492,14 @@ inline bool graph_execution_signal_external_ready(GraphExecution &execution) {
             GRAPH_EXECUTION_EXTERNAL_READY) == 0;
 }
 
-inline bool graph_execution_complete_node(GraphExecution &execution) {
-    return execution.remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1;
+inline bool graph_execution_complete_in_graph_task(GraphExecution &execution) {
+    return execution.remaining_tasks.fetch_sub(1, std::memory_order_acq_rel) == 1;
 }
 
 inline void graph_execution_mark_completed(GraphExecution &execution) {
     graph_execution_set_state(execution, GraphExecutionState::COMPLETED);
 }
 
-inline void graph_execution_retire_node(GraphExecution &execution) {
-    execution.retired_nodes.fetch_add(1, std::memory_order_release);
+inline void graph_execution_retire_in_graph_task(GraphExecution &execution) {
+    execution.retired_tasks.fetch_add(1, std::memory_order_release);
 }

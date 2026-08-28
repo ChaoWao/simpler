@@ -143,7 +143,7 @@ public:
 
         size_t owned_args_index;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::scoped_lock lock(mutex_);
             if (stopping_ || free_owned_args_count_ == 0 || job_count_ == kJobCapacity) return false;
             owned_args_index = free_owned_args_[--free_owned_args_count_];
         }
@@ -175,8 +175,8 @@ public:
         cv_.notify_one();
         // graph_begin() has already installed the keyed in-flight entry and
         // submitted the zero-heap outer shell. Enqueuing the private job is
-        // therefore the last dependency of the caller; graph_prepare() and all
-        // node recording may start after later shells are submitted.
+        // therefore the last dependency of the caller; graph_prepare() and the
+        // recording of the body may start after later shells are submitted.
         return true;
     }
 
@@ -270,11 +270,11 @@ private:
         // still reports ready and prewarm() fails: the lazy stand-up in
         // graph_recording_reset is the backstop for the workers start() adds later.
         if (!graph_recorder_stand_up_storage()) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::scoped_lock lock(mutex_);
             storage_failed_ = true;
         }
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::scoped_lock lock(mutex_);
             ready_workers_++;
         }
         cv_.notify_all();
@@ -296,7 +296,7 @@ private:
             current.function(owned_args_[current.owned_args_index].args());
             current.function = {};
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::scoped_lock lock(mutex_);
                 free_owned_args_[free_owned_args_count_++] = current.owned_args_index;
                 active_jobs_--;
             }
@@ -308,7 +308,7 @@ private:
         wait();
         std::vector<std::thread> draining;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::scoped_lock lock(mutex_);
             stopping_ = true;
             // The handles leave workers_ under the lock and are joined without it.
             // Joining while holding mutex_ deadlocks: a worker reacquires it inside

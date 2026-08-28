@@ -292,7 +292,7 @@ TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsReserveDeferredHeap) {
     EXPECT_EQ(allocator.heap_top(), 0u);
 }
 
-// Graph recording addresses its internal nodes' outputs from
+// Graph recording addresses its in-graph tasks' outputs from
 // GRAPH_RECORD_VIRTUAL_BASE upward and classifies internal vs boundary tensor
 // sources by address-range containment alone. A real heap that reached into that
 // range would silently misclassify, so init() refuses it.

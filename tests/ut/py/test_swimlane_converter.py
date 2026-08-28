@@ -490,9 +490,9 @@ def test_graph_prepare_phases_create_graph_execution_envelopes(tmp_path):
     out = tmp_path / "trace.json"
     outer_a = 3
     outer_b = 7
-    node_a0 = (1 << 32) | (outer_a << 10)
-    node_a1 = (1 << 32) | ((outer_a << 10) | 1)
-    node_b0 = (1 << 32) | (outer_b << 10)
+    task_a0 = (1 << 32) | (outer_a << 10)
+    task_a1 = (1 << 32) | ((outer_a << 10) | 1)
+    task_b0 = (1 << 32) | (outer_b << 10)
     scheduler_phases = [
         [
             {
@@ -519,9 +519,9 @@ def test_graph_prepare_phases_create_graph_execution_envelopes(tmp_path):
         ]
     ]
     tasks = [
-        _task_row(node_a0, 0, dispatch=2.0, start=2.2, end=3.0, receive=2.1),
-        _task_row(node_a1, 1, dispatch=3.2, start=3.4, end=4.0, receive=3.3),
-        _task_row(node_b0, 0, dispatch=5.3, start=5.5, end=6.0, receive=5.4),
+        _task_row(task_a0, 0, dispatch=2.0, start=2.2, end=3.0, receive=2.1),
+        _task_row(task_a1, 1, dispatch=3.2, start=3.4, end=4.0, receive=3.3),
+        _task_row(task_b0, 0, dispatch=5.3, start=5.5, end=6.0, receive=5.4),
     ]
 
     sc.generate_chrome_trace_json(tasks, str(out), scheduler_phases=scheduler_phases, core_to_thread=[0, 0])
@@ -534,7 +534,7 @@ def test_graph_prepare_phases_create_graph_execution_envelopes(tmp_path):
     )
     graph_events = [event for event in events if event.get("cat") == "graph_execution"]
     assert [event["args"]["outer_task_id"] for event in graph_events] == [outer_a, outer_b]
-    assert graph_events[0]["args"]["visible_node_count"] == 2
+    assert graph_events[0]["args"]["visible_in_graph_task_count"] == 2
     assert graph_events[0]["args"]["prepare_slice_count"] == 2
     assert graph_events[0]["ts"] == 1.0
     assert graph_events[0]["dur"] == 4.0

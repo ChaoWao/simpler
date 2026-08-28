@@ -27,7 +27,7 @@ line per segment per bind at `LOG_TIMING`:
 | ------- | -------------- |
 | `args` | staging readable caller tensors H2D and exposing their existing host buffers to orchestration; pure outputs skip both |
 | `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init` | arena layout, GM heap and shared-memory bring-up |
-| `host_orch` | **all** orchestration: every task submitted, every Graph node recorded, the Definition built |
+| `host_orch` | **all** orchestration: every task submitted, every in-graph task recorded, the Definition built |
 | `graph_upload` | one H2D of the block holding every Definition object, and binding each Graph task to the one with its key. The recorders built the objects in that block's host staging during `host_orch`, so this segment writes their headers and copies in only what did not fit |
 | `arena_h2d` | one H2D of the arena's copied zone and the shared-memory image |
 | `host_view_close` | closing per-run tensor-access regions and any optional device mappings; the current bind path installs none (`count=0 bytes=0`) |
@@ -72,7 +72,7 @@ device lock for the whole job (see
 | Entry point | `SceneTestCase` at level 2, run through the module runner | standalone `main.py`, which owns its L3 `Worker` |
 | Devices | 1 | 2 (EP2/TP2) |
 | Host tasks | 47 | 1131 |
-| Graph replays | 40, of a 277-node Definition | 20, of a 743-node Definition |
+| Graph replays | 40, of a 277-task Definition | 20, of a 743-task Definition |
 | Graph boundary | 26 tensors | 118 tensors, 31 scalars |
 | First-run compile | seconds | **minutes** (369 kernel sources + an 11.6k-line orchestration) |
 | Parameters | host fixture per run | child memory, and `--skip-golden` leaves it uninitialized |
@@ -453,7 +453,7 @@ orchestration views, so it performs no `halHostRegister` calls and reports
 the H2D work but removes that registration side.
 
 Three of these deserve reading together. `host_orch` is the whole story on dsv4 —
-839 `submit_task`, 743 `record_node` and 272 `alloc_tensors` per bind against qwen's
+839 `submit_task`, 743 `record_in_graph_task` and 272 `alloc_tensors` per bind against qwen's
 5, 277 and 2 — and its 2.3 ms of scatter is why a claim about it needs a
 sub-counter rather than a stopwatch. At the pinned commit, `args` plus
 `host_view_close` are two orders of magnitude above everything else while being

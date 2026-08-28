@@ -542,7 +542,7 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
                           // phase_data.dummy_task identity payload as DummyTask.
     // Outer (sched lane): one bounded Graph Definition materialization slice.
     // phase_data.graph_task identifies the ring-0 outer Graph task and
-    // tasks_processed is the number of nodes patched in this slice.
+    // tasks_processed is the number of in-graph tasks patched in this slice.
     GraphPrepare = 13,
 };
 
@@ -625,7 +625,7 @@ static_assert(sizeof(ChipSwimlaneAicpuOrchPhaseRecord) == 32, "ChipSwimlaneAicpu
  *
  * `payload` is kind-discriminated: a task id for the kinds that submit a task
  * (see host_phase_kind_submits_task), otherwise a per-kind detail count such as
- * a byte or node count. Readers must consult `kind` before interpreting it.
+ * a byte or in-graph task count. Readers must consult `kind` before interpreting it.
  */
 struct HostPhaseRecord {
     uint64_t start_ns;
@@ -712,8 +712,8 @@ inline const char *host_phase_kind_name(HostPhaseKind kind) {
         return "submit_task";
     case HostPhaseKind::OrchAllocTensors:
         return "alloc_tensors";
-    case HostPhaseKind::OrchRecordNode:
-        return "record_node";
+    case HostPhaseKind::OrchRecordInGraphTask:
+        return "record_in_graph_task";
     case HostPhaseKind::OrchGraphSubmit:
         return "graph_submit";
     case HostPhaseKind::OrchBuildDefinition:

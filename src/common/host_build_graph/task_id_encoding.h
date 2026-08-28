@@ -49,7 +49,7 @@ namespace simpler::hbg {
 enum class TaskIdSpace : uint32_t { GLOBAL = 0, IN_GRAPH = 1 };
 
 // An in-graph task's low bits pack its Graph task's local id above its index
-// within that Graph. graph_execution.h asserts GRAPH_MAX_NODES fits the index.
+// within that Graph. graph_execution.h asserts MAX_IN_GRAPH_TASKS fits the index.
 inline constexpr uint32_t IN_GRAPH_TASK_INDEX_BITS = 10;
 
 constexpr TaskId make_global_task(uint32_t local_id) {

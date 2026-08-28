@@ -303,8 +303,8 @@ struct GraphRecordedScalarSourceRef {
     size_t source_index{0};
 };
 
-// A node's dispatch predicate, held as the operand tensor plus the element index
-// within it rather than the absolute address submit would resolve. The tensor is
+// A recorded task's dispatch predicate, held as the operand tensor plus the element
+// index within it rather than the absolute address submit would resolve. The tensor is
 // copied because the caller only lends it for the duration of the submit call.
 struct GraphRecordedPredicate {
     simpler::hbg::Tensor operand;
@@ -315,7 +315,7 @@ struct GraphRecordedPredicate {
     PredicateOp op{PredicateOp::NONE};
 };
 
-struct GraphRecordedNode {
+struct RecordedInGraphTask {
     std::array<int32_t, SUBTASK_SLOT_COUNT> kernel_ids{};
     ActiveMask active_mask{};
     TaskAttrs task_attrs{};
@@ -323,10 +323,10 @@ struct GraphRecordedNode {
     int16_t total_required_subtasks{0};
     size_t total_output_size{0};
     uintptr_t record_packed_base{0};
-    // This node's slice of the recording's node tensor pool, as an offset so the node
+    // This task's slice of the recording's tensor pool, as an offset so the task
     // carries no address into storage the recording owns. The element addresses are handed
-    // to the caller through TaskOutputTensors and have to stay valid while every later node
-    // records, which the pool satisfies by being allocated at the cap and never growing.
+    // to the caller through TaskOutputTensors and have to stay valid while the rest of the
+    // body records, which the pool satisfies by being allocated at the cap and never growing.
     uint32_t tensor_offset{0};
     uint32_t tensor_count{0};
     // Ranges into the recording's flat arrays. tensor_sources has one entry per
@@ -336,18 +336,18 @@ struct GraphRecordedNode {
     uint32_t scalar_count{0};
     uint32_t fanin_offset{0};
     uint32_t fanin_count{0};
-    // Index into the recording's predicates, or -1 when the node carries none.
+    // Index into the recording's predicates, or -1 when the task carries none.
     int32_t predicate_index{-1};
     ArgsDumpTaskMetadata dump_metadata;
 
-    // Restore the state a fresh node has, without giving up `tensors`'s buffer -- which is
-    // the point of reusing a slot. A reused slot that keeps any field of the previous body
+    // Restore the state a freshly recorded task has, in a slot the previous body left
+    // behind. A reused slot that keeps any field of the previous body
     // records a Definition that body never had, and predicate_index and dump_metadata are
     // written only on the paths that have one, so neither can be left to the fill.
     //
-    // Field by field rather than `*this = GraphRecordedNode{}`: the latter is immune to
-    // fields added later, but it costs a second write of the whole struct on every node
-    // and measured 350-700 us per bind on dsv4's 1679 nodes. The static_assert below is
+    // Field by field rather than `*this = RecordedInGraphTask{}`: the latter is immune to
+    // fields added later, but it costs a second write of the whole struct on every recorded
+    // task and measured 350-700 us per bind on dsv4's 1679 tasks. The static_assert below is
     // the cheap half of that guarantee -- adding a field breaks the build here, which is
     // where the reader is told to extend this function.
     void reset() {
@@ -374,19 +374,19 @@ struct GraphRecordedNode {
 // from the previous body into the next recording -- silently, as a Definition that body
 // never had. Adding a field changes this size, so the build stops here instead.
 static_assert(
-    sizeof(GraphRecordedNode) == 104, "GraphRecordedNode gained or lost a field: extend reset() to match, then "
-                                      "update this size"
+    sizeof(RecordedInGraphTask) == 104, "RecordedInGraphTask gained or lost a field: extend reset() to match, then "
+                                        "update this size"
 );
 
-// One recorded node's scratch output window. reserve_heap_scratch is a pure bump
-// and a node stores the aligned size it advanced by, so consecutive windows abut:
+// One recorded task's scratch output window. reserve_heap_scratch is a pure bump
+// and a task stores the aligned size it advanced by, so consecutive windows abut:
 // held in record order these are sorted and disjoint, which is what lets an
-// address lookup binary search instead of walking every producer. A node with no
+// address lookup binary search instead of walking every producer. A task with no
 // output advances nothing and owns no entry.
 struct GraphRecordedOutputRange {
     uintptr_t begin;
     uintptr_t end;
-    uint32_t node_index;
+    uint32_t task_index;
 };
 
 // The Graph boundary as the submitting thread captured it, deep-copied because the
@@ -412,32 +412,32 @@ struct GraphRecording {
     // boundary matching while this thread records.
     const GraphBoundary *boundary{nullptr};
     bool unsupported{false};
-    std::vector<GraphRecordedNode> nodes;
-    // How many of `nodes` this recording has filled. The array itself is never cleared
-    // and graph_recording_reserve_storage sizes it to the node cap, so a body is recorded
-    // into slots that already exist: a recorded node makes no allocation at all.
-    size_t node_count{0};
-    // Every recorded node's tensor arguments, packed end to end in one region this
-    // recording bumps through, and the reason a node holds an offset rather than its own
-    // buffer: a body's tensors then occupy the bytes they need instead of a page per node
-    // (a per-node buffer at the cap is 32 x 128 B = exactly one page, so dsv4's 1679 nodes
+    std::vector<RecordedInGraphTask> tasks;
+    // How many of `tasks` this recording has filled. The array itself is never cleared
+    // and graph_recording_reserve_storage sizes it to the in-graph task cap, so a body is
+    // recorded into slots that already exist: a recorded task makes no allocation at all.
+    size_t task_count{0};
+    // Every recorded task's tensor arguments, packed end to end in one region this
+    // recording bumps through, and the reason a task holds an offset rather than its own
+    // buffer: a body's tensors then occupy the bytes they need instead of a page per task
+    // (a per-task buffer at the cap is 32 x 128 B = exactly one page, so dsv4's 1679 tasks
     // touched 1679 pages to hold ~210 KB). Allocated once per thread at the cap and never
-    // grown, which is what keeps a node's borrowed element addresses valid for the rest of
+    // grown, which is what keeps a task's borrowed element addresses valid for the rest of
     // the recording. `new[]` default-initializes a trivially-default-constructible Tensor,
-    // so the region costs no page until a body writes one; each element a node uses is
+    // so the region costs no page until a body writes one; each element a task uses is
     // value-initialized before it is filled.
-    std::unique_ptr<simpler::hbg::Tensor[]> node_tensor_pool;
-    uint32_t node_tensor_cursor{0};
-    // Flat per-node arrays, indexed by the ranges on GraphRecordedNode. Held here rather
-    // than on each node so recording a graph pays no allocation per node per array, and
-    // reserved to the node cap by graph_recording_reserve_storage so it pays no growth
-    // either.
+    std::unique_ptr<simpler::hbg::Tensor[]> task_tensor_pool;
+    uint32_t task_tensor_cursor{0};
+    // Flat per-task arrays, indexed by the ranges on RecordedInGraphTask. Held here rather
+    // than on each recorded task so recording a graph pays no allocation per task per array,
+    // and reserved to the in-graph task cap by graph_recording_reserve_storage so it pays no
+    // growth either.
     std::vector<GraphRecordedTensorSourceRef> tensor_sources;
     std::vector<uint64_t> scalars;
     std::vector<GraphRecordedScalarSourceRef> scalar_sources;
     std::vector<size_t> internal_fanins;
     std::vector<GraphRecordedOutputRange> output_ranges;
-    // Indexed by GraphRecordedNode::predicate_index; only predicated nodes
+    // Indexed by RecordedInGraphTask::predicate_index; only predicated tasks
     // contribute an entry.
     std::vector<GraphRecordedPredicate> predicates;
     // Hazard state for the recorded body, owned per recorder thread because
@@ -448,14 +448,14 @@ struct GraphRecording {
     // (register_task_outputs, STEP 4). The shadow-record path replaces
     // submit_task_common wholesale, so without a map of its own the recorder
     // can only see the edges tensor-source classification yields — and that
-    // classification answers "which node's packed window holds these bytes",
+    // classification answers "which recorded task's packed window holds these bytes",
     // i.e. who ALLOCATED the buffer, never who wrote it last. A body that
     // allocates once with alloc_tensors and then writes in place with add_inout
-    // (the shape every generated orchestration uses) would therefore record a
-    // node with no edge to its actual producer, and the Definition would replay
+    // (the shape every generated orchestration uses) would therefore record an
+    // in-graph task with no edge to its actual producer, and the Definition would replay
     // a DAG the same body never had when submitted task by task.
     ChipTensorMap tensor_map{};
-    // Set once both the hazard map and the node tensor pool are up, and only then: the two
+    // Set once both the hazard map and the tensor pool are up, and only then: the two
     // allocate, so a flag set by the first would let a thread whose second allocation
     // failed skip the stand-up on its next recording and record through a null pool.
     bool storage_ready{false};
@@ -468,8 +468,8 @@ struct GraphRecording {
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
 
-    simpler::hbg::Tensor *node_tensors(const GraphRecordedNode &node) const {
-        return node_tensor_pool.get() + node.tensor_offset;
+    simpler::hbg::Tensor *task_tensors(const RecordedInGraphTask &task) const {
+        return task_tensor_pool.get() + task.tensor_offset;
     }
 
     const GraphTaskArgs *boundary_args() const { return boundary == nullptr ? nullptr : boundary->args; }
@@ -639,7 +639,7 @@ template <typename ArgT>
 GraphRecordedScalarSourceRef
 graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t scalar_index) {
     if (recording.boundary_args() == nullptr) return {};
-    // Identity, not type: an internal node's Arg and the boundary Arg have
+    // Identity, not type: an in-graph task's Arg and the boundary Arg have
     // different capacities, so compare the addresses through void.
     if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args()) &&
         scalar_index < recording.boundary_args()->scalar_count()) {
@@ -664,7 +664,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 }
 
 // Entry capacity for one recorded body's hazard map. A Definition is capped at
-// GRAPH_MAX_NODES nodes and each node registers at most its INOUT/OUTPUT_EXISTING
+// MAX_IN_GRAPH_TASKS tasks and each recorded task registers at most its INOUT/OUTPUT_EXISTING
 // args, so this bounds the worst realistic body while staying a small fraction of
 // the ordinary path's whole-orchestration pool (CHIP_TENSORMAP_POOL_SIZE). Exhausting
 // it marks the recording unsupported, which graph_commit reports as
@@ -672,18 +672,18 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
 // is no ordinary-path fallback left to take.
 constexpr int32_t GRAPH_RECORD_TENSORMAP_POOL_SIZE = 16384;
 
-// Elements in the recording's node tensor pool: every node a body can hold, times every
-// tensor argument a node can carry. An in-cap body therefore always fits, and the bump
-// cursor is checked anyway because a body that overshoots GRAPH_MAX_NODES keeps recording
-// so it can finish.
-constexpr size_t GRAPH_RECORD_NODE_TENSOR_POOL_ELEMS =
-    static_cast<size_t>(GRAPH_MAX_NODES) * static_cast<size_t>(CORE_MAX_TENSOR_ARGS);
+// Elements in the recording's tensor pool: every in-graph task a body can hold, times
+// every tensor argument one such task can carry. An in-cap body therefore always fits, and
+// the bump cursor is checked anyway because a body that overshoots MAX_IN_GRAPH_TASKS keeps
+// recording so it can finish.
+constexpr size_t GRAPH_RECORD_TENSOR_POOL_ELEMS =
+    static_cast<size_t>(MAX_IN_GRAPH_TASKS) * static_cast<size_t>(CORE_MAX_TENSOR_ARGS);
 
 // The graph_local_id a recorded task's IN_GRAPH id carries. A recorded task belongs
 // to no Graph task yet -- every shell replaying the Definition re-mints the id with
 // its own local id at materialize -- so record time names a task by its index alone,
 // and the id's low field is that index and nothing else. That is what keeps the
-// index inside the GRAPH_MAX_NODES task chains the recording's hazard map is
+// index inside the MAX_IN_GRAPH_TASKS task chains the recording's hazard map is
 // dimensioned for.
 constexpr uint32_t GRAPH_RECORD_NO_OWNING_GRAPH = 0;
 
@@ -691,7 +691,7 @@ constexpr uint32_t GRAPH_RECORD_NO_OWNING_GRAPH = 0;
 // reported to the caller, which abandons the recording rather than producing a
 // Definition with inferred edges missing.
 bool graph_recording_init_tensor_map(GraphRecording &recording) {
-    return recording.tensor_map.init(CHIP_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, GRAPH_MAX_NODES);
+    return recording.tensor_map.init(CHIP_TENSORMAP_NUM_BUCKETS, GRAPH_RECORD_TENSORMAP_POOL_SIZE, MAX_IN_GRAPH_TASKS);
 }
 
 // The recorder thread's own storage for the body it is recording, and the reason none
@@ -726,7 +726,7 @@ void unbind_recorder_boundary() {
 }
 
 // Stand this thread's retained storage up at the cap, so no body it records grows any of
-// it and no recorded node allocates.
+// it and no recorded task allocates.
 //
 // Capacity kept across recordings is otherwise the high-water mark of the bodies this
 // thread happened to record, and which body a thread gets is decided by one FIFO the
@@ -735,20 +735,21 @@ void unbind_recorder_boundary() {
 // binds: a thread that recorded a narrow body first extends its slots and reallocates
 // every array the first time a wider one lands on it, on whatever bind that happens to
 // be. Measured on dsv4, whose eight Definitions differ in size, a warm bind still created
-// 1336 node slots of 1679. Standing everything up at the cap makes a thread's storage
-// independent of the order it saw bodies in.
+// 1336 of the 1679 `tasks` slots that body needed. Standing everything up at the cap makes a
+// thread's storage independent of the order it saw bodies in.
 //
-// Each bound is a per-node cap times the node cap, so these are the recorded body's own
-// limits rather than a worst case invented here: the tensor pool and tensor_sources are
-// one entry per tensor argument (CORE_MAX_TENSOR_ARGS), the two scalar arrays one per
-// scalar argument (CORE_MAX_SCALAR_ARGS), and predicates and output_ranges at most one per
-// node.
+// Each bound is a per-task cap times the in-graph task cap, so these are the recorded
+// body's own limits rather than a worst case invented here: the tensor pool and
+// tensor_sources are one entry per tensor argument (CORE_MAX_TENSOR_ARGS), the two scalar
+// arrays one per scalar argument (CORE_MAX_SCALAR_ARGS), and predicates and output_ranges at
+// most one per task.
 //
 // internal_fanins is the one array left growing, and the reason is the size it grows to
-// rather than the bound it could reach. It has no per-node cap: CHIP_MAX_FANIN bounds a
-// ring task's inline fanin, but a Graph node's producers travel in the Definition's own
-// CSR, which the scheduler reads directly, so the only limits are uint16 producer indices
-// and each producer being an earlier node — a structural 1024 x 1023 / 2 edges, 4.2 MB.
+// rather than the bound it could reach. It has no per-in-graph-task cap: CHIP_MAX_FANIN
+// bounds a global task's inline fanin, but an in-graph task's producers travel in the
+// Definition's own CSR, which the scheduler reads directly, so the only limits are uint16
+// producer indices and each producer being an earlier task of the same body — a structural
+// 1024 x 1023 / 2 edges, 4.2 MB.
 // What decides whether growth costs anything is not that bound but whether a reallocation
 // crosses glibc's mmap threshold, since a freed block below it is reused off the heap
 // without re-faulting (see the entry cited above). A dsv4 body holds ~630 edges, 5 KB, two
@@ -764,20 +765,20 @@ void unbind_recorder_boundary() {
 // Returns false when the pool cannot be allocated, which the caller treats like a hazard
 // map it could not stand up.
 bool graph_recording_reserve_storage(GraphRecording &recording) {
-    constexpr size_t kNodeCap = GRAPH_MAX_NODES;
-    recording.node_tensor_pool.reset(new (std::nothrow) simpler::hbg::Tensor[GRAPH_RECORD_NODE_TENSOR_POOL_ELEMS]);
-    if (recording.node_tensor_pool == nullptr) return false;
-    recording.nodes.resize(kNodeCap);
-    recording.tensor_sources.reserve(kNodeCap * static_cast<size_t>(CORE_MAX_TENSOR_ARGS));
-    recording.scalars.reserve(kNodeCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
-    recording.scalar_sources.reserve(kNodeCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
-    recording.output_ranges.reserve(kNodeCap);
-    recording.predicates.reserve(kNodeCap);
+    constexpr size_t kInGraphTaskCap = MAX_IN_GRAPH_TASKS;
+    recording.task_tensor_pool.reset(new (std::nothrow) simpler::hbg::Tensor[GRAPH_RECORD_TENSOR_POOL_ELEMS]);
+    if (recording.task_tensor_pool == nullptr) return false;
+    recording.tasks.resize(kInGraphTaskCap);
+    recording.tensor_sources.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_TENSOR_ARGS));
+    recording.scalars.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
+    recording.scalar_sources.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
+    recording.output_ranges.reserve(kInGraphTaskCap);
+    recording.predicates.reserve(kInGraphTaskCap);
     return true;
 }
 
 // Bind this thread's storage to one in-flight entry and empty it. Returns false when the
-// hazard map or the node tensor pool cannot be stood up, which is only reachable on the
+// hazard map or the tensor pool cannot be stood up, which is only reachable on the
 // thread's first recording.
 // Stand this thread's storage up once, or report that it could not be. Idempotent.
 //
@@ -792,7 +793,7 @@ bool graph_recording_stand_up(GraphRecording &recording) {
             return false;
         }
     } catch (const std::bad_alloc &) {
-        // The node tensor pool is a nothrow new, but the flat arrays are vectors whose
+        // The tensor pool is a nothrow new, but the flat arrays are vectors whose
         // resize/reserve throw. This also runs on a recorder worker as it starts, where an
         // escaping exception terminates the process instead of letting the pool's prewarm
         // report the failure.
@@ -804,14 +805,14 @@ bool graph_recording_stand_up(GraphRecording &recording) {
 }
 
 // Bind this thread's storage to one in-flight entry and empty it. Returns false when the
-// hazard map or the node tensor pool cannot be stood up.
+// hazard map or the tensor pool cannot be stood up.
 bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecording &entry) {
-    // A body over GRAPH_MAX_NODES is abandoned, but it still grew every array to its real
+    // A body over MAX_IN_GRAPH_TASKS is abandoned, but it still grew every array to its real
     // size while it ran. Handing that to the next recording would retain storage for a
     // Definition that can never be published, unbounded, for the process's life -- so an
     // over-cap recording gives its storage back instead of passing it on. This is what
-    // makes the bound documented on GraphRecording::node_count true rather than nominal.
-    if (recording.nodes.size() > GRAPH_MAX_NODES) {
+    // makes the bound documented on GraphRecording::task_count true rather than nominal.
+    if (recording.tasks.size() > MAX_IN_GRAPH_TASKS) {
         recording = GraphRecording{};
     }
     if (!graph_recording_stand_up(recording)) {
@@ -826,9 +827,9 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     recording.manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
     // clear() keeps each array's capacity, and the stand-up above reserved every one of
     // them to what a body at the cap needs, so no body a thread records can grow one.
-    // nodes is deliberately not cleared: see GraphRecording::node_count.
-    recording.node_count = 0;
-    recording.node_tensor_cursor = 0;
+    // tasks is deliberately not cleared: see GraphRecording::task_count.
+    recording.task_count = 0;
+    recording.task_tensor_cursor = 0;
     recording.tensor_sources.clear();
     recording.scalars.clear();
     recording.scalar_sources.clear();
@@ -839,12 +840,12 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
 }
 
 bool graph_classify_tensor(
-    const GraphRecording &recording, const GraphRecordedNode &current, int32_t task_index,
+    const GraphRecording &recording, const RecordedInGraphTask &current, int32_t task_index,
     const simpler::hbg::Tensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
     if (graph_tensor_from_boundary(recording, tensor, source)) return true;
     const uintptr_t tensor_addr = static_cast<uintptr_t>(tensor.buffer.addr);
-    // The node being recorded is not in output_ranges yet — its entry is appended
+    // The task being recorded is not in output_ranges yet — its entry is appended
     // once its own tensors are classified — so its window is tested here, and a
     // hit is OWN_OUTPUT rather than a dependency.
     if (current.record_packed_base != 0 && current.total_output_size != 0 &&
@@ -869,7 +870,7 @@ bool graph_classify_tensor(
     const GraphRecordedOutputRange &range = *(after - 1);
     if (tensor_addr >= range.end) return false;
     source->source = GraphRecordedTensorSource::INTERNAL;
-    source->source_index = range.node_index;
+    source->source_index = range.task_index;
     source->packed_offset = tensor_addr - range.begin;
     return true;
 }
@@ -948,9 +949,9 @@ T *graph_image_section(std::byte *image, uint32_t offset) {
 // Counts, section offsets and total_bytes for the image this recording produces,
 // settled without writing any of it so the destination can be claimed at the
 // exact size. required_heap comes from the fill, which is the pass that walks the
-// nodes in order.
+// tasks in order.
 std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &recording) {
-    if (recording.unsupported || recording.node_count == 0 || recording.node_count > GRAPH_MAX_NODES ||
+    if (recording.unsupported || recording.task_count == 0 || recording.task_count > MAX_IN_GRAPH_TASKS ||
         recording.boundary_tensors().empty() || recording.boundary_tensors().size() > UINT16_MAX ||
         recording.boundary_tensors().size() != recording.boundary_types().size() ||
         recording.boundary_args() == nullptr) {
@@ -962,10 +963,10 @@ std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &rec
     size_t total_fanins = 0;
     size_t root_count = 0;
     size_t predicate_count = 0;
-    // node_count, not nodes.size(): the array keeps the slots a longer body left behind,
+    // task_count, not tasks.size(): the array keeps the slots a longer body left behind,
     // and those are not part of this recording.
-    for (size_t node = 0; node < recording.node_count; ++node) {
-        const GraphRecordedNode &source = recording.nodes[node];
+    for (size_t i = 0; i < recording.task_count; ++i) {
+        const RecordedInGraphTask &source = recording.tasks[i];
         if (source.tensor_count > UINT32_MAX - total_tensors || source.scalar_count > UINT32_MAX - total_scalars ||
             source.fanin_count > UINT32_MAX - total_fanins ||
             source.tensor_source_offset > recording.tensor_sources.size() ||
@@ -988,7 +989,7 @@ std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &rec
 
     GraphDefinition definition{};
     definition.full_key = recording.full_key;
-    definition.task_count = static_cast<uint32_t>(recording.node_count);
+    definition.task_count = static_cast<uint32_t>(recording.task_count);
     definition.edge_count = static_cast<uint32_t>(total_fanins);
     definition.root_count = static_cast<uint32_t>(root_count);
     definition.boundary_count = static_cast<uint32_t>(recording.boundary_tensors().size());
@@ -1007,13 +1008,15 @@ std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &rec
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
 
     size_t image_bytes = sizeof(GraphDefinition);
-    if (!graph_layout_section<uint32_t>(recording.node_count + 1, &image_bytes, &definition.off_fanout_offsets) ||
+    if (!graph_layout_section<uint32_t>(recording.task_count + 1, &image_bytes, &definition.off_fanout_offsets) ||
         !graph_layout_section<uint16_t>(total_fanins, &image_bytes, &definition.off_fanout_indices) ||
-        !graph_layout_section<uint32_t>(recording.node_count + 1, &image_bytes, &definition.off_fanin_offsets) ||
+        !graph_layout_section<uint32_t>(recording.task_count + 1, &image_bytes, &definition.off_fanin_offsets) ||
         !graph_layout_section<uint16_t>(total_fanins, &image_bytes, &definition.off_fanin_indices) ||
         !graph_layout_section<uint16_t>(root_count, &image_bytes, &definition.off_root_indices) ||
-        !graph_layout_section<uint64_t>(recording.node_count, &image_bytes, &definition.off_node_offsets) ||
-        !graph_layout_section<GraphNodeDefinition>(recording.node_count, &image_bytes, &definition.off_nodes) ||
+        !graph_layout_section<uint64_t>(recording.task_count, &image_bytes, &definition.off_in_graph_task_offsets) ||
+        !graph_layout_section<InGraphTaskDefinition>(
+            recording.task_count, &image_bytes, &definition.off_in_graph_tasks
+        ) ||
         !graph_layout_section<GraphTensor>(total_tensors, &image_bytes, &definition.off_tensors) ||
         !graph_layout_section<GraphTensorSourceRef>(total_tensors, &image_bytes, &definition.off_tensor_sources) ||
         !graph_layout_section<uint64_t>(total_scalars, &image_bytes, &definition.off_scalars) ||
@@ -1052,8 +1055,8 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
     auto *fanin_offsets = graph_image_section<uint32_t>(image, definition.off_fanin_offsets);
     auto *fanin_indices = graph_image_section<uint16_t>(image, definition.off_fanin_indices);
     auto *roots = graph_image_section<uint16_t>(image, definition.off_root_indices);
-    auto *node_offsets = graph_image_section<uint64_t>(image, definition.off_node_offsets);
-    auto *nodes = graph_image_section<GraphNodeDefinition>(image, definition.off_nodes);
+    auto *in_graph_task_offsets = graph_image_section<uint64_t>(image, definition.off_in_graph_task_offsets);
+    auto *tasks = graph_image_section<InGraphTaskDefinition>(image, definition.off_in_graph_tasks);
     auto *tensors = graph_image_section<GraphTensor>(image, definition.off_tensors);
     auto *tensor_sources = graph_image_section<GraphTensorSourceRef>(image, definition.off_tensor_sources);
     auto *scalars = graph_image_section<uint64_t>(image, definition.off_scalars);
@@ -1069,16 +1072,16 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
     // A producer's fanout count is accumulated across the consumer walk below and then
     // prefix-summed in place, so every entry has to start at zero — including [0],
     // which nothing else writes and which the device checks is zero.
-    std::fill_n(fanout_offsets, recording.node_count + 1, 0U);
+    std::fill_n(fanout_offsets, recording.task_count + 1, 0U);
     fanin_offsets[0] = 0;
-    for (size_t i = 0; i < recording.node_count; ++i) {
-        const GraphRecordedNode &source = recording.nodes[i];
+    for (size_t i = 0; i < recording.task_count; ++i) {
+        const RecordedInGraphTask &source = recording.tasks[i];
         if (source.total_output_size > static_cast<size_t>(INT32_MAX) ||
             source.tensor_count > static_cast<uint32_t>(INT32_MAX) ||
             source.scalar_count > static_cast<uint32_t>(INT32_MAX) || source.fanin_count > UINT16_MAX) {
             return false;
         }
-        node_offsets[i] = required_heap;
+        in_graph_task_offsets[i] = required_heap;
         const uint64_t output_bytes = CHIP_ALIGN_UP(source.total_output_size, CHIP_ALIGN_SIZE);
         if (required_heap > UINT64_MAX - output_bytes) return false;
         required_heap += output_bytes;
@@ -1092,19 +1095,19 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
         }
         fanin_offsets[i + 1] = static_cast<uint32_t>(fanin_cursor);
 
-        GraphNodeDefinition &node = nodes[i];
-        std::copy(source.kernel_ids.begin(), source.kernel_ids.end(), std::begin(node.kernel_id));
-        node.active_mask = source.active_mask.raw();
-        node.task_attrs = source.task_attrs.raw();
-        node.logical_block_num = source.logical_block_num;
-        node.total_required_subtasks = source.total_required_subtasks;
-        node.tensor_count = static_cast<int32_t>(source.tensor_count);
-        node.scalar_count = static_cast<int32_t>(source.scalar_count);
-        node.total_output_size = static_cast<int32_t>(source.total_output_size);
-        node.tensor_offset = static_cast<uint32_t>(tensor_cursor);
-        node.scalar_offset = static_cast<uint32_t>(scalar_cursor);
-        node.dump_metadata = source.dump_metadata;
-        node.predicate_slot = 0;
+        InGraphTaskDefinition &task = tasks[i];
+        std::copy(source.kernel_ids.begin(), source.kernel_ids.end(), std::begin(task.kernel_id));
+        task.active_mask = source.active_mask.raw();
+        task.task_attrs = source.task_attrs.raw();
+        task.logical_block_num = source.logical_block_num;
+        task.total_required_subtasks = source.total_required_subtasks;
+        task.tensor_count = static_cast<int32_t>(source.tensor_count);
+        task.scalar_count = static_cast<int32_t>(source.scalar_count);
+        task.total_output_size = static_cast<int32_t>(source.total_output_size);
+        task.tensor_offset = static_cast<uint32_t>(tensor_cursor);
+        task.scalar_offset = static_cast<uint32_t>(scalar_cursor);
+        task.dump_metadata = source.dump_metadata;
+        task.predicate_slot = 0;
         if (source.predicate_index >= 0) {
             if (static_cast<size_t>(source.predicate_index) >= recording.predicates.size()) return false;
             const GraphRecordedPredicate &recorded = recording.predicates[source.predicate_index];
@@ -1118,9 +1121,9 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
             packed.elem_size = recorded.elem_size;
             packed.op = static_cast<uint8_t>(recorded.op);
             predicates[predicate_cursor] = packed;
-            node.predicate_slot = static_cast<uint16_t>(++predicate_cursor);
+            task.predicate_slot = static_cast<uint16_t>(++predicate_cursor);
         }
-        const simpler::hbg::Tensor *source_tensors = recording.node_tensors(source);
+        const simpler::hbg::Tensor *source_tensors = recording.task_tensors(source);
         for (size_t t = 0; t < source.tensor_count; ++t) {
             if (source_tensors[t].ndims > MAX_TENSOR_DIMS) return false;
             tensors[tensor_cursor] = graph_tensor_pack(source_tensors[t]);
@@ -1149,10 +1152,10 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
         return false;
     }
     definition.required_heap = required_heap;
-    for (size_t i = 0; i < recording.node_count; ++i)
+    for (size_t i = 0; i < recording.task_count; ++i)
         fanout_offsets[i + 1] += fanout_offsets[i];
-    std::vector<uint32_t> cursors(fanout_offsets, fanout_offsets + recording.node_count);
-    for (size_t consumer = 0; consumer < recording.node_count; ++consumer) {
+    std::vector<uint32_t> cursors(fanout_offsets, fanout_offsets + recording.task_count);
+    for (size_t consumer = 0; consumer < recording.task_count; ++consumer) {
         for (uint32_t f = fanin_offsets[consumer]; f < fanin_offsets[consumer + 1]; ++f) {
             const size_t producer = fanin_indices[f];
             fanout_indices[cursors[producer]++] = static_cast<uint16_t>(consumer);
@@ -1448,7 +1451,7 @@ static bool prepare_task(
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
-    out->slot_state->task_kind = active_mask ? TaskKind::KERNEL : TaskKind::DUMMY;
+    out->slot_state->task_kind = active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
     // Reclaim gate: seed last_consumer to self, so a producer with no consumers
     // is retirable once completed_watermark >= its own id. Each fanin edge bumps
     // it in append_fanin_or_fail. completion_flags for this slot were cleared
@@ -1472,8 +1475,8 @@ void OrchestratorState::begin_scope(ScopeMode mode) {
     // A Graph replays as a flat DAG with no scope structure: scope boundaries only
     // shape scheduling on the ordinary path, and the shadow-record path submits no
     // ordinary tasks. So a scope inside a Graph body must not touch the real scope
-    // stack. Its manual/auto mode still matters, though — the recorder infers a
-    // node's producers with the same compute_task_fanin the ordinary path uses, and
+    // stack. Its manual/auto mode still matters, though — the recorder infers a recorded
+    // task's producers with the same compute_task_fanin the ordinary path uses, and
     // that inference is suppressed inside a manual scope — so the depth is tracked on
     // the recording instead.
     if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
@@ -2074,17 +2077,16 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
     return true;
 }
 
-// Record one internal Graph node while recording, without consuming a
-// task-table slot. Builds the node's metadata and materialized outputs
-// exactly as submit_task_common would, but assigns output buffers from the
-// bit-63 virtual address range and derives internal fanins from tensor-source
-// classification — so no task slot, tensormap entry, fanin-pool entry, or upload
-// is produced for the node. The resulting Definition is later attached to the
-// outer GRAPH shells already submitted by the main thread. The returned
-// TaskOutputTensors borrow the node's own tensor storage; moving the node into
-// recording.nodes keeps those addresses valid because the inner buffer is
-// transferred, not copied.
-TaskOutputTensors graph_record_submit_node(
+// Record one in-graph task while recording, without consuming a task-table
+// slot. Builds the task's metadata and materialized outputs exactly as
+// submit_task_common would, but assigns output buffers from the bit-63 virtual
+// address range and derives internal fanins from tensor-source classification — so
+// no task-table slot, tensormap entry, fanin-pool entry, or upload is produced for
+// it. The resulting Definition is later attached to the outer GRAPH shells already
+// submitted by the main thread. The returned TaskOutputTensors point into the
+// recording's tensor pool, which is allocated at the cap and never grows, so they
+// stay valid for the rest of the recording.
+TaskOutputTensors graph_record_submit_in_graph_task(
     OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
@@ -2092,16 +2094,16 @@ TaskOutputTensors graph_record_submit_node(
     TaskOutputTensors result;
     GraphRecording &recording = *active_graph_recording(orch);
 
-    const size_t node_index = recording.node_count;
+    const size_t task_index = recording.task_count;
     // A recorded task lives in the IN_GRAPH id space, so an id the body hands
     // around says which of the two kinds of thing it names without any arithmetic:
     // an IN_GRAPH id is a task of this body, indexed by its low field; a GLOBAL id is
     // a task submitted before the Graph, which nothing in the body may depend on.
     const TaskId task_id =
-        simpler::hbg::make_in_graph_task(GRAPH_RECORD_NO_OWNING_GRAPH, static_cast<uint32_t>(node_index));
+        simpler::hbg::make_in_graph_task(GRAPH_RECORD_NO_OWNING_GRAPH, static_cast<uint32_t>(task_index));
     result.set_task_id(task_id);
 
-    if (node_index >= GRAPH_MAX_NODES || args.has_error) {
+    if (task_index >= MAX_IN_GRAPH_TASKS || args.has_error) {
         recording.unsupported = true;
     }
 
@@ -2116,61 +2118,59 @@ TaskOutputTensors graph_record_submit_node(
     const uintptr_t packed_base_addr = GRAPH_RECORD_VIRTUAL_BASE + recording.next_virtual_offset;
     recording.next_virtual_offset += aligned_output;
 
-    // The node is filled in place, in the slot it will keep. Reusing the slot is what
-    // keeps its `tensors` buffer across recordings; reset() puts the rest of the slot
-    // back to a fresh node's state. Growing `nodes` moves the slots, but a slot's
-    // borrowed output addresses live in that heap buffer and a move only transfers its
-    // pointer, so they stay valid -- the same reason the old push_back(std::move(node))
-    // was sound.
-    if (node_index >= recording.nodes.size()) recording.nodes.emplace_back();
-    GraphRecordedNode &node = recording.nodes[node_index];
-    node.reset();
-    node.kernel_ids[static_cast<int>(SubtaskSlot::AIC)] = aic_kernel_id;
-    node.kernel_ids[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
-    node.kernel_ids[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
-    node.active_mask = active_mask;
-    node.task_attrs = task_attrs;
-    node.task_attrs.set_early_resolve(false);
-    node.logical_block_num = args.launch_spec.block_num();
+    // The task is filled in place, in the slot it will keep, and reset() puts the rest of
+    // the slot back to a freshly recorded task's state. An over-cap body grows `tasks`,
+    // which moves the slots, but the addresses handed to the caller live in the recording's
+    // tensor pool rather than in a slot, so a move cannot invalidate them.
+    if (task_index >= recording.tasks.size()) recording.tasks.emplace_back();
+    RecordedInGraphTask &task = recording.tasks[task_index];
+    task.reset();
+    task.kernel_ids[static_cast<int>(SubtaskSlot::AIC)] = aic_kernel_id;
+    task.kernel_ids[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
+    task.kernel_ids[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
+    task.active_mask = active_mask;
+    task.task_attrs = task_attrs;
+    task.task_attrs.set_early_resolve(false);
+    task.logical_block_num = args.launch_spec.block_num();
     // Mirror prepare_task's contract: block_num must be positive and the subtask
     // count must fit int16_t. An out-of-contract value marks asynchronous
     // recording unsupported and makes commit fail-fast, rather than baking a
     // truncated or negative count into the cached Definition (which the device
-    // would expand into a node that never completes).
+    // would expand into an in-graph task that never completes).
     const int32_t required_subtasks =
-        static_cast<int32_t>(node.logical_block_num) * __builtin_popcount(active_mask.core_mask());
-    if (node.logical_block_num <= 0 || required_subtasks > std::numeric_limits<int16_t>::max()) {
+        static_cast<int32_t>(task.logical_block_num) * __builtin_popcount(active_mask.core_mask());
+    if (task.logical_block_num <= 0 || required_subtasks > std::numeric_limits<int16_t>::max()) {
         recording.unsupported = true;
-        node.total_required_subtasks = 0;
+        task.total_required_subtasks = 0;
     } else {
-        node.total_required_subtasks = static_cast<int16_t>(required_subtasks);
+        task.total_required_subtasks = static_cast<int16_t>(required_subtasks);
     }
-    node.record_packed_base = packed_base_addr;
-    node.total_output_size = aligned_output;
+    task.record_packed_base = packed_base_addr;
+    task.total_output_size = aligned_output;
 
     // Build the tensor list exactly as TaskPayload::init: inputs/inouts copy
     // the caller's simpler::hbg::Tensor; outputs materialize from the create-info onto the
-    // scratch buffer and carry this node's owner id.
+    // scratch buffer and carry the recorded task's owner id.
     const int32_t tensor_count = args.tensor_count();
-    // Claim this node's slice of the pool. The cursor is a pure bump, so slices abut and a
+    // Claim this task's slice of the pool. The cursor is a pure bump, so slices abut and a
     // body holds its tensors in the bytes they need; nothing is ever returned to it, since
     // the whole pool is reset by the next recording.
-    if (static_cast<size_t>(recording.node_tensor_cursor) + static_cast<size_t>(tensor_count) >
-        GRAPH_RECORD_NODE_TENSOR_POOL_ELEMS) {
+    if (static_cast<size_t>(recording.task_tensor_cursor) + static_cast<size_t>(tensor_count) >
+        GRAPH_RECORD_TENSOR_POOL_ELEMS) {
         recording.unsupported = true;
         return result;
     }
-    node.tensor_offset = recording.node_tensor_cursor;
-    node.tensor_count = static_cast<uint32_t>(tensor_count);
-    recording.node_tensor_cursor += static_cast<uint32_t>(tensor_count);
-    simpler::hbg::Tensor *node_tensors = recording.node_tensors(node);
+    task.tensor_offset = recording.task_tensor_cursor;
+    task.tensor_count = static_cast<uint32_t>(tensor_count);
+    recording.task_tensor_cursor += static_cast<uint32_t>(tensor_count);
+    simpler::hbg::Tensor *task_tensors = recording.task_tensors(task);
     // Value-initialized before the fill, not merely claimed: the slice holds whatever the
     // previous body left in it, and simpler::hbg::Tensor::init_from writes strides only up
     // to the new tensor's ndims, so a narrower tensor would inherit a wider one's trailing
     // strides.
-    std::fill_n(node_tensors, static_cast<size_t>(tensor_count), simpler::hbg::Tensor{});
+    std::fill_n(task_tensors, static_cast<size_t>(tensor_count), simpler::hbg::Tensor{});
     for (int32_t i = 0; i < tensor_count; ++i) {
-        simpler::hbg::Tensor &slot_tensor = node_tensors[static_cast<size_t>(i)];
+        simpler::hbg::Tensor &slot_tensor = task_tensors[static_cast<size_t>(i)];
         if (args.tag(i) != TensorArgType::OUTPUT) {
             slot_tensor.copy(args.tensor(i).ref());
         } else {
@@ -2182,39 +2182,39 @@ TaskOutputTensors graph_record_submit_node(
         }
     }
     // The addresses handed out here are into the pool, which never moves, so they stay
-    // valid for every later node of this recording.
+    // valid for the rest of this recording.
     for (int32_t i = 0; i < tensor_count; ++i) {
-        if (args.tag(i) == TensorArgType::OUTPUT) result.materialize_output(node_tensors[static_cast<size_t>(i)]);
+        if (args.tag(i) == TensorArgType::OUTPUT) result.materialize_output(task_tensors[static_cast<size_t>(i)]);
     }
-    node.scalar_offset = static_cast<uint32_t>(recording.scalars.size());
-    node.scalar_count = static_cast<uint32_t>(args.scalar_count());
+    task.scalar_offset = static_cast<uint32_t>(recording.scalars.size());
+    task.scalar_count = static_cast<uint32_t>(args.scalar_count());
     recording.scalars.insert(recording.scalars.end(), args.scalars(), args.scalars() + args.scalar_count());
 #if SIMPLER_DFX
-    node.dump_metadata.dump_arg_mask = args.dump_arg_mask();
-    node.dump_metadata.dump_arg_flags = args.dump_arg_index_ambiguous_mask();
-    memcpy(node.dump_metadata.scalar_dtypes, args.scalar_dtypes(), args.scalar_count() * sizeof(uint8_t));
+    task.dump_metadata.dump_arg_mask = args.dump_arg_mask();
+    task.dump_metadata.dump_arg_flags = args.dump_arg_index_ambiguous_mask();
+    memcpy(task.dump_metadata.scalar_dtypes, args.scalar_dtypes(), args.scalar_count() * sizeof(uint8_t));
 #endif
 
     // Classify each scalar's source: a plain literal is static Definition data,
     // while a value copied from a boundary scalar is refreshed on replay. A
     // mutable tracked boundary scalar is not supported and falls back.
-    recording.scalar_sources.resize(static_cast<size_t>(node.scalar_offset) + node.scalar_count);
+    recording.scalar_sources.resize(static_cast<size_t>(task.scalar_offset) + task.scalar_count);
     for (int32_t i = 0; i < args.scalar_count(); ++i) {
         GraphRecordedScalarSourceRef source = graph_classify_scalar(recording, args, i);
         if (source.source == GraphRecordedScalarSource::INVALIDATED_BOUNDARY) recording.unsupported = true;
-        recording.scalar_sources[static_cast<size_t>(node.scalar_offset) + static_cast<size_t>(i)] = source;
+        recording.scalar_sources[static_cast<size_t>(task.scalar_offset) + static_cast<size_t>(i)] = source;
     }
 
     // Classify each tensor's source, then derive internal fanins from the
     // INTERNAL classifications plus any explicit internal dependency.
-    node.tensor_source_offset = static_cast<uint32_t>(recording.tensor_sources.size());
-    recording.tensor_sources.resize(static_cast<size_t>(node.tensor_source_offset) + tensor_count);
+    task.tensor_source_offset = static_cast<uint32_t>(recording.tensor_sources.size());
+    recording.tensor_sources.resize(static_cast<size_t>(task.tensor_source_offset) + tensor_count);
     for (int32_t i = 0; i < tensor_count; ++i) {
         // The out-pointer is used only for the duration of the call, so pointing
-        // it into the flat array is safe even though a later node grows that array.
+        // it into the flat array is safe even though a later task of this body grows it.
         if (!graph_classify_tensor(
-                recording, node, static_cast<int32_t>(node_index), node_tensors[static_cast<size_t>(i)],
-                &recording.tensor_sources[static_cast<size_t>(node.tensor_source_offset) + static_cast<size_t>(i)]
+                recording, task, static_cast<int32_t>(task_index), task_tensors[static_cast<size_t>(i)],
+                &recording.tensor_sources[static_cast<size_t>(task.tensor_source_offset) + static_cast<size_t>(i)]
             )) {
             recording.unsupported = true;
         }
@@ -2226,18 +2226,18 @@ TaskOutputTensors graph_record_submit_node(
     // predicate creates no dependency here any more than it does on the ordinary
     // path: the caller declares one, and the explicit-dep loop below records it.
     //
-    // Gated on the recorded attribute, not on args: a kernel-less node never
+    // Gated on the recorded attribute, not on args: a kernel-less task never
     // dispatches, so submit_dummy_task and alloc_tensors drop the predicate the
-    // caller set. Reading args here instead would record a predicate the node's
+    // caller set. Reading args here instead would record a predicate the task's
     // own attribute denies, and materialize rejects a Definition whose two halves
     // disagree.
-    if (node.task_attrs.has_predicate()) {
+    if (task.task_attrs.has_predicate()) {
         const CoreTaskPredicate &pred = args.predicate();
         GraphRecordedPredicate recorded;
         recorded.op = pred.op;
         recorded.target = pred.target;
         const simpler::hbg::Tensor *operand = pred.operand.tensor;
-        // OWN_OUTPUT would read the node's own output before the node runs, so it
+        // OWN_OUTPUT would read the task's own output before the task runs, so it
         // names no value the predicate could be evaluating. An index vector that
         // leaves the operand's extent is caught here too: materialize would
         // otherwise reject the baked offset on the device, where the failure is a
@@ -2246,7 +2246,7 @@ TaskOutputTensors graph_record_submit_node(
             operand == nullptr ? 0 : operand->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
         if (operand == nullptr || operand->ndims > MAX_TENSOR_DIMS || pred.operand.ndims > operand->ndims ||
             flat_offset < operand->start_offset || flat_offset - operand->start_offset >= operand->extent_elem_cache ||
-            !graph_classify_tensor(recording, node, static_cast<int32_t>(node_index), *operand, &recorded.source) ||
+            !graph_classify_tensor(recording, task, static_cast<int32_t>(task_index), *operand, &recorded.source) ||
             recorded.source.source == GraphRecordedTensorSource::OWN_OUTPUT) {
             recording.unsupported = true;
         } else {
@@ -2254,31 +2254,31 @@ TaskOutputTensors graph_record_submit_node(
             recorded.elem_offset = flat_offset - operand->start_offset;
             recorded.elem_size = static_cast<uint8_t>(get_element_size(operand->dtype));
         }
-        node.predicate_index = static_cast<int32_t>(recording.predicates.size());
+        task.predicate_index = static_cast<int32_t>(recording.predicates.size());
         recording.predicates.push_back(recorded);
     }
 
-    node.fanin_offset = static_cast<uint32_t>(recording.internal_fanins.size());
-    // Dedup within this node's own range: the flat array's earlier entries belong
-    // to earlier nodes.
-    auto add_fanin = [&recording, &node](size_t producer) {
-        const auto begin = recording.internal_fanins.begin() + node.fanin_offset;
+    task.fanin_offset = static_cast<uint32_t>(recording.internal_fanins.size());
+    // Dedup within this task's own range: the flat array's earlier entries belong
+    // to the body's earlier tasks.
+    auto add_fanin = [&recording, &task](size_t producer) {
+        const auto begin = recording.internal_fanins.begin() + task.fanin_offset;
         if (std::find(begin, recording.internal_fanins.end(), producer) == recording.internal_fanins.end()) {
             recording.internal_fanins.push_back(producer);
         }
     };
     for (uint32_t i = 0; i < static_cast<uint32_t>(tensor_count); ++i) {
-        const GraphRecordedTensorSourceRef &source = recording.tensor_sources[node.tensor_source_offset + i];
+        const GraphRecordedTensorSourceRef &source = recording.tensor_sources[task.tensor_source_offset + i];
         if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(source.source_index);
     }
 
     // Inferred hazards, on the same terms as the ordinary path. The loop above only
-    // names the node that ALLOCATED each buffer; every write-then-read through a
+    // names the in-graph task that ALLOCATED each buffer; every write-then-read through a
     // buffer someone else allocated — an alloc_tensors output written in place
     // with add_inout, or a view of a boundary tensor — needs the last-writer
     // lookup compute_task_fanin performs. Running the very same function against
     // the recording's own map is what keeps a Definition's edge set equal to the
-    // one the body gets when its tasks are submitted individually.
+    // one the body gets when the ordinary path submits its tasks one at a time.
     //
     // Producers outside the recording window are dropped: they are reached
     // through boundary tensors, and the outer Graph shell already carries those
@@ -2292,29 +2292,29 @@ TaskOutputTensors graph_record_submit_node(
             args.explicit_deps_data(),
         };
         const bool manual_scope = recording.in_manual_scope();
-        if (!recording.storage_ready || node_index >= GRAPH_MAX_NODES) {
+        if (!recording.storage_ready || task_index >= MAX_IN_GRAPH_TASKS) {
             // An over-cap body is already abandoned, and its task ids have run past
             // the index field make_in_graph_task packs them into, so registering one
             // would key the map outside its task chains.
             recording.unsupported = true;
         } else if (recording.tensor_map.free_entries() < count_registrable_outputs(dep_inputs, manual_scope)) {
-            // Recording one more node would assert inside new_entry(). Abandon the
+            // Recording one more task would assert inside new_entry(). Abandon the
             // Definition instead, so the run fails by name at graph_commit rather
             // than on a hard assert here.
             LOG_WARN(
-                "[GraphExecution] recording hazard map exhausted at node %zu (%d entries); Graph abandoned", node_index,
-                GRAPH_RECORD_TENSORMAP_POOL_SIZE
+                "[GraphExecution] recording hazard map exhausted at in-graph task %zu (%d entries); Graph abandoned",
+                task_index, GRAPH_RECORD_TENSORMAP_POOL_SIZE
             );
             recording.unsupported = true;
         } else {
-            auto emit_inferred = [&add_fanin, node_index](TaskId producer) -> bool {
+            auto emit_inferred = [&add_fanin, task_index](TaskId producer) -> bool {
                 // A GLOBAL producer is a task submitted before the Graph. The outer shell
                 // was submitted through the ordinary path against this same boundary, so
                 // its own fanin already orders the whole body behind that task and the
                 // Definition carries no edge of its own.
                 if (simpler::hbg::is_global_task(producer)) return true;
                 const uint32_t producer_index = simpler::hbg::task_local_id(producer);
-                if (producer_index < static_cast<uint32_t>(node_index)) {
+                if (producer_index < static_cast<uint32_t>(task_index)) {
                     add_fanin(static_cast<size_t>(producer_index));
                 }
                 return true;
@@ -2343,7 +2343,7 @@ TaskOutputTensors graph_record_submit_node(
             continue;
         }
         const uint32_t dep_index = simpler::hbg::task_local_id(dep);
-        if (dep_index >= static_cast<uint32_t>(node_index)) {
+        if (dep_index >= static_cast<uint32_t>(task_index)) {
             // A task of this body that is not yet recorded: the Definition's edges are
             // acyclic by construction, so a forward reference cannot be expressed.
             recording.unsupported = true;
@@ -2352,22 +2352,21 @@ TaskOutputTensors graph_record_submit_node(
         add_fanin(static_cast<size_t>(dep_index));
     }
 
-    node.fanin_count = static_cast<uint32_t>(recording.internal_fanins.size() - node.fanin_offset);
-    if (node.record_packed_base != 0 && node.total_output_size != 0 &&
-        node.total_output_size <= UINTPTR_MAX - node.record_packed_base) {
-        const uintptr_t begin = node.record_packed_base;
-        const uintptr_t end = begin + node.total_output_size;
+    task.fanin_count = static_cast<uint32_t>(recording.internal_fanins.size() - task.fanin_offset);
+    if (task.record_packed_base != 0 && task.total_output_size != 0 &&
+        task.total_output_size <= UINTPTR_MAX - task.record_packed_base) {
+        const uintptr_t begin = task.record_packed_base;
+        const uintptr_t end = begin + task.total_output_size;
         // The sorted-and-disjoint property the lookup depends on, checked rather
         // than assumed: a mid-recording heap rollback would break it, and today
-        // the only rollback is graph_end's, after every node is recorded.
+        // the only rollback is graph_end's, after every task of the body is recorded.
         always_assert(recording.output_ranges.empty() || recording.output_ranges.back().end <= begin);
-        recording.output_ranges.push_back({begin, end, static_cast<uint32_t>(node_index)});
+        recording.output_ranges.push_back({begin, end, static_cast<uint32_t>(task_index)});
     }
-    // Published last, as push_back(std::move(node)) used to be: until this advances, the
-    // slot is not part of the recording, so nothing that scans the recorded nodes can see
-    // the node being built.
-    recording.node_count = node_index + 1;
-    ORCH_PHASE_END(HostPhaseKind::OrchRecordNode, task_id.raw);
+    // Published last: until this advances, the slot is not part of the recording, so
+    // nothing that scans the recorded tasks can see the task being built.
+    recording.task_count = task_index + 1;
+    ORCH_PHASE_END(HostPhaseKind::OrchRecordInGraphTask, task_id.raw);
     return result;
 }
 
@@ -2586,7 +2585,7 @@ bool OrchestratorState::graph_end() {
     }
     const bool built = layout.has_value() && graph_fill_definition(*recording, *layout, image);
     if (built) {
-        ORCH_PHASE_END(HostPhaseKind::OrchBuildDefinition, recording->node_count);
+        ORCH_PHASE_END(HostPhaseKind::OrchBuildDefinition, recording->task_count);
     }
     const GraphDefinition *header = built ? graph_record_definition(*state, record) : nullptr;
     if (header == nullptr) {
@@ -2596,7 +2595,7 @@ bool OrchestratorState::graph_end() {
         return false;
     }
     LOG_DEBUG(
-        "[GraphExecution] define key=0x%llx nodes=%u bytes=%u", static_cast<unsigned long long>(header->full_key),
+        "[GraphExecution] define key=0x%llx tasks=%u bytes=%u", static_cast<unsigned long long>(header->full_key),
         header->task_count, header->total_bytes
     );
     bool ready = false;
@@ -2741,7 +2740,7 @@ TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kerne
     }
 
     if (active_graph_recording(orch) != nullptr) {
-        return graph_record_submit_node(
+        return graph_record_submit_in_graph_task(
             orch, args, active_mask, task_attrs, normalized.aic_kernel_id, normalized.aiv0_kernel_id,
             normalized.aiv1_kernel_id
         );
@@ -2784,7 +2783,7 @@ TaskOutputTensors OrchestratorState::submit_dummy_task(const CoreTaskArgs &args)
     task_attrs.set_timing_slot(args.task_timing_slot());
 
     if (active_graph_recording(orch) != nullptr) {
-        return graph_record_submit_node(
+        return graph_record_submit_in_graph_task(
             orch, args, ActiveMask{}, task_attrs, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
         );
     }
@@ -2832,12 +2831,12 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         return TaskOutputTensors{};
     }
 
-    // A Graph body may allocate. The allocation records as a kernel-less node —
-    // the same shape submit_dummy_task records — and replay reserves the
-    // intermediate heap for every internal node anyway, so the outputs land at
+    // A Graph body may allocate. The allocation records as a kernel-less in-graph
+    // task — the same shape submit_dummy_task records — and replay reserves the
+    // intermediate heap for every in-graph task anyway, so the outputs land at
     // addresses the replayed Definition derives for itself.
     if (active_graph_recording(orch) != nullptr) {
-        return graph_record_submit_node(
+        return graph_record_submit_in_graph_task(
             orch, args, ActiveMask{}, TaskAttrs{}, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
         );
     }

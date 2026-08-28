@@ -46,9 +46,9 @@ protected:
     std::vector<std::byte> definition_staging;
     GraphDefinitionArena arena{};
 
-    // A Graph task's heap allocation covers its nodes' packed outputs *and* the
+    // A Graph task's heap allocation covers its tasks' packed outputs *and* the
     // execution storage the device materializes into, so the pool has to hold a
-    // GraphExecution header plus one GraphNodeStorage (~5 KB) on top of the
+    // GraphExecution header plus one InGraphTaskStorage (~5 KB) on top of the
     // outputs. 4 KB used to be enough when the storage came from a separate
     // device allocation.
     static constexpr size_t HEAP_BYTES = 64 * 1024;
@@ -113,11 +113,11 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     EXPECT_EQ(graph_host_upload_count(*graph_state), 2u);
 
     ASSERT_TRUE(orch.graph_prepare(first.recording_handle, boundary_args));
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-    node_args.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    task_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     EXPECT_EQ(orch.task_allocator.heap_top(), 0u);
 
@@ -156,7 +156,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
 //
 // That overlap is held together only by field partitioning: under
 // recording_mutex the main thread reads boundary_tensors / boundary_types /
-// boundary_scalar_count, while the worker writes boundary_args / nodes /
+// boundary_scalar_count, while the worker writes boundary_args / tasks /
 // next_virtual_offset / unsupported without it (graph_prepare skips the mutex on
 // purpose, so a submit burst cannot starve it). Nothing enforces that split, so
 // this pins the functional contract that depends on it — and gives TSAN a window
@@ -182,7 +182,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     bool prepared = false;
     bool main_done_submitting = false;
     bool prepare_ok = false;
-    bool node_ok = false;
+    bool task_ok = false;
     bool end_ok = false;
 
     std::thread worker([&]() {
@@ -205,11 +205,11 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
             });
         }
 
-        CoreTaskArgs node_args;
-        node_args.add_input(boundary);
+        CoreTaskArgs task_args;
+        task_args.add_input(boundary);
         TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-        node_args.add_output(recorded_output);
-        node_ok = orch.submit_dummy_task(node_args).task_id().is_valid();
+        task_args.add_output(recorded_output);
+        task_ok = orch.submit_dummy_task(task_args).task_id().is_valid();
         end_ok = orch.graph_end();
     });
 
@@ -232,7 +232,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     worker.join();
 
     ASSERT_TRUE(prepare_ok);
-    ASSERT_TRUE(node_ok);
+    ASSERT_TRUE(task_ok);
     ASSERT_TRUE(end_ok);
     EXPECT_FALSE(second.recording);
     EXPECT_FALSE(second.execute_block);
@@ -290,11 +290,11 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     ASSERT_TRUE(graph.task_id.is_valid());
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-    node_args.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    task_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
 
     orch.graph_abort(graph.recording_handle);
     ASSERT_FALSE(orch.fatal) << "Abort alone must not latch; the shell is still finalizable in principle";
@@ -323,11 +323,11 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
     orch.begin_scope(ScopeMode::MANUAL);
     orch.begin_scope(ScopeMode::AUTO);
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-    node_args.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    task_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
 
     orch.end_scope();
     orch.end_scope();
@@ -338,10 +338,10 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
     EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
 }
 
-// A Graph body may allocate. The allocation records as a kernel-less node, the
-// same shape submit_dummy_task records, so the recording stays publishable and
+// A Graph body may allocate. The allocation records as a kernel-less in-graph task,
+// the same shape submit_dummy_task records, so the recording stays publishable and
 // the commit latches no fatal.
-TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernellessNode) {
+TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernellessInGraphTask) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
@@ -377,12 +377,12 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-    node_args.add_output(recorded_output);
+    task_args.add_output(recorded_output);
     const uint64_t heap_top_before_record = orch.task_allocator.heap_top();
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     EXPECT_EQ(orch.task_allocator.heap_top(), heap_top_before_record);
     ASSERT_TRUE(orch.graph_end());
     EXPECT_EQ(orch.task_allocator.heap_top(), heap_top_before_record);
@@ -421,9 +421,9 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     ASSERT_EQ(orch.task_allocator.active_count(), 1);
 
@@ -455,7 +455,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
 // it.
 class HbgGraphPredicateRejectionTest : public HbgGraphSubmitFailureTest {
 protected:
-    // Records one predicated node into a fresh Graph and asserts the recording
+    // Records one predicated in-graph task into a fresh Graph and asserts the recording
     // refused it. `build_predicate` receives the boundary tensor.
     template <typename BuildPredicate>
     void expect_recording_refused(uint64_t graph_key, BuildPredicate build_predicate) {
@@ -470,14 +470,14 @@ protected:
         EXPECT_TRUE(graph.recording);
         EXPECT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-        CoreTaskArgs node_args;
-        node_args.add_input(boundary);
+        CoreTaskArgs task_args;
+        task_args.add_input(boundary);
         TensorCreateInfo recorded_output(shape, 1, DataType::INT32);
-        node_args.add_output(recorded_output);
+        task_args.add_output(recorded_output);
         MixedKernels mixed{};
         mixed.aiv0_kernel_id = 0;
-        node_args.set_predicate(build_predicate(boundary));
-        EXPECT_TRUE(orch.submit_task(mixed, node_args).task_id().is_valid());
+        task_args.set_predicate(build_predicate(boundary));
+        EXPECT_TRUE(orch.submit_task(mixed, task_args).task_id().is_valid());
 
         EXPECT_THROW(orch.graph_end(), AssertionError) << "an unrecordable predicate must not publish";
         orch.graph_abort(graph.recording_handle);
@@ -505,7 +505,7 @@ TEST_F(HbgGraphPredicateRejectionTest, OperandIndexOutsideTheExtentAbortsTheReco
 }
 
 TEST_F(HbgGraphPredicateRejectionTest, OperandOnAnUnclassifiableTensorAbortsTheRecording) {
-    // Neither a boundary tensor nor any recorded node's output, so the recorder
+    // Neither a boundary tensor nor any recorded task's output, so the recorder
     // cannot name a base the replay could rebind against.
     std::array<uint32_t, 16> foreign_storage{};
     uint32_t shape[] = {static_cast<uint32_t>(foreign_storage.size())};
@@ -516,12 +516,12 @@ TEST_F(HbgGraphPredicateRejectionTest, OperandOnAnUnclassifiableTensorAbortsTheR
     });
 }
 
-// A kernel-less node never dispatches, so submit_dummy_task and alloc_tensors
+// A kernel-less in-graph task never dispatches, so submit_dummy_task and alloc_tensors
 // drop the caller's predicate exactly as they do on the ordinary path. Recording
-// must drop it too: a node whose Definition claimed a predicate its own attribute
+// must drop it too: a task whose Definition claimed a predicate its own attribute
 // denies is rejected by materialize, on the device, for a value the scheduler was
 // never going to read.
-TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessNodeIsNotRecorded) {
+TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessInGraphTaskIsNotRecorded) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1, DataType::INT32);
@@ -533,14 +533,14 @@ TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessNodeIsNotRecorded) 
     ASSERT_TRUE(graph.recording);
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
     TensorCreateInfo recorded_output(shape, 1, DataType::INT32);
-    node_args.add_output(recorded_output);
+    task_args.add_output(recorded_output);
     // Out of extent, which a recorded predicate would reject — proving the
     // predicate never reached the recorder rather than merely passing its checks.
-    node_args.set_predicate(predicate_on(boundary, 16));
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    task_args.set_predicate(predicate_on(boundary, 16));
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
 
     EXPECT_TRUE(orch.graph_end()) << "a dropped predicate must not make the body unrecordable";
     orch.graph_commit();
@@ -579,17 +579,17 @@ TEST_F(HbgGraphSubmitFailureTest, ASecondKeyRecordsAlongsideTheFirst) {
     TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
 
     ASSERT_TRUE(orch.graph_prepare(first.recording_handle, args_a));
-    CoreTaskArgs node_a;
-    node_a.add_input(boundary_a);
-    node_a.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_a).task_id().is_valid());
+    CoreTaskArgs task_a;
+    task_a.add_input(boundary_a);
+    task_a.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_a).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
 
     ASSERT_TRUE(orch.graph_prepare(second.recording_handle, args_b));
-    CoreTaskArgs node_b;
-    node_b.add_input(boundary_b);
-    node_b.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_b).task_id().is_valid());
+    CoreTaskArgs task_b;
+    task_b.add_input(boundary_b);
+    task_b.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_b).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
 
     // One commit drains and back-patches both keys' deferred shells.
@@ -628,10 +628,10 @@ TEST_F(HbgGraphSubmitFailureTest, ConcurrentDefinitionsFinalizeInSubmissionOrder
 
     for (size_t i = kGraphCount; i-- > 0;) {
         ASSERT_TRUE(orch.graph_prepare(graphs[i].recording_handle, args)) << "Graph " << i;
-        CoreTaskArgs node_args;
-        node_args.add_input(boundary);
-        node_args.add_output(recorded_output);
-        ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid()) << "Graph " << i;
+        CoreTaskArgs task_args;
+        task_args.add_input(boundary);
+        task_args.add_output(recorded_output);
+        ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid()) << "Graph " << i;
         ASSERT_TRUE(orch.graph_end()) << "Graph " << i;
     }
 
@@ -674,10 +674,10 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
     const GraphScopeResult first = orch.graph_begin(0x1903, args_a, 0x1736);
     ASSERT_TRUE(first.recording);
     ASSERT_TRUE(orch.graph_prepare(first.recording_handle, args_a));
-    CoreTaskArgs node_a;
-    node_a.add_input(boundary_a);
-    node_a.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_a).task_id().is_valid());
+    CoreTaskArgs task_a;
+    task_a.add_input(boundary_a);
+    task_a.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_a).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
     ASSERT_FALSE(orch.fatal);
@@ -695,10 +695,10 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
     EXPECT_GT(orch.task_allocator.heap_top(), 0u);
 
     ASSERT_TRUE(orch.graph_prepare(second.recording_handle, args_b));
-    CoreTaskArgs node_b;
-    node_b.add_input(boundary_b);
-    node_b.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_b).task_id().is_valid());
+    CoreTaskArgs task_b;
+    task_b.add_input(boundary_b);
+    task_b.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_b).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
     EXPECT_FALSE(orch.fatal);
@@ -733,10 +733,10 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
 
     // Only then does the recording finish and the shell claim its block.
     ASSERT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
-    CoreTaskArgs node_args;
-    node_args.add_input(boundary);
-    node_args.add_output(recorded_output);
-    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    CoreTaskArgs task_args;
+    task_args.add_input(boundary);
+    task_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
 
@@ -757,10 +757,10 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
 // A Graph's boundary tensor can be an upstream task's output, which lives in the
 // graph heap and therefore carries an address out of HEAP_VIRTUAL_BASE's window
 // while recording — three address classes are in play at once, the third being
-// GRAPH_RECORD_VIRTUAL_BASE for the recorded nodes' own outputs. Recording must
+// GRAPH_RECORD_VIRTUAL_BASE for the recorded tasks' own outputs. Recording must
 // still classify such a tensor as a boundary: graph_tensor_from_boundary matches
 // on equality, not on range containment, and the windows do not overlap. If it
-// fell through to the recorded-output ranges instead, the node would be marked
+// fell through to the recorded-output ranges instead, the task would be marked
 // unsupported and the whole Graph would silently drop to the ordinary path.
 //
 // The Definition describes a boundary by its shape, strides, buffer size and type
@@ -793,11 +793,11 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
         EXPECT_TRUE(graph.task_id.is_valid());
         EXPECT_TRUE(orch.graph_prepare(graph.recording_handle, boundary_args));
 
-        CoreTaskArgs node_args;
-        node_args.add_input(boundary);
+        CoreTaskArgs task_args;
+        task_args.add_input(boundary);
         TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
-        node_args.add_output(recorded_output);
-        EXPECT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+        task_args.add_output(recorded_output);
+        EXPECT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
         EXPECT_TRUE(orch.graph_end());
         orch.graph_commit();
         EXPECT_FALSE(orch.fatal);

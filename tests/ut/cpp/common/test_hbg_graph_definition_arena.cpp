@@ -93,10 +93,10 @@ protected:
         return reinterpret_cast<const GraphDefinition *>(image);
     }
 
-    // Record one Graph of `node_count` chained nodes under `graph_key`. The chain
+    // Record one Graph of `task_count` chained tasks under `graph_key`. The chain
     // makes the image's size a function of the count, so two keys recorded with
     // different counts cannot come out byte-identical and share one Definition.
-    void record_graph(uint64_t graph_key, int node_count, const simpler::hbg::Tensor &boundary, const uint32_t *shape) {
+    void record_graph(uint64_t graph_key, int task_count, const simpler::hbg::Tensor &boundary, const uint32_t *shape) {
         GraphTaskArgs boundary_args;
         boundary_args.add_input(boundary);
         const GraphScopeResult scope = orch.graph_begin(graph_key, boundary_args, 0x1736);
@@ -104,12 +104,12 @@ protected:
         ASSERT_TRUE(scope.task_id.is_valid());
         ASSERT_TRUE(orch.graph_prepare(scope.recording_handle, boundary_args));
         simpler::hbg::Tensor input = boundary;
-        for (int i = 0; i < node_count; ++i) {
-            CoreTaskArgs node_args;
-            node_args.add_input(input);
+        for (int i = 0; i < task_count; ++i) {
+            CoreTaskArgs task_args;
+            task_args.add_input(input);
             TensorCreateInfo output(shape, 1, DataType::UINT32);
-            node_args.add_output(output);
-            TaskOutputTensors outputs = orch.submit_dummy_task(node_args);
+            task_args.add_output(output);
+            TaskOutputTensors outputs = orch.submit_dummy_task(task_args);
             ASSERT_TRUE(outputs.task_id().is_valid());
             input = outputs.get_ref(0);
         }

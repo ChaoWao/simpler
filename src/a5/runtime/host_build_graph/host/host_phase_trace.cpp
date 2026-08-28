@@ -45,7 +45,7 @@ namespace {
 // path performs no atomic read-modify-write at all. Sharing them cost the emitting
 // thread about 0.8 us per record at eight producers, purely in cache-line
 // ownership: every producer of a Graph workload records the same kind
-// (`record_node`), so a per-kind counter is a single line eight threads fight
+// (`record_in_graph_task`), so a per-kind counter is a single line eight threads fight
 // over, and the `alignas(64)` that separates one kind from another does nothing
 // about that.
 //
@@ -307,7 +307,7 @@ void host_phase_record_bind(uint32_t kind, uint64_t start_ns, const char *attrs,
 
 void host_phase_trace_begin(const void *host_api) {
     TraceState &s = state();
-    std::lock_guard<std::mutex> lock(s.lifecycle_mutex);
+    std::scoped_lock lock(s.lifecycle_mutex);
     s.active.store(false, std::memory_order_release);
     drain_in_flight_records(s);
     s.api = static_cast<const HostApi *>(host_api);
@@ -340,7 +340,7 @@ void host_phase_trace_note_submitted(uint64_t submitted_tasks) {
 
 void host_phase_trace_end() {
     TraceState &s = state();
-    std::lock_guard<std::mutex> lifecycle_lock(s.lifecycle_mutex);
+    std::scoped_lock lifecycle_lock(s.lifecycle_mutex);
     if (!s.active.load(std::memory_order_relaxed)) {
         return;
     }

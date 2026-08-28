@@ -1299,7 +1299,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         // independently, then meet in GraphExecution::state.
         //
         // Keep this ahead of dummy/regular dispatch so a ready Graph can expose
-        // its root nodes without waiting for an otherwise unrelated dispatch
+        // its root tasks without waiting for an otherwise unrelated dispatch
         // pass. Limiting the work to one activation and one bounded prepare
         // slice per loop prevents a large definition from monopolizing a
         // scheduler thread.
@@ -1328,9 +1328,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 uint64_t graph_prepare_t0 =
                     chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES ? get_sys_cnt_aicpu() : 0;
 #endif
-                int32_t nodes_materialized = 0;
+                int32_t tasks_materialized = 0;
                 GraphMaterializeResult result =
-                    sched_->prepare_graph_task(*prepare_slot, GRAPH_MATERIALIZE_SLICE_NODES, &nodes_materialized);
+                    sched_->prepare_graph_task(*prepare_slot, GRAPH_MATERIALIZE_SLICE_TASKS, &tasks_materialized);
                 if (result == GraphMaterializeResult::PENDING || result == GraphMaterializeResult::BUSY) {
                     if (!sched_->push_graph_prepare(prepare_slot, prepare_task_id, thread_idx)) {
                         fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
@@ -1340,7 +1340,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_INVALID_ARGS);
                     break;
                 }
-                if (nodes_materialized > 0 || result == GraphMaterializeResult::PREPARED) {
+                if (tasks_materialized > 0 || result == GraphMaterializeResult::PREPARED) {
                     made_progress = true;
                 }
 #if SIMPLER_DFX
@@ -1348,7 +1348,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     uint64_t graph_prepare_t1 = get_sys_cnt_aicpu();
                     chip_swimlane_aicpu_record_graph_prepare(
                         thread_idx, graph_prepare_t0, graph_prepare_t1, chip_swimlane.sched_loop_count, prepare_task_id,
-                        static_cast<uint32_t>(nodes_materialized)
+                        static_cast<uint32_t>(tasks_materialized)
                     );
                     _t0_phase = graph_prepare_t1;
                 }

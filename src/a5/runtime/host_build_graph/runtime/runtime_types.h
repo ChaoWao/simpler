@@ -109,7 +109,7 @@
 // base before the image travels. Nothing dereferences an address in this window.
 inline constexpr uint64_t HEAP_VIRTUAL_BASE = 1ULL << 62;
 
-// Base of the address range Graph recording hands to an internal node's packed
+// Base of the address range Graph recording hands to an in-graph task's packed
 // outputs. Recorded addresses are never dereferenced: they exist so
 // graph_classify_tensor can tell an internal producer's output from a boundary
 // tensor by address-range containment alone, and the Definition stores them as
@@ -206,11 +206,20 @@ struct TaskAllocResult {
     bool failed() const { return task_id < 0; }
 };
 
+/**
+ * What a task is, independent of where it belongs.
+ *
+ * KERNEL and DUMMY are leaves: KERNEL dispatches to cores, DUMMY carries only
+ * dependencies. GRAPH is a container — a shell that expands into its own body of
+ * tasks and completes when they all have.
+ *
+ * Membership is not a kind: a task inside a Graph body is an ordinary KERNEL or
+ * DUMMY, and `graph_context` names the Graph it belongs to.
+ */
 enum class TaskKind : uint8_t {
     KERNEL = 0,
     DUMMY = 1,
     GRAPH = 2,
-    GRAPH_NODE = 3,
 };
 
 struct OutputLayout {
@@ -316,7 +325,7 @@ struct TaskPayload {
     // fanin holds flat position-independent producer local task ids. A producer is
     // named by its local id alone, so no per-edge indirection is stored. Scanned by
     // classify_fanin_state against the shared-memory completion_flags. Hard-capped at
-    // CHIP_MAX_FANIN (no dep-pool spill). Unbound on a Graph node, whose
+    // CHIP_MAX_FANIN (no dep-pool spill). Unbound on an in-graph task, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<simpler::hbg::Tensor> tensors;
     simpler::hbg::SelfRelativePtr<uint64_t> scalars;
@@ -395,7 +404,7 @@ struct TaskPayload {
      * Point this payload's three argument regions at pool-resident storage. Must run
      * before prefetch() and init(), which dereference them.
      *
-     * A Graph node passes nullptr for fanin: its dependencies come from the
+     * An in-graph task passes nullptr for fanin: its dependencies come from the
      * Definition's CSR, so the region does not exist and fanin_count stays 0.
      */
     void bind_regions(simpler::hbg::Tensor *tensor_region, uint64_t *scalar_region, int32_t *fanin_region) {
@@ -598,9 +607,27 @@ struct alignas(64) ChipTaskSlotState {
     // ranges through claim_block_range().
     std::atomic<int16_t> next_block_idx{0};
 
-    // Graph scheduling metadata occupies the slot's tail padding. Ordinary
-    // Ordinary tasks keep the index invalid and the context null.
-    int32_t graph_node_index{-1};
+    // Graph-only scheduling metadata occupies the former tail padding, keeping
+    // the slot state at one cache line and preserving the 40-byte descriptor
+    // ABI consumed by AICore. Readiness uses the shared intrusive wake-list
+    // fields above; this index identifies the task in the saved fanin CSR.
+    // Ordinary tasks leave both Graph fields -1/null.
+    int32_t in_graph_task_index{-1};
+    // Graph membership, and which of the two Graph structs this points at is
+    // decided by task_kind rather than by anything stored here:
+    //
+    //   nullptr                        an ordinary task, in no Graph
+    //   != nullptr, task_kind == GRAPH the outer Graph task, pointing at the
+    //                                  shared GraphDefinition until localize
+    //                                  swaps in its GraphExecution
+    //   != nullptr, task_kind != GRAPH an in-graph task, pointing at the
+    //                                  GraphExecution it belongs to
+    //
+    // So every reader must test task_kind before casting, and complete_task
+    // routes on exactly that pair: a null context or a GRAPH kind takes the
+    // ordinary global fanout, anything else is counted against its Graph. A
+    // localize that fails puts this back to nullptr (scheduler_cold_path.cpp),
+    // so the outer task cannot be mistaken for an in-graph one.
     void *graph_context{nullptr};
 
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
@@ -637,8 +664,8 @@ struct alignas(64) ChipTaskSlotState {
 
     /**
      * Reset dynamic scheduling fields to their pristine values. Called once per
-     * slot as the orchestrator claims it in prepare_task, and again as a Graph
-     * node's storage is materialized — whole-graph-resident hbg has no
+     * slot as the orchestrator claims it in prepare_task, and again as an
+     * in-graph task's storage is materialized — whole-graph-resident hbg has no
      * execution-time slot recycle. Skips payload/task (bound once) and
      * task_state (the orchestrator sets PENDING when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
@@ -649,7 +676,7 @@ struct alignas(64) ChipTaskSlotState {
         any_subtask_deferred.store(false, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
-        graph_node_index = -1;
+        in_graph_task_index = -1;
         graph_context = nullptr;
         task_kind = TaskKind::KERNEL;
         // Note: active_mask and task_attrs are per-submit-constant fields
