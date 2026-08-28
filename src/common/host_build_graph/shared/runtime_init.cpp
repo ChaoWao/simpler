@@ -11,10 +11,10 @@
 /**
  * Host/AICPU shared runtime-arena layout, init_data and wire implementations.
  *
- * Lives under runtime/shared/ so it is included in both the host_runtime.so
- * build (host pre-populates the prebuilt arena image) and the aicpu_runtime
- * build (AICPU runs wire_arena_pointers + destroy after attach). The
- * device-only parts of runtime_core.cpp / orchestrator.cpp / scheduler.cpp
+ * Lives under host_build_graph/shared/ so it is included in both the
+ * host_runtime.so build (host pre-populates the prebuilt arena image) and the
+ * aicpu_runtime build (AICPU runs wire_arena_pointers + destroy after attach).
+ * The device-only parts of runtime_core.cpp / orchestrator.cpp / scheduler.cpp
  * (ops table, scope/submit/dispatch business logic, profiling) stay in their
  * original files and the aicpu build only.
  */

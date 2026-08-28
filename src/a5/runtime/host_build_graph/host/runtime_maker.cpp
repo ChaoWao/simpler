@@ -55,13 +55,13 @@
 
 #include "../common/runtime_status.h"
 #include "../runtime/common.h"
-#include "../runtime/dep_gen_host_graph.h"
+#include "host_build_graph/dep_gen_host_graph.h"
 #include "../runtime/graph_execution.h"
-#include "../runtime/host_tensor_access.h"
+#include "host_build_graph/host_tensor_access.h"
 #include "../runtime/graph_host_state.h"
-#include "../runtime/host_phase_trace.h"
+#include "host_build_graph/host_phase_trace.h"
 #include "../runtime/orchestrator.h"
-#include "../runtime/ready_queue_sizing.h"
+#include "host_build_graph/ready_queue_sizing.h"
 #include "graph_recorder_pool.h"
 #include "../runtime/runtime_core.h"
 #include "../runtime/shared_memory.h"
@@ -685,8 +685,8 @@ int32_t run_host_orchestration(
     orchestrator.total_aiv_count = block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM;
     rt->mode = MODE_EXECUTE;
     // get_tensor_data/set_tensor_data resolve buffer.addr through the host
-    // views registered at staging time (runtime/host_tensor_access.h), so the
-    // host orchestrator can read control tensors (e.g. paged_attention's
+    // views registered at staging time (host_build_graph/host_tensor_access.h),
+    // so the host orchestrator can read control tensors (e.g. paged_attention's
     // context_lens/block_table) whether or not the platform maps device memory
     // into the host address space.
 

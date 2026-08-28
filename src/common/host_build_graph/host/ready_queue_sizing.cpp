@@ -9,9 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "ready_queue_sizing.h"
+#include "host_build_graph/ready_queue_sizing.h"
 
-#include "../common/runtime_status.h"
+#include "runtime_status.h"
 
 namespace {
 

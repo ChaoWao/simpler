@@ -11,10 +11,10 @@
 
 /**
  * Host-side tensor access for the host orchestrator. See
- * runtime/host_tensor_access.h for the contract.
+ * host_build_graph/host_tensor_access.h for the contract.
  */
 
-#include "host_tensor_access.h"
+#include "host_build_graph/host_tensor_access.h"
 
 #include <string.h>
 

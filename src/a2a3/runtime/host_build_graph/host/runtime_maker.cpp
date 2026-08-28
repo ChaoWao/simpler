@@ -55,13 +55,13 @@
 
 #include "../common/runtime_status.h"
 #include "../runtime/common.h"
-#include "../runtime/dep_gen_host_graph.h"
+#include "host_build_graph/dep_gen_host_graph.h"
 #include "../runtime/graph_execution.h"
-#include "../runtime/host_tensor_access.h"
+#include "host_build_graph/host_tensor_access.h"
 #include "../runtime/graph_host_state.h"
-#include "../runtime/host_phase_trace.h"
+#include "host_build_graph/host_phase_trace.h"
 #include "../runtime/orchestrator.h"
-#include "../runtime/ready_queue_sizing.h"
+#include "host_build_graph/ready_queue_sizing.h"
 #include "graph_recorder_pool.h"
 #include "../runtime/runtime_core.h"
 #include "../runtime/shared_memory.h"
@@ -409,6 +409,11 @@ struct HostOrchEntryPoints {
     OrchestrationBindFunc bind{nullptr};
 };
 
+// host_build_graph host-orch: the orchestrator builds the task graph in a host
+// shared-memory mirror, and every cross-task reference it stores is an offset or
+// an index from its own block. The bytes the host wrote are therefore the bytes
+// the device schedules, with no on-device or pre-copy pointer fixup.
+
 // What the Definition pass copied to the device: the distinct objects, the bytes
 // of the one block holding them (inter-object alignment padding included), and how
 // many of them the recorders could not build in the block, so that this pass had to
@@ -592,6 +597,7 @@ int32_t run_host_orchestration(
     DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, uint64_t task_capacity,
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
+    // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 
     // Init-on-write: descriptors, payloads, slot_states and completion_flags are
@@ -632,6 +638,7 @@ int32_t run_host_orchestration(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
+    // Initialize the host SM header (ring flow control) so submit_task can run.
     SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init(host_sm, sm_size, task_capacity)) {
         LOG_ERROR("host-orch: host SM init failed");
@@ -664,6 +671,10 @@ int32_t run_host_orchestration(
     }
     GraphHostStateBinding graph_binding(orchestrator, graph_state.get());
 
+    // Install the ops table (host s_runtime_ops) and latch this run's cluster
+    // counts. worker_count is published by DeviceRunner::prepare_launch_shape
+    // before this bind, so the host orchestrator sees the same geometry the
+    // AICPU re-derives from the handshake at boot.
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
         LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
@@ -673,6 +684,11 @@ int32_t run_host_orchestration(
     orchestrator.total_cluster_count = block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM;
     orchestrator.total_aiv_count = block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM;
     rt->mode = MODE_EXECUTE;
+    // get_tensor_data/set_tensor_data resolve buffer.addr through the host
+    // views registered at staging time (host_build_graph/host_tensor_access.h),
+    // so the host orchestrator can read control tensors (e.g. paged_attention's
+    // context_lens/block_table) whether or not the platform maps device memory
+    // into the host address space.
 
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
     if (entry_points->bind == nullptr) {
@@ -1287,6 +1303,13 @@ extern "C" int bind_callable_to_runtime_impl(
     rt->prebuilt_layout = layout;
     record_bind_phase(HostPhaseKind::BindRuntimeInit, runtime_init_phase);
 
+    // host_build_graph host-orch: run the orchestrator on the host now, against
+    // a host SM mirror, and ship the populated SM to the device. The arena
+    // (copied to the device below) carries the scheduler state; the orchestrator
+    // itself stays on the host, and the device boots scheduler-only.
+    // register_callable_impl guarantees host_orch_func_ptr is non-null on success
+    // (it fails the whole prepare otherwise), so this is an assertion-style
+    // guard, not a fallback path.
     if (host_orch_func_ptr == nullptr) {
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
         return PTO_RUNTIME_ERR_INTERNAL;

@@ -48,7 +48,7 @@
  * exit path.
  *
  * The read/write pair carries weak fallbacks in the runtime translation unit
- * (`orchestrator_core/runtime_core.cpp`) that dereference `dev_addr` directly,
+ * (`shared/runtime_core.cpp`) that dereference `dev_addr` directly,
  * so the AICPU build — which compiles this path but never runs an
  * orchestrator — resolves without this .cpp. libhost_runtime.so links the
  * strong definitions from `host/host_tensor_access.cpp`.
@@ -81,7 +81,7 @@ struct HostApi;  // common/host_api.h — fwd-declared so this header stays out 
  * usable `api`; `write`'s mirror push-back relies on that and does not re-check.
  *
  * The state lives behind `Impl` because this header is also compiled by the
- * AICPU build (through `orchestrator_core/runtime_core.cpp`, which resolves the
+ * AICPU build (through `shared/runtime_core.cpp`, which resolves the
  * weak read/write fallbacks below), and that build has no `<vector>`. Keep the
  * standard containers in `host/host_tensor_access.cpp`.
  */

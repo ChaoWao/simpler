@@ -25,7 +25,7 @@
  * about the data flow, and viewers rely on seeing every overlap.
  */
 
-#include "dep_gen_host_graph.h"
+#include "host_build_graph/dep_gen_host_graph.h"
 
 #include <cstddef>
 #include <cstdint>

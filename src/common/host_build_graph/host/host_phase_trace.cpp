@@ -11,10 +11,10 @@
 
 /**
  * Prepare-path timing: per-kind counters and the binding to the platform's
- * record pool. See runtime/host_phase_trace.h.
+ * record pool. See host_build_graph/host_phase_trace.h.
  */
 
-#include "../runtime/host_phase_trace.h"
+#include "host_build_graph/host_phase_trace.h"
 
 #include <stdio.h>
 

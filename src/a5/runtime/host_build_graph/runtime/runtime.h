@@ -48,7 +48,7 @@
 // =============================================================================
 
 #define RUNTIME_MAX_ARGS 128
-#define RUNTIME_MAX_WORKER 108  // 36 AIC + 72 AIV cores
+#define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
 #define RUNTIME_MAX_FUNC_ID 1024
 #define RUNTIME_MAX_ORCH_SO_SIZE (4 * 1024 * 1024)  // 4MB max for orchestration SO
 #define RUNTIME_MAX_ORCH_SYMBOL_NAME 64

@@ -17,7 +17,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#include "host_phase_trace.h"
+#include "host_build_graph/host_phase_trace.h"
 #include "runtime_core.h"
 
 #include <stdarg.h>
@@ -31,8 +31,8 @@
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host_build_graph/host_tensor_access.h"
 #include "host_build_graph/task_id_encoding.h"
-#include "host_tensor_access.h"
 
 // simpler::hbg::Tensor-byte access for a caller that can load a device address directly.
 // The AICPU build compiles this translation unit and links these; the host
@@ -427,7 +427,7 @@ static const RuntimeOps s_runtime_ops = {
 // =============================================================================
 //
 // Layout / init_data / wire / destroy live in
-// runtime/shared/runtime_init.cpp so the host build can pre-populate the
+// host_build_graph/shared/runtime_init.cpp so the host build can pre-populate the
 // prebuilt arena image. The piece below — wiring the ops table — depends on the
 // device-side s_runtime_ops global, so it remains in the AICPU build.
 

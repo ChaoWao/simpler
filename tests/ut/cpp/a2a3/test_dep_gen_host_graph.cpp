@@ -19,7 +19,7 @@
 
 #include <unistd.h>
 
-#include "dep_gen_host_graph.h"
+#include "host_build_graph/dep_gen_host_graph.h"
 
 namespace {
 

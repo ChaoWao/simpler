@@ -46,7 +46,7 @@
 #include "common/host_phase_kind.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
-#include "dep_gen_host_graph.h"
+#include "host_build_graph/dep_gen_host_graph.h"
 #include "dep_compute.h"
 #include "graph_execution.h"
 #include "graph_host_state.h"

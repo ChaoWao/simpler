@@ -9,11 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_CONSTANTS_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_CONSTANTS_H_
+#pragma once
 
 #define CHIP_ALIGN_SIZE 64        // Cache line alignment
 #define PACKED_OUTPUT_ALIGN 1024  // Each output in packed buffer aligned to 1024B; gap is padding
 #define CHIP_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_CONSTANTS_H_

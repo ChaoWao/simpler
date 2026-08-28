@@ -27,7 +27,7 @@
 #include <vector>
 
 #include "common/host_api.h"
-#include "host_tensor_access.h"
+#include "host_build_graph/host_tensor_access.h"
 
 namespace {
 

@@ -338,8 +338,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // orchestration setup, seeds its disjoint slice of the whole graph's ready
     // set + wake lists, then barriers. Only once all slices are done does the
     // leader publish runtime_init_ready_, so no thread dispatches against a
-    // half-seeded graph. This replaces the O(total_tasks) serial classify the
-    // leader used to run alone while the others idle-waited.
+    // half-seeded graph.
     while (!classify_ready_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
     }

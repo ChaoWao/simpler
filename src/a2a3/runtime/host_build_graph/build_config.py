@@ -24,16 +24,34 @@
 # threads, because the aicore and aicpu targets compile it too: the Graph recorder pool
 # therefore lives in "host" (host/graph_recorder_pool.cpp), which only the host target
 # builds, and the orchestration .so reaches it through the ops table.
+#
+# src/common/host_build_graph holds the sources shared with the other architecture.
+# Its .cpp files sit under a "host", "device" or "shared" subdirectory naming the
+# targets that compile them, because every source_dirs entry is collected by a
+# recursive glob: "host" code uses the STL containers the AICPU target forbids, so it
+# has to live outside any directory that target names. Headers stay flat there — they
+# are included by path, not globbed.
 
 BUILD_CONFIG = {
     "aicore": {"include_dirs": ["runtime", "common", ".."], "source_dirs": ["aicore", "orchestration"]},
     "aicpu": {
         "include_dirs": ["runtime", "common", ".."],
-        "source_dirs": ["aicpu", "runtime", "orchestration", "../../../common/host_build_graph"],
+        "source_dirs": [
+            "aicpu",
+            "runtime",
+            "orchestration",
+            "../../../common/host_build_graph/device",
+            "../../../common/host_build_graph/shared",
+        ],
     },
     "host": {
         "include_dirs": ["runtime", "common", ".."],
-        "source_dirs": ["host", "runtime/orchestrator_core", "runtime/shared", "orchestration"],
+        "source_dirs": [
+            "host",
+            "orchestration",
+            "../../../common/host_build_graph/host",
+            "../../../common/host_build_graph/shared",
+        ],
     },
     "orchestration": {
         "include_dirs": ["runtime", "orchestration", "common", ".."],

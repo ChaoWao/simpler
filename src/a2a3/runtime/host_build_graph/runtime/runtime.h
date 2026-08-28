@@ -26,8 +26,7 @@
  * signals AICore via DATA_MAIN_BASE.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -49,7 +48,7 @@
 // =============================================================================
 
 #define RUNTIME_MAX_ARGS 128
-#define RUNTIME_MAX_WORKER 72  // 24 AIC + 48 AIV cores
+#define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
 #define RUNTIME_MAX_FUNC_ID 1024
 #define RUNTIME_MAX_ORCH_SO_SIZE (4 * 1024 * 1024)  // 4MB max for orchestration SO
 #define RUNTIME_MAX_ORCH_SYMBOL_NAME 64
@@ -314,5 +313,3 @@ public:
 // object); trb returns sizeof(DeviceRuntimeLaunchDesc). Defined per-runtime so
 // the shared device_runner_helpers.cpp copy path stays runtime-agnostic.
 size_t runtime_device_copy_size(const Runtime &rt);
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_

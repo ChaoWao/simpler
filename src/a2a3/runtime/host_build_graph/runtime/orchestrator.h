@@ -124,7 +124,6 @@ struct OrchestratorState {
     int64_t tasks_submitted;
     int64_t buffers_allocated;
     int64_t bytes_allocated;
-
 #endif
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }

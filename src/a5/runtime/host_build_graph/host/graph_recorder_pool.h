@@ -212,7 +212,7 @@ public:
     // onboard runs, so the platforms that lack it are the ones that never take this
     // measurement -- but rec_cpu_ns carries no information there, and the tooling says so.
     uint64_t worker_cpu_ns() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::scoped_lock lock(mutex_);
         uint64_t total = 0;
 #if defined(__linux__)
         for (std::thread &worker : workers_) {

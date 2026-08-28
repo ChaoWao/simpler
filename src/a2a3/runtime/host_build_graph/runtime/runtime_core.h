@@ -95,6 +95,7 @@ struct RuntimeOps {
     );
     TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
+
     // This-run core geometry latched by the host bind: MIX clusters
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(RuntimeContext *rt);

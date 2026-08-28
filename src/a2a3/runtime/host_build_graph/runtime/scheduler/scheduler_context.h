@@ -13,6 +13,7 @@
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "common/chip_swimlane_profiling.h"
+#include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "scheduler_types.h"
 
@@ -21,11 +22,12 @@
 #include "aicore_completion_mailbox.h"
 #include "dispatch_payload.h"
 
-// These macros are defined in runtime.h, but we cannot include it here
-// (it pulls in Handshake which we only forward-declare).  Mirror the
-// authoritative values so the class layout compiles standalone.
+// runtime.h cannot be included here — it pulls in Handshake, which this header
+// only forward-declares. RUNTIME_MAX_WORKER therefore reaches the same platform
+// core count runtime.h defines it from, so both spellings carry one value.
+// RUNTIME_MAX_FUNC_ID has no platform-level source and stays a mirrored literal.
 #ifndef RUNTIME_MAX_WORKER
-#define RUNTIME_MAX_WORKER 72
+#define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
 #endif
 #ifndef RUNTIME_MAX_FUNC_ID
 #define RUNTIME_MAX_FUNC_ID 1024
