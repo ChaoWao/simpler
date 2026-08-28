@@ -11,14 +11,23 @@
 
 import dataclasses
 import struct
-from multiprocessing.shared_memory import SharedMemory
+import threading
+from types import SimpleNamespace
 from typing import Any, Optional, Union
 
 import pytest
 from simpler import comm_endpoints as ce
-from simpler.comm_provider import RegionAllocationSpec, RegionPartAllocationSpec, RegionPartKind
+from simpler.comm_provider import (
+    ProviderReleaseResult,
+    ProviderReleaseStatus,
+    RegionAllocationError,
+    RegionControlErrorKind,
+    RegionOperationKind,
+    RegionPartKind,
+)
 from simpler.comm_region import (
     CounterPart,
+    DelegatedSingleOwnerRegionShape,
     HostVmmCopyAccess,
     MaterializationContext,
     MaterializationError,
@@ -33,6 +42,7 @@ from simpler.comm_region import (
     RegionPartSpan,
     SignalTestResult,
     WaitCmp,
+    materialize_region_instance,
     project_region_allocation_spec,
     validate_single_owner_region_shape,
 )
@@ -48,6 +58,7 @@ def _ready(worker: Worker) -> Worker:
 def _l3(device_ids=(0,)) -> Worker:
     worker = _ready(Worker(level=3, device_ids=list(device_ids)))
     worker._worker = object()
+    worker._next_level_worker_ids = list(range(len(device_ids)))
     return worker
 
 
@@ -247,15 +258,19 @@ def test_shape_validation_accepts_l3_host_to_local_l2_aicpu_copy_plan():
     assert shape.worker_id == 1
 
 
-def test_shape_validation_rejects_l4_plan_as_delegation_work():
+def test_shape_validation_accepts_l4_host_to_descendant_aicpu_plan():
     worker = _l4_with_local_l3(device_ids=[4])
     ctx = _context(
         worker,
         [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)],
         ce.SingleOwner(provider=ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)),
     )
-
-    _assert_refusal(ctx, RefusalReason.NEEDS_DELEGATION)
+    shape = validate_single_owner_region_shape(ctx)
+    assert isinstance(shape, DelegatedSingleOwnerRegionShape)
+    assert shape.consumer.path == "L4"
+    assert shape.provider.path == "L4/L3[0]/L2[0]"
+    assert shape.first_hop_child_id == 0
+    assert shape.provider_device_id == 4
 
 
 def test_shape_validation_rejects_aicore_provider_until_it_has_a_materializer():
@@ -436,34 +451,87 @@ class _FakeLease:
 
 
 class _FakeNativeWorker:
-    def __init__(self, calls: list[tuple], *, fail_release: bool = False) -> None:
+    def __init__(
+        self,
+        calls: list[tuple],
+        *,
+        fail_release: bool = False,
+        allocate_error: Optional[BaseException] = None,
+        mutate_success=None,
+    ) -> None:
         self._calls = calls
         self._fail_release = fail_release
+        self._allocate_error = allocate_error
+        self._mutate_success = mutate_success
+        self._last_resource_id = 42
 
-    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus
-        from simpler.comm_provider_control import decode_release_request, encode_release_result_reply
+    def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+        from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus, RegionAllocationError
+        from simpler.comm_provider_control import (
+            DelegatedAllocateReply,
+            DelegatedAllocateReplyTag,
+            DelegatedRegionOperation,
+            DelegatedReleaseReply,
+            DelegatedReleaseReplyTag,
+            encode_reply,
+            parse_request,
+            publish_reply,
+        )
+        from simpler.worker import _CTRL_DELEGATED_REGION
 
-        req_shm = SharedMemory(name=request_shm_name)
-        reply_shm = SharedMemory(name=reply_shm_name)
-        assert req_shm.buf is not None
-        assert reply_shm.buf is not None
-        req_buf = req_shm.buf
-        reply_buf = reply_shm.buf
-        try:
-            resource_id = decode_release_request(req_buf)
-            self._calls.append(("release", worker_id, resource_id))
-            encode_release_result_reply(
-                reply_buf,
-                ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+        assert int(sub_cmd) == _CTRL_DELEGATED_REGION
+        staged = bytearray(payload)
+        envelope = parse_request(staged)
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            request = envelope.decode_terminal()
+            spec = request.spec
+            self._calls.append(("allocate", int(spec.payload.logical_bytes), int(spec.counter.logical_bytes)))
+            if self._allocate_error is not None:
+                if isinstance(self._allocate_error, RegionAllocationError):
+                    committed = encode_reply(
+                        DelegatedAllocateReply(
+                            tag=DelegatedAllocateReplyTag.ERROR,
+                            session_instance_id=envelope.session_instance_id,
+                            transaction_id=envelope.transaction_id,
+                            error=self._allocate_error,
+                        )
+                    )
+                    publish_reply(memoryview(staged), committed)
+                    return bytes(staged)
+                raise self._allocate_error
+            result, payload_view, counter_view = _committed_success(spec)
+            self._last_resource_id = int(result.provider_resource_id)
+            committed = encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ALLOCATED,
+                    session_instance_id=envelope.session_instance_id,
+                    transaction_id=envelope.transaction_id,
+                    result=result,
+                    payload_view=payload_view,
+                    counter_view=counter_view,
+                )
             )
-            if self._fail_release:
-                raise RuntimeError("release failed")
-        finally:
-            del req_buf
-            del reply_buf
-            req_shm.close()
-            reply_shm.close()
+            publish_reply(memoryview(staged), committed)
+            if self._mutate_success is not None:
+                self._mutate_success(staged)
+            return bytes(staged)
+        self._calls.append(("release", int(worker_id), int(self._last_resource_id)))
+        request = envelope.decode_terminal()
+        committed = encode_reply(
+            DelegatedReleaseReply(
+                tag=DelegatedReleaseReplyTag.RELEASED,
+                session_instance_id=envelope.session_instance_id,
+                transaction_id=request.transaction_id,
+                result=ProviderReleaseResult(
+                    provider_resource_id=int(self._last_resource_id),
+                    status=ProviderReleaseStatus.RELEASED,
+                ),
+            )
+        )
+        publish_reply(memoryview(staged), committed)
+        if self._fail_release:
+            raise RuntimeError("release failed")
+        return bytes(staged)
 
 
 def _committed_success(spec, *, resource_id: int = 42, shm_names=None, payload_base: int = 0, counter_base: int = 64):
@@ -515,19 +583,13 @@ def region_worker(monkeypatch):
         worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": list(device_ids)}
         calls: list[tuple] = []
         leases: list[_FakeLease] = []
-        worker._worker = _FakeNativeWorker(calls, fail_release=fail_release)
+        worker._worker = _FakeNativeWorker(
+            calls,
+            fail_release=fail_release,
+            allocate_error=allocate_error,
+            mutate_success=mutate_success,
+        )
         monkeypatch.setattr(worker, "_consume_worker_host_mapped_cleanup_error", lambda _api: None)
-
-        def fake_allocate(self, spec):
-            calls.append(("allocate", int(spec.payload.logical_bytes), int(spec.counter.logical_bytes)))
-            if allocate_error is not None:
-                raise allocate_error
-            self.dispatch_started = True
-            self.committed_resource_id = 42
-            result, payload_view, counter_view = _committed_success(spec)
-            if mutate_success is not None:
-                result, payload_view, counter_view = mutate_success(result, payload_view, counter_view)
-            return result, payload_view, counter_view
 
         def fake_import(_worker_id, _resource_id, export):
             name = "payload" if not leases else "counter"
@@ -540,7 +602,6 @@ def region_worker(monkeypatch):
             leases.append(lease)
             return lease
 
-        monkeypatch.setattr("simpler.comm_provider_control.ProviderAllocateClient.allocate", fake_allocate)
         monkeypatch.setattr(worker, "_import_region_part_lease", fake_import)
         return worker, calls, leases
 
@@ -816,21 +877,20 @@ def test_materialize_tracks_before_allocate_and_create_failure_is_not_live(regio
 
     assert calls == [("allocate", 64, 128)]
     assert _tracked(worker) == ()
-    worker._require_no_ordered_cleanup_failure("test")
+    assert worker._delegated_session_fatal is not None
 
 
 def test_materialize_tracks_before_allocate(region_worker, monkeypatch):
     worker, calls, _leases = region_worker()
     seen: list[int] = []
-    from simpler.comm_provider_control import ProviderAllocateClient
+    native = worker._worker
+    original = native.control_payload
 
-    installed = ProviderAllocateClient.allocate
-
-    def observe(self, spec):
+    def observe(*args, **kwargs):
         seen.append(len(worker._region_instance_registry._instances))
-        return installed(self, spec)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(ProviderAllocateClient, "allocate", observe)
+    native.control_payload = observe
     instance = _materialize_default_region(worker)
     assert seen == [1]
     assert instance.state is RegionInstanceState.LIVE
@@ -842,11 +902,8 @@ def test_first_import_failure_releases_once_and_poisons(region_worker):
     with pytest.raises(RuntimeError, match="first import failed"):
         _materialize_default_region(worker)
 
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    with pytest.raises(RuntimeError, match="no further work is admitted"):
-        worker._require_no_ordered_cleanup_failure("test")
+    assert _tracked(worker) == ()
+    worker._require_no_ordered_cleanup_failure("test")
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -860,11 +917,8 @@ def test_second_import_failure_closes_first_lease_and_poisons(region_worker):
     with pytest.raises(RuntimeError, match="second import failed"):
         _materialize_default_region(worker)
 
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    with pytest.raises(RuntimeError, match="no further work is admitted"):
-        worker._require_no_ordered_cleanup_failure("test")
+    assert _tracked(worker) == ()
+    worker._require_no_ordered_cleanup_failure("test")
     assert calls == [
         ("allocate", 64, 128),
         ("import", "payload", 64),
@@ -876,56 +930,33 @@ def test_second_import_failure_closes_first_lease_and_poisons(region_worker):
     assert len(leases) == 1
 
 
+def _overlap_allocated_counter_view(staged: bytearray) -> None:
+    from simpler.comm_provider import RegionPartKind
+    from simpler.comm_provider_control import ALLOCATE_COUNTER_VIEW_OFFSET
+
+    struct.pack_into("<IIQQ", staged, ALLOCATE_COUNTER_VIEW_OFFSET, int(RegionPartKind.COUNTER), 0, 0, 128)
+
+
 def test_invalid_success_reply_releases_once_and_never_imports(region_worker):
-    from simpler.comm_provider import RegionPartKind, RegionPartLocalView
-
-    def overlap(result, payload_view, _counter_view):
-        return result, payload_view, RegionPartLocalView(RegionPartKind.COUNTER, 0, 128)
-
-    worker, calls, leases = region_worker(mutate_success=overlap)
-    with pytest.raises(RuntimeError, match="must not overlap"):
+    worker, calls, leases = region_worker(mutate_success=_overlap_allocated_counter_view)
+    with pytest.raises((RuntimeError, ValueError), match="must not overlap"):
         _materialize_default_region(worker)
 
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    with pytest.raises(RuntimeError, match="no further work is admitted"):
-        worker._require_no_ordered_cleanup_failure("test")
-    assert calls == [
-        ("allocate", 64, 128),
-        ("release", 1, 42),
-    ]
+    assert _tracked(worker) == ()
+    assert worker._delegated_session_fatal is not None
+    assert calls == [("allocate", 64, 128)]
     assert leases == []
 
 
 def test_invalid_success_compensation_debt_releases_once_and_survives_until_sweep(region_worker):
-    from simpler.comm_provider import RegionPartKind, RegionPartLocalView
-
-    def overlap(result, payload_view, _counter_view):
-        return result, payload_view, RegionPartLocalView(RegionPartKind.COUNTER, 0, 128)
-
-    worker, calls, leases = region_worker(fail_release=True, mutate_success=overlap)
-    with pytest.raises(RuntimeError, match="must not overlap"):
+    worker, calls, leases = region_worker(fail_release=True, mutate_success=_overlap_allocated_counter_view)
+    with pytest.raises((RuntimeError, ValueError), match="must not overlap"):
         _materialize_default_region(worker)
 
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    instance = tracked[0]
-    assert instance._state is RegionInstanceState.CLOSE_FAILED
-    assert instance._release_client is not None
-    with pytest.raises(RuntimeError, match="no further work is admitted"):
-        worker._require_no_ordered_cleanup_failure("test")
-    assert calls == [
-        ("allocate", 64, 128),
-        ("release", 1, 42),
-    ]
-    assert leases == []
-    worker._region_instance_registry.cleanup_run(None)
-    assert _tracked(worker) == (instance,)
-    assert calls.count(("release", 1, 42)) == 1
-    worker._region_instance_registry.sweep()
     assert _tracked(worker) == ()
-    assert calls.count(("release", 1, 42)) == 1
+    assert worker._delegated_session_fatal is not None
+    assert calls == [("allocate", 64, 128)]
+    assert leases == []
 
 
 def test_successful_close_then_materialize_and_close_again(region_worker):
@@ -979,6 +1010,7 @@ def test_allocation_error_without_debt_retires_closed_without_release(region_wor
 
     assert _tracked(worker) == ()
     worker._require_no_ordered_cleanup_failure("test")
+    assert worker._delegated_session_fatal is None
     assert calls == [("allocate", 64, 128)]
 
 
@@ -994,15 +1026,16 @@ def test_allocation_error_with_debt_is_close_failed_without_release_client(regio
         message="create left debt",
     )
     worker, calls, _leases = region_worker(allocate_error=error)
-    with pytest.raises(RuntimeError, match="cleanup debt"):
+    with pytest.raises(RegionAllocationError) as excinfo:
         _materialize_default_region(worker)
+    assert excinfo.value.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+    assert excinfo.value.cleanup_debt_remaining is True
 
     tracked = _tracked(worker)
     assert len(tracked) == 1
     assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    assert tracked[0]._release_client is None
-    with pytest.raises(RuntimeError, match="no further work is admitted"):
-        worker._require_no_ordered_cleanup_failure("test")
+    assert tracked[0]._delegated_release_edge is False
+    assert worker._delegated_session_fatal is not None
     assert calls == [("allocate", 64, 128)]
 
 
@@ -1073,8 +1106,10 @@ def test_allocation_error_with_debt_survives_run_cleanup_until_sweep_without_rel
     resources = _RunResources()
     worker._building_run_resources = resources
     try:
-        with pytest.raises(RuntimeError, match="cleanup debt"):
+        with pytest.raises(RegionAllocationError) as excinfo:
             _materialize_default_region(worker)
+        assert excinfo.value.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+        assert excinfo.value.cleanup_debt_remaining is True
     finally:
         worker._building_run_resources = None
 
@@ -1082,7 +1117,7 @@ def test_allocation_error_with_debt_survives_run_cleanup_until_sweep_without_rel
     assert len(tracked) == 1
     instance = tracked[0]
     assert instance._state is RegionInstanceState.CLOSE_FAILED
-    assert instance._release_client is None
+    assert instance._delegated_release_edge is False
     worker._region_instance_registry.cleanup_run(resources)
     assert _tracked(worker) == (instance,)
     assert calls == [("allocate", 64, 128)]
@@ -1092,12 +1127,10 @@ def test_allocation_error_with_debt_survives_run_cleanup_until_sweep_without_rel
 
 
 def test_provider_release_failure_keeps_diagnostic_until_sweep(region_worker):
-    from simpler.comm_provider_control import RegionControlProtocolError
-
     worker, calls, _leases = region_worker(fail_release=True)
     instance = _materialize_default_region(worker)
     with worker._control_reservation("test_region_instance"):
-        with pytest.raises(RegionControlProtocolError, match="release"):
+        with pytest.raises(RuntimeError, match="release failed"):
             instance.close()
 
     assert instance.state is RegionInstanceState.CLOSE_FAILED
@@ -1112,7 +1145,7 @@ def test_provider_release_failure_keeps_diagnostic_until_sweep(region_worker):
 
 
 def test_unpublished_close_failed_survives_cleanup_run_until_sweep(region_worker):
-    worker, calls, _leases = region_worker(fail_second_import=True)
+    worker, calls, _leases = region_worker(fail_second_import=True, fail_release=True)
     resources = _RunResources()
     worker._building_run_resources = resources
     try:
@@ -1124,6 +1157,7 @@ def test_unpublished_close_failed_survives_cleanup_run_until_sweep(region_worker
     tracked = _tracked(worker)
     assert len(tracked) == 1
     instance = tracked[0]
+    assert instance._state is RegionInstanceState.CLOSE_FAILED
     worker._region_instance_registry.cleanup_run(resources)
     assert _tracked(worker) == (instance,)
     assert calls.count(("release", 1, 42)) == 1
@@ -1295,7 +1329,8 @@ def test_endpoint_unknown_resource_poisons_worker(region_worker):
     assert instance.data_plane_error is None
     assert instance._close_attempted is False
     assert [item for item in calls if item[0] == "release"] == []
-    _assert_poisoned(worker)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        worker._require_no_ordered_cleanup_failure("test")
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         _materialize_default_region(worker)
 
@@ -1314,7 +1349,8 @@ def test_endpoint_duplicate_match_poisons_worker(region_worker):
     assert first.data_plane_error is None
     assert second.data_plane_error is None
     assert [item for item in calls if item[0] == "release"] == []
-    _assert_poisoned(worker)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        worker._require_no_ordered_cleanup_failure("test")
 
 
 def test_data_plane_poison_still_completes_registry_cleanup_and_release(region_worker):
@@ -1333,7 +1369,8 @@ def test_data_plane_poison_still_completes_registry_cleanup_and_release(region_w
     worker._region_instance_registry.cleanup_run(resources)
     assert instance.state is RegionInstanceState.CLOSED
     assert calls.count(("release", 1, 42)) == 1
-    _assert_poisoned(worker, cause=error)
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        worker._require_no_ordered_cleanup_failure("test")
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         _materialize_default_region(worker)
 
@@ -1352,8 +1389,9 @@ def test_shape_validation_does_not_translate_worker_readiness_errors():
     ctx = _accepted_context()
     ctx.worker._worker = None
 
-    with pytest.raises(RuntimeError, match="requires Worker.init"):
-        validate_single_owner_region_shape(ctx)
+    shape = validate_single_owner_region_shape(ctx)
+    assert shape.provider.path == "L3/L2[1]"
+    assert shape.first_hop_child_id == 1
 
 
 def test_shape_validation_rejects_stale_registry_epoch():
@@ -1420,21 +1458,12 @@ def test_projection_requires_a_real_backend_plan():
 
 def test_compatibility_create_projects_admitted_w2_plan_not_byte_counts(monkeypatch):
     worker = _l3(device_ids=[8, 9])
-    captured: dict[str, Any] = {}
-
-    def fake_allocate(_self, spec):
-        captured["spec"] = spec
-        raise RuntimeError("allocate must not run in this projection probe")
-
-    monkeypatch.setattr("simpler.comm_provider_control.ProviderAllocateClient.allocate", fake_allocate)
-
     spec = worker._project_admitted_worker_chip_region_spec(1, 64, 128)
 
     assert spec.payload.planned_backing_kind is ce.BackendKind.VMM_WINDOW
     assert spec.counter.planned_backing_kind is ce.BackendKind.VMM_WINDOW
     assert spec.payload.logical_bytes == 64
     assert spec.counter.logical_bytes == 128
-    assert "spec" not in captured
 
 
 def test_compatibility_create_does_not_allocate_when_admission_refuses(monkeypatch):
@@ -1446,12 +1475,12 @@ def test_compatibility_create_does_not_allocate_when_admission_refuses(monkeypat
         calls.append("admit")
         raise MaterializationRefusal(RefusalReason.UNSUPPORTED_BACKEND_KIND, "refused")
 
-    def allocate(_self, _spec):
+    def payload(*_args, **_kwargs):
         calls.append("allocate")
-        raise AssertionError("unadmitted plans must not reach the provider store")
+        raise AssertionError("unadmitted plans must not reach delegated dispatch")
 
-    monkeypatch.setattr("simpler.worker.validate_single_owner_region_shape", refuse)
-    monkeypatch.setattr("simpler.comm_provider_control.ProviderAllocateClient.allocate", allocate)
+    monkeypatch.setattr("simpler.comm_region.validate_single_owner_region_shape", refuse)
+    worker._worker = type("Native", (), {"control_payload": staticmethod(payload)})()
 
     with pytest.raises(MaterializationRefusal) as excinfo:
         worker._create_worker_chip_region(1, 64, 128)
@@ -1462,43 +1491,60 @@ def test_compatibility_create_does_not_allocate_when_admission_refuses(monkeypat
 
 def test_compatibility_create_uses_projection_result_not_a_fabricated_spec(monkeypatch):
     worker = _l3(device_ids=[8, 9])
-    captured: dict[str, Any] = {}
+    worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [8, 9]}
     monkeypatch.setattr(worker, "_consume_worker_host_mapped_cleanup_error", lambda _api: None)
+    monkeypatch.setattr(worker, "_import_region_part_lease", lambda *_args, **_kwargs: _FakeLease([], "payload", 1))
+    captured: dict[str, Any] = {}
 
-    def fake_project(plan, layout):
-        captured["plan"] = plan
-        captured["layout"] = layout
-        return RegionAllocationSpec(
-            payload=RegionPartAllocationSpec(plan.payload.backend_kind, 96),
-            counter=RegionPartAllocationSpec(plan.counter.backend_kind, 8),
+    def payload(_worker_type, worker_id, sub_cmd, staged, _timeout):
+        from simpler.comm_provider_control import (
+            DelegatedAllocateReply,
+            DelegatedAllocateReplyTag,
+            DelegatedRegionOperation,
+            encode_reply,
+            parse_request,
+            publish_reply,
         )
+        from simpler.worker import _CTRL_DELEGATED_REGION
 
-    def fake_allocate(_self, spec):
-        captured["spec"] = spec
-        raise RuntimeError("stop after capturing the projected spec")
+        assert int(sub_cmd) == _CTRL_DELEGATED_REGION
+        buf = bytearray(staged)
+        envelope = parse_request(buf)
+        request = envelope.decode_terminal()
+        captured["worker_id"] = int(worker_id)
+        captured["request"] = request
+        captured["plan"] = worker._get_endpoint_registry()
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            result, payload_view, counter_view = _committed_success(request.spec, resource_id=1)
+            committed = encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ALLOCATED,
+                    session_instance_id=envelope.session_instance_id,
+                    transaction_id=envelope.transaction_id,
+                    result=result,
+                    payload_view=payload_view,
+                    counter_view=counter_view,
+                )
+            )
+            publish_reply(memoryview(buf), committed)
+        return bytes(buf)
 
-    monkeypatch.setattr("simpler.comm_region.project_region_allocation_spec", fake_project)
-    monkeypatch.setattr("simpler.comm_provider_control.ProviderAllocateClient.allocate", fake_allocate)
-
-    with pytest.raises(RuntimeError, match="stop after capturing the projected spec"):
-        worker._create_worker_chip_region(1, 64, 128)
-
-    plan = captured["plan"]
-    spec = captured["spec"]
-    assert isinstance(plan, ce.BackendPlan)
-    assert captured["layout"] == ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128)
-    assert spec.payload.logical_bytes == 96
-    assert spec.counter.logical_bytes == 8
-    assert spec.payload.planned_backing_kind is plan.payload.backend_kind
-    assert spec.counter.planned_backing_kind is plan.counter.backend_kind
+    worker._worker = type("Native", (), {"control_payload": staticmethod(payload)})()
+    region = worker._create_worker_chip_region(1, 64, 128)
+    request = captured["request"]
+    assert int(captured["worker_id"]) == 1
+    assert request.payload_logical_bytes == 64
+    assert request.counter_logical_bytes == 128
+    assert request.payload_backend_kind is ce.BackendKind.VMM_WINDOW
+    assert request.counter_backend_kind is ce.BackendKind.VMM_WINDOW
     registry = worker._get_endpoint_registry()
+    plan = region._instance.plan
     provider = registry.record_for(plan.topology_plan.provider_endpoint)
     consumer = next(registry.record_for(member) for member in plan.ordered_members if member != provider.identity)
     assert provider.path == "L3/L2[1]"
     assert provider.deployment is ce.DEVICE_AICPU
     assert consumer.path == "L3"
     assert consumer.deployment is ce.HOST_CPU
-    assert set(plan.ordered_members) == {provider.identity, consumer.identity}
 
 
 class _StoreControlMailbox:
@@ -1510,7 +1556,10 @@ class _StoreControlMailbox:
         fail_after_allocate: Optional[BaseException] = None,
         reply_mode: str = "handler",
     ) -> None:
+        from simpler.comm_provider_control import ProviderTransactionTable
+
         self.store = store
+        self.table = ProviderTransactionTable()
         self.allocate_calls = 0
         self.release_calls = 0
         self.released_ids: list[int] = []
@@ -1518,62 +1567,39 @@ class _StoreControlMailbox:
         self._fail_after_allocate = fail_after_allocate
         self._reply_mode = reply_mode
 
-    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+    def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
         from simpler.comm_provider_control import (
-            ALLOCATE_REPLY_BYTES,
-            ALLOCATE_REQUEST_BYTES,
-            COMMIT_TAG_OFFSET,
-            AllocateReplyTag,
-            handle_ctrl_region_allocate,
+            DelegatedRegionOperation,
+            handle_terminal_delegated_region,
+            parse_reply,
+            parse_request,
         )
+        from simpler.worker import _CTRL_DELEGATED_REGION
 
         del worker_id
-        self.allocate_calls += 1
-        if self._fail_before_allocate is not None:
-            raise self._fail_before_allocate
-        req = SharedMemory(name=request_shm_name)
-        reply = SharedMemory(name=reply_shm_name)
-        assert req.buf is not None
-        assert reply.buf is not None
-        req_view = memoryview(req.buf)[:ALLOCATE_REQUEST_BYTES]
-        reply_view = memoryview(reply.buf)[:ALLOCATE_REPLY_BYTES]
-        try:
-            if self._reply_mode == "handler":
-                handle_ctrl_region_allocate(req_view, reply_view, self.store)
-            elif self._reply_mode == "malformed":
-                struct.pack_into("<I", reply.buf, COMMIT_TAG_OFFSET, int(AllocateReplyTag.SUCCESS))
+        assert int(sub_cmd) == _CTRL_DELEGATED_REGION
+        staged = bytearray(payload)
+        envelope = parse_request(staged)
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            self.allocate_calls += 1
+            if self._fail_before_allocate is not None:
+                raise self._fail_before_allocate
+            if self._reply_mode == "empty":
+                return bytes(len(staged))
+            if self._reply_mode == "malformed":
+                staged[:] = b"\x00" * len(staged)
+                staged[12:16] = (1).to_bytes(4, "little")
+                return bytes(staged)
+            handle_terminal_delegated_region(memoryview(staged), self.table, self.store)
             if self._fail_after_allocate is not None:
                 raise self._fail_after_allocate
-        finally:
-            req_view.release()
-            reply_view.release()
-            req.close()
-            reply.close()
-
-    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        from simpler.comm_provider_control import (
-            RELEASE_REPLY_BYTES,
-            RELEASE_REQUEST_BYTES,
-            decode_release_request,
-            handle_ctrl_region_release,
-        )
-
-        del worker_id
+            return bytes(staged)
         self.release_calls += 1
-        req = SharedMemory(name=request_shm_name)
-        reply = SharedMemory(name=reply_shm_name)
-        assert req.buf is not None
-        assert reply.buf is not None
-        req_view = memoryview(req.buf)[:RELEASE_REQUEST_BYTES]
-        reply_view = memoryview(reply.buf)[:RELEASE_REPLY_BYTES]
-        try:
-            self.released_ids.append(decode_release_request(req_view))
-            handle_ctrl_region_release(req_view, reply_view, self.store)
-        finally:
-            req_view.release()
-            reply_view.release()
-            req.close()
-            reply.close()
+        handle_terminal_delegated_region(memoryview(staged), self.table, self.store)
+        outcome = parse_reply(staged).decode_outcome()
+        resource_id = getattr(getattr(outcome, "result", None), "provider_resource_id", 0)
+        self.released_ids.append(int(resource_id or 0))
+        return bytes(staged)
 
 
 def _live_control_worker(mailbox, monkeypatch, device_ids=(8, 9)):
@@ -1586,7 +1612,7 @@ def _live_control_worker(mailbox, monkeypatch, device_ids=(8, 9)):
 
 def _assert_poisoned(worker, *, cause: Optional[BaseException] = None) -> RuntimeError:
     with pytest.raises(RuntimeError, match="no further work is admitted") as poison_info:
-        worker._require_no_ordered_cleanup_failure("test")
+        worker._require_no_delegated_session_fatal("test")
     if cause is not None:
         chain: list[BaseException] = []
         current: Optional[BaseException] = poison_info.value
@@ -1608,33 +1634,26 @@ def test_handler_commit_then_mailbox_error_releases_once_and_poisons(monkeypatch
     worker = _live_control_worker(mailbox, monkeypatch)
     with pytest.raises(RuntimeError, match="mailbox down after commit") as exc_info:
         _materialize_default_region(worker)
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._provider_resource_id == 1
-    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    assert mailbox.release_calls == 1
-    assert mailbox.released_ids == [1]
-    assert factory.payloads[0].release_count == 1
-    assert factory.counters[0].release_count == 1
+    assert _tracked(worker) == ()
+    assert mailbox.release_calls == 0
+    assert factory.payloads[0].release_count == 0
+    assert factory.counters[0].release_count == 0
     _assert_poisoned(worker, cause=exc_info.value)
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         _materialize_default_region(worker)
 
 
 def test_dispatch_empty_reply_does_not_release_and_poisons(monkeypatch):
-    from simpler.comm_provider import ProviderRegionStore
-    from simpler.comm_provider_control import RegionControlProtocolError
+    from simpler.comm_provider import ProviderRegionStore, RegionControlError
 
     from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
 
     store = ProviderRegionStore(_sim_context(), _shell_factory=FakeShellFactory())
     mailbox = _StoreControlMailbox(store, reply_mode="empty")
     worker = _live_control_worker(mailbox, monkeypatch)
-    with pytest.raises(RegionControlProtocolError):
+    with pytest.raises(RegionControlError):
         _materialize_default_region(worker)
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._provider_resource_id == 0
+    assert _tracked(worker) == ()
     assert mailbox.release_calls == 0
     _assert_poisoned(worker)
     with pytest.raises(RuntimeError, match="no further work is admitted"):
@@ -1651,9 +1670,7 @@ def test_dispatch_malformed_reply_does_not_release_and_poisons(monkeypatch):
     worker = _live_control_worker(mailbox, monkeypatch)
     with pytest.raises(RegionControlError):
         _materialize_default_region(worker)
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._provider_resource_id == 0
+    assert _tracked(worker) == ()
     assert mailbox.release_calls == 0
     _assert_poisoned(worker)
     with pytest.raises(RuntimeError, match="no further work is admitted"):
@@ -1661,7 +1678,6 @@ def test_dispatch_malformed_reply_does_not_release_and_poisons(monkeypatch):
 
 
 def test_request_encode_failure_does_not_dispatch_or_poison(monkeypatch):
-    from simpler import comm_provider_control as control
     from simpler.comm_provider import ProviderRegionStore
 
     from tests.ut.py.test_worker.test_comm_provider import FakeShellFactory, _sim_context
@@ -1673,7 +1689,7 @@ def test_request_encode_failure_does_not_dispatch_or_poison(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise RuntimeError("encode failed")
 
-    monkeypatch.setattr(control, "encode_allocate_request", _boom)
+    monkeypatch.setattr("simpler.comm_region.encode_request", _boom)
     with pytest.raises(RuntimeError, match="encode failed"):
         _materialize_default_region(worker)
     assert mailbox.allocate_calls == 0
@@ -1694,13 +1710,11 @@ def test_mailbox_error_before_handler_poisons_and_keeps_transport_type(monkeypat
         _materialize_default_region(worker)
     assert mailbox.allocate_calls == 1
     assert mailbox.release_calls == 0
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._provider_resource_id == 0
+    assert _tracked(worker) == ()
     _assert_poisoned(worker, cause=exc_info.value)
     with pytest.raises(RuntimeError, match="no further work is admitted") as admission_info:
         _materialize_default_region(worker)
-    assert admission_info.value.__cause__ is worker._ordered_cleanup_error
+    assert admission_info.value.__cause__ is worker._delegated_session_fatal
 
 
 def test_store_lifecycle_allocate_is_terminal_ambiguity(monkeypatch):
@@ -1718,9 +1732,553 @@ def test_store_lifecycle_allocate_is_terminal_ambiguity(monkeypatch):
     assert exc_info.value.kind is RegionControlErrorKind.STORE_LIFECYCLE
     assert mailbox.release_calls == 0
     assert factory.world.calls == []
-    tracked = _tracked(worker)
-    assert len(tracked) == 1
-    assert tracked[0]._state is RegionInstanceState.CLOSE_FAILED
-    _assert_poisoned(worker, cause=exc_info.value)
+    assert _tracked(worker) == ()
+    _assert_poisoned(worker)
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         _materialize_default_region(worker)
+
+
+_DELEGATED_SESSION_A = b"\x10\x11\x12\x13\x14\x15\x16\x17"
+_DELEGATED_SESSION_B = b"\x20\x21\x22\x23\x24\x25\x26\x27"
+
+
+def _endpoint_session(session: bytes = _DELEGATED_SESSION_A, epoch: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(session_instance_id=session, registry_epoch=epoch)
+
+
+class _RecordingLease:
+    def __init__(self, name: str, calls: list[str], fail: Optional[BaseException] = None) -> None:
+        self.name = name
+        self.calls = calls
+        self.fail = fail
+        self.handle = 1
+
+    def close(self) -> None:
+        self.calls.append(self.name)
+        if self.fail is not None:
+            raise self.fail
+
+
+def test_delegated_allocate_dispatch_is_serialized_and_burns_ids():
+    registry = RegionInstanceRegistry()
+    endpoints = _endpoint_session()
+    holding = threading.Event()
+    second_entered = threading.Event()
+    order: list[tuple[str, int]] = []
+
+    def first() -> None:
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            order.append(("first", ident[1]))
+            holding.set()
+            assert not second_entered.wait(timeout=0.2)
+        order.append(("first_done", ident[1]))
+
+    def second() -> None:
+        holding.wait(timeout=2)
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            second_entered.set()
+            order.append(("second", ident[1]))
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    t2.start()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+    assert order == [("first", 1), ("first_done", 1), ("second", 2)]
+    assert registry._next_delegated_transaction_id == 3
+    assert registry._delegated_session_instance_id == _DELEGATED_SESSION_A
+
+
+def test_delegated_allocate_dispatch_burns_id_when_encode_or_dispatch_fails():
+    registry = RegionInstanceRegistry()
+    endpoints = _endpoint_session()
+    with pytest.raises(RuntimeError, match="encode failed"):
+        with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+            assert ident == (_DELEGATED_SESSION_A, 1)
+            raise RuntimeError("encode failed")
+    with registry._delegated_allocate_dispatch(registry=endpoints, expected_registry_epoch=3) as ident:
+        assert ident == (_DELEGATED_SESSION_A, 2)
+
+
+def test_delegated_allocate_dispatch_rejects_session_and_epoch_mismatch_before_side_effect():
+    registry = RegionInstanceRegistry()
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 1
+    with pytest.raises(MaterializationRefusal) as session_exc:
+        with registry._delegated_allocate_dispatch(
+            registry=_endpoint_session(_DELEGATED_SESSION_B), expected_registry_epoch=3
+        ):
+            raise AssertionError("mismatch must fail before yield")
+    assert session_exc.value.reason is RefusalReason.REGISTRY_MISMATCH
+    with pytest.raises(MaterializationRefusal) as epoch_exc:
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(epoch=4), expected_registry_epoch=3):
+            raise AssertionError("epoch mismatch must fail before yield")
+    assert epoch_exc.value.reason is RefusalReason.REGISTRY_MISMATCH
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 2
+
+
+def test_delegated_allocate_dispatch_closes_admission_at_uint64_limit():
+    registry = RegionInstanceRegistry()
+    registry._next_delegated_transaction_id = (1 << 64) - 1
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == (1 << 64) - 1
+    with pytest.raises(MaterializationError, match="exhausted"):
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3):
+            raise AssertionError("must not wrap")
+    registry._next_delegated_transaction_id = 0
+    registry._delegated_admission_closed = False
+    with pytest.raises(MaterializationError, match="0 is illegal"):
+        with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3):
+            raise AssertionError("must not recycle 0")
+
+
+def test_clean_retirement_keeps_allocator_and_has_no_lookup_api():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    registry = ctx.worker._region_instance_registry
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 1
+    registry.track(instance, None)
+    registry._retire(id(instance))
+    assert id(instance) not in registry._instances
+    with registry._delegated_allocate_dispatch(registry=_endpoint_session(), expected_registry_epoch=3) as ident:
+        assert ident[1] == 2
+    assert not hasattr(RegionInstanceRegistry, "get")
+    assert not hasattr(RegionInstanceRegistry, "find")
+    assert not hasattr(RegionInstanceRegistry, "__getitem__")
+
+
+def test_delegated_identity_requires_track_and_skips_uncertainty_release():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    releases: list[tuple[bytes, int, bytes]] = []
+
+    def _dispatch(*, session_instance_id, transaction_id, provider_path):
+        releases.append((session_instance_id, transaction_id, provider_path))
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._dispatch_delegated_release = _dispatch
+    with pytest.raises(MaterializationError, match="tracked"):
+        instance._bind_delegated_identity(_DELEGATED_SESSION_A, 1, b"L3/L2[1]")
+    ctx.worker._region_instance_registry.track(instance, None)
+    instance._bind_delegated_identity(_DELEGATED_SESSION_A, 1, b"L3/L2[1]")
+    instance._state = RegionInstanceState.LIVE
+    mapping_calls: list[str] = []
+    instance._payload_mapping = _RecordingLease("payload", mapping_calls)
+    instance._counter_mapping = _RecordingLease("counter", mapping_calls)
+    instance._close_owned(poison_on_error=False)
+    assert releases == []
+    assert mapping_calls == ["payload", "counter"]
+    assert instance._delegated_release_edge is False
+    assert instance._provider_resource_id == 0
+
+
+def test_committed_allocated_installs_release_edge_and_close_sends_once():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    instance = RegionInstance.planned(ctx, shape)
+    ctx.worker._region_instance_registry.track(instance, None)
+    instance._bind_delegated_identity(_DELEGATED_SESSION_A, 4, b"L3/L2[1]")
+    instance._commit_delegated_allocation(11)
+    assert instance.provider_resource_id == 11
+    assert instance._delegated_allocation_committed is True
+    assert instance._delegated_release_edge is True
+    releases: list[dict[str, object]] = []
+
+    def _dispatch(**kwargs):
+        releases.append(kwargs)
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._dispatch_delegated_release = _dispatch
+    mapping_calls: list[str] = []
+    payload_error = RuntimeError("payload mapping close failed")
+    instance._state = RegionInstanceState.LIVE
+    instance._payload_mapping = _RecordingLease("payload", mapping_calls, fail=payload_error)
+    instance._counter_mapping = _RecordingLease("counter", mapping_calls)
+    with pytest.raises(RuntimeError, match="payload mapping close failed"):
+        instance._close_owned(poison_on_error=False)
+    assert mapping_calls == ["payload", "counter"]
+    assert releases == [
+        {
+            "session_instance_id": _DELEGATED_SESSION_A,
+            "transaction_id": 4,
+            "provider_path": b"L3/L2[1]",
+        }
+    ]
+    with pytest.raises(RuntimeError, match="payload mapping close failed"):
+        instance._close_owned(poison_on_error=False)
+    assert len(releases) == 1
+
+
+def test_delegated_shape_accepts_l3_and_l4():
+    l3_ctx = _accepted_context()
+    l3_shape = validate_single_owner_region_shape(l3_ctx)
+    assert isinstance(l3_shape, DelegatedSingleOwnerRegionShape)
+    assert l3_shape.consumer.path == "L3"
+    assert l3_shape.provider.path == "L3/L2[1]"
+    assert l3_shape.initiator_path == b"L3"
+    assert l3_shape.provider_path == b"L3/L2[1]"
+    assert l3_shape.first_hop_child_id == 1
+    assert l3_shape.provider_device_id == 9
+
+    l4_worker = _l4_with_local_l3(device_ids=[4])
+    l4_ctx = _context(
+        l4_worker,
+        [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)),
+    )
+    l4_shape = validate_single_owner_region_shape(l4_ctx)
+    assert l4_shape.consumer.path == "L4"
+    assert l4_shape.provider.path == "L4/L3[0]/L2[0]"
+    assert l4_shape.first_hop_child_id == 0
+    assert l4_shape.provider_device_id == 4
+
+
+def test_delegated_shape_refuses_aicore_without_dispatch():
+    worker = _l3(device_ids=[0])
+    ctx = _context(
+        worker,
+        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[0]", ce.DEVICE_AICORE)],
+        ce.SingleOwner(provider=ce.at("L3/L2[0]", ce.DEVICE_AICORE)),
+    )
+    worker._dispatch_delegated_allocate = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no wire"))
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        validate_single_owner_region_shape(ctx)
+    assert excinfo.value.reason is RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT
+    with pytest.raises(MaterializationRefusal) as core:
+        materialize_region_instance(ctx)
+    assert core.value.reason is RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT
+
+
+def _posix_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
+    from simpler.comm_provider import (
+        PosixShmImport,
+        RegionAllocationResult,
+        RegionExportDescriptor,
+        RegionPartExportDescriptor,
+        RegionPartKind,
+        RegionPartLocalView,
+    )
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+
+    result = RegionAllocationResult(
+        provider_resource_id=11,
+        export_descriptor=RegionExportDescriptor(
+            payload=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=payload_bytes,
+                mapping_bytes=payload_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_payload_a"),
+            ),
+            counter=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=counter_bytes,
+                mapping_bytes=counter_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_counter_a"),
+            ),
+        ),
+    )
+    payload = RegionPartLocalView(part=RegionPartKind.PAYLOAD, local_base=0x1000, logical_bytes=payload_bytes)
+    counter = RegionPartLocalView(part=RegionPartKind.COUNTER, local_base=0x2000, logical_bytes=counter_bytes)
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ALLOCATED,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            result=result,
+            payload_view=payload,
+            counter_view=counter,
+        )
+    )
+
+
+class _TestDelegatedImportFailure(BaseException):
+    pass
+
+
+def _posix_inconsistent_allocated_reply(session: bytes, transaction_id: int, *, payload_bytes: int, counter_bytes: int):
+    from simpler.comm_provider import (
+        PosixShmImport,
+        RegionAllocationResult,
+        RegionExportDescriptor,
+        RegionPartExportDescriptor,
+        RegionPartKind,
+        RegionPartLocalView,
+    )
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+
+    result = RegionAllocationResult(
+        provider_resource_id=11,
+        export_descriptor=RegionExportDescriptor(
+            payload=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=payload_bytes,
+                mapping_bytes=payload_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_same_token"),
+            ),
+            counter=RegionPartExportDescriptor(
+                planned_backing_kind=ce.BackendKind.VMM_WINDOW,
+                logical_bytes=counter_bytes,
+                mapping_bytes=counter_bytes,
+                import_capability=PosixShmImport(shm_name="/pto_same_token"),
+            ),
+        ),
+    )
+    payload = RegionPartLocalView(part=RegionPartKind.PAYLOAD, local_base=0x1000, logical_bytes=payload_bytes)
+    counter = RegionPartLocalView(part=RegionPartKind.COUNTER, local_base=0x2000, logical_bytes=counter_bytes)
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ALLOCATED,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            result=result,
+            payload_view=payload,
+            counter_view=counter,
+        )
+    )
+
+
+def _backend_failure_reply(session: bytes, transaction_id: int):
+    from simpler.comm_provider_control import DelegatedAllocateReply, DelegatedAllocateReplyTag, encode_reply
+
+    return encode_reply(
+        DelegatedAllocateReply(
+            tag=DelegatedAllocateReplyTag.ERROR,
+            session_instance_id=session,
+            transaction_id=transaction_id,
+            error=RegionAllocationError(
+                provisional_resource_id=7,
+                control_kind=RegionControlErrorKind.BACKEND_FAILURE,
+                failed_part=RegionPartKind.COUNTER,
+                failed_operation=RegionOperationKind.ZERO_BYTES,
+                cleanup_debt_remaining=False,
+            ),
+        )
+    )
+
+
+def _install_delegated_dispatch(
+    worker: Worker,
+    dispatches: list[bytes],
+    *,
+    close_calls: Optional[list[str]] = None,
+    import_calls: Optional[list[str]] = None,
+    fail_on_import: Optional[int] = None,
+    import_error: Optional[BaseException] = None,
+    reply_factory=None,
+) -> None:
+    from simpler.comm_provider import PosixShmImport
+    from simpler.comm_provider_control import parse_request
+
+    close_calls = close_calls if close_calls is not None else []
+    import_calls = import_calls if import_calls is not None else []
+
+    def _dispatch(staged):
+        view = staged if isinstance(staged, memoryview) else memoryview(staged)
+        envelope = parse_request(view)
+        request = envelope.decode_terminal()
+        dispatches.append(view.tobytes())
+        factory = reply_factory if reply_factory is not None else _posix_allocated_reply
+        return factory(
+            request.session_instance_id,
+            request.transaction_id,
+            payload_bytes=int(request.payload_logical_bytes),
+            counter_bytes=int(request.counter_logical_bytes),
+        )
+
+    def _import(*_args, **_kwargs):
+        name = "payload" if len(import_calls) == 0 else "counter"
+        import_calls.append(name)
+        if fail_on_import is not None and len(import_calls) == fail_on_import:
+            assert import_error is not None
+            raise import_error
+        return _RecordingLease(name, close_calls)
+
+    worker._dispatch_delegated_allocate = _dispatch
+    worker._import_region_part_lease = _import
+    worker._provider_import_capability_type = lambda: PosixShmImport
+
+
+def test_l3_and_l4_plans_use_the_same_delegated_materializer_core():
+    l3_dispatches: list[bytes] = []
+    l3_ctx = _accepted_context()
+    _install_delegated_dispatch(l3_ctx.worker, l3_dispatches)
+    l3_instance = materialize_region_instance(l3_ctx)
+    assert l3_instance.state is RegionInstanceState.LIVE
+    assert l3_instance.provider_resource_id == 11
+    assert l3_instance._delegated_release_edge is True
+    assert len(l3_dispatches) == 1
+
+    l4_dispatches: list[bytes] = []
+    l4_worker = _l4_with_local_l3(device_ids=[4])
+    l4_ctx = _context(
+        l4_worker,
+        [ce.at("L4", ce.HOST_CPU), ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L4/L3[0]/L2[0]", ce.DEVICE_AICPU)),
+    )
+    _install_delegated_dispatch(l4_worker, l4_dispatches)
+    l4_instance = materialize_region_instance(l4_ctx)
+    assert l4_instance.state is RegionInstanceState.LIVE
+    assert l4_instance._delegated_provider_path == b"L4/L3[0]/L2[0]"
+    assert len(l4_dispatches) == 1
+    from simpler.comm_provider_control import parse_request
+
+    l3_req = parse_request(l3_dispatches[0]).decode_terminal()
+    l4_req = parse_request(l4_dispatches[0]).decode_terminal()
+    assert type(l3_req) is type(l4_req)
+    assert l3_req.provider_path == b"L3/L2[1]"
+    assert l4_req.provider_path == b"L4/L3[0]/L2[0]"
+    assert len(l3_dispatches[0]) >= 256
+    assert len(l4_dispatches[0]) >= 256
+
+
+@pytest.mark.parametrize(
+    ("fail_on_import", "error_factory", "expected_imports", "expected_closes"),
+    [
+        (1, lambda: RuntimeError("payload import failed"), ["payload"], []),
+        (2, lambda: RuntimeError("counter import failed"), ["payload", "counter"], ["payload"]),
+        (1, lambda: _TestDelegatedImportFailure("payload import failed"), ["payload"], []),
+        (2, lambda: _TestDelegatedImportFailure("counter import failed"), ["payload", "counter"], ["payload"]),
+    ],
+)
+def test_delegated_import_failure_sends_one_release(fail_on_import, error_factory, expected_imports, expected_closes):
+    ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+    error = error_factory()
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        fail_on_import=fail_on_import,
+        import_error=error,
+    )
+
+    def _release(**kwargs):
+        releases.append(kwargs)
+        return ProviderReleaseResult(provider_resource_id=11, status=ProviderReleaseStatus.RELEASED)
+
+    ctx.worker._dispatch_delegated_release = _release
+    with pytest.raises(type(error)) as excinfo:
+        materialize_region_instance(ctx)
+    assert excinfo.value is error
+    assert import_calls == expected_imports
+    assert close_calls == expected_closes
+    assert len(dispatches) == 1
+    assert len(dispatches[0]) >= 256
+    assert len(releases) == 1
+    assert releases[0] == {
+        "session_instance_id": ctx.registry.session_instance_id,
+        "transaction_id": 1,
+        "provider_path": b"L3/L2[1]",
+    }
+    instance = captured["instance"]
+    assert instance._delegated_release_edge is False
+    assert id(instance) not in ctx.worker._region_instance_registry._instances
+    assert ctx.worker._region_instance_registry._next_delegated_transaction_id == 2
+
+
+def test_delegated_malformed_allocated_reply_does_not_import_or_release():
+    ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        reply_factory=_posix_inconsistent_allocated_reply,
+    )
+    ctx.worker._dispatch_delegated_release = lambda **kwargs: releases.append(kwargs) or ProviderReleaseResult(
+        provider_resource_id=11, status=ProviderReleaseStatus.RELEASED
+    )
+    with pytest.raises(RuntimeError, match="POSIX shm tokens must be distinct") as excinfo:
+        materialize_region_instance(ctx)
+    instance = captured["instance"]
+    fatal = ctx.worker._delegated_session_fatal
+    assert fatal is not None
+    assert excinfo.value is fatal
+    assert instance._delegated_allocation_committed is False
+    assert instance._delegated_release_edge is False
+    assert instance._provider_resource_id == 0
+    assert import_calls == []
+    assert close_calls == []
+    assert releases == []
+    assert ctx.worker._region_instance_registry._delegated_admission_closed is True
+    assert id(instance) not in ctx.worker._region_instance_registry._instances
+
+
+def test_delegated_clean_backend_failure_preserves_typed_fields():
+    ctx = _accepted_context()
+    captured: dict[str, RegionInstance] = {}
+    original_track = ctx.worker._region_instance_registry.track
+
+    def _track(instance, resources):
+        captured["instance"] = instance
+        return original_track(instance, resources)
+
+    ctx.worker._region_instance_registry.track = _track  # type: ignore[method-assign]
+    dispatches: list[bytes] = []
+    releases: list[dict[str, object]] = []
+    close_calls: list[str] = []
+    import_calls: list[str] = []
+
+    def _error_reply(session, transaction_id, **_kwargs):
+        return _backend_failure_reply(session, transaction_id)
+
+    _install_delegated_dispatch(
+        ctx.worker,
+        dispatches,
+        close_calls=close_calls,
+        import_calls=import_calls,
+        reply_factory=_error_reply,
+    )
+    ctx.worker._dispatch_delegated_release = lambda **kwargs: releases.append(kwargs) or ProviderReleaseResult(
+        provider_resource_id=7, status=ProviderReleaseStatus.RELEASED
+    )
+    with pytest.raises(RegionAllocationError) as excinfo:
+        materialize_region_instance(ctx)
+    error = excinfo.value
+    assert error.control_kind is RegionControlErrorKind.BACKEND_FAILURE
+    assert error.failed_part is RegionPartKind.COUNTER
+    assert error.failed_operation is RegionOperationKind.ZERO_BYTES
+    assert error.provisional_resource_id == 7
+    assert error.cleanup_debt_remaining is False
+    assert ctx.worker._delegated_session_fatal is None
+    assert ctx.worker._region_instance_registry._delegated_admission_closed is False
+    assert import_calls == []
+    assert close_calls == []
+    assert releases == []
+    instance = captured["instance"]
+    assert instance._delegated_release_edge is False
+    assert ctx.worker._region_instance_registry._next_delegated_transaction_id == 2
+    success_dispatches: list[bytes] = []
+    _install_delegated_dispatch(ctx.worker, success_dispatches)
+    live = materialize_region_instance(ctx)
+    assert live._delegated_transaction_id == 2
+    assert live.state is RegionInstanceState.LIVE

@@ -10,7 +10,7 @@
 
 This module is the provider-agent value surface for CPU-NPU comm regions. It
 does not import worker-chip compatibility types, Worker, mailbox transport, or
-W5a transaction identity.
+delegated-region transaction identity.
 """
 
 from __future__ import annotations

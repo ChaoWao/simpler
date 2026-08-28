@@ -30,14 +30,25 @@ from simpler.comm_provider import (
     RegionPartLocalView,
 )
 from simpler.comm_provider_control import (
-    decode_allocate_request,
-    decode_release_request,
-    encode_allocate_success_reply,
-    encode_release_result_reply,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedRegionOperation,
+    DelegatedReleaseReply,
+    DelegatedReleaseReplyTag,
+    encode_reply,
+    parse_request,
+    publish_reply,
 )
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, get_element_size
-from simpler.worker import _IDLE, _OFF_STATE, Worker, _buffer_field_addr, _mailbox_store_i32
+from simpler.worker import (
+    _CTRL_DELEGATED_REGION,
+    _IDLE,
+    _OFF_STATE,
+    Worker,
+    _buffer_field_addr,
+    _mailbox_store_i32,
+)
 from simpler.worker_chip_message_queue import (
     WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
     WORKER_CHIP_QUEUE_COUNTER_BYTES,
@@ -116,20 +127,20 @@ class _FakeRequest:
 class _FakeCWorker:
     def __init__(self):
         self.next_region_id = 1
+        self._last_resource_id = 1
 
-    def control_region_allocate(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        req_shm = SharedMemory(name=request_shm_name)
-        reply_shm = SharedMemory(name=reply_shm_name)
-        req_buf = req_shm.buf
-        reply_buf = reply_shm.buf
-        assert req_buf is not None
-        assert reply_buf is not None
-        try:
-            spec = decode_allocate_request(req_buf)
+    def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+        assert int(sub_cmd) == _CTRL_DELEGATED_REGION
+        staged = bytearray(payload)
+        envelope = parse_request(staged)
+        if envelope.operation is DelegatedRegionOperation.DELEGATED_ALLOCATE:
+            request = envelope.decode_terminal()
+            spec = request.spec
             payload_bytes = int(spec.payload.logical_bytes)
             counter_bytes = int(spec.counter.logical_bytes)
             region_id = self.next_region_id
             self.next_region_id += 1
+            self._last_resource_id = region_id
             result = RegionAllocationResult(
                 provider_resource_id=region_id,
                 export_descriptor=RegionExportDescriptor(
@@ -147,36 +158,32 @@ class _FakeCWorker:
                     ),
                 ),
             )
-            encode_allocate_success_reply(
-                reply_buf,
-                result,
-                RegionPartLocalView(RegionPartKind.PAYLOAD, 0x1000_0000, payload_bytes),
-                RegionPartLocalView(RegionPartKind.COUNTER, 0x1000_1000, counter_bytes),
+            committed = encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ALLOCATED,
+                    session_instance_id=envelope.session_instance_id,
+                    transaction_id=envelope.transaction_id,
+                    result=result,
+                    payload_view=RegionPartLocalView(RegionPartKind.PAYLOAD, 0x1000_0000, payload_bytes),
+                    counter_view=RegionPartLocalView(RegionPartKind.COUNTER, 0x1000_1000, counter_bytes),
+                )
             )
-        finally:
-            del req_buf
-            del reply_buf
-            req_shm.close()
-            reply_shm.close()
-
-    def control_region_release(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
-        req_shm = SharedMemory(name=request_shm_name)
-        reply_shm = SharedMemory(name=reply_shm_name)
-        req_buf = req_shm.buf
-        reply_buf = reply_shm.buf
-        assert req_buf is not None
-        assert reply_buf is not None
-        try:
-            resource_id = decode_release_request(req_buf)
-            encode_release_result_reply(
-                reply_buf,
-                ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+            publish_reply(memoryview(staged), committed)
+            return bytes(staged)
+        resource_id = int(self._last_resource_id)
+        committed = encode_reply(
+            DelegatedReleaseReply(
+                tag=DelegatedReleaseReplyTag.RELEASED,
+                session_instance_id=envelope.session_instance_id,
+                transaction_id=envelope.transaction_id,
+                result=ProviderReleaseResult(
+                    provider_resource_id=resource_id,
+                    status=ProviderReleaseStatus.RELEASED,
+                ),
             )
-        finally:
-            del req_buf
-            del reply_buf
-            req_shm.close()
-            reply_shm.close()
+        )
+        publish_reply(memoryview(staged), committed)
+        return bytes(staged)
 
 
 class _FakeCOrch:
@@ -328,6 +335,7 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
     ]
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = _FakeCWorker()
+    worker._next_level_worker_ids = [0]
     worker._chip_shms = [shm]
     worker._worker_chip_test_fake_client = fake_client
     reservation = worker._control_reservation("test_worker_chip_queue")

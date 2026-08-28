@@ -71,30 +71,37 @@ from simpler.worker import (
 from simpler.worker_level import WorkerLevel
 
 
-def _native_control_region_release(recorder, worker_id, request_shm_name, reply_shm_name, *, fail=None):
+def _native_control_payload(recorder, worker_id, payload, *, fail=None):
     from simpler.comm_provider import ProviderReleaseResult, ProviderReleaseStatus
-    from simpler.comm_provider_control import decode_release_request, encode_release_result_reply
+    from simpler.comm_provider_control import (
+        DelegatedRegionOperation,
+        DelegatedReleaseReply,
+        DelegatedReleaseReplyTag,
+        encode_reply,
+        parse_request,
+        publish_reply,
+    )
 
-    req_shm = SharedMemory(name=request_shm_name)
-    reply_shm = SharedMemory(name=reply_shm_name)
-    assert req_shm.buf is not None
-    assert reply_shm.buf is not None
-    req_buf = req_shm.buf
-    reply_buf = reply_shm.buf
-    try:
-        resource_id = decode_release_request(req_buf)
-        recorder.append((worker_id, resource_id))
-        encode_release_result_reply(
-            reply_buf,
-            ProviderReleaseResult(provider_resource_id=int(resource_id), status=ProviderReleaseStatus.RELEASED),
+    staged = bytearray(payload)
+    envelope = parse_request(staged)
+    if envelope.operation is not DelegatedRegionOperation.DELEGATED_RELEASE:
+        raise AssertionError("native fake expected a delegated release")
+    recorder.append((worker_id, int(envelope.transaction_id)))
+    committed = encode_reply(
+        DelegatedReleaseReply(
+            tag=DelegatedReleaseReplyTag.RELEASED,
+            session_instance_id=envelope.session_instance_id,
+            transaction_id=envelope.transaction_id,
+            result=ProviderReleaseResult(
+                provider_resource_id=int(envelope.transaction_id),
+                status=ProviderReleaseStatus.RELEASED,
+            ),
         )
-        if fail is not None:
-            raise fail
-    finally:
-        del req_buf
-        del reply_buf
-        req_shm.close()
-        reply_shm.close()
+    )
+    publish_reply(memoryview(staged), committed)
+    if fail is not None:
+        raise fail
+    return bytes(staged)
 
 
 from ._harness import (
@@ -4496,8 +4503,8 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
-                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
+            def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+                return _native_control_payload(self.released_regions, worker_id, payload)
 
         class NativeOrchestrator:
             def __init__(self):
@@ -4601,9 +4608,10 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_region_release(self, worker_id, request_shm_name, reply_shm_name):
-                _native_control_region_release(self.released_regions, worker_id, request_shm_name, reply_shm_name)
+            def control_payload(self, _worker_type, worker_id, sub_cmd, payload, _timeout):
+                result = _native_control_payload(self.released_regions, worker_id, payload)
                 raise release_error
+                return result
 
         class NativeOrchestrator:
             def _release_run(self, run_id):
@@ -7332,32 +7340,45 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         """
         worker = self._worker()
         worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [0]}
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        worker._next_level_worker_ids = [0]
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _interrupted(*_args):
             raise KeyboardInterrupt
 
-        worker._worker = cast(Any, SimpleNamespace(control_region_allocate=_interrupted))
+        worker._worker = cast(Any, SimpleNamespace(control_payload=_interrupted))
         with pytest.raises(KeyboardInterrupt):
             worker._create_worker_chip_region(0, 4096, 64)
-        assert worker._ordered_cleanup_error is not None
+        assert worker._delegated_session_fatal is not None
         with pytest.raises(RuntimeError, match="no further work is admitted"):
-            worker._require_no_ordered_cleanup_failure("submit")
+            worker._require_no_delegated_session_fatal("submit")
 
     def test_an_ordinary_region_create_failure_does_not_refuse_further_work(self):
         worker = self._worker()
         worker._config = {**worker._config, "platform": "a2a3sim", "device_ids": [0]}
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        worker._next_level_worker_ids = [0]
         worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
-        def _failed(*_args):
+        def _failed(_worker_type, _worker_id, _sub_cmd, payload, _timeout):
             from simpler.comm_provider import (
                 RegionAllocationError,
                 RegionControlErrorKind,
                 RegionOperationKind,
                 RegionPartKind,
             )
+            from simpler.comm_provider_control import (
+                DelegatedAllocateReply,
+                DelegatedAllocateReplyTag,
+                encode_reply,
+                parse_request,
+                publish_reply,
+            )
 
-            raise RegionAllocationError(
+            staged = bytearray(payload)
+            envelope = parse_request(staged)
+            error = RegionAllocationError(
                 provisional_resource_id=7,
                 control_kind=RegionControlErrorKind.BACKEND_FAILURE,
                 failed_part=RegionPartKind.PAYLOAD,
@@ -7365,13 +7386,26 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 cleanup_debt_remaining=False,
                 message="chip refused the region",
             )
+            committed = encode_reply(
+                DelegatedAllocateReply(
+                    tag=DelegatedAllocateReplyTag.ERROR,
+                    session_instance_id=envelope.session_instance_id,
+                    transaction_id=envelope.transaction_id,
+                    error=error,
+                )
+            )
+            publish_reply(memoryview(staged), committed)
+            return bytes(staged)
 
-        worker._worker = cast(Any, SimpleNamespace(control_region_allocate=_failed))
+        worker._worker = cast(Any, SimpleNamespace(control_payload=_failed))
         from simpler.comm_provider import RegionAllocationError
 
-        with pytest.raises(RegionAllocationError, match="chip refused the region"):
+        with pytest.raises(RegionAllocationError) as excinfo:
             worker._create_worker_chip_region(0, 4096, 64)
+        assert "BACKEND_FAILURE" in str(excinfo.value)
+        assert excinfo.value.cleanup_debt_remaining is False
         assert worker._ordered_cleanup_error is None, "an ordinary failure must not shut the worker"
+        assert worker._delegated_session_fatal is None
 
     def test_a_region_rollback_that_cannot_release_refuses_further_work(self):
         """The id was never tracked, so no later cleanup can reclaim it.

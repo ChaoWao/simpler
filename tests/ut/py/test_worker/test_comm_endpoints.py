@@ -9,12 +9,35 @@
 """Unit tests for W2 endpoint selectors, registry resolution, and planning."""
 
 import dataclasses
+from typing import Any, cast
 
 import pytest
 from simpler import comm_endpoints as ce
 from simpler.buffer import _RESOLVERS
 from simpler.buffer import BackendKind as BufferBackendKind
 from simpler.worker import RemoteWorkerSpec, Worker, _Lifecycle
+
+FROZEN_ADAPTER_KIND_U32 = {
+    None: 0,
+    "DIRECT_MAP": 1,
+    "DEVICE_PEER": 2,
+    "OWNER_DELEGATED_COPY": 3,
+    "EXPLICIT_TRANSFER": 4,
+    "COLLECTIVE": 5,
+}
+FROZEN_ADAPTER_PROFILE_U32 = {
+    None: 0,
+    "HOST_SVM_MAP": 1,
+    "HOST_VMM_COPY": 2,
+    "DEVICE_VMM_PEER_IMPORT": 3,
+    "DEVICE_FABRIC_V2_PEER_IMPORT": 4,
+    "HOST_SHM_MAP": 5,
+    "REMOTE_COPY": 6,
+}
+FROZEN_ADAPTER_KIND_LE_U32 = {name: value.to_bytes(4, "little") for name, value in FROZEN_ADAPTER_KIND_U32.items()}
+FROZEN_ADAPTER_PROFILE_LE_U32 = {
+    name: value.to_bytes(4, "little") for name, value in FROZEN_ADAPTER_PROFILE_U32.items()
+}
 
 
 def _ready(worker: Worker) -> Worker:
@@ -318,6 +341,56 @@ def test_every_admitted_profile_has_something_that_carries_it_out():
         f"the default service admits {unimplemented}, which no resolver and no owner-side copy "
         f"implements; offer such a profile with an `unsupported_reason` and let the service refuse it"
     )
+
+
+def test_topology_and_deployment_kinds_are_explicit_little_endian_u32():
+    assert list(ce.RegionTopologyKind) == [
+        ce.RegionTopologyKind.INVALID,
+        ce.RegionTopologyKind.SINGLE_OWNER,
+    ]
+    assert list(ce.EndpointDeploymentKind) == [
+        ce.EndpointDeploymentKind.INVALID,
+        ce.EndpointDeploymentKind.HOST_CPU,
+        ce.EndpointDeploymentKind.DEVICE_AICORE,
+        ce.EndpointDeploymentKind.DEVICE_AICPU,
+    ]
+    assert int(ce.RegionTopologyKind.INVALID).to_bytes(4, "little") == b"\x00\x00\x00\x00"
+    assert int(ce.RegionTopologyKind.SINGLE_OWNER).to_bytes(4, "little") == b"\x01\x00\x00\x00"
+    assert int(ce.EndpointDeploymentKind.INVALID).to_bytes(4, "little") == b"\x00\x00\x00\x00"
+    assert int(ce.EndpointDeploymentKind.HOST_CPU).to_bytes(4, "little") == b"\x01\x00\x00\x00"
+    assert int(ce.EndpointDeploymentKind.DEVICE_AICORE).to_bytes(4, "little") == b"\x02\x00\x00\x00"
+    assert int(ce.EndpointDeploymentKind.DEVICE_AICPU).to_bytes(4, "little") == b"\x03\x00\x00\x00"
+    assert int(ce.EndpointDeploymentKind.DEVICE_AICPU).to_bytes(4, "big") == b"\x00\x00\x00\x03"
+
+
+def test_adapter_numeric_ids_are_frozen_little_endian_u32_not_enum_order():
+    live_kinds = {None: 0, **{kind.name: value for kind, value in ce._ADAPTER_KIND_IDS.items()}}
+    live_profiles = {None: 0, **{profile.name: value for profile, value in ce._ADAPTER_PROFILE_IDS.items()}}
+    assert live_kinds == FROZEN_ADAPTER_KIND_U32
+    assert live_profiles == FROZEN_ADAPTER_PROFILE_U32
+    assert ce._adapter_kind_id(None) == 0
+    assert ce._adapter_profile_id(None) == 0
+    for kind in ce.AdapterKind:
+        value = FROZEN_ADAPTER_KIND_U32[kind.name]
+        assert ce._adapter_kind_id(kind) == value
+        assert value.to_bytes(4, "little") == FROZEN_ADAPTER_KIND_LE_U32[kind.name]
+        assert ce._adapter_kind_from_id(value) is kind
+    for profile in ce.AdapterProfile:
+        numbered = ce._ADAPTER_PROFILE_IDS.get(profile)
+        if numbered is None:
+            assert profile.name not in FROZEN_ADAPTER_PROFILE_U32
+            with pytest.raises(ValueError, match="adapter_profile is unknown"):
+                ce._adapter_profile_id(profile)
+            continue
+        value = FROZEN_ADAPTER_PROFILE_U32[profile.name]
+        assert numbered == value
+        assert ce._adapter_profile_id(profile) == value
+        assert value.to_bytes(4, "little") == FROZEN_ADAPTER_PROFILE_LE_U32[profile.name]
+        assert ce._adapter_profile_from_id(value) is profile
+    with pytest.raises(ValueError, match="adapter_kind is unknown"):
+        ce._adapter_kind_id(cast(Any, "NOT_A_KIND"))
+    with pytest.raises(ValueError, match="adapter_profile id is unknown"):
+        ce._adapter_profile_from_id(99)
 
 
 def test_selector_constructors_validate_shape_and_preserve_hashability():

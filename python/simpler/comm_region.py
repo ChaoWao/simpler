@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import ctypes
 import itertools
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Any
@@ -34,11 +37,13 @@ from .comm_endpoints import (
     AttachmentRole,
     BackendKind,
     BackendPlan,
+    EndpointDeploymentKind,
     EndpointRecord,
     EndpointRegistry,
     MemberAttachmentPlan,
     RegionLayoutSpec,
     RegionPartPlan,
+    RegionTopologyKind,
     SingleOwnerPlan,
     UnsupportedRegionPlan,
     parse_endpoint_path,
@@ -49,18 +54,30 @@ from .comm_provider import (
     RegionAllocationError,
     RegionAllocationResult,
     RegionAllocationSpec,
+    RegionControlError,
+    RegionControlErrorKind,
     RegionPartAllocationSpec,
     RegionPartKind,
     RegionPartLocalView,
     VmmShareableHandleImport,
     validate_independent_local_views,
 )
-from .comm_provider_control import ProviderAllocateClient, ProviderReleaseClient
+from .comm_provider_control import (
+    ALLOCATE_REPLY_BYTES,
+    ALLOCATE_REQUEST_HARD_CEILING,
+    DelegatedAllocateReply,
+    DelegatedAllocateReplyTag,
+    DelegatedAllocateRequest,
+    encode_request,
+    parse_reply,
+)
 
 _GENERATION_COUNTER = itertools.count(1)
 _MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
 _WAIT_STATUS_TIMEOUT = -1
 _WAIT_ERROR_SIGNAL_TIMEOUT = 7
+_UINT64_MAX = (1 << 64) - 1
+_SESSION_INSTANCE_ID_BYTES = 8
 
 
 class NotifyOp(IntEnum):
@@ -302,12 +319,51 @@ class SingleOwnerRegionShape:
     worker_id: int
 
 
+@dataclass(frozen=True)
+class DelegatedSingleOwnerRegionShape:
+    provider: EndpointRecord
+    consumer: EndpointRecord
+    initiator_path: bytes
+    provider_path: bytes
+    first_hop_child_id: int
+    provider_device_id: int
+
+    @property
+    def worker_id(self) -> int:
+        return int(self.first_hop_child_id)
+
+
+def _require_session_instance_id(value: object) -> bytes:
+    if isinstance(value, memoryview):
+        raw = value.tobytes()
+    elif isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+    else:
+        raise MaterializationRefusal(
+            RefusalReason.REGISTRY_MISMATCH,
+            "session_instance_id must be 8 opaque bytes",
+        )
+    if len(raw) != _SESSION_INSTANCE_ID_BYTES:
+        raise MaterializationRefusal(
+            RefusalReason.REGISTRY_MISMATCH,
+            "session_instance_id must be 8 opaque bytes",
+        )
+    return raw
+
+
 class RegionInstanceRegistry:
     """Strong reachability for consumer instances. Not an ID-addressed data path."""
 
     def __init__(self) -> None:
         self._instances: dict[int, RegionInstance] = {}
         self._run_scopes: dict[int, Any] = {}
+        self._delegated_session_instance_id: bytes | None = None
+        self._next_delegated_transaction_id: int = 1
+        self._delegated_admission_closed: bool = False
+        self._delegated_allocate_dispatch_lock = threading.Lock()
+
+    def close_delegated_admission(self) -> None:
+        self._delegated_admission_closed = True
 
     def track(self, instance: RegionInstance, run_scope: Any) -> None:
         key = id(instance)
@@ -315,6 +371,40 @@ class RegionInstanceRegistry:
             raise MaterializationError("region instance is already tracked")
         self._instances[key] = instance
         self._run_scopes[key] = run_scope
+
+    def _require_tracked(self, instance: RegionInstance) -> None:
+        if id(instance) not in self._instances:
+            raise MaterializationError("region instance must be tracked before delegated dispatch")
+
+    @contextmanager
+    def _delegated_allocate_dispatch(
+        self, *, registry: object, expected_registry_epoch: int
+    ) -> Iterator[tuple[bytes, int]]:
+        with self._delegated_allocate_dispatch_lock:
+            session = _require_session_instance_id(getattr(registry, "session_instance_id", None))
+            if self._delegated_session_instance_id is None:
+                self._delegated_session_instance_id = session
+            elif self._delegated_session_instance_id != session:
+                raise MaterializationRefusal(
+                    RefusalReason.REGISTRY_MISMATCH,
+                    "delegated allocate observed a different session nonce on this Worker incarnation",
+                )
+            if int(getattr(registry, "registry_epoch", -1)) != int(expected_registry_epoch):
+                raise MaterializationRefusal(
+                    RefusalReason.REGISTRY_MISMATCH,
+                    "delegated allocate observed a registry epoch mismatch",
+                )
+            if self._delegated_admission_closed or self._next_delegated_transaction_id > _UINT64_MAX:
+                self._delegated_admission_closed = True
+                raise MaterializationError("delegated transaction id space is exhausted")
+            transaction_id = int(self._next_delegated_transaction_id)
+            if transaction_id < 1:
+                self._delegated_admission_closed = True
+                raise MaterializationError("delegated transaction_id 0 is illegal")
+            self._next_delegated_transaction_id = transaction_id + 1
+            if self._next_delegated_transaction_id > _UINT64_MAX:
+                self._delegated_admission_closed = True
+            yield session, transaction_id
 
     def close(self, instance: RegionInstance) -> None:
         try:
@@ -403,8 +493,12 @@ class RegionInstance:
         self._payload_local_view: RegionPartLocalView | None = None
         self._counter_local_view: RegionPartLocalView | None = None
         self._provider_resource_id = 0
-        self._release_client: ProviderReleaseClient | None = None
-        self._allocate_client: ProviderAllocateClient | None = None
+        self._delegated_session_instance_id: bytes | None = None
+        self._delegated_transaction_id: int = 0
+        self._delegated_provider_path: bytes | None = None
+        self._delegated_allocation_committed: bool = False
+        self._delegated_release_edge: bool = False
+        self._delegated_provider_device_id: int | None = None
         self._state: RegionInstanceState | None = None
         self._cleanup_error: BaseException | None = None
         self._close_attempted = False
@@ -437,7 +531,20 @@ class RegionInstance:
         raise ValueError("region part must be PAYLOAD or COUNTER")
 
     @classmethod
-    def planned(cls, ctx: MaterializationContext, shape: SingleOwnerRegionShape) -> RegionInstance:
+    def planned(
+        cls, ctx: MaterializationContext, shape: SingleOwnerRegionShape | DelegatedSingleOwnerRegionShape
+    ) -> RegionInstance:
+        if isinstance(shape, DelegatedSingleOwnerRegionShape):
+            instance = cls(
+                ctx,
+                SingleOwnerRegionShape(
+                    provider=shape.provider,
+                    consumer=shape.consumer,
+                    worker_id=int(shape.first_hop_child_id),
+                ),
+            )
+            instance._delegated_provider_device_id = int(shape.provider_device_id)
+            return instance
         return cls(ctx, shape)
 
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
@@ -473,79 +580,37 @@ class RegionInstance:
         self._worker._require_region_control_before_submit("region_instance.close")
         self._worker._region_instance_registry.close(self)
 
-    def _materialize(self, spec: RegionAllocationSpec) -> None:
-        plan = self.plan
-        if not isinstance(plan, BackendPlan):
-            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
-        prior = self._worker._consume_worker_host_mapped_cleanup_error("region_instance.materialize")
-        if prior is not None:
-            raise prior
-        native = self._worker._worker
-        if native is None:
-            raise RuntimeError("region instance materialize requires Worker.init()")
-        self._allocate_client = ProviderAllocateClient(native, self.worker_id)
-        try:
-            result, payload_view, counter_view = self._allocate_client.allocate(spec)
-        except RegionAllocationError as exc:
-            self._provider_resource_id = int(exc.provisional_resource_id)
-            if exc.cleanup_debt_remaining:
-                error = self._worker._record_unreclaimable(
-                    f"region instance: allocation left cleanup debt for resource "
-                    f"{exc.provisional_resource_id} on worker {self.worker_id}; no further work is admitted",
-                    exc,
-                )
-                self._fail_terminal(error)
-                raise error
-            self._state = RegionInstanceState.CLOSED
-            raise
-        except BaseException:
-            committed = int(self._allocate_client.committed_resource_id)
-            if committed:
-                self._provider_resource_id = committed
-                self._release_client = ProviderReleaseClient(native, self.worker_id)
-            raise
-        self._provider_resource_id = int(result.provider_resource_id)
-        self._release_client = ProviderReleaseClient(native, self.worker_id)
-        try:
-            validate_committed_region_allocation(
-                plan,
-                spec,
-                result,
-                payload_view,
-                counter_view,
-                expected_capability_type=self._worker._provider_import_capability_type(),
-                expected_device_id=self._worker._provider_import_device_id(self.worker_id),
-            )
-            payload_lease = self._worker._import_region_part_lease(
-                self.worker_id, self._provider_resource_id, result.export_descriptor.payload
-            )
-            self._payload_mapping = payload_lease
-            counter_lease = self._worker._import_region_part_lease(
-                self.worker_id, self._provider_resource_id, result.export_descriptor.counter
-            )
-            self._counter_mapping = counter_lease
-            self._payload_part = PayloadPart(
-                RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
-                _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, payload_lease),
-            )
-            self._counter_part = CounterPart(
-                RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
-                _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, counter_lease),
-            )
-            self._payload_local_view = payload_view
-            self._counter_local_view = counter_view
-        except BaseException as exc:
-            self._abort_materialization(exc)
-            raise
-        self._ever_live = True
-        self._state = RegionInstanceState.LIVE
+    def _bind_delegated_identity(self, session_instance_id: bytes, transaction_id: int, provider_path: bytes) -> None:
+        self._worker._region_instance_registry._require_tracked(self)
+        session = _require_session_instance_id(session_instance_id)
+        if type(transaction_id) is not int or transaction_id < 1 or transaction_id > _UINT64_MAX:
+            raise MaterializationError("delegated transaction_id 0 is illegal")
+        path = bytes(provider_path)
+        if not path:
+            raise MaterializationError("delegated provider path must be non-empty")
+        if self._delegated_session_instance_id is not None or self._delegated_transaction_id != 0:
+            raise MaterializationError("delegated identity is already bound")
+        self._delegated_session_instance_id = session
+        self._delegated_transaction_id = transaction_id
+        self._delegated_provider_path = path
+
+    def _commit_delegated_allocation(self, provider_resource_id: int) -> None:
+        resource_id = int(provider_resource_id)
+        if resource_id <= 0:
+            raise MaterializationError("ALLOCATED requires a nonzero provider resource id")
+        if self._delegated_session_instance_id is None or self._delegated_transaction_id < 1:
+            raise MaterializationError("delegated identity must be bound before ALLOCATED commit")
+        if self._delegated_provider_path is None:
+            raise MaterializationError("delegated provider path must be bound before ALLOCATED commit")
+        self._provider_resource_id = resource_id
+        self._delegated_allocation_committed = True
+        self._delegated_release_edge = True
 
     def _abort_materialization(self, cause: BaseException) -> None:
         if isinstance(cause, RegionAllocationError):
             poison = bool(cause.cleanup_debt_remaining)
         else:
-            client = self._allocate_client
-            poison = bool(client is not None and client.dispatch_started)
+            poison = False
         close_error: BaseException | None = None
         try:
             self._close_owned(poison_on_error=False)
@@ -583,22 +648,45 @@ class RegionInstance:
         return errors
 
     def _release_provider_resource(self) -> BaseException | None:
-        if self._release_client is None or int(self._provider_resource_id) == 0:
-            return None
+        if self._delegated_release_edge:
+            return self._release_delegated_resource()
+        return None
+
+    def _release_delegated_resource(self) -> BaseException | None:
+        if (
+            self._delegated_session_instance_id is None
+            or self._delegated_transaction_id < 1
+            or self._delegated_provider_path is None
+        ):
+            return RuntimeError("delegated release edge is missing identity")
+        dispatcher = getattr(self._worker, "_dispatch_delegated_release", None)
+        if not callable(dispatcher):
+            return RuntimeError("delegated release requires Worker dispatch")
         try:
-            result = self._release_client.release(int(self._provider_resource_id))
+            result = dispatcher(
+                session_instance_id=self._delegated_session_instance_id,
+                transaction_id=self._delegated_transaction_id,
+                provider_path=self._delegated_provider_path,
+            )
         except BaseException as exc:  # noqa: BLE001
             return exc
-        if result.status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
+        return self._interpret_provider_release(result)
+
+    def _interpret_provider_release(self, result: object) -> BaseException | None:
+        status = getattr(result, "status", None)
+        if status in (ProviderReleaseStatus.RELEASED, ProviderReleaseStatus.ALREADY_GONE):
             self._provider_release_committed = True
+            self._delegated_release_edge = False
             return None
-        if result.status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
+        if status is ProviderReleaseStatus.CLEANUP_INCOMPLETE:
             return RuntimeError(
                 f"region instance: provider cleanup incomplete for resource {self._provider_resource_id}"
             )
-        if result.status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
+        if status is ProviderReleaseStatus.UNKNOWN_RESOURCE:
             return RuntimeError(f"region instance: provider resource {self._provider_resource_id} is unknown")
-        return None
+        return RuntimeError(
+            f"region instance: delegated release failed for transaction {self._delegated_transaction_id}"
+        )
 
     def _close_owned(self, *, poison_on_error: bool) -> None:
         if self._state is RegionInstanceState.CLOSED:
@@ -663,45 +751,22 @@ def project_region_allocation_spec(plan: object, layout: object) -> RegionAlloca
     )
 
 
-def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwnerRegionShape:  # noqa: PLR0912
+def validate_single_owner_region_shape(ctx: MaterializationContext) -> DelegatedSingleOwnerRegionShape:
     _validate_registry_matches_worker(ctx)
     plan = ctx.plan
     if isinstance(plan, UnsupportedRegionPlan):
         raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, plan.message)
     if not isinstance(plan, BackendPlan):
         raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materializer expects a BackendPlan")
-    if int(getattr(ctx.worker, "level", -1)) != 3:
-        raise MaterializationRefusal(
-            RefusalReason.NEEDS_DELEGATION,
-            "Only L3-local worker-chip regions can be materialized directly; higher-level roots require delegation",
-        )
     if not isinstance(plan.topology_plan, SingleOwnerPlan):
         raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "Only SingleOwner region plans are supported")
+    root_path = f"L{int(ctx.registry.root_level)}"
     provider = _record_for(ctx, plan.topology_plan.provider_endpoint)
-    if not provider.path.startswith("L3/"):
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider path requires delegated materialization")
     if provider.deployment is not DEVICE_AICPU:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT,
             "Only DEVICE_AICPU providers are supported for worker-chip regions",
         )
-    try:
-        provider_path = parse_endpoint_path(provider.path, root_level=ctx.registry.root_level)
-    except ValueError as exc:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint") from exc
-    if len(provider_path.segments) != 2:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    _root, child = provider_path.segments
-    if child.level != 2 or child.index is None:
-        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    worker_id = int(child.index)
-    try:
-        ctx.worker._validate_worker_chip_id(worker_id)
-    except ValueError as exc:
-        raise MaterializationRefusal(
-            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            f"provider worker_id {worker_id} is outside the current L3 device list",
-        ) from exc
     member_records = tuple(_record_for(ctx, member) for member in plan.ordered_members)
     if len(member_records) != 2:
         raise MaterializationRefusal(
@@ -709,10 +774,10 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
             "Only one host consumer and one device provider are supported",
         )
     host_consumers = [member for member in member_records if member.deployment is HOST_CPU]
-    if len(host_consumers) != 1 or host_consumers[0].path != "L3":
+    if len(host_consumers) != 1 or host_consumers[0].path != root_path:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "The current L3 HOST_CPU endpoint must be the only consumer",
+            "The current registry-root HOST_CPU endpoint must be the only consumer",
         )
     consumer = host_consumers[0]
     if provider.identity not in plan.ordered_members or consumer.identity not in plan.ordered_members:
@@ -727,7 +792,133 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
         )
     _validate_part(plan.payload, provider, consumer)
     _validate_part(plan.counter, provider, consumer)
-    return SingleOwnerRegionShape(provider=provider, consumer=consumer, worker_id=worker_id)
+    first_hop_child_id, provider_device_id = _resolve_delegated_provider_route(ctx.worker, provider.path)
+    return DelegatedSingleOwnerRegionShape(
+        provider=provider,
+        consumer=consumer,
+        initiator_path=consumer.path.encode("ascii"),
+        provider_path=provider.path.encode("ascii"),
+        first_hop_child_id=first_hop_child_id,
+        provider_device_id=provider_device_id,
+    )
+
+
+def _resolve_delegated_provider_route(worker: Any, provider_path: str) -> tuple[int, int]:
+    root_level = int(getattr(worker, "level", -1))
+    try:
+        parsed = parse_endpoint_path(provider_path, root_level=root_level)
+    except ValueError as exc:
+        raise MaterializationRefusal(
+            RefusalReason.NEEDS_DELEGATION,
+            "provider is not a descendant of the current registry root",
+        ) from exc
+    if len(parsed.segments) < 2:
+        raise MaterializationRefusal(
+            RefusalReason.NEEDS_DELEGATION,
+            "provider is not a descendant of the current registry root",
+        )
+    hop = parsed.segments[1]
+    if hop.index is None:
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+            "first hop must include a child index",
+        )
+    first_hop_child_id = int(hop.index)
+    if first_hop_child_id in tuple(int(worker_id) for worker_id in getattr(worker, "_remote_worker_ids", ())):
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+            "remote child is not supported",
+        )
+    if root_level == 3:
+        if len(parsed.segments) != 2 or hop.level != 2:
+            raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
+        device_ids = list(worker._config.get("device_ids", []))
+        if first_hop_child_id < 0 or first_hop_child_id >= len(device_ids):
+            raise MaterializationRefusal(
+                RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+                f"provider worker_id {first_hop_child_id} is outside the current L3 device list",
+            )
+        return first_hop_child_id, int(device_ids[first_hop_child_id])
+    children = {
+        int(worker_id): child
+        for worker_id, child in zip(
+            getattr(worker, "_next_level_worker_ids", ()),
+            getattr(worker, "_next_level_workers", ()),
+        )
+    }
+    child = children.get(first_hop_child_id)
+    if child is None:
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+            f"first-hop child {first_hop_child_id} is not in the current Worker tree",
+        )
+    child_root = f"L{int(child.level)}"
+    remainder = [child_root]
+    for segment in parsed.segments[2:]:
+        if segment.index is None:
+            raise MaterializationRefusal(
+                RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+                "child provider path segments must include an index",
+            )
+        remainder.append(f"L{int(segment.level)}[{int(segment.index)}]")
+    _ignored_child_hop, provider_device_id = _resolve_delegated_provider_route(child, "/".join(remainder))
+    return first_hop_child_id, provider_device_id
+
+
+def _deployment_kind(record: EndpointRecord) -> EndpointDeploymentKind:
+    mapping = {
+        HOST_CPU: EndpointDeploymentKind.HOST_CPU,
+        DEVICE_AICPU: EndpointDeploymentKind.DEVICE_AICPU,
+    }
+    try:
+        return mapping[record.deployment]
+    except KeyError as exc:
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT,
+            f"unsupported endpoint deployment {record.deployment.value}",
+        ) from exc
+
+
+def _consumer_adapter(part: RegionPartPlan, consumer: EndpointRecord) -> tuple[AdapterKind, AdapterProfile]:
+    matches = [
+        attachment
+        for attachment in part.attachments
+        if attachment.member == consumer.identity and attachment.role is AttachmentRole.CONSUMER
+    ]
+    if len(matches) != 1 or matches[0].adapter_kind is None or matches[0].adapter_profile is None:
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_ATTACHMENT,
+            "single-owner first shape requires a consumer adapter on each part",
+        )
+    return matches[0].adapter_kind, matches[0].adapter_profile
+
+
+def _delegated_allocate_request(
+    shape: DelegatedSingleOwnerRegionShape,
+    plan: BackendPlan,
+    layout: RegionLayoutSpec,
+    session_instance_id: bytes,
+    transaction_id: int,
+) -> DelegatedAllocateRequest:
+    payload_kind, payload_profile = _consumer_adapter(plan.payload, shape.consumer)
+    counter_kind, counter_profile = _consumer_adapter(plan.counter, shape.consumer)
+    return DelegatedAllocateRequest(
+        session_instance_id=session_instance_id,
+        transaction_id=transaction_id,
+        initiator_path=shape.initiator_path,
+        provider_path=shape.provider_path,
+        payload_logical_bytes=int(layout.payload_bytes),
+        counter_logical_bytes=int(layout.counter_bytes),
+        topology=RegionTopologyKind.SINGLE_OWNER,
+        initiator_deployment=_deployment_kind(shape.consumer),
+        provider_deployment=_deployment_kind(shape.provider),
+        payload_backend_kind=plan.payload.backend_kind,
+        counter_backend_kind=plan.counter.backend_kind,
+        payload_consumer_adapter_kind=payload_kind,
+        payload_consumer_adapter_profile=payload_profile,
+        counter_consumer_adapter_kind=counter_kind,
+        counter_consumer_adapter_profile=counter_profile,
+    )
 
 
 def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
@@ -738,9 +929,81 @@ def materialize_region_instance(ctx: MaterializationContext) -> RegionInstance:
     ctx.worker._region_instance_registry.track(instance, resources)
     if resources is not None:
         resources.requires_ordered_cleanup = True
+    dispatcher = getattr(ctx.worker, "_dispatch_delegated_allocate", None)
+    if not callable(dispatcher):
+        ctx.worker._region_instance_registry._settle(instance)
+        raise MaterializationError("delegated allocate requires Worker dispatch")
     try:
-        instance._materialize(spec)
-        return instance
+        with ctx.worker._region_instance_registry._delegated_allocate_dispatch(
+            registry=ctx.registry,
+            expected_registry_epoch=int(ctx.registry.registry_epoch),
+        ) as (session_instance_id, transaction_id):
+            instance._bind_delegated_identity(session_instance_id, transaction_id, shape.provider_path)
+            if not isinstance(ctx.plan, BackendPlan):
+                raise MaterializationRefusal(
+                    RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan"
+                )
+            request = _delegated_allocate_request(shape, ctx.plan, ctx.layout, session_instance_id, transaction_id)
+            staged = encode_request(request, staged_capacity=max(ALLOCATE_REQUEST_HARD_CEILING, ALLOCATE_REPLY_BYTES))
+            raw_reply = dispatcher(memoryview(staged))
+            if isinstance(raw_reply, (bytes, bytearray, memoryview)):
+                reply_payload = raw_reply
+            else:
+                reply_payload = staged
+            outcome = parse_reply(reply_payload).decode_outcome()
+        if isinstance(outcome, DelegatedAllocateReply) and outcome.tag is DelegatedAllocateReplyTag.ALLOCATED:
+            try:
+                if outcome.result is None or outcome.payload_view is None or outcome.counter_view is None:
+                    raise MaterializationError("delegated ALLOCATED reply is missing result or local views")
+                validate_committed_region_allocation(
+                    ctx.plan,
+                    spec,
+                    outcome.result,
+                    outcome.payload_view,
+                    outcome.counter_view,
+                    expected_capability_type=ctx.worker._provider_import_capability_type(),
+                    expected_device_id=int(shape.provider_device_id),
+                )
+            except BaseException as exc:
+                ctx.worker._latch_delegated_session_fatal(exc)
+                raise
+            instance._commit_delegated_allocation(int(outcome.result.provider_resource_id))
+            payload_lease = ctx.worker._import_region_part_lease(
+                instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.payload
+            )
+            instance._payload_mapping = payload_lease
+            counter_lease = ctx.worker._import_region_part_lease(
+                instance.worker_id, instance._provider_resource_id, outcome.result.export_descriptor.counter
+            )
+            instance._counter_mapping = counter_lease
+            instance._payload_part = PayloadPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.payload.logical_bytes)),
+                _select_host_vmm_copy_access(ctx.plan.payload, instance.provider, instance.consumer, payload_lease),
+            )
+            instance._counter_part = CounterPart(
+                RegionPartSpan(offset=0, nbytes=int(spec.counter.logical_bytes)),
+                _select_host_vmm_copy_access(ctx.plan.counter, instance.provider, instance.consumer, counter_lease),
+            )
+            instance._payload_local_view = outcome.payload_view
+            instance._counter_local_view = outcome.counter_view
+            instance._ever_live = True
+            instance._state = RegionInstanceState.LIVE
+            return instance
+        if isinstance(outcome, DelegatedAllocateReply) and outcome.tag is DelegatedAllocateReplyTag.ERROR:
+            if outcome.error is None:
+                missing = RegionControlError(
+                    RegionControlErrorKind.INTERNAL_INVARIANT,
+                    "delegated allocate ERROR is missing its typed error",
+                )
+                ctx.worker._latch_delegated_session_fatal(missing)
+                raise missing
+            raise outcome.error
+        unexpected = RegionControlError(
+            RegionControlErrorKind.INTERNAL_INVARIANT,
+            "delegated allocate returned an unexpected reply tag",
+        )
+        ctx.worker._latch_delegated_session_fatal(unexpected)
+        raise unexpected
     except BaseException as exc:
         if instance._state is None:
             instance._abort_materialization(exc)

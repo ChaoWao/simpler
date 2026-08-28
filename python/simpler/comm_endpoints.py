@@ -14,7 +14,7 @@ import ipaddress
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import Enum, IntEnum
 from types import MappingProxyType
 from typing import Protocol
 
@@ -33,6 +33,18 @@ class EndpointDeployment(str, Enum):
 HOST_CPU = EndpointDeployment.HOST_CPU
 DEVICE_AICORE = EndpointDeployment.DEVICE_AICORE
 DEVICE_AICPU = EndpointDeployment.DEVICE_AICPU
+
+
+class EndpointDeploymentKind(IntEnum):
+    INVALID = 0
+    HOST_CPU = 1
+    DEVICE_AICORE = 2
+    DEVICE_AICPU = 3
+
+
+class RegionTopologyKind(IntEnum):
+    INVALID = 0
+    SINGLE_OWNER = 1
 
 
 class EndpointSelectorKind(str, Enum):
@@ -465,9 +477,9 @@ class RegionPartKind(str, Enum):
     COUNTER = "COUNTER"
 
 
-# These three enums are also a wire contract: `global_comm_domain` maps each value to a numeric id
-# for the version-2 `GlobalDomainCommand` attachment records. A new enumerator needs a new id there,
-# and a rename or renumber is a wire break — see that module's `_ATTACHMENT_ROLE_IDS` block.
+# These three enums plus the numeric tables below are a wire contract. Global CommDomain and
+# delegated-region control both encode them as little-endian u32. A new enumerator needs a
+# new id; a rename or renumber is a wire break.
 class AttachmentRole(str, Enum):
     PROVIDER = "PROVIDER"
     CONSUMER = "CONSUMER"
@@ -501,6 +513,61 @@ class AdapterProfile(str, Enum):
     # planner has no counterpart because `_backend_kind_for_provider` never gives a region a
     # `DEVICE_MALLOC` Buffer; the `VMM_WINDOW` half of the same relation is `HOST_VMM_COPY`.
     OWNER_DEVICE_COPY = "OWNER_DEVICE_COPY"
+
+
+_ADAPTER_KIND_IDS = {
+    AdapterKind.DIRECT_MAP: 1,
+    AdapterKind.DEVICE_PEER: 2,
+    AdapterKind.OWNER_DELEGATED_COPY: 3,
+    AdapterKind.EXPLICIT_TRANSFER: 4,
+    AdapterKind.COLLECTIVE: 5,
+}
+_ADAPTER_KIND_BY_ID = {value: key for key, value in _ADAPTER_KIND_IDS.items()}
+_ADAPTER_PROFILE_IDS = {
+    AdapterProfile.HOST_SVM_MAP: 1,
+    AdapterProfile.HOST_VMM_COPY: 2,
+    AdapterProfile.DEVICE_VMM_PEER_IMPORT: 3,
+    AdapterProfile.DEVICE_FABRIC_V2_PEER_IMPORT: 4,
+    AdapterProfile.HOST_SHM_MAP: 5,
+    AdapterProfile.REMOTE_COPY: 6,
+}
+_ADAPTER_PROFILE_BY_ID = {value: key for key, value in _ADAPTER_PROFILE_IDS.items()}
+
+
+def _adapter_kind_id(kind: AdapterKind | None) -> int:
+    if kind is None:
+        return 0
+    try:
+        return _ADAPTER_KIND_IDS[AdapterKind(kind)]
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"adapter_kind is unknown: {kind!r}") from exc
+
+
+def _adapter_kind_from_id(value: int) -> AdapterKind | None:
+    if value == 0:
+        return None
+    try:
+        return _ADAPTER_KIND_BY_ID[int(value)]
+    except KeyError as exc:
+        raise ValueError(f"adapter_kind id is unknown: {value}") from exc
+
+
+def _adapter_profile_id(profile: AdapterProfile | None) -> int:
+    if profile is None:
+        return 0
+    try:
+        return _ADAPTER_PROFILE_IDS[AdapterProfile(profile)]
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"adapter_profile is unknown: {profile!r}") from exc
+
+
+def _adapter_profile_from_id(value: int) -> AdapterProfile | None:
+    if value == 0:
+        return None
+    try:
+        return _ADAPTER_PROFILE_BY_ID[int(value)]
+    except KeyError as exc:
+        raise ValueError(f"adapter_profile id is unknown: {value}") from exc
 
 
 class RegionAccessReasonCode(str, Enum):
@@ -1103,6 +1170,7 @@ __all__ = [
     "DEVICE_AICORE",
     "DEVICE_AICPU",
     "EndpointDeployment",
+    "EndpointDeploymentKind",
     "EndpointId",
     "EndpointIdentity",
     "EndpointPathSegment",
@@ -1123,6 +1191,7 @@ __all__ = [
     "RegionLayoutSpec",
     "RegionPartKind",
     "RegionPartPlan",
+    "RegionTopologyKind",
     "ResolvedRegionSpec",
     "ResolvedSingleOwner",
     "SingleOwner",
