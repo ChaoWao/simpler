@@ -162,9 +162,8 @@ public:
         Submission *submission = find_submission(owner);
         if (submission == nullptr) return 0;
         const size_t index = static_cast<size_t>(submission - submissions_.data());
-        if (completion_status == CompletionStatus::Complete && index != 0) {
-            return PTO_RUNTIME_ERR_INTERNAL;
-        }
+        const bool order_error = completion_status == CompletionStatus::Complete && index != 0;
+        if (order_error) completion_status = CompletionStatus::Unproven;
         // Publish the proven terminal state before destroying the handle. Poll
         // either finishes its in-flight query first or observes this result.
         // An error-path retirement clears a completion that raced ahead of a
@@ -173,12 +172,14 @@ public:
         for (size_t i = index + 1; i < submission_count_; ++i)
             submissions_[i - 1] = submissions_[i];
         submissions_[--submission_count_] = Submission{};
-        if (submission_count_ != 0 || !unproven_ || aicore_ == nullptr) return 0;
+        if (submission_count_ != 0 || !unproven_ || aicore_ == nullptr) {
+            return order_error ? PTO_RUNTIME_ERR_INTERNAL : 0;
+        }
         int rc = destroy_(aicore_);
         if (rc != 0) return rc;
         aicore_ = nullptr;
         unproven_ = false;
-        return 0;
+        return order_error ? PTO_RUNTIME_ERR_INTERNAL : 0;
     }
 
     /** Destroy both streams, keeping a handle whose destroy failed. */

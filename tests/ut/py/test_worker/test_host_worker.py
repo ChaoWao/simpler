@@ -733,6 +733,7 @@ class _FakeNativeRunImpl:
         self.prepare_errors: dict[tuple[int, int], BaseException] = {}
         self.poll_errors: dict[tuple[int, int], BaseException] = {}
         self.finalize_errors: dict[tuple[int, int], BaseException] = {}
+        self.recoverable_finalize_errors: set[tuple[int, int]] = set()
         self.prepare_identities: list[tuple[int, int, int, int]] = []
         self.poll_states: list[tuple[int, int]] = []
         self.register_calls: list[tuple[int, int]] = []
@@ -855,7 +856,9 @@ class _FakeNativeRunImpl:
                 self._finalize_native_run(run.token)
         except BaseException as error:  # noqa: BLE001
             run.error = run.error or error
-            self._lane_poisoned = True
+            run_key = (int(run.token.slot_id), int(run.token.generation))
+            if run_key not in self.recoverable_finalize_errors:
+                self._lane_poisoned = True
         run.terminal = True
         if run in self._runs:
             self._runs.remove(run)
@@ -1841,6 +1844,41 @@ def test_two_frame_native_progress_failure_terminalizes_staged_successor(failure
         assert not harness.cw._impl.prepared[1].is_set()
         assert not harness.cw._impl.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+    finally:
+        harness.close()
+
+
+def test_two_frame_recoverable_runtime_failure_keeps_successor_and_lane_usable():
+    harness = _TwoFrameLoopHarness(
+        supports_concurrent_native_prepare=True,
+        chip_runtime="host_build_graph",
+    )
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish(1, 2, state=worker_mod._PREPARE_READY)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[1].wait(5.0)
+
+        harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("invalid orchestration args")
+        harness.cw._impl.recoverable_finalize_errors.add((0, 11))
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+        assert harness.thread.is_alive()
+
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+
+        harness.cw._impl.completed[0].clear()
+        harness.cw._impl.launched[0].clear()
+        harness.publish(0, 3, generation=12)
+        harness.cw._impl.finalize_errors.pop((0, 11))
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
 

@@ -355,6 +355,10 @@ extern "C" int completed_runtime_status_impl(Runtime *runtime, const HostApi *ap
     return read_runtime_status(runtime, api, &host_header);
 }
 
+extern "C" int runtime_status_poisons_device_impl(int runtime_status) {
+    return latched_error_may_poison_device(-runtime_status) ? 1 : 0;
+}
+
 namespace {
 
 // host_build_graph is host-orchestration-first: the HOST dlopens the

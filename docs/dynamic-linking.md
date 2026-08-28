@@ -302,7 +302,8 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
            simpler_prepare_run, simpler_launch_run, simpler_poll_run,
            simpler_wait_run, simpler_finalize_run, simpler_run,
            simpler_unregister_callable, get_pipeline_contract,
-           supports_concurrent_native_prepare_ctx,
+           supports_concurrent_native_prepare_ctx, supports_queued_native_launch_ctx,
+           native_run_error_poisons_ctx,
            get_arena_bank_gm_heap_base_ctx, get_retained_temp_addr_ctx,
            finalize_device
     create_device_context() → DeviceContextHandle

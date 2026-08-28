@@ -226,6 +226,10 @@ extern "C" int completed_runtime_status_impl(Runtime *runtime, const HostApi *ap
     return read_runtime_status(runtime, api, &host_header);
 }
 
+extern "C" int runtime_status_poisons_device_impl(int runtime_status) {
+    return latched_error_may_poison_device(-runtime_status) ? 1 : 0;
+}
+
 static void release_tensor_leases(Runtime *runtime, const HostApi *api) {
     int freed = 0;
     int buffer_noop = 0;

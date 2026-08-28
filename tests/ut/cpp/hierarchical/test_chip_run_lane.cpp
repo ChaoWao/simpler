@@ -54,6 +54,7 @@ size_t g_poll_count{0};
 size_t g_poll_completes_after{0};
 bool g_supports_successor{true};
 bool g_supports_queued_launch{true};
+bool g_finalize_failure_poisons{true};
 std::mutex g_wait_mu;
 std::condition_variable g_wait_cv;
 bool g_wait_entered{false};
@@ -114,6 +115,8 @@ int supports_successor(void *) { return g_supports_successor ? 1 : 0; }
 
 int supports_queued_launch(void *) { return g_supports_queued_launch ? 1 : 0; }
 
+int finalize_failure_poisons(void *, int error_code) { return error_code != 0 && g_finalize_failure_poisons ? 1 : 0; }
+
 void prime_worker(ChipWorker &worker) {
     g_slots.clear();
     g_complete = {};
@@ -128,6 +131,7 @@ void prime_worker(ChipWorker &worker) {
     g_poll_completes_after = 0;
     g_supports_successor = true;
     g_supports_queued_launch = true;
+    g_finalize_failure_poisons = true;
     {
         std::lock_guard<std::mutex> lk(g_wait_mu);
         g_wait_entered = false;
@@ -148,6 +152,7 @@ void prime_worker(ChipWorker &worker) {
     worker.finalize_run_fn_ = finalize_run;
     worker.supports_concurrent_native_prepare_fn_ = supports_successor;
     worker.supports_queued_native_launch_fn_ = supports_queued_launch;
+    worker.native_run_error_poisons_fn_ = finalize_failure_poisons;
 }
 
 ChipRun submit(ChipRunLane &lane, uint64_t run_id, uint32_t slot, bool activate = true) {
@@ -564,6 +569,35 @@ TEST(ChipRunLaneTest, FinalizeFailurePoisonsAdmissionAndCloseReportsIt) {
         lane.submit(1, args, CallConfig{}, PipelineSlotLease{1, 0, 102}, 102, 102, nullptr, 0, true), std::runtime_error
     );
     EXPECT_THROW(lane.close(), std::runtime_error);
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, RecoverableRunFailureLeavesQueuedSuccessorAndLaneUsable) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+
+    ChipRun first = submit(lane, 101, 0);
+    ChipRun second = submit(lane, 102, 1);
+    ASSERT_TRUE(first.launched());
+    ASSERT_TRUE(second.launched());
+
+    g_finalize_failure_poisons = false;
+    g_finalize_rc[0] = -5;
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
+    EXPECT_THROW(first.wait_until(ChipRunLane::Deadline::max()), NativeRunFailure);
+    EXPECT_FALSE(lane.poisoned());
+
+    g_complete[1] = true;
+    EXPECT_TRUE(second.wait_until(ChipRunLane::Deadline::max()));
+    EXPECT_FALSE(lane.poisoned());
+
+    g_finalize_rc[0] = 0;
+    ChipRun third = submit(lane, 103, 0);
+    g_complete[0] = true;
+    EXPECT_TRUE(third.wait_until(ChipRunLane::Deadline::max()));
+    lane.close();
     worker.finalize();
 }
 

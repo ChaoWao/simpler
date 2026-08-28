@@ -445,7 +445,9 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
 
     int rc = reap_run(prepared);
     if (rc != 0) {
-        // The device/sync error remains authoritative over teardown errors.
+        // reap_run() marks the runner unusable before returning an error. The
+        // recorded event remains owned until fatal finalize abandons this
+        // device generation; no later launch can reach the occupied slot.
         return rc;
     }
     reset_run_completion_events(prepared.pipeline_slot);
@@ -730,12 +732,11 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
                 // slow-launch / 207001 wedge was measured on a5; this mirror is UNVERIFIED on
                 // a2a3 silicon (the dev box is a5-only), relying on CI. See
                 // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
-                // The AICore publishes aicore_done on launch (gated by nothing), and the
-                // workers region persists across runs in the pooled arena. Clearing each
-                // worker's aicore_done before the AICore kernel launches keeps the AICPU's
-                // handshake sweep from reading a prior run's report — which would open a
-                // window on that run's physical_core_id. Only aicore_done needs clearing; the
-                // AICore overwrites physical_core_id/core_type in the same report.
+                // Each prepared Runtime owns its inline workers array and its
+                // device runtime_args allocation, so a queued successor clears
+                // only its own slot. Clearing aicore_done before launch keeps
+                // this run's AICPU sweep from reading that slot's prior report.
+                // The AICore overwrites physical_core_id/core_type alongside it.
                 Handshake *workers = runtime.get_workers();
                 for (int i = 0; i < num_aicore; i++)
                     workers[i].aicore_done = 0;

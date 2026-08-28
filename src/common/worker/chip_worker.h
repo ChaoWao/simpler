@@ -52,6 +52,18 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+class NativeRunFailure : public std::runtime_error {
+public:
+    NativeRunFailure(const std::string &message, bool poisons_lane) :
+        std::runtime_error(message),
+        poisons_lane_(poisons_lane) {}
+
+    bool poisons_lane() const noexcept { return poisons_lane_; }
+
+private:
+    bool poisons_lane_{true};
+};
+
 class ChipWorker {
 public:
     ChipWorker() = default;
@@ -271,6 +283,7 @@ private:
     using SimplerPrepareRunFn = decltype(&simpler_prepare_run);
     using SimplerNativeRunFn = decltype(&simpler_launch_run);
     using SupportsConcurrentNativePrepareFn = int (*)(void *);
+    using NativeRunErrorPoisonsFn = decltype(&native_run_error_poisons_ctx);
     using GetArenaBankGmHeapBaseFn = uint64_t (*)(void *, uint32_t);
     using GetRetainedTempAddrFn = uint64_t (*)(void *, uint32_t);
     using GetPipelineContractFn = const PipelineContract *(*)();
@@ -334,6 +347,7 @@ private:
     SimplerNativeRunFn finalize_run_fn_ = nullptr;
     SupportsConcurrentNativePrepareFn supports_concurrent_native_prepare_fn_ = nullptr;
     SupportsConcurrentNativePrepareFn supports_queued_native_launch_fn_ = nullptr;
+    NativeRunErrorPoisonsFn native_run_error_poisons_fn_ = nullptr;
     GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
     GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;

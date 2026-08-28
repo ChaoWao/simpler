@@ -100,6 +100,10 @@ struct ChipRunLaneState {
     void finish(const std::shared_ptr<ChipRunState> &run) noexcept {
         try {
             worker->finalize_native_run(run->native_run);
+        } catch (const NativeRunFailure &e) {
+            const std::exception_ptr finalize_error = std::current_exception();
+            if (run->error == nullptr) run->error = finalize_error;
+            if (e.poisons_lane()) poison_with(run, finalize_error);
         } catch (...) {
             const std::exception_ptr finalize_error = std::current_exception();
             if (run->error == nullptr) run->error = finalize_error;

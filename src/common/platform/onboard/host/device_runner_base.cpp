@@ -1990,8 +1990,8 @@ bool DeviceRunnerBase::try_reserve_native_run(
     }
     if (occupied != 0) {
         const bool existing_active =
-            std::any_of(active_native_runs_.begin(), active_native_runs_.end(), [existing](const void *owner) {
-                return owner == existing->owner;
+            std::any_of(active_native_runs_.begin(), active_native_runs_.end(), [existing](const void *active_owner) {
+                return active_owner == existing->owner;
             });
         if (!allow_prepared_successor || occupied != 1 || existing == nullptr ||
             !existing->permits_prepared_successor || !existing_active) {

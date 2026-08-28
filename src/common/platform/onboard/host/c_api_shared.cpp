@@ -67,6 +67,10 @@ extern "C" {
 int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 __attribute__((weak)) int completed_runtime_status_impl(Runtime * /*runtime*/, const HostApi * /*api*/) { return 0; }
+// Backends that do not report a per-run status keep the conservative policy.
+// a5 still completes through stream sync and never reaches this fallback for a
+// successful drain; a future queued-launch backend must provide both hooks.
+__attribute__((weak)) int runtime_status_poisons_device_impl(int /*runtime_status*/) { return 1; }
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
 __attribute__((weak)) int prepared_run_config_compatible_impl(
     const HostApi * /*api*/, const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
@@ -646,10 +650,23 @@ static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
 
 static int completed_execution_rc(OnboardNativeRunContext *state, int drain_rc) {
     if (drain_rc != 0) return drain_rc;
+    // Per-run events delimit the completed stream prefix but do not carry the
+    // runtime's device-side error latches. Read this run's small status header
+    // before validation decides whether outputs are safe to copy back.
     const int runtime_status = completed_runtime_status_impl(&state->runtime, &state->host_api);
     if (runtime_status == 0) return 0;
-    state->runner->recover_device_or_mark_unusable(runtime_status);
+    if (runtime_status_poisons_device_impl(runtime_status) != 0) {
+        state->runner->recover_device_or_mark_unusable(runtime_status);
+    }
     return runtime_status;
+}
+
+int native_run_error_poisons_ctx(DeviceContextHandle ctx, int execution_rc) {
+    if (ctx == nullptr || execution_rc == 0) return 0;
+    if (execution_rc <= -1 && execution_rc >= -PTO_RUNTIME_LATCHED_CODE_MAX) {
+        return runtime_status_poisons_device_impl(execution_rc) != 0 ? 1 : 0;
+    }
+    return 1;
 }
 
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {

@@ -294,8 +294,18 @@ TEST(RunStreamPair, CompleteRetirementMustFollowSubmissionOrder) {
     ASSERT_EQ(pair.mark_submitted(kOwnerA), 0);
     ASSERT_EQ(pair.mark_submitted(kOwnerB), 0);
     EXPECT_NE(pair.retire(CompletionStatus::Complete, kOwnerB), 0);
+    EXPECT_EQ(
+        pair.poll(
+            kOwnerB,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+    EXPECT_NE(pair.ensure(), 0) << "out-of-order retirement makes the shared stream unproven";
     EXPECT_EQ(pair.retire(CompletionStatus::Complete, kOwnerA), 0);
-    EXPECT_EQ(pair.retire(CompletionStatus::Complete, kOwnerB), 0);
+    EXPECT_EQ(pair.aicore(), nullptr);
 }
 
 TEST(RunStreamPair, ThirdSubmissionIsRejectedAtPipelineDepthTwo) {

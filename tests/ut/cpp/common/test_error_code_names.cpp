@@ -88,6 +88,15 @@ TEST(RuntimeErrorNames, LatchedCodePicksTheNonZeroField) {
     EXPECT_EQ(latched_error_code(SIMPLER_ERROR_NONE, SIMPLER_ERROR_NONE), SIMPLER_ERROR_NONE);
 }
 
+TEST(RuntimeErrorNames, OnlyTimeoutsAndUnknownCodesPoisonTheDevice) {
+    for (int32_t code : kAllRuntimeCodes) {
+        const bool expected = code == SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT || code == SIMPLER_ERROR_SCHEDULER_TIMEOUT;
+        EXPECT_EQ(latched_error_may_poison_device(code), expected) << "code " << code;
+    }
+    EXPECT_FALSE(latched_error_may_poison_device(SIMPLER_ERROR_NONE));
+    EXPECT_TRUE(latched_error_may_poison_device(9999));
+}
+
 // The stall sub-class already had a name table; keep it and the error table consistent so a
 // SCHEDULER_TIMEOUT annotation and its sub_class= line cannot disagree.
 TEST(RuntimeErrorNames, StallDetailStillNamed) {
