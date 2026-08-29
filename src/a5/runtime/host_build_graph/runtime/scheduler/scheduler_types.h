@@ -18,6 +18,14 @@
 #include "common/platform_config.h"
 #include "dispatch_payload.h"
 
+#ifndef __gm__
+#define __gm__
+#endif
+
+#ifndef __aicore__
+#define __aicore__
+#endif
+
 #if !defined(__CCE_AICORE__)
 #include "host_build_graph/runtime_types.h"
 #if __has_include("spin_hint.h")
@@ -615,18 +623,6 @@ inline uint64_t sync_start_drain_ack_subtree_token(uint64_t attempt) {
     return attempt | SYNC_START_DRAIN_ACK_SUBTREE_READY;
 }
 
-#ifndef __gm__
-#define __gm__
-#endif
-
-#ifndef __aicore__
-#define __aicore__
-#endif
-
-#ifndef __host__
-#define __host__
-#endif
-
 #endif
 
 // =============================================================================
@@ -712,33 +708,29 @@ struct alignas(16) SchedulerTaskMetadata {
     int32_t timing_slot;
 };
 
-inline __host__ __aicore__ bool scheduler_task_is_executable(uint8_t flags) {
-    return (flags & SCHEDULER_TASK_EXECUTABLE) != 0;
-}
+inline __aicore__ bool scheduler_task_is_executable(uint8_t flags) { return (flags & SCHEDULER_TASK_EXECUTABLE) != 0; }
 
-inline __host__ __aicore__ bool scheduler_task_has_fanin(uint8_t flags) {
-    return (flags & SCHEDULER_TASK_HAS_FANIN) != 0;
-}
+inline __aicore__ bool scheduler_task_has_fanin(uint8_t flags) { return (flags & SCHEDULER_TASK_HAS_FANIN) != 0; }
 
-inline __host__ __aicore__ bool scheduler_task_is_mix(uint8_t flags) { return (flags & SCHEDULER_TASK_MIX) != 0; }
+inline __aicore__ bool scheduler_task_is_mix(uint8_t flags) { return (flags & SCHEDULER_TASK_MIX) != 0; }
 
-inline __host__ __aicore__ bool scheduler_task_is_spmd(uint8_t flags) { return (flags & SCHEDULER_TASK_SPMD) != 0; }
+inline __aicore__ bool scheduler_task_is_spmd(uint8_t flags) { return (flags & SCHEDULER_TASK_SPMD) != 0; }
 
-inline __host__ __aicore__ bool scheduler_task_requires_sync_start(uint8_t flags) {
+inline __aicore__ bool scheduler_task_requires_sync_start(uint8_t flags) {
     return (flags & SCHEDULER_TASK_SYNC_START) != 0;
 }
 
-inline __host__ __aicore__ bool scheduler_task_is_inline(uint8_t flags) { return (flags & SCHEDULER_TASK_INLINE) != 0; }
+inline __aicore__ bool scheduler_task_is_inline(uint8_t flags) { return (flags & SCHEDULER_TASK_INLINE) != 0; }
 
-inline __host__ __aicore__ bool scheduler_task_has_predicate(uint8_t flags) {
+inline __aicore__ bool scheduler_task_has_predicate(uint8_t flags) {
     return (flags & SCHEDULER_TASK_HAS_PREDICATE) != 0;
 }
 
-inline __host__ __aicore__ bool scheduler_task_is_gang(uint8_t flags) {
+inline __aicore__ bool scheduler_task_is_gang(uint8_t flags) {
     return (flags & (SCHEDULER_TASK_MIX | SCHEDULER_TASK_SPMD)) != 0;
 }
 
-inline __host__ __aicore__ uint32_t scheduler_task_priority_bit(uint8_t flags) {
+inline __aicore__ uint32_t scheduler_task_priority_bit(uint8_t flags) {
     if (scheduler_task_requires_sync_start(flags)) return 1U;
     if (scheduler_task_is_mix(flags)) return 2U;
     if (scheduler_task_is_spmd(flags)) return 4U;
@@ -1221,6 +1213,11 @@ static_assert(offsetof(SchedulerWorkerContext, completion_enqueue_cycles) == 640
 static_assert(offsetof(SchedulerWorkerContext, scheduler_tail_trace) == 768, "scheduler tail trace offset changed");
 static_assert(sizeof(SchedulerTaskTrace) == 384, "task trace layout changed");
 
+template <typename T>
+inline __aicore__ __gm__ T *scheduler_state_at(__gm__ void *base, uint64_t offset) {
+    return reinterpret_cast<__gm__ T *>(reinterpret_cast<__gm__ uint8_t *>(base) + offset);
+}
+
 #if !defined(__CCE_AICORE__)
 #include <type_traits>
 static_assert(std::is_standard_layout_v<SchedulerTaskMetadata> && std::is_trivially_copyable_v<SchedulerTaskMetadata>);
@@ -1249,7 +1246,6 @@ static_assert(
     std::is_standard_layout_v<SchedulerWorkerContext> && std::is_trivially_copyable_v<SchedulerWorkerContext>
 );
 static_assert(std::is_standard_layout_v<SchedulerTailTrace> && std::is_trivially_copyable_v<SchedulerTailTrace>);
-#endif
 
 inline bool scheduler_layout_checked_add(uint64_t lhs, uint64_t rhs, uint64_t *out) {
     if (out == nullptr || rhs > UINT64_MAX - lhs) return false;
@@ -1335,11 +1331,6 @@ inline bool scheduler_plan_layout(
     return true;
 }
 
-template <typename T>
-inline __host__ __aicore__ __gm__ T *scheduler_state_at(__gm__ void *base, uint64_t offset) {
-    return reinterpret_cast<__gm__ T *>(reinterpret_cast<__gm__ uint8_t *>(base) + offset);
-}
-
 inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout) {
     if (base == nullptr || (reinterpret_cast<uintptr_t>(base) & (SCHEDULER_STATE_ALIGNMENT - 1)) != 0) return false;
     __builtin_memset(base, 0, static_cast<size_t>(layout.total_size));
@@ -1386,3 +1377,4 @@ inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLay
         participants[i].task_id = SCHEDULER_TASK_ID_INVALID;
     return true;
 }
+#endif
