@@ -120,6 +120,14 @@ jobs:
             --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" \
             --enable-chip-swimlane --enable-dep-gen
 
+      - name: chip_swimlane smoke (a2a3 host_build_graph)
+        if: inputs.include_dfx_smokes
+        run: |
+          .venv/bin/python -m pytest tests/st/a2a3/host_build_graph/dfx/chip_swimlane/ \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" \
+            --enable-chip-swimlane 3
+
       - name: PMU smoke (a2a3)
         if: inputs.include_dfx_smokes
         run: |

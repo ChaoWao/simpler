@@ -488,12 +488,18 @@ static_assert(sizeof(ChipSwimlaneDataHeader) % 64 == 0, "ChipSwimlaneDataHeader 
  * a single discriminator byte:
  *
  *   OUTER (mutually time-exclusive within an iter; emit advances _t0_phase):
- *     Complete, Dispatch, Release, Dummy, EarlyDispatch.
+ *     Complete, Dispatch, Release, Dummy, EarlyDispatch, AsyncPoll, Drain,
+ *     GraphPrepare.
  *     Every iter is a sequence of zero-or-more outer bars + optional gap.
  *
  *   INNER (no anchor advance; Perfetto auto-nests by time containment):
- *     Resolve. Only parents are Complete and Dummy — those are the two
- *     FIN-observation sites that call on_task_complete.
+ *     Resolve in the tensormap_and_ringbuffer runtime, plus DrainPrepare and
+ *     DrainPublish. Resolve is contained by Complete or Dummy there.
+ *
+ *   HBG RESOLUTION-THREAD OUTER:
+ *     Resolve, AsyncPoll, and Dummy. The host_build_graph runtime hands FIN'd
+ *     slots from S threads to a dedicated P thread, so these are standalone,
+ *     mutually exclusive P-thread bars rather than nested S-thread work.
  *
  *   SEPARATE-LANE (converter routes to Worker View pid=4, not the sched lane):
  *     DummyTask and PredicatedSkip. One zero-width marker per dependency-only
@@ -516,10 +522,10 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     EarlyDispatch = 5,  // try_early_dispatch: early-dispatch pre-staging
                         // of a flagged producer's consumer's gated blocks.
                         // tasks_processed = blocks staged this pass.
-    // Inner (parent: Complete | Dummy)
-    Resolve = 6,  // on_task_complete: walk consumer list, decrement fanin,
-                  // push newly-ready successors, ring doorbells for
-                  // early-dispatch hits. tasks_processed = # consumers visited.
+    // Inner in tensormap_and_ringbuffer (parent: Complete | Dummy); standalone
+    // P-thread outer phase in host_build_graph.
+    Resolve = 6,  // Complete ready work after FIN observation. tasks_processed
+                  // is consumers visited (TMR) or completed SPSC slots (HBG).
     // Separate-lane (Worker View pid=4 AICPU_N)
     DummyTask = 7,      // Per-dummy identity marker (zero-width). phase_data.dummy_task
                         // carries the local/ring components of the full task identity.

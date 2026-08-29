@@ -750,6 +750,21 @@ target_link_libraries(test_chip_swimlane_aicore PRIVATE
 add_test(NAME test_chip_swimlane_aicore COMMAND test_chip_swimlane_aicore)
 set_tests_properties(test_chip_swimlane_aicore PROPERTIES LABELS "no_hardware")
 
+add_executable(test_async_poll_phase_accumulator
+    common/test_async_poll_phase_accumulator.cpp
+)
+target_include_directories(test_async_poll_phase_accumulator PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+)
+target_link_libraries(test_async_poll_phase_accumulator PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_async_poll_phase_accumulator COMMAND test_async_poll_phase_accumulator)
+set_tests_properties(test_async_poll_phase_accumulator PROPERTIES LABELS "no_hardware")
+
 # AICPU-side dep_gen writer. The shared-memory layout is byte-identical across
 # platforms, so compiling against a2a3's platform_config covers a5 too.
 add_executable(test_dep_gen_collector_aicpu
