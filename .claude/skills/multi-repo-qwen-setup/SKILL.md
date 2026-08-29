@@ -36,30 +36,24 @@ styles**. They measure different things; don't confuse them:
   AIC + 16 AIV + orchestration, plus the vendored CANN FusedInferAttentionScore
   extern under `kernels/paged_attention_cce/`; golden in
   `simpler_setup/goldens/qwen3_14b_decode.py`). No pypto / pypto-lib / JIT
-  descent — it builds in this repo and runs through either entry point below.
-  Budget ~5 min wall and a 38 GiB fixture (weights + paged KV, bf16), and note
-  it needs CANN devkit headers to build the attention extern. Onboard rules
-  still apply (per-die lock + `onboard-arch-precheck`):
+  descent — it builds and runs like any simpler example. Budget ~5 min wall and
+  a 38 GiB fixture (weights + paged KV, bf16), and note it needs CANN devkit
+  headers to build the attention extern. Onboard rules still apply (per-die
+  lock + `onboard-arch-precheck`):
 
   ```bash
-  # Thin manual pytest wrapper:
+  .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
   task-submit --device auto --device-num 1 --run "\
-    .claude/skills/onboard-arch-precheck/check.sh a2a3 && \
     python -m pytest examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode \
-      --platform a2a3 --device \"\$TASK_DEVICE\" --manual include"
-
-  # Canonical standalone driver; add --rounds N --skip-golden to benchmark:
-  task-submit --device auto --device-num 1 --run "\
-    .claude/skills/onboard-arch-precheck/check.sh a2a3 && \
-    python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/main.py \
-      -p a2a3 -d \"\$TASK_DEVICE\""
+      --platform a2a3 --device \$TASK_DEVICE --manual include"
+  # standalone driver (canonical direct entry; --rounds N --skip-golden to
+  # benchmark): python .../qwen3_14b_decode/main.py -p a2a3 -d \$TASK_DEVICE
   ```
 
   This is **not** a cross-repo path, so the rest of this skill (§1 setup,
-  §2–§6) does not apply to it — use the thin pytest wrapper or invoke the
-  standalone driver directly (see the example's own `README.md`). It's listed
-  here only so you know it exists before reaching for the heavier cross-repo
-  paths below.
+  §2–§6) does not apply to it — run it per the example's own `README.md`,
+  which owns both entry points' full recipes. It's listed here only so you
+  know it exists before reaching for the heavier cross-repo paths below.
 - **Path A — serving runner (pypto-serving).** Full engine: builds an
   `Engine` and runs `generate` over a prompt. Entry
   `examples/model/qwen3_14b/npu_generate.py`, flags `--model-dir --prompt
