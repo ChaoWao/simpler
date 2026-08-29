@@ -28,9 +28,9 @@
 #include "spin_hint.h"
 
 // Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
-#include "runtime_core.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_core.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 
 // Performance profiling headers
 #include "aicpu/chip_swimlane_collector_aicpu.h"
@@ -338,8 +338,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // orchestration setup, seeds its disjoint slice of the whole graph's ready
     // set + wake lists, then barriers. Only once all slices are done does the
     // leader publish runtime_init_ready_, so no thread dispatches against a
-    // half-seeded graph. This replaces the O(total_tasks) serial classify the
-    // leader used to run alone while the others idle-waited.
+    // half-seeded graph.
     while (!classify_ready_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
     }

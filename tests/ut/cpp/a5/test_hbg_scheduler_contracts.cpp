@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 #include "scheduler/scheduler_graph.h"
 #include "scheduler/scheduler_topology.h"
 #include "scheduler/scheduler_types.h"

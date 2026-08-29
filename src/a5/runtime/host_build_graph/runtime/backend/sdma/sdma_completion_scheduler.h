@@ -16,8 +16,8 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
-#include "completion_token.h"
-#include "runtime_status.h"
+#include "host_build_graph/completion_token.h"
+#include "host_build_graph/runtime_status.h"
 
 // PTO-ISA stores the latest completed post ID as a monotonic uint64_t in one
 // cache-line-sized record per queue. The completion type keeps its historical

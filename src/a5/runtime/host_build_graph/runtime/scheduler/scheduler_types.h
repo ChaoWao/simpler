@@ -19,7 +19,7 @@
 #include "dispatch_payload.h"
 
 #if !defined(__CCE_AICORE__)
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 #if __has_include("spin_hint.h")
 #include "spin_hint.h"
 #endif

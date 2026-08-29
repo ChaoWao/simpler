@@ -200,7 +200,7 @@ Reach for the high-level `Worker` first. Public registration returns a
 
 ### Compile-time Configuration (Runtime Limits)
 
-In `src/{arch}/runtime/host_build_graph/runtime/runtime.h`:
+In `src/common/host_build_graph/runtime.h`:
 
 ```cpp
 #define RUNTIME_MAX_TASKS 131072   // Maximum number of tasks

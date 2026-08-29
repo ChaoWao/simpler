@@ -9,12 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_AICORE_COMPLETION_MAILBOX_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_AICORE_COMPLETION_MAILBOX_TYPES_H_
+#pragma once
 
 #include <stdint.h>
 
-#include "constants.h"
+#include "host_build_graph/constants.h"
 
 // Types shared across the AICore↔AICPU boundary.
 //
@@ -64,5 +63,3 @@ static_assert(
     sizeof(DeferredCompletionSlab) % CHIP_ALIGN_SIZE == 0,
     "DeferredCompletionSlab size must preserve array element cache-line boundaries"
 );
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_AICORE_COMPLETION_MAILBOX_TYPES_H_

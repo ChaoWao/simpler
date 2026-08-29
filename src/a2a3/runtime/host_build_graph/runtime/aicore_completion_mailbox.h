@@ -15,7 +15,7 @@
 #include <cstdint>
 
 #include "aicore_completion_mailbox_types.h"
-#include "constants.h"
+#include "host_build_graph/constants.h"
 #include "task_id.h"
 
 // AICPU-only MPSC ring used to convey deferred-completion observations from

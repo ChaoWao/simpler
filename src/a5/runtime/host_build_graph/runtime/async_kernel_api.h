@@ -19,8 +19,8 @@
 
 #include "intrinsic.h"
 #include "aicore_completion_mailbox_types.h"
-#include "completion_token.h"
-#include "runtime_status.h"
+#include "host_build_graph/completion_token.h"
+#include "host_build_graph/runtime_status.h"
 
 #ifndef __aicore__
 #define __aicore__

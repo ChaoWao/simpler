@@ -28,9 +28,9 @@
 #include "spin_hint.h"
 
 // Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
-#include "runtime_core.h"
-#include "runtime_types.h"
-#include "shared_memory.h"
+#include "host_build_graph/runtime_core.h"
+#include "host_build_graph/runtime_types.h"
+#include "host_build_graph/shared_memory.h"
 
 // Performance profiling headers
 #include "aicpu/chip_swimlane_collector_aicpu.h"
@@ -311,6 +311,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             runtime->set_slot_states_ptr(nullptr);
 
             sched_ctx_.bind_runtime(rt);
+
             // Latch the host-built task count (on_orchestration_done sets total_tasks_)
             // BEFORE the runtime_init_ready_ release below — that store is the barrier
             // that unblocks the scheduler threads. Otherwise they would acquire
@@ -320,7 +321,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // NOTE: do NOT call rt_orchestration_done(rt) here. The HOST already
             // called it in run_host_orchestration; the orchestrator's own
             // task-allocator pointers name host memory the device never reads, so
-            // mark_done() would fault the AICPU.
+            // mark_done()'s active_count() read would dereference it and fault the
+            // AICPU. on_orchestration_done only needs total_tasks and the scalar
+            // orchestrator.inline_completed_tasks, both already valid.
             sched_ctx_.on_orchestration_done(runtime, rt, thread_idx, runtime->host_total_tasks);
             LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, runtime->host_total_tasks);
         }

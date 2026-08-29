@@ -13,7 +13,7 @@
 
 #include <stdint.h>
 
-#include "constants.h"
+#include "host_build_graph/constants.h"
 
 // Types shared across the AICore↔AICPU boundary.
 //

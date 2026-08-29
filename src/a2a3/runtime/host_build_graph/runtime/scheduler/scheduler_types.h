@@ -16,7 +16,7 @@
 
 #include "common/core_type.h"
 #include "common/platform_config.h"
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 #include "spin_hint.h"
 
 // host_build_graph host-orch build: RuntimeContext embeds SchedulerState by

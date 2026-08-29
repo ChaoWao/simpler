@@ -14,7 +14,7 @@
 #include <cinttypes>
 #include <limits>
 
-#include "common.h"  // debug_assert
+#include "host_build_graph/common.h"  // debug_assert
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
@@ -24,7 +24,7 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
-#include "runtime_core.h"
+#include "host_build_graph/runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"
 

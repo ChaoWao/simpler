@@ -17,8 +17,8 @@
  * translation units need only the kinds:
  *
  *   - the host trace and record store, which format and file the records;
- *   - orchestrator_core/orchestrator.cpp, compiled for the AICPU as well, where the
- *     platform's host headers are absent;
+ *   - host_build_graph/shared/orchestrator.cpp, compiled for the AICPU as well, where
+ *     the platform's host headers are absent;
  *   - orchestration_api.h, compiled into the orchestration .so, likewise.
  *
  * So keep this header free of anything the AICPU or the orchestration .so cannot
@@ -51,7 +51,7 @@ enum class HostPhaseKind : uint32_t {
     BindSmH2d,
     BindArenaH2d,
     BindHostViewClose,
-    // Recorded by the host orchestrator (orchestrator_core/orchestrator.cpp).
+    // Recorded by the host orchestrator (host_build_graph/shared/orchestrator.cpp).
     OrchSubmitTask,         // submit_task_common: one ordinary task
     OrchAllocTensors,       // prepare_task: one alloc_tensors slot
     OrchRecordInGraphTask,  // graph_record_submit_in_graph_task: one recorded in-graph task

@@ -17,7 +17,7 @@
 #include <type_traits>
 
 #include "task_id.h"
-#include "types.h"
+#include "host_build_graph/types.h"
 
 struct GraphScopeResult {
     bool execute_block{true};

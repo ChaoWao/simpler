@@ -138,6 +138,9 @@ function(add_a2a3_hbg_runtime_test name src)
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
         ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
         ${CMAKE_SOURCE_DIR}/../../../src/common
+        # Mirrors the runtime's own include path: the runtime-agnostic platform and
+        # worker sources reach host_build_graph's runtime.h / types.h by bare name.
+        ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
     )
     target_link_libraries(${name} PRIVATE
         ${GTEST_MAIN_LIB}
@@ -166,6 +169,9 @@ function(add_a5_hbg_runtime_test name src)
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
         ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
         ${CMAKE_SOURCE_DIR}/../../../src/common
+        # Mirrors the runtime's own include path: the runtime-agnostic platform and
+        # worker sources reach host_build_graph's runtime.h / types.h by bare name.
+        ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
     )
     target_link_libraries(${name} PRIVATE
         ${GTEST_MAIN_LIB}
@@ -442,7 +448,7 @@ set_tests_properties(test_native_run_execution PROPERTIES LABELS "no_hardware")
 add_executable(test_native_run_acceptance
     common/test_native_run_acceptance.cpp
     ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
-    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/shared/runtime.cpp
 )
 target_include_directories(test_native_run_acceptance PRIVATE
     ${GTEST_INCLUDE_DIRS}
@@ -455,6 +461,8 @@ target_include_directories(test_native_run_acceptance PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/common
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu
+    # native_run_context.h reaches host_build_graph's runtime.h by bare name.
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
 )
 target_link_libraries(test_native_run_acceptance PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
 add_test(NAME test_native_run_acceptance COMMAND test_native_run_acceptance)
@@ -850,6 +858,21 @@ add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_runtime_test(test_scope_deadlock_detection common/test_scope_deadlock_detection.cpp)
 set(HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime)
 set(A5_HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime)
+# The out-of-line members every hbg target that drives a real Runtime or
+# orchestrator has to link. Both architectures compile the same translation units
+# (src/common/host_build_graph/shared), so one list serves the a2a3 and a5 targets
+# alike; only the arch-specific headers they include differ.
+set(HBG_SHARED_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/shared)
+set(HBG_SHARED_RUNTIME_SOURCES
+    ${HBG_SHARED_DIR}/shared_memory.cpp
+    ${HBG_SHARED_DIR}/tensormap.cpp
+    ${HBG_SHARED_DIR}/runtime_init.cpp
+    ${HBG_SHARED_DIR}/runtime.cpp
+)
+set(HBG_ORCH_SHARED_SOURCES
+    ${HBG_SHARED_DIR}/orchestrator.cpp
+    ${HBG_SHARED_RUNTIME_SOURCES}
+)
 add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_hbg_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
@@ -860,7 +883,7 @@ add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp
 # dereferenced by the scheduler and called by the AICore (issue #1489), so this
 # links the Runtime implementation to pin the contract without a device.
 add_a2a3_hbg_runtime_test(test_dispatch_table a2a3/test_dispatch_table.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp)
+    ${HBG_SHARED_DIR}/runtime.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 # The seed test calls the real ready_queue_init_data_from_layout, so it links the
 # shared init TU (and the orchestrator/SM members that TU refers to).
@@ -887,100 +910,60 @@ target_sources(test_a5_hbg_scheduler_drain PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/device_phase_aicpu.cpp
 )
 target_sources(test_hbg_ready_queue_seed PRIVATE
-    ${HBG_RUNTIME_DIR}/../host/ready_queue_sizing.cpp
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host/ready_queue_sizing.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 # The submit-poison test drives the real orchestrator submit path, so it links the
 # orchestrator + shared runtime out-of-line members (mirrors a2a3_rt_objs for hbg).
 add_a2a3_hbg_runtime_test(test_hbg_submit_poison a2a3/test_hbg_submit_poison.cpp)
 target_sources(test_hbg_submit_poison PRIVATE
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_scheduler_contracts a5/test_hbg_scheduler_contracts.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
 target_sources(test_hbg_graph_submit_failure PRIVATE
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a2a3_hbg_runtime_test(test_hbg_graph_async_submit common/test_hbg_graph_async_submit.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_graph_definition_arena common/test_hbg_graph_definition_arena.cpp)
 target_sources(test_hbg_graph_definition_arena PRIVATE
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 # Drives the real orchestrator submit and Graph placement paths, so it links the
 # same out-of-line members as the graph-submit test.
 add_a2a3_hbg_runtime_test(test_hbg_slot_claim common/test_hbg_slot_claim.cpp)
 target_sources(test_hbg_slot_claim PRIVATE
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a2a3_hbg_runtime_test(test_hbg_graph_recording_bounds common/test_hbg_graph_recording_bounds.cpp)
 target_sources(test_hbg_graph_recording_bounds PRIVATE
-    ${HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_graph_recording_bounds common/test_hbg_graph_recording_bounds.cpp)
 target_sources(test_a5_hbg_graph_recording_bounds PRIVATE
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
 target_sources(test_a5_hbg_graph_submit_failure PRIVATE
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_graph_async_submit common/test_hbg_graph_async_submit.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_graph_definition_arena common/test_hbg_graph_definition_arena.cpp)
 target_sources(test_a5_hbg_graph_definition_arena PRIVATE
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_slot_claim common/test_hbg_slot_claim.cpp)
 target_sources(test_a5_hbg_slot_claim PRIVATE
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
@@ -989,61 +972,46 @@ add_a5_hbg_runtime_test(test_a5_hbg_mailbox_init common/test_hbg_mailbox_init.cp
 add_a5_hbg_runtime_test(test_a5_hbg_self_relative_ptr common/test_hbg_self_relative_ptr.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_sm_compaction common/test_hbg_sm_compaction.cpp)
 target_sources(test_a5_hbg_ready_queue_seed PRIVATE
-    ${A5_HBG_RUNTIME_DIR}/../host/ready_queue_sizing.cpp
-    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host/ready_queue_sizing.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_aicore_completion_mailbox a5/test_aicore_completion_mailbox.cpp)
-set(HBG_A5_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime)
 # The submit-poison test drives the real orchestrator submit path, so it links the
 # orchestrator + shared runtime out-of-line members (mirrors a2a3's test_hbg_submit_poison).
 add_a5_hbg_runtime_test(test_a5_hbg_submit_poison a5/test_hbg_submit_poison.cpp)
 target_sources(test_a5_hbg_submit_poison PRIVATE
-    ${HBG_A5_RUNTIME_DIR}/orchestrator_core/orchestrator.cpp
-    ${HBG_A5_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_A5_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_A5_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_A5_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a2a3_hbg_runtime_test(test_graph_cache common/test_hbg_graph_cache.cpp)
 target_sources(test_graph_cache PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/graph_execution.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/device/graph_execution.cpp
 )
 add_a5_hbg_runtime_test(test_a5_graph_cache common/test_hbg_graph_cache.cpp)
 target_sources(test_a5_graph_cache PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/graph_execution.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/device/graph_execution.cpp
 )
 # Incremental-activation tests init a real SchedulerState (ready queues), so
 # they link the scheduler + shared runtime out-of-line members.
 add_a2a3_hbg_runtime_test(test_graph_activation a2a3/test_graph_activation.cpp)
 target_sources(test_graph_activation PRIVATE
-    ${HBG_RUNTIME_DIR}/shared/shared_memory.cpp
-    ${HBG_RUNTIME_DIR}/shared/tensormap.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime_init.cpp
-    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${HBG_SHARED_RUNTIME_SOURCES}
 )
 add_a5_hbg_runtime_test(test_a5_graph_activation a5/test_graph_activation.cpp)
 target_sources(test_a5_graph_activation PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/shared_memory.cpp
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/tensormap.cpp
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime_init.cpp
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime.cpp
+    ${HBG_SHARED_RUNTIME_SOURCES}
 )
 # ChipTensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/tensormap.cpp
+    ${HBG_SHARED_DIR}/tensormap.cpp
 )
 target_sources(test_hbg_dep_gen_host_graph PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/host/dep_gen_host_graph.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host/dep_gen_host_graph.cpp
 )
 target_sources(test_hbg_tensor_access PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/host/host_tensor_access.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host/host_tensor_access.cpp
 )
 add_a2a3_runtime_test(test_dep_list_pool    a2a3/test_dep_list_pool.cpp)
 add_a2a3_runtime_test(test_scheduler_state  a2a3/test_scheduler_state.cpp)

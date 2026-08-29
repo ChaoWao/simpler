@@ -35,7 +35,7 @@
 #include <cstring>
 #include <set>
 
-#include "task_allocator.h"
+#include "host_build_graph/task_allocator.h"
 #include "task_interface/assert_compat.h"
 
 class HbgTaskAllocatorTest : public ::testing::Test {

@@ -31,8 +31,8 @@
 #include <vector>
 
 #include "utils/device_arena.h"
-#include "orchestrator.h"
-#include "shared_memory.h"
+#include "host_build_graph/orchestrator.h"
+#include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_id_encoding.h"
 
 namespace {

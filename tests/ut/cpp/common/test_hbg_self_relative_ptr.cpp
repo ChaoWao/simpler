@@ -22,7 +22,7 @@
 #include <cstring>
 #include <vector>
 
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 
 namespace {
 

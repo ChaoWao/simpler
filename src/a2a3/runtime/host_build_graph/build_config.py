@@ -22,21 +22,49 @@
 # runtime targets AND the orchestration .so (e.g., tensor methods needed
 # by the ChipTensor constructor's validation logic). Nothing in it may create host
 # threads, because the aicore and aicpu targets compile it too: the Graph recorder pool
-# therefore lives in "host" (host/graph_recorder_pool.cpp), which only the host target
-# builds, and the orchestration .so reaches it through the ops table.
+# therefore lives in a "host" directory (common/host_build_graph/host/graph_recorder_pool.cpp),
+# which only the host target builds, and the orchestration .so reaches it through the
+# ops table.
+#
+# src/common/host_build_graph holds the sources shared with the other architecture.
+# Its .cpp files sit under a "host", "device" or "shared" subdirectory naming the
+# targets that compile them, because every source_dirs entry is collected by a
+# recursive glob: "host" code uses the STL containers the AICPU target forbids, so it
+# has to live outside any directory that target names. Headers stay flat there.
+#
+# That directory is also on every target's include path, which is what lets the
+# runtime-agnostic platform and worker sources reach this runtime's runtime.h and
+# types.h by bare name: they resolve here when compiled for host_build_graph and to
+# tensormap_and_ringbuffer's own copies when compiled for that runtime. "runtime"
+# precedes it, so an arch-local header still wins over a shared one of the same name.
+SHARED = "../../../common/host_build_graph"
 
 BUILD_CONFIG = {
-    "aicore": {"include_dirs": ["runtime", "common", ".."], "source_dirs": ["aicore", "orchestration"]},
+    "aicore": {
+        "include_dirs": ["runtime", "common", "..", SHARED],
+        "source_dirs": ["aicore", "orchestration"],
+    },
     "aicpu": {
-        "include_dirs": ["runtime", "common", ".."],
-        "source_dirs": ["aicpu", "runtime", "orchestration", "../../../common/host_build_graph"],
+        "include_dirs": ["runtime", "common", "..", SHARED],
+        "source_dirs": [
+            "aicpu",
+            "runtime",
+            "orchestration",
+            f"{SHARED}/device",
+            f"{SHARED}/shared",
+        ],
     },
     "host": {
-        "include_dirs": ["runtime", "common", ".."],
-        "source_dirs": ["host", "runtime/orchestrator_core", "runtime/shared", "orchestration"],
+        "include_dirs": ["runtime", "common", "..", SHARED],
+        "source_dirs": [
+            "host",
+            "orchestration",
+            f"{SHARED}/host",
+            f"{SHARED}/shared",
+        ],
     },
     "orchestration": {
-        "include_dirs": ["runtime", "orchestration", "common", ".."],
+        "include_dirs": ["runtime", "orchestration", "common", "..", SHARED],
         "source_dirs": ["orchestration"],
     },
 }

@@ -19,7 +19,7 @@
 #include <type_traits>
 
 #include "host_build_graph/task_id_encoding.h"
-#include "runtime_types.h"
+#include "host_build_graph/runtime_types.h"
 #include "tensor.h"
 
 inline constexpr uint32_t MAX_IN_GRAPH_TASKS = 1024;

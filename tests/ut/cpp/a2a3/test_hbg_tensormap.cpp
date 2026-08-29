@@ -24,7 +24,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "tensormap.h"
+#include "host_build_graph/tensormap.h"
 #include "host_build_graph/task_id_encoding.h"
 
 namespace {
