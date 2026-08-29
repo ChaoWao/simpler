@@ -52,8 +52,9 @@ For each run, the host:
 5. finalizes task counts and the graph image; and
 6. copies the shared-memory image and the arena's copied zone to the device.
 
-An orchestration fatal stops this sequence and is propagated through
-`orch_error_code`.
+An orchestration fatal stops this sequence before the upload. The orchestrator
+runs on the host, so its code is latched in `OrchestratorState::fatal_code` and
+never reaches shared memory; the bind maps it onto the status the caller sees.
 
 ### 2.3 Device Execution and Teardown
 
@@ -335,9 +336,11 @@ a slot is used, preventing masked-slot aliasing. See
 
 ## 9. Errors and Diagnostics
 
-The runtime latches orchestration and scheduler errors in shared memory and maps
-them to the negative run status observed by the host. Important validation paths
-include:
+The runtime latches a fatal code and maps it to the negative run status the host
+observes. The two reporters latch in different places: a scheduler code goes into
+the shared-memory header, and an orchestration code into
+`OrchestratorState::fatal_code` in host memory, since this runtime's orchestrator
+runs on the host. Important validation paths include:
 
 - invalid arguments (`-5`);
 - sync-start residency violations (`-7`);

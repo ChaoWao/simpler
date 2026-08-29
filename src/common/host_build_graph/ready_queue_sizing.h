@@ -27,6 +27,4 @@ struct ReadyQueuePopulations {
     bool derive_capacities(ReadyQueueCapacities *capacities) const;
 };
 
-int32_t derive_ready_queue_capacities(
-    const ReadyQueuePopulations &populations, SharedMemoryHeader &sm_header, ReadyQueueCapacities *capacities
-);
+int32_t derive_ready_queue_capacities(const ReadyQueuePopulations &populations, ReadyQueueCapacities *capacities);

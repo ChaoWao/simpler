@@ -84,11 +84,8 @@ bool ReadyQueuePopulations::derive_capacities(ReadyQueueCapacities *capacities) 
     return true;
 }
 
-int32_t derive_ready_queue_capacities(
-    const ReadyQueuePopulations &populations, SharedMemoryHeader &sm_header, ReadyQueueCapacities *capacities
-) {
+int32_t derive_ready_queue_capacities(const ReadyQueuePopulations &populations, ReadyQueueCapacities *capacities) {
     if (populations.derive_capacities(capacities)) return 0;
 
-    sm_header.sched_error_code.store(SIMPLER_ERROR_READY_QUEUE_OVERFLOW, std::memory_order_release);
-    return runtime_status_from_error_codes(SIMPLER_ERROR_NONE, SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
+    return runtime_status_from_error_code(SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
 }

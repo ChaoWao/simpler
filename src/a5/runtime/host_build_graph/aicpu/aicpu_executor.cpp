@@ -71,9 +71,8 @@ static int32_t read_runtime_status(Runtime *runtime) {
     }
 
     auto *header = static_cast<SharedMemoryHeader *>(sm);
-    int32_t orch_error_code = header->orch_error_code.load(std::memory_order_acquire);
     int32_t sched_error_code = header->sched_error_code.load(std::memory_order_acquire);
-    return runtime_status_from_error_codes(orch_error_code, sched_error_code);
+    return runtime_status_from_error_code(sched_error_code);
 }
 
 static RuntimeContext *rt{nullptr};
@@ -312,7 +311,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             sched_ctx_.bind_runtime(rt);
 
-            // Latch the host-built task count (on_orchestration_done sets total_tasks_)
+            // Latch the host-built task count (on_graph_attached sets total_tasks_)
             // BEFORE the runtime_init_ready_ release below — that store is the barrier
             // that unblocks the scheduler threads. Otherwise they would acquire
             // runtime_init_ready_ with total_tasks_=0 and race to an early exit before
@@ -322,9 +321,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // called it in run_host_orchestration; the orchestrator's own
             // task-allocator pointers name host memory the device never reads, so
             // mark_done()'s active_count() read would dereference it and fault the
-            // AICPU. on_orchestration_done only needs total_tasks and the scalar
+            // AICPU. on_graph_attached only needs total_tasks and the scalar
             // orchestrator.inline_completed_tasks, both already valid.
-            sched_ctx_.on_orchestration_done(runtime, rt, thread_idx, runtime->host_total_tasks);
+            sched_ctx_.on_graph_attached(rt, thread_idx, runtime->host_total_tasks);
             LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, runtime->host_total_tasks);
         }
 
@@ -360,7 +359,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // Every AICPU thread schedules its assigned cores.
     if (!sched_ctx_.is_completed()) {
         if (rt == nullptr) {
-            LOG_ERROR("Thread %d: rt is null after orchestrator error, skipping dispatch", thread_idx);
+            LOG_ERROR("Thread %d: rt is null after a failed boot, skipping dispatch", thread_idx);
         } else {
             sched_ctx_.bind_runtime(rt);
             // 3S+1P: the last thread is the core-less resolution (P) thread; the

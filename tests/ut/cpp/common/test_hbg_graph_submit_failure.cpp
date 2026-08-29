@@ -122,7 +122,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     EXPECT_EQ(orch.task_allocator.heap_top(), 0u);
 
     orch.graph_commit();
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
     EXPECT_GT(orch.task_allocator.heap_top(), 0u);
     const std::optional<GraphHostUpload> first_upload = graph_host_upload(*graph_state, 0);
     const std::optional<GraphHostUpload> second_upload = graph_host_upload(*graph_state, 1);
@@ -244,7 +244,7 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     EXPECT_EQ(orch.task_allocator.heap_top(), 0u) << "no shell may take heap before commit";
 
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
     ASSERT_EQ(graph_host_upload_count(*graph_state), 3u);
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
@@ -297,10 +297,87 @@ TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
     ASSERT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
 
     orch.graph_abort(graph.recording_handle);
-    ASSERT_FALSE(orch.fatal) << "Abort alone must not latch; the shell is still finalizable in principle";
+    ASSERT_FALSE(orch.is_fatal()) << "Abort alone must not latch; the shell is still finalizable in principle";
 
     orch.graph_commit();
-    EXPECT_TRUE(orch.fatal) << "A shell whose Definition never arrived cannot be completed";
+    EXPECT_TRUE(orch.is_fatal()) << "A shell whose Definition never arrived cannot be completed";
+}
+
+// A recording worker reaches report_fatal for anything the recording cannot answer
+// locally: every submit entry validates its arguments ahead of its recording branch,
+// and the public rt_report_fatal is callable from a body. Two things have to hold
+// afterwards, and neither is about the code that was latched.
+//
+// The entry has to leave RECORDING. graph_commit's drain blocks until every in-flight
+// entry has, and on this path graph_end is the only thing the worker calls that can
+// perform the transition — so a graph_end that returns early on the fatal turns a
+// reported error into a hang on the bind thread.
+//
+// And the worker's recorder thread_locals have to be released. The recorder pool
+// outlives the run, so a thread that keeps them bound fails graph_prepare's
+// already-recording guard for every later recording it is handed.
+TEST_F(HbgGraphSubmitFailureTest, AFatalDuringRecordingRetiresTheEntryAndFreesTheRecorderThread) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    simpler::hbg::Tensor boundary = simpler::hbg::make_tensor_external(storage.data(), shape, 1);
+    GraphTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    // Two keys, so the worker has a second recording to prove its thread_locals came
+    // back. Both open before any fatal is latched.
+    const GraphScopeResult first = orch.graph_begin(0x1720, boundary_args, 0x1736);
+    const GraphScopeResult second = orch.graph_begin(0x1721, boundary_args, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_TRUE(second.recording);
+
+    bool first_prepare_ok = false;
+    bool first_end_ok = true;
+    bool second_prepare_ok = false;
+    bool second_end_ok = true;
+    bool retired_entry_refuses_prepare = false;
+
+    std::thread worker([&]() {
+        // Worker-owned boundary copies, alive until each recording ends.
+        GraphTaskArgs first_args;
+        first_args.add_input(boundary);
+        first_prepare_ok = orch.graph_prepare(first.recording_handle, first_args);
+        if (!first_prepare_ok) return;
+
+        // The body reports a fatal. This is the cross-thread write fatal_code is
+        // atomic for: the bind thread reads it through is_fatal() at every entry.
+        orch.report_fatal(SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, "recorded_body", "%s", "the body reported a fatal");
+        first_end_ok = orch.graph_end();
+
+        GraphTaskArgs second_args;
+        second_args.add_input(boundary);
+        second_prepare_ok = orch.graph_prepare(second.recording_handle, second_args);
+        if (!second_prepare_ok) return;
+        second_end_ok = orch.graph_end();
+
+        // With this thread's thread_locals proven clear by the prepare above, the only
+        // reason left to refuse the first handle is that its entry is no longer
+        // RECORDING -- which is the transition graph_commit's drain waits for.
+        GraphTaskArgs retry_args;
+        retry_args.add_input(boundary);
+        retired_entry_refuses_prepare = !orch.graph_prepare(first.recording_handle, retry_args);
+    });
+    worker.join();
+
+    ASSERT_TRUE(first_prepare_ok);
+    EXPECT_FALSE(first_end_ok) << "a fatal publishes no Definition, so end must decline";
+    EXPECT_TRUE(second_prepare_ok) << "graph_end must release the recorder thread_locals it bound";
+    EXPECT_FALSE(second_end_ok);
+    EXPECT_TRUE(retired_entry_refuses_prepare) << "a fatal must leave the entry out of RECORDING";
+
+    // Returns rather than blocking: the drain's predicate is already satisfied, because
+    // both entries left RECORDING above.
+    orch.graph_commit();
+
+    EXPECT_TRUE(orch.is_fatal());
+    EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_EXPLICIT_ORCH_FATAL)
+        << "first-writer-wins: commit's own SIMPLER_ERROR_INVALID_ARGS must not displace the body's code";
+    EXPECT_EQ(graph_host_definitions(*graph_state).entries.size(), 0u) << "no Definition may be published";
 }
 
 // The ordinary path reports SIMPLER_ERROR_INVALID_ARGS for an auto scope opened
@@ -335,7 +412,7 @@ TEST_F(HbgGraphSubmitFailureTest, AutoScopeNestedInManualScopeRefusesTheRecordin
     EXPECT_THROW(orch.graph_end(), AssertionError) << "an auto scope inside a manual one must not publish";
     orch.graph_abort(graph.recording_handle);
     orch.graph_commit();
-    EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
+    EXPECT_TRUE(orch.is_fatal()) << "a shell whose Definition never arrived cannot be completed";
 }
 
 // A Graph body may allocate. The allocation records as a kernel-less in-graph task,
@@ -362,7 +439,7 @@ TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyRecordsAKernelle
     EXPECT_TRUE(orch.graph_end());
 
     orch.graph_commit();
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
 }
 
 TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) {
@@ -388,7 +465,7 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     EXPECT_EQ(orch.task_allocator.heap_top(), heap_top_before_record);
     orch.graph_commit();
     EXPECT_GT(orch.task_allocator.heap_top(), heap_top_before_record);
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
     const size_t uploads_before_failure = graph_host_upload_count(*graph_state);
 
     CoreTaskArgs producer_args;
@@ -402,10 +479,8 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     EXPECT_TRUE(replay.execute_block);
     EXPECT_FALSE(replay.recording);
     EXPECT_FALSE(replay.task_id.is_valid());
-    EXPECT_TRUE(orch.fatal);
-    EXPECT_EQ(
-        sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED
-    );
+    EXPECT_TRUE(orch.is_fatal());
+    EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
     EXPECT_EQ(graph_host_upload_count(*graph_state), uploads_before_failure);
 }
 
@@ -439,7 +514,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     EXPECT_EQ(simpler::hbg::task_local_id(replay.task_id), static_cast<uint32_t>(allocator.capacity() - 1));
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
+    EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
 }
 
 // The constructs a predicate can present that no Definition can express. Each is
@@ -482,7 +557,7 @@ protected:
         EXPECT_THROW(orch.graph_end(), AssertionError) << "an unrecordable predicate must not publish";
         orch.graph_abort(graph.recording_handle);
         orch.graph_commit();
-        EXPECT_TRUE(orch.fatal) << "a shell whose Definition never arrived cannot be completed";
+        EXPECT_TRUE(orch.is_fatal()) << "a shell whose Definition never arrived cannot be completed";
     }
 
     static CoreTaskPredicate predicate_on(const simpler::hbg::Tensor &operand, uint32_t index) {
@@ -544,7 +619,7 @@ TEST_F(HbgGraphPredicateRejectionTest, PredicateOnAKernellessInGraphTaskIsNotRec
 
     EXPECT_TRUE(orch.graph_end()) << "a dropped predicate must not make the body unrecordable";
     orch.graph_commit();
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
 }
 
 // Distinct Graph keys record concurrently. A Definition the run has not seen
@@ -594,7 +669,7 @@ TEST_F(HbgGraphSubmitFailureTest, ASecondKeyRecordsAlongsideTheFirst) {
 
     // One commit drains and back-patches both keys' deferred shells.
     orch.graph_commit();
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
 
     const GraphScopeResult replay_a = orch.graph_begin(0x1901, args_a, 0x1736);
     EXPECT_FALSE(replay_a.execute_block) << "the first key's Definition must be cached";
@@ -636,7 +711,7 @@ TEST_F(HbgGraphSubmitFailureTest, ConcurrentDefinitionsFinalizeInSubmissionOrder
     }
 
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
     ASSERT_EQ(graph_host_upload_count(*graph_state), kGraphCount);
 
     const char *previous_end = nullptr;
@@ -680,7 +755,7 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
     ASSERT_TRUE(orch.submit_dummy_task(task_a).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
 
     // Key B is now recording and stays that way for the rest of the test.
     const GraphScopeResult second = orch.graph_begin(0x1904, args_b, 0x1736);
@@ -701,7 +776,7 @@ TEST_F(HbgGraphSubmitFailureTest, ACachedGraphReplaysWhileAnotherKeyRecords) {
     ASSERT_TRUE(orch.submit_dummy_task(task_b).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
 }
 
 // An ordinary task submitted while a recording is in flight takes its heap
@@ -740,7 +815,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     ASSERT_TRUE(orch.graph_end());
     orch.graph_commit();
 
-    EXPECT_FALSE(orch.fatal);
+    EXPECT_FALSE(orch.is_fatal());
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
     SharedMemoryTaskHeader &tasks = sm_handle->header->tasks;
@@ -800,7 +875,7 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
         EXPECT_TRUE(orch.submit_dummy_task(task_args).task_id().is_valid());
         EXPECT_TRUE(orch.graph_end());
         orch.graph_commit();
-        EXPECT_FALSE(orch.fatal);
+        EXPECT_FALSE(orch.is_fatal());
 
         // Each call uses its own graph_key, so it publishes exactly one Definition
         // and appends exactly one upload. That upload names this call's full_key
@@ -902,7 +977,7 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     args.add_output(output);
     const TaskOutputTensors outputs = orch.alloc_tensors(args);
     ASSERT_TRUE(outputs.task_id().is_valid());
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
 
     const uint64_t slot = simpler::hbg::task_local_id(outputs.task_id());
     ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";

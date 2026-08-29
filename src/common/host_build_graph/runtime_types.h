@@ -175,8 +175,10 @@ constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  *   PENDING -> COMPLETED
  *
  * The slot stays in PENDING from submit through "ready in queue" and "running
- * on a worker"; readiness and running-vs-idle are derived from fanin_refcount
- * and per-core running_slot_state respectively, not from task_state itself.
+ * on a worker": readiness comes from the producers' completion state, and
+ * running-vs-idle from the per-core running_slot_state -- neither from this
+ * field. Which completion state carries readiness depends on the task's id
+ * space; see ChipTaskSlotState below.
  *
  * Conditions:
  *   PENDING->COMPLETED:   all subtasks finish (set by scheduler) or task is a
@@ -187,9 +189,8 @@ constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * completed_watermark instead.
  */
 typedef enum {
-    CHIP_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
-    CHIP_TASK_COMPLETED = 1,  // Execution finished, output may still be in use
-    CHIP_TASK_CONSUMED = 2    // Unused: host_build_graph never advances past COMPLETED
+    CHIP_TASK_PENDING = 0,   // Submitted; awaiting fanin, queued, or dispatched
+    CHIP_TASK_COMPLETED = 1  // Execution finished, output may still be in use
 } ChipTaskState;
 
 /**
@@ -344,9 +345,10 @@ struct TaskPayload {
     // the completed mask stable for its single launch owner, whether staging is local
     // or uses the global drain fallback.
     alignas(64) std::atomic<uint64_t> staged_core_mask[EARLY_DISPATCH_CORE_MASK_WORDS]{};
-    // Early-dispatch CANDIDATE detection (event-driven, dual of fanin_refcount):
-    // seeded at wiring with producers already complete, then a flagged producer
-    // bumps each consumer after all of its logical blocks are published.
+    // Early-dispatch CANDIDATE detection, event-driven and counted rather than
+    // polled: seeded to 0 at submit with the producers already complete, then a
+    // flagged producer bumps each consumer after all of its logical blocks are
+    // published (propagate_dispatch_fanin).
     // dispatch_fanin == fanin_actual_count  <=>  every producer is
     // flagged-and-fully-published or was
     // pre-completed  =>  this task is an early-dispatch candidate (push early_dispatch_queues[shape]).
@@ -547,15 +549,24 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
  *
  * 64 bytes = one cache line. Under the polling completion model a task's
- * readiness is derived from its producers' completion_flags (in the SM
- * header); producer completion is published by setting this task's own
- * completion_flag + draining its wake list. There is no fanout adjacency,
- * refcount, or per-task lock here.
+ * readiness is derived from its producers' completion state; producer completion
+ * is published by marking this task complete + draining its wake list. There is
+ * no fanout adjacency, refcount, or per-task lock here.
  *
- * task_state is retained (a COMPLETED store on completion) because the HOST
- * still polls it: the completion-wait in runtime_core.cpp, the allocator
- * deadlock detector, and the cold-path stall dump. completion_flags is the
- * device-side readiness truth; task_state is the host-visible mirror.
+ * Which field carries that completion state depends on which task table the slot
+ * belongs to, and both are load-bearing:
+ *
+ *   - A GLOBAL task holds a slot in the SM task table, so its readiness truth is
+ *     `completion_flags[local_id]` — a byte-per-slot array, which is what lets a
+ *     fanin scan read many producers out of one cache line. `task_state` is then
+ *     a mirror, polled by the host completion-wait in runtime_core.cpp.
+ *   - An IN_GRAPH task lives in its Graph's own storage and has no slot in that
+ *     table, hence no flag byte. `task_state` IS its readiness truth, read on the
+ *     device by graph_first_unmet_producer; only the outer Graph shell (a GLOBAL
+ *     task) gets a flag when the body finishes.
+ *
+ * So a completion publishes both for a GLOBAL task and `task_state` alone for an
+ * IN_GRAPH one.
  */
 struct alignas(64) ChipTaskSlotState {
     // Highest local task id among this slot's consumers. Reclaim gate: the slot
@@ -565,9 +576,11 @@ struct alignas(64) ChipTaskSlotState {
     // bumped via max() at submit for each consumer.
     int32_t last_consumer_local_id;
 
-    // Host-visible completion mirror. PENDING at submit; COMPLETED at
-    // on_mixed_task_complete. Read by the host completion-wait / deadlock
-    // detector / cold-path dump; the device readiness path uses completion_flags.
+    // Completion state. PENDING at submit; COMPLETED at whichever completion path
+    // owns this slot. For an IN_GRAPH task this is the readiness truth the device
+    // itself polls (graph_first_unmet_producer); for a GLOBAL task it mirrors
+    // completion_flags[slot], which is what the device reads instead. Also read by
+    // the host completion-wait and the cold-path stall dump.
     std::atomic<ChipTaskState> task_state;
 
     // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
@@ -652,10 +665,10 @@ struct alignas(64) ChipTaskSlotState {
         task.set(t);
     }
 
-    // Host-visible completion mirror. The device readiness truth
-    // (completion_flags[slot]) is published by the scheduler's
-    // on_mixed_task_complete; this store makes the same fact visible to the
-    // host completion-wait / deadlock detector.
+    // Publishes completion. For an IN_GRAPH task this store is the whole
+    // publication — that task has no completion_flags byte. For a GLOBAL task it
+    // accompanies the completion_flags[slot] store that on_mixed_task_complete
+    // makes, and is the copy the host completion-wait reads.
     void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
 
     void mark_any_subtask_deferred() { any_subtask_deferred.store(true, std::memory_order_release); }

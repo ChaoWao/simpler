@@ -47,12 +47,13 @@
 // push into a ready queue found no free slot (full, or window > capacity)
 #define SIMPLER_ERROR_READY_QUEUE_OVERFLOW 104
 
-static inline int32_t runtime_status_from_error_codes(int32_t orch_error_code, int32_t sched_error_code) {
-    if (orch_error_code != SIMPLER_ERROR_NONE) {
-        return orch_error_code < 0 ? orch_error_code : -orch_error_code;
-    }
-    if (sched_error_code != SIMPLER_ERROR_NONE) {
-        return sched_error_code < 0 ? sched_error_code : -sched_error_code;
+// Maps one latched code onto the status the caller sees. Both families negate the
+// same way, and a single call site only ever holds one of them: the orchestrator
+// runs to completion on the host before the device starts, so an orchestrator code
+// is latched during the bind and a scheduler code only after it.
+static inline int32_t runtime_status_from_error_code(int32_t error_code) {
+    if (error_code != SIMPLER_ERROR_NONE) {
+        return error_code < 0 ? error_code : -error_code;
     }
     return 0;
 }

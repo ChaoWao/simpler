@@ -128,7 +128,7 @@ TEST_F(HbgGraphDefinitionArenaTest, ObjectsAreBuiltInTheArenaAtAlignedDisjointOf
     record_graph(0x1715, 1, boundary, shape);
     record_graph(0x1716, 3, boundary, shape);
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 2u);
@@ -190,7 +190,7 @@ TEST_F(HbgGraphDefinitionArenaTest, AnArenaWithNoRoomSpillsAndStillPublishesTheI
     orch.begin_scope();
     record_graph(0x1715, 2, boundary, shape);
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal) << "outgrowing the arena must cost a copy, not the run";
+    ASSERT_FALSE(orch.is_fatal()) << "outgrowing the arena must cost a copy, not the run";
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 1u);
@@ -221,7 +221,7 @@ TEST_F(HbgGraphDefinitionArenaTest, AnArenaTooSmallForAnObjectSpillsIt) {
     orch.begin_scope();
     record_graph(0x1715, 1, boundary, shape);
     orch.graph_commit();
-    ASSERT_FALSE(orch.fatal);
+    ASSERT_FALSE(orch.is_fatal());
 
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 1u);

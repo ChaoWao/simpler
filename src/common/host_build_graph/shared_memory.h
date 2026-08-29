@@ -15,7 +15,7 @@
  *
  * Memory Layout:
  *   +---------------------------+
- *   | SharedMemoryHeader        |  (completion watermark + sync + error state)
+ *   | SharedMemoryHeader        |  (completion watermark + scheduler error state)
  *   +---------------------------+
  *   | TaskDescriptor[]          |
  *   | TaskPayload[]             |
@@ -49,8 +49,8 @@ struct SharedMemoryHandle;
 /**
  * The task table's header in shared memory.
  *
- * Groups the completion watermark, layout info, and the pointers to the four
- * slot-pitched segments. Pointers are host-side only (set by setup_pointers,
+ * Groups the completion watermark, the run's task total, and the pointers to the
+ * four slot-pitched segments. Pointers are host-side only (set by setup_pointers,
  * invalid on device).
  *
  * The run's task total sits here too, as a plain scalar. The graph is complete
@@ -68,11 +68,8 @@ struct alignas(64) SharedMemoryTaskHeader {
     // (concurrent CAS-advance by completing threads).
     alignas(64) std::atomic<int32_t> completed_watermark;
 
-    // Layout metadata (set once at init)
-    alignas(64) uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
-
     // Segment pointers (host-side, set by setup_pointers)
-    TaskDescriptor *task_descriptors;
+    alignas(64) TaskDescriptor *task_descriptors;
     TaskPayload *task_payloads;
     ChipTaskSlotState *slot_states;
 
@@ -80,7 +77,13 @@ struct alignas(64) SharedMemoryTaskHeader {
     // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
     // on_mixed_task_complete; reader = consumer fanin polling (is_completion_flag_set).
     // Cleared per-slot in orch::prepare_task as each slot is claimed. Indexed by
-    // local task id, like every other segment.
+    // local task id, like every other segment — so it covers GLOBAL tasks only. An
+    // IN_GRAPH task holds no slot here and publishes completion through its own
+    // ChipTaskSlotState::task_state instead; the Graph's outer shell is the GLOBAL
+    // task that carries a flag for the whole body.
+    //
+    // A hidden-alloc task is the one flag the host presets to 1: it completes during
+    // orchestration, and a consumer polls this array rather than task_state.
     std::atomic<uint8_t> *completion_flags;
 
     // Tasks this run submitted, i.e. the slot count the four segments above are
@@ -135,41 +138,36 @@ struct alignas(64) SharedMemoryTaskHeader {
 
 static_assert(sizeof(SharedMemoryTaskHeader) == 128, "SharedMemoryTaskHeader layout drift");
 static_assert(
-    offsetof(SharedMemoryTaskHeader, task_descriptors_offset) == 64,
-    "SharedMemoryTaskHeader task_descriptors_offset layout drift"
+    offsetof(SharedMemoryTaskHeader, task_descriptors) == 64, "SharedMemoryTaskHeader task_descriptors layout drift"
 );
+// The device reads this one out of the H2D'd header, so it is pinned separately from the
+// segment pointers above, which are host-side only.
+static_assert(offsetof(SharedMemoryTaskHeader, total_tasks) == 96, "SharedMemoryTaskHeader total_tasks layout drift");
 
 /**
  * Shared memory header structure
  *
- * Contains the task table's header plus the run's global sync and error state.
+ * Contains the task table's header plus the scheduler's error state.
  */
 struct alignas(CHIP_ALIGN_SIZE) SharedMemoryHeader {
     // === TASK TABLE HEADER (set once at init) ===
     SharedMemoryTaskHeader tasks;
 
-    // === GLOBAL FIELDS ===
-    std::atomic<int32_t> orchestrator_done;  // Flag: orchestration complete
-
-    // Total shared memory size (for validation)
-    uint64_t total_size;
-
     // === ERROR REPORTING ===
 
-    // Orchestrator fatal error code (Orchestrator → Scheduler, AICPU → Host)
-    // Non-zero signals fatal error. Written by orchestrator, read by scheduler and host.
-    std::atomic<int32_t> orch_error_code;
-
-    // Scheduler error state (Scheduler → Host, independent of orchestrator)
-    // Written by scheduler threads on timeout; read by orchestrator and host.
+    // Scheduler error state. Written by scheduler threads on timeout; read by the
+    // scheduler's own cold path and, after a failed run, by the host through a D2H
+    // copy of this header. The orchestrator runs on the host and latches its own
+    // fatal code in OrchestratorState, so no orchestrator error crosses here.
     std::atomic<uint32_t> sched_error_bitmap;  // Bit X set = thread X had error
     std::atomic<int32_t> sched_error_code;     // Last scheduler error code (last-writer-wins)
     std::atomic<int32_t> sched_error_thread;   // Thread index of last error writer
 };
 
 static_assert(sizeof(SharedMemoryHeader) == 192, "SharedMemoryHeader layout drift");
-static_assert(offsetof(SharedMemoryHeader, total_size) == 136, "SharedMemoryHeader total_size layout drift");
-static_assert(offsetof(SharedMemoryHeader, orch_error_code) == 144, "SharedMemoryHeader orch_error_code layout drift");
+static_assert(
+    offsetof(SharedMemoryHeader, sched_error_bitmap) == 128, "SharedMemoryHeader sched_error_bitmap layout drift"
+);
 
 // =============================================================================
 // Shared Memory Handle
@@ -230,8 +228,6 @@ struct SharedMemoryHandle {
     attach_populated(void *sm_base, uint64_t sm_size, uint64_t max_tasks, uint64_t live_slots, uint64_t image_bytes);
 
     void destroy();
-    void print_layout();
-    bool validate();
 
 private:
     void init_header();
@@ -246,22 +242,16 @@ private:
 // =============================================================================
 //
 // When the host pre-builds a runtime-arena image, it needs the device-side
-// addresses of several SM sub-fields (the task header,
-// task_descriptors arrays, orch_error_code) so it can wire them into the
-// orchestrator / scheduler init_data path without dereferencing the SM —
-// the SM lives in device memory and cannot be touched from host.
+// addresses of several SM sub-fields (the task header, the task_descriptors
+// arrays) so it can wire them into the scheduler init_data path without
+// dereferencing the SM — the SM lives in device memory and cannot be touched
+// from host.
 //
 // These helpers compute those addresses by offset arithmetic on the SM
 // device base. Pure pointer math, no loads/stores; safe to call from host.
 // The same arithmetic happens on AICPU too (via SharedMemoryHandle's
 // own setup_pointers), so values are guaranteed consistent across sides.
 namespace sm_layout {
-
-inline std::atomic<int32_t> *orch_error_code_addr(void *sm_dev_base) noexcept {
-    return reinterpret_cast<std::atomic<int32_t> *>(
-        static_cast<char *>(sm_dev_base) + offsetof(SharedMemoryHeader, orch_error_code)
-    );
-}
 
 inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
     return reinterpret_cast<SharedMemoryTaskHeader *>(

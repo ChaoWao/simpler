@@ -154,7 +154,7 @@ void rt_orchestration_done(RuntimeContext *rt) {
     rt->inline_completed_tasks = rt->orchestrator->inline_completed_tasks;
 }
 
-static bool is_fatal_impl(RuntimeContext *rt) { return rt->orchestrator->fatal; }
+static bool is_fatal_impl(RuntimeContext *rt) { return rt->orchestrator->is_fatal(); }
 
 void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     va_list args;
@@ -231,9 +231,9 @@ static bool wait_for_tensor_ready(
         while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
-                // A fatal latched elsewhere (e.g. the scheduler-side wiring
-                // deadlock detector) breaks this wait; cold path only.
-                if (orch.sm_header->orch_error_code.load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
+                // A fatal latched earlier in this orchestration breaks the wait;
+                // cold path only.
+                if (orch.is_fatal()) {
                     failed = true;
                     return;
                 }
@@ -262,9 +262,9 @@ static bool wait_for_tensor_ready(
         while (cons_tasks.completed_watermark.load(std::memory_order_acquire) < slot.last_consumer_local_id) {
             SPIN_WAIT_HINT();
             if ((++spin_count & 1023) == 0) {
-                // A fatal latched elsewhere (e.g. the scheduler-side wiring
-                // deadlock detector) breaks this wait; cold path only.
-                if (orch.sm_header->orch_error_code.load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
+                // A fatal latched earlier in this orchestration breaks the wait;
+                // cold path only.
+                if (orch.is_fatal()) {
                     failed = true;
                     return;
                 }

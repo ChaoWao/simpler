@@ -953,8 +953,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #endif
 
         int32_t published_task_count = 0;
-        if (handle_orchestrator_exit(thread_idx, header, runtime, published_task_count) == LoopAction::BREAK_LOOP)
-            break;
+        if (check_exit_conditions(thread_idx, header, runtime, published_task_count) == LoopAction::BREAK_LOOP) break;
 
         int32_t resolved_this_pass = 0;
         bool resolved_any = false;
@@ -1302,7 +1301,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 #endif
         int32_t task_count = 0;
         if (!tracker.has_any_running_cores()) {
-            LoopAction action = handle_orchestrator_exit(thread_idx, header, runtime, task_count);
+            LoopAction action = check_exit_conditions(thread_idx, header, runtime, task_count);
             if (action == LoopAction::BREAK_LOOP) break;
         }
 

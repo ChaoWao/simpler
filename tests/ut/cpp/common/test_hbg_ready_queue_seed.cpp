@@ -187,16 +187,14 @@ TEST(HbgReadyQueueSizing, RejectsMergedPopulationPastReservationLimit) {
     EXPECT_FALSE(first.derive_capacities(&capacities));
 }
 
-TEST(HbgReadyQueueSizing, BindRejectionReturnsAndStoresReadyQueueOverflow) {
+TEST(HbgReadyQueueSizing, BindRejectionReturnsReadyQueueOverflow) {
     ReadyQueuePopulations populations{};
     populations.add_task(ActiveMask(SUBTASK_MASK_AIC), TaskAttrs{}, TaskKind::KERNEL, READY_QUEUE_CAPACITY_LIMIT + 1);
-    SharedMemoryHeader header{};
     ReadyQueueCapacities capacities{};
 
-    const int32_t status = derive_ready_queue_capacities(populations, header, &capacities);
+    const int32_t status = derive_ready_queue_capacities(populations, &capacities);
 
     EXPECT_EQ(status, -SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
-    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_READY_QUEUE_OVERFLOW);
 }
 
 TEST(HbgReadyQueueSizing, InitializesEveryLogicalQueueCapacityFromLayout) {

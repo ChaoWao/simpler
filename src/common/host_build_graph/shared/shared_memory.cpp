@@ -146,17 +146,7 @@ void SharedMemoryHandle::init_header() {
     // orchestration, so the real value is not known here yet.
     header->tasks.total_tasks = 0;
 
-    header->orchestrator_done.store(0, std::memory_order_relaxed);
-
-    // Layout info. The descriptors are the first segment, so their offset is where
-    // the header's own padded size ends — pitch-independent, unlike every segment
-    // after them.
-    header->tasks.task_descriptors_offset = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
-
-    header->total_size = sm_size;
-
     // Error reporting
-    header->orch_error_code.store(SIMPLER_ERROR_NONE, std::memory_order_relaxed);
     header->sched_error_bitmap.store(0, std::memory_order_relaxed);
     header->sched_error_code.store(SIMPLER_ERROR_NONE, std::memory_order_relaxed);
     header->sched_error_thread.store(-1, std::memory_order_relaxed);
@@ -166,46 +156,4 @@ void SharedMemoryHandle::init_header() {
     // [0, total_tasks) is claimed, so the SM init/upload cost tracks the task
     // count, not the size the table was dimensioned for. The device reads no slot
     // past total_tasks, so the unclaimed tail is left uninitialized.
-}
-
-// =============================================================================
-// Debug Utilities
-// =============================================================================
-
-void SharedMemoryHandle::print_layout() {
-    if (!header) return;
-
-    SharedMemoryHeader *h = header;
-
-    LOG_DEBUG("=== Shared Memory Layout ===");
-    LOG_DEBUG("Base address:       %p", sm_base);
-    LOG_DEBUG("Total size:         %" PRIu64 " bytes", h->total_size);
-    LOG_DEBUG("Task table:");
-    LOG_DEBUG(
-        "  descriptors_off:  %" PRIu64 " (0x%" PRIx64 ")", h->tasks.task_descriptors_offset,
-        h->tasks.task_descriptors_offset
-    );
-    LOG_DEBUG("  completed_wm:     %d", h->tasks.completed_watermark.load(std::memory_order_acquire));
-    LOG_DEBUG("orchestrator_done:  %d", h->orchestrator_done.load(std::memory_order_acquire));
-    LOG_DEBUG("Error state:");
-    LOG_DEBUG("  orch_error_code:    %d", h->orch_error_code.load(std::memory_order_relaxed));
-    LOG_DEBUG("  sched_error_bitmap: 0x%x", h->sched_error_bitmap.load(std::memory_order_relaxed));
-    LOG_DEBUG("  sched_error_code:   %d", h->sched_error_code.load(std::memory_order_relaxed));
-    LOG_DEBUG("  sched_error_thread: %d", h->sched_error_thread.load(std::memory_order_relaxed));
-    LOG_DEBUG("================================");
-}
-
-bool SharedMemoryHandle::validate() {
-    if (!sm_base) return false;
-    if (!header) return false;
-
-    const SharedMemoryHeader *h = header;
-
-    // Check that offsets are within bounds
-    if (h->tasks.task_descriptors_offset >= h->total_size) return false;
-
-    // Check pointer alignment
-    if ((uintptr_t)h->tasks.task_descriptors % CHIP_ALIGN_SIZE != 0) return false;
-
-    return true;
 }

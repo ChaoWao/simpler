@@ -155,18 +155,18 @@ public:
     // Orchestrator threads (core_trackers_[thread_idx].core_num() == 0) are a no-op.
     int32_t shutdown(int32_t thread_idx);
 
-    // Run all post-orchestration scheduler bookkeeping:
+    // Run all post-attach scheduler bookkeeping, once, on the boot leader:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
-    //  - latches submitted task count from shared memory
+    //  - latches the host-built task count
+    //  - sizes the per-S completed-task queues to it
     //  - folds inline_completed_tasks into completed_tasks_
-    //    (skipped on fatal error — emergency_shutdown runs instead)
-    // Callers must invoke rt_orchestration_done(rt) before this — that
-    // step belongs to the orchestrator lifecycle, not the scheduler.
-    void on_orchestration_done(Runtime *runtime, RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
+    // The orchestration this graph came from ran to completion on the host, so
+    // there is no orchestrator lifecycle to hook here: the event is the attach.
+    void on_graph_attached(RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
 
     // Seed the ready queues + wake lists for the whole graph at boot. Called by
     // every AICPU thread on a disjoint slice of the submitted-task range, after
-    // on_orchestration_done and before runtime_init_ready_ (the caller barriers
+    // on_graph_attached and before runtime_init_ready_ (the caller barriers
     // all threads between the two). Concurrency-safe: push_ready_routed and
     // register_wake are the same lock-free primitives used during the run.
     void classify_partition(int32_t thread_idx, int32_t nthreads);
@@ -181,7 +181,6 @@ public:
     int32_t aic_count() const { return aic_count_; }
     int32_t aiv_count() const { return aiv_count_; }
     bool is_completed() const { return completed_.load(std::memory_order_acquire); }
-    int32_t completed_tasks_count() const { return completed_tasks_.load(std::memory_order_acquire); }
 
     friend class SchedulerContextTestPeer;
 
@@ -523,8 +522,16 @@ private:
     // Cold path: exit checks, stall diagnostics, profiling (scheduler_cold_path.cpp)
     // =========================================================================
 
+    // The latched-error test both exit checks below share. Deliberately NOT marked
+    // cold/noinline: it is inlined into each of them, so neither pays a frame for
+    // the shared half — check_exit_conditions runs on every dispatch pass.
+    LoopAction check_latched_sched_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime);
+
+    // Dispatch-loop exit check: latched scheduler error, then the completion
+    // count against the run's task total. check_idle_fatal_error below is the
+    // error-only half, for the idle path that has no count to compare.
     __attribute__((noinline, cold)) LoopAction
-    handle_orchestrator_exit(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count);
+    check_exit_conditions(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count);
 
     __attribute__((noinline, cold)) LoopAction
     check_idle_fatal_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime);

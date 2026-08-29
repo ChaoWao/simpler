@@ -21,6 +21,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <inttypes.h>
 #include <type_traits>
 
@@ -57,9 +58,10 @@ public:
     /**
      * Initialize the allocator with its task capacity and heap resources.
      *
-     * All pointer arguments are device addresses (live in SM / GM heap); this
-     * function only stores them, no dereferences, so it is safe to invoke
-     * from host code that constructs a prebuilt arena image.
+     * `heap_base` is a device address (the GM heap); this function only stores it,
+     * no dereferences, so it is safe to invoke from host code that constructs a
+     * prebuilt arena image. `error_code_ptr` is the host-side orchestrator's own
+     * fatal_code, dereferenced only from the host as the allocator runs.
      *
      * `capacity` is the number of task slots the caller's task table holds — what
      * the bind resolved from runtime_env.ring_task_window, defaulting to
@@ -164,6 +166,8 @@ private:
     uint64_t heap_top_ = 0;      // Current heap allocation pointer
 
     // --- Shared ---
+    // The orchestrator's own fatal_code. Atomic for the same reason it is there: the
+    // bind thread and a Graph recording worker both latch into it.
     std::atomic<int32_t> *error_code_ptr_ = nullptr;
 
     // =========================================================================
@@ -230,9 +234,14 @@ private:
             );
         }
         LOG_ERROR("========================================");
-        if (error_code_ptr_) {
-            int32_t code = heap_blocked ? SIMPLER_ERROR_HEAP_RING_DEADLOCK : SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK;
-            error_code_ptr_->store(code, std::memory_order_release);
+        // First-writer-wins, matching orch_mark_fatal, which latches the same field.
+        // alloc() already declines once a code is latched, so in practice this is the
+        // first writer -- but the rule is stated here rather than inherited from that
+        // guard, so the two writers cannot drift apart.
+        if (error_code_ptr_ != nullptr) {
+            const int32_t code = heap_blocked ? SIMPLER_ERROR_HEAP_RING_DEADLOCK : SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK;
+            int32_t expected = SIMPLER_ERROR_NONE;
+            error_code_ptr_->compare_exchange_strong(expected, code, std::memory_order_acq_rel);
         }
     }
 };

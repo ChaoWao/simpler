@@ -32,9 +32,13 @@ grep -E "orch_error_code=|sched_error_code=|sub_class=|error detail:" <run log>
 The `host_build_graph` runtime runs orchestration on the host, transfers the
 prepared image to the AICPU, and runs scheduling there. The
 `tensormap_and_ringbuffer` runtime runs both orchestration and scheduling on the
-AICPU. On a fatal condition the runtime **latches** a code into the shared-memory
-header; the host reads it back in `validate_runtime_impl` and prints the lines
-above.
+AICPU. On a fatal condition the runtime **latches** a code, which the host reads
+back in `validate_runtime_impl` to print the lines above. Where it is latched
+follows where the reporter runs: a scheduler code goes into the shared-memory
+header, and so does an orchestrator code under `tensormap_and_ringbuffer`, whose
+orchestrator is on the AICPU. `host_build_graph`'s orchestrator is host-side, so
+its code stays in host memory (`OrchestratorState::fatal_code`) and never crosses
+to the device — a refused bind reports it without the device having run at all.
 
 At most one of `orch_error_code` (1-11) and `sched_error_code` (100+) is ever
 non-zero. `runtime_status` is just the latched code negated.
@@ -210,7 +214,7 @@ enforces coverage. Edit those and the log carries the new code correctly:
 | ---- | ----- |
 | runtime code names / descriptions / hints | `src/common/runtime_status/error_names.h` |
 | host-side CANN names / descriptions / hints | `src/common/platform/include/host/acl_error_names.h` |
-| `SCHEDULER_TIMEOUT` sub-class labels | `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/runtime_status.h` |
+| `SCHEDULER_TIMEOUT` sub-class labels | `src/common/host_build_graph/runtime_status.h`, `src/{arch}/runtime/tensormap_and_ringbuffer/common/runtime_status.h` |
 | completeness test | `tests/ut/cpp/common/test_error_code_names.cpp` |
 
 **This page does not need updating for a new code** — deliberately. The tables
@@ -220,7 +224,8 @@ time, so there is nothing to drift out of sync.
 
 ## References
 
-- Code definitions: `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/runtime_status.h`
+- Code definitions: `src/common/host_build_graph/runtime_status.h`,
+  `src/{arch}/runtime/tensormap_and_ringbuffer/common/runtime_status.h`
 - Host print site: `.../host/runtime_maker.cpp` (`validate_runtime_impl`)
 - Sub-class logic: `.../runtime/scheduler/scheduler_cold_path.cpp` (`classify_stall_reason`)
 - End-to-end negative tests: `tests/st/runtime_fatal_codes/`
