@@ -75,7 +75,7 @@ constexpr int32_t MAX_AICPU_THREADS = PLATFORM_MAX_AICPU_THREADS;
 // independent of the wall-clock timeout below: small enough to fire a few times
 // before the budget expires, large enough not to flood device_log.
 constexpr int32_t STALL_LOG_INTERVAL = 480000;
-constexpr int32_t FATAL_ERROR_CHECK_INTERVAL = 1024;  // Check orchestrator error every N idle iters
+constexpr int32_t FATAL_ERROR_CHECK_INTERVAL = 1024;  // Check for a latched scheduler error every N idle iters
 
 // Wall-clock budget for declaring "no progress = scheduler timeout". Replaces
 // the per-thread iteration-count cap that once lived here as MAX_IDLE_ITERATIONS

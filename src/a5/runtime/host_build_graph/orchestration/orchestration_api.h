@@ -44,15 +44,15 @@
 #include <vector>
 
 // Type headers needed by orchestration
-#include "host_build_graph/common.h"         // framework_bind_runtime / framework_current_runtime
-#include "common/host_phase_kind.h"          // HostPhaseKind, for the phase records below
-#include "graph_cache.h"                     // Graph Execution key and result helpers
-#include "graph_host_state.h"                // GRAPH_MAX_DEFINITIONS
-#include "host_build_graph/runtime_types.h"  // SIMPLER_ERROR_*
-#include "host_build_graph/submit_types.h"   // MixedKernels, INVALID_KERNEL_ID, subtask slots
-#include "types.h"                           // Arg, TaskOutputTensors, TensorArgType
-#include "task_args.h"                       // ChipStorageTaskArgs, simpler::hbg::Tensor
-#include "tensor.h"                          // simpler::hbg::Tensor, TensorCreateInfo
+#include "host_build_graph/common.h"            // framework_bind_runtime / framework_current_runtime
+#include "common/host_phase_kind.h"             // HostPhaseKind, for the phase records below
+#include "host_build_graph/graph_cache.h"       // Graph Execution key and result helpers
+#include "host_build_graph/graph_host_state.h"  // GRAPH_MAX_DEFINITIONS
+#include "host_build_graph/runtime_types.h"     // SIMPLER_ERROR_*
+#include "host_build_graph/submit_types.h"      // MixedKernels, INVALID_KERNEL_ID, subtask slots
+#include "types.h"                              // Arg, TaskOutputTensors, TensorArgType
+#include "task_args.h"                          // ChipStorageTaskArgs, simpler::hbg::Tensor
+#include "tensor.h"                             // simpler::hbg::Tensor, TensorCreateInfo
 
 // =============================================================================
 // simpler::hbg::Tensor Factory Helpers
@@ -294,11 +294,20 @@ static inline void rt_graph_abort(void *recording_handle) {
 
 // Finish the recording pass and publish its Definition. The calling thread
 // finalizes the already-submitted outer Graph shells in rt_graph_commit.
+//
+// No is_fatal() short-circuit: a prepared recording has to leave RECORDING even when
+// the run has already failed, or graph_commit's drain never completes. graph_end
+// retires the entry it bound on every path that has one — published, unsupported,
+// key-mismatched, or fatal — so `false` here means "no Definition", never "the entry
+// is still yours to retire". That is why no caller pairs this with an abort.
+//
+// The null-op guard is defensive only: hbg's ops table always carries graph_end
+// (runtime_core.cpp), and a table without it would have no graph_begin either, so
+// no recording could be open to end. It reports false rather than the older `true`
+// because nothing was published.
 static inline bool rt_graph_end() {
     RuntimeContext *rt = current_runtime();
-    if (rt->ops->is_fatal(rt) || rt->ops->graph_end == nullptr) {
-        return true;
-    }
+    if (rt->ops->graph_end == nullptr) return false;
     return rt->ops->graph_end(rt);
 }
 
@@ -544,6 +553,11 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
                     return;
                 }
                 invoke(record_args);
+                // Not paired with an abort: graph_end retires the entry it bound on
+                // every path that has one, including the fatal one. A second abort
+                // would race graph_commit's drain, which frees the entry after
+                // releasing recording_mutex — so the mutex this would take is no
+                // protection against touching it.
                 (void)rt_graph_end();
             } catch (...) {
                 rt_graph_abort(handle);

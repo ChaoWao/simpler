@@ -14,11 +14,13 @@
  *
  * The Scheduler is responsible for:
  * 1. Maintaining per-resource-shape ready queues
- * 2. Polling-completion dependency resolution: a task is ready when every
- *    producer named in its inline fanin has set its completion_flags byte;
- *    a producer publishes completion + drains its wake list on finish
- * 3. Publishing the host-visible task_state mirror (PENDING -> COMPLETED) and
- *    advancing the completed_watermark (consumer-retirement signal)
+ * 2. Polling-completion dependency resolution: a GLOBAL task is ready when every
+ *    producer named in its inline fanin has set its completion_flags byte, an
+ *    IN_GRAPH one when every producer in its Graph's fanin wire has reached
+ *    task_state == COMPLETED (that table has no flag bytes); a producer publishes
+ *    completion + drains its wake list on finish
+ * 3. Publishing task_state (PENDING -> COMPLETED) and advancing the
+ *    completed_watermark (consumer-retirement signal)
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
@@ -38,7 +40,7 @@
 #include "utils/device_arena.h"
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId for the early-dispatch doorbell
 #include "async_wait.h"
-#include "graph_execution.h"
+#include "host_build_graph/graph_execution.h"
 #include "host_build_graph/task_id_encoding.h"
 #include "host_build_graph/task_allocator.h"
 #include "host_build_graph/runtime_types.h"

@@ -27,7 +27,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <type_traits>
 
 #include "common/chip_swimlane_profiling.h"
 #include "host_build_graph/task_allocator.h"
@@ -87,9 +89,21 @@ struct OrchestratorState {
     int32_t total_aiv_count{0};      // AIV cores (= 2 × clusters on standard hardware)
 
     // === FATAL ERROR ===
-    // Fatal error flag (single-thread access by orchestrator, no atomic needed)
-    // Cross-thread notification uses shared memory orch_error_code (atomic)
-    bool fatal;
+    // The whole fatal state, in one field: the first code latched, or
+    // SIMPLER_ERROR_NONE while the orchestration is healthy. First-writer-wins, so
+    // it names the failure that started the cascade rather than the last symptom,
+    // and the bind maps it onto the status the caller sees. A report that supplies
+    // no code is latched as SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, which is what keeps
+    // "is fatal" and "which code" from being two separately-settable things.
+    //
+    // Atomic because the reporters are not one thread. A recording worker reaches
+    // report_fatal for everything the recording cannot answer locally with its
+    // `unsupported` flag: every submit entry validates its arguments ahead of the
+    // recording branch (submit_task, alloc_tensors), and the public rt_report_fatal
+    // is callable from a Graph body too. Meanwhile the bind thread reads is_fatal()
+    // at every entry. The CAS in orch_mark_fatal is what makes first-writer-wins
+    // hold across those threads rather than only within one.
+    std::atomic<int32_t> fatal_code{SIMPLER_ERROR_NONE};
 
     // Hidden alloc tasks complete synchronously inside the orchestrator and
     // therefore bypass the executor's normal worker-completion counter path.
@@ -126,6 +140,8 @@ struct OrchestratorState {
     int64_t bytes_allocated;
 #endif
 
+    bool is_fatal() const { return fatal_code.load(std::memory_order_acquire) != SIMPLER_ERROR_NONE; }
+
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
 
     // === Cold-path API (defined in orchestrator.cpp) ===
@@ -141,7 +157,6 @@ struct OrchestratorState {
     // and must not orchestrate.
     bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler);
 
-    void set_scheduler(SchedulerState *scheduler);
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
@@ -159,6 +174,15 @@ struct OrchestratorState {
     void graph_commit_inner();
     void mark_done();
 };
+
+// task_allocator holds a pointer back to this object's own fatal_code, so relocating
+// an OrchestratorState by value would leave the allocator latching into the source.
+// The atomic member already makes both operations ill-formed; asserting it says so on
+// purpose rather than leaving the self-reference resting on that side effect.
+static_assert(
+    !std::is_move_assignable_v<OrchestratorState> && !std::is_copy_assignable_v<OrchestratorState>,
+    "OrchestratorState holds a pointer into itself (task_allocator's fatal_code); assigning one would retarget it"
+);
 
 // =============================================================================
 // Orchestrator Profiling Data

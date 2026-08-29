@@ -234,41 +234,49 @@ __attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { retur
     } while (0)
 #endif
 
+// A report that names no code still means "fatal", so it is latched -- and logged --
+// under the explicit-fatal code rather than as a zero that reads like "no error".
+static constexpr int32_t normalized_fatal_code(int32_t error_code) {
+    return error_code == SIMPLER_ERROR_NONE ? SIMPLER_ERROR_EXPLICIT_ORCH_FATAL : error_code;
+}
+
+// First-writer-wins, so the latched code names the failure that started the
+// cascade. The CAS is load-bearing rather than decorative: a recording worker and
+// the bind thread both reach here (see OrchestratorState::fatal_code).
+// TaskAllocator::report_capacity_exhausted writes the same field under the same rule.
 static int32_t orch_mark_fatal(OrchestratorState *orch, int32_t error_code) {
     always_assert(orch != nullptr);
-    orch->fatal = true;
-    if (error_code == SIMPLER_ERROR_NONE || orch->sm_header == nullptr) {
-        return SIMPLER_ERROR_NONE;
-    }
-
+    const int32_t code = normalized_fatal_code(error_code);
     int32_t expected = SIMPLER_ERROR_NONE;
-    std::atomic<int32_t> &orch_error_code = orch->sm_header->orch_error_code;
-    if (orch_error_code.compare_exchange_strong(expected, error_code, std::memory_order_acq_rel)) {
-        return error_code;
+    if (orch->fatal_code.compare_exchange_strong(expected, code, std::memory_order_acq_rel)) {
+        return code;
     }
+    // A failed exchange loads the winner's code into `expected`.
     return expected;
 }
 
 static void
 orch_report_fatal_v(OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
-    int32_t latched_code = orch_mark_fatal(orch, error_code);
+    const int32_t reported = normalized_fatal_code(error_code);
+    // Differs from `reported` only when an earlier fatal already owns the field.
+    const int32_t latched_code = orch_mark_fatal(orch, reported);
 
     if (fmt == nullptr || fmt[0] == '\0') {
-        if (latched_code != SIMPLER_ERROR_NONE && latched_code != error_code) {
-            unified_log_error(func, "FATAL(code=%d, latched=%d)", error_code, latched_code);
+        if (latched_code != reported) {
+            unified_log_error(func, "FATAL(code=%d, latched=%d)", reported, latched_code);
         } else {
-            unified_log_error(func, "FATAL(code=%d)", error_code);
+            unified_log_error(func, "FATAL(code=%d)", reported);
         }
         return;
     }
 
     std::array<char, 1024> message{};
     vsnprintf(message.data(), message.size(), fmt, args);
-    if (latched_code != SIMPLER_ERROR_NONE && latched_code != error_code) {
-        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", error_code, latched_code, message.data());
+    if (latched_code != reported) {
+        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", reported, latched_code, message.data());
         return;
     }
-    unified_log_error(func, "FATAL(code=%d): %s", error_code, message.data());
+    unified_log_error(func, "FATAL(code=%d): %s", reported, message.data());
 }
 
 void OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
@@ -1469,7 +1477,7 @@ static bool prepare_task(
 
 void OrchestratorState::begin_scope(ScopeMode mode) {
     auto *orch = this;
-    if (orch->fatal) {
+    if (orch->is_fatal()) {
         return;
     }
     // A Graph replays as a flat DAG with no scope structure: scope boundaries only
@@ -1514,7 +1522,7 @@ void OrchestratorState::begin_scope(ScopeMode mode) {
 
 void OrchestratorState::end_scope() {
     auto *orch = this;
-    if (orch->fatal) {
+    if (orch->is_fatal()) {
         return;
     }
     // Matches begin_scope: a scope inside a Graph body never touches the real
@@ -1547,13 +1555,13 @@ void OrchestratorState::end_scope() {
 // become large enough while the host waits: latch
 // SIMPLER_ERROR_TENSORMAP_OVERFLOW and bail rather than letting new_entry()'s hard
 // assert fire mid-registration. Returns false when the pool is exhausted or a
-// fatal is already latched by another party.
+// fatal is already latched.
 static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
     ChipTensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
     }
-    if (orch->sm_header->orch_error_code.load(std::memory_order_acquire) != SIMPLER_ERROR_NONE) {
+    if (orch->is_fatal()) {
         return false;
     }
 
@@ -2559,11 +2567,26 @@ void OrchestratorState::graph_abort(void *recording_handle) {
 
 // Finish the background recording and publish the Definition. The main
 // thread finalizes the already-submitted outer Graph tasks in graph_commit.
+//
+// Retires the entry it bound on every path below that has one, so a caller never has
+// to pair a `false` return with an abort — and must not: graph_commit frees a drained
+// entry after releasing recording_mutex, so a second abort would take that mutex and
+// still touch freed memory.
 bool OrchestratorState::graph_end() {
     GraphHostState *state = graph_state_from(this);
     GraphRecording *recording = active_graph_recording(this);
     GraphInflightRecording *entry = g_active_graph_entry;
     if (state == nullptr || recording == nullptr || entry == nullptr) return false;
+
+    // A fatal latched anywhere in the run ends this pass with no Definition, but the
+    // entry still has to leave RECORDING: graph_commit's drain blocks until every
+    // in-flight entry has, and nothing else transitions this one. Returning early
+    // instead would park the entry — and this thread's recorder thread_locals — for
+    // the rest of the process, and hang the bind that is already failing.
+    if (is_fatal()) {
+        graph_abort(entry);
+        return false;
+    }
 
     ORCH_PHASE_START();
     std::optional<GraphDefinition> layout = graph_layout_definition(*recording);
@@ -2670,7 +2693,7 @@ TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kerne
 
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.
-    if (orch->fatal) {
+    if (orch->is_fatal()) {
         return TaskOutputTensors{};
     }
 
@@ -2760,7 +2783,7 @@ TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kerne
 TaskOutputTensors OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
     auto *orch = this;
 
-    if (orch->fatal) {
+    if (orch->is_fatal()) {
         return TaskOutputTensors{};
     }
 
@@ -2797,7 +2820,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     auto *orch = this;
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.
-    if (orch->fatal) {
+    if (orch->is_fatal()) {
         return TaskOutputTensors{};
     }
 
@@ -2892,7 +2915,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // codegen task there is no Arg-driven hint to honor here, so mark it
         // unconditionally.
         prepared.slot_state->task_attrs.set_early_resolve(true);
-        prepared.slot_state->mark_completed();  // host-visible task_state mirror
+        prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is the host-visible mirror
         // Polling: pre-set the device-visible completion_flags byte in the H2D
         // image. Consumers poll completion_flags (not task_state), so a hidden-alloc
         // producer completed here on the host must publish its flag too — otherwise
@@ -2929,7 +2952,6 @@ void OrchestratorState::mark_done() {
     if (total_tasks > 0) {
         LOG_DEBUG("=== [Orchestrator] total_tasks=%d ===", total_tasks);
     }
-    orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_stack_top = -1;
     orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX

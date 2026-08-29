@@ -52,30 +52,30 @@ void SchedulerContext::fail_scheduler(Runtime *runtime, int32_t thread_idx, int3
     }
 }
 
-LoopAction SchedulerContext::handle_orchestrator_exit(
-    int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count
-) {
+LoopAction
+SchedulerContext::check_latched_sched_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime) {
     if (completed_.load(std::memory_order_acquire)) {
         return LoopAction::BREAK_LOOP;
     }
-    int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != SIMPLER_ERROR_NONE) {
+    int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
+    if (sched_err != SIMPLER_ERROR_NONE) {
         LOG_ERROR(
-            "Thread %d: Fatal error (code=%d), sending EXIT_SIGNAL to all cores. "
+            "Thread %d: Scheduler fatal error detected (code=%d), sending EXIT_SIGNAL to all cores. "
             "completed_tasks=%d, total_tasks=%d",
-            thread_idx, orch_err, completed_tasks_.load(std::memory_order_relaxed), total_tasks_
+            thread_idx, sched_err, completed_tasks_.load(std::memory_order_relaxed), total_tasks_
         );
         if (!completed_.exchange(true, std::memory_order_acq_rel)) {
             emergency_shutdown(runtime);
         }
         return LoopAction::BREAK_LOOP;
     }
-    int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != SIMPLER_ERROR_NONE) {
-        LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+    return LoopAction::NONE;
+}
+
+LoopAction SchedulerContext::check_exit_conditions(
+    int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count
+) {
+    if (check_latched_sched_error(thread_idx, header, runtime) == LoopAction::BREAK_LOOP) {
         return LoopAction::BREAK_LOOP;
     }
 
@@ -91,26 +91,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
 }
 
 LoopAction SchedulerContext::check_idle_fatal_error(int32_t thread_idx, SharedMemoryHeader *header, Runtime *runtime) {
-    if (completed_.load(std::memory_order_acquire)) {
-        return LoopAction::BREAK_LOOP;
-    }
-    int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
-    if (orch_err != SIMPLER_ERROR_NONE) {
-        LOG_ERROR("Thread %d: Fatal error detected (code=%d), sending EXIT_SIGNAL to all cores", thread_idx, orch_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
-        return LoopAction::BREAK_LOOP;
-    }
-    int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
-    if (sched_err != SIMPLER_ERROR_NONE) {
-        LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
-        return LoopAction::BREAK_LOOP;
-    }
-    return LoopAction::NONE;
+    return check_latched_sched_error(thread_idx, header, runtime);
 }
 
 // =============================================================================
@@ -906,7 +887,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
 
     // Initialize task counters. Task count comes from shared memory.
     // 0 is the correct count at boot: the graph is not attached yet, and
-    // on_orchestration_done latches the host-built total before releasing any
+    // on_graph_attached latches the host-built total before releasing any
     // scheduler thread.
     total_tasks_ = 0;
     completed_tasks_.store(0, std::memory_order_release);
@@ -1028,15 +1009,13 @@ void SchedulerContext::bind_runtime(RuntimeContext *rt) {
 }
 
 // =============================================================================
-// Post-orchestration bookkeeping. Runs once on the boot leader after the
-// host-built image is attached; latches total_tasks_ and folds inline-completed
-// tasks (or shuts down on a fatal orchestration error). classify_ready_ is
-// released after this call and is what publishes total_tasks_ to the peer threads,
-// which acquire it before classify_partition reads the count.
+// Post-attach bookkeeping. Runs once on the boot leader after the host-built
+// image is attached; latches total_tasks_, sizes the per-S queues to it, and
+// folds inline-completed tasks. classify_ready_ is released after this call and
+// is what publishes total_tasks_ to the peer threads, which acquire it before
+// classify_partition reads the count.
 // =============================================================================
-void SchedulerContext::on_orchestration_done(
-    Runtime *runtime, RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
-) {
+void SchedulerContext::on_graph_attached(RuntimeContext *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks) {
     total_tasks_ = total_tasks;
 
     // Allocate the per-S CompletedTaskQueues here on the boot leader, before it
@@ -1063,17 +1042,6 @@ void SchedulerContext::on_orchestration_done(
 #if SIMPLER_SCHED_PROFILING
         rt->scheduler->tasks_completed.fetch_add(inline_completed, std::memory_order_relaxed);
 #endif
-    }
-
-    // Check for fatal error from orchestration; if so, shut down immediately.
-    int32_t orch_err = 0;
-    if (sched_->sm_header) {
-        orch_err = sched_->sm_header->orch_error_code.load(std::memory_order_relaxed);
-    }
-    if (orch_err != SIMPLER_ERROR_NONE) {
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
     }
 
     // The polling initial classify (seed the ready queues + wake lists for the

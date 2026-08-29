@@ -56,9 +56,9 @@
 #include "host_build_graph/runtime_status.h"
 #include "host_build_graph/common.h"
 #include "host_build_graph/dep_gen_host_graph.h"
-#include "../runtime/graph_execution.h"
+#include "host_build_graph/graph_execution.h"
 #include "host_build_graph/host_tensor_access.h"
-#include "../runtime/graph_host_state.h"
+#include "host_build_graph/graph_host_state.h"
 #include "host_build_graph/host_phase_trace.h"
 #include "host_build_graph/orchestrator.h"
 #include "host_build_graph/ready_queue_sizing.h"
@@ -345,9 +345,8 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
         return 0;
     }
 
-    int32_t orch_error_code = host_header->orch_error_code.load(std::memory_order_relaxed);
     int32_t sched_error_code = host_header->sched_error_code.load(std::memory_order_relaxed);
-    return runtime_status_from_error_codes(orch_error_code, sched_error_code);
+    return runtime_status_from_error_code(sched_error_code);
 }
 
 namespace {
@@ -734,14 +733,12 @@ int32_t run_host_orchestration(
     // described — a heap or tensormap exhaustion drops tasks, a fanin overflow drops
     // edges. Uploading it would launch the device on an incomplete graph and surface
     // the cause as whatever the device notices second, usually a scheduler timeout.
-    const int32_t orch_error = sm_layout::orch_error_code_addr(host_sm)->load(std::memory_order_acquire);
-    if (orch_error != SIMPLER_ERROR_NONE || orchestrator.fatal) {
+    if (orchestrator.is_fatal()) {
         // The latched code is the diagnosis, so it is what the caller sees — through the
         // same mapping the run path uses, since a caller cannot tell which of the two
-        // noticed. A fatal with no code left to read is the only generic failure.
-        const int32_t status = orch_error != SIMPLER_ERROR_NONE ?
-                                   runtime_status_from_error_codes(orch_error, SIMPLER_ERROR_NONE) :
-                                   PTO_RUNTIME_ERR_INTERNAL;
+        // noticed.
+        const int32_t orch_error = orchestrator.fatal_code.load(std::memory_order_acquire);
+        const int32_t status = runtime_status_from_error_code(orch_error);
         LOG_RUNTIME_FAILURE(orch_error, SIMPLER_ERROR_NONE, status);
         LOG_ERROR(
             "host-orch: refusing to upload an incomplete graph after %" PRIu64 " heap bytes",
@@ -800,8 +797,7 @@ int32_t run_host_orchestration(
     }
 
     ReadyQueueCapacities ready_queue_capacities{};
-    const int32_t ready_queue_status =
-        derive_ready_queue_capacities(ready_queue_populations, *host_sm_handle.header, &ready_queue_capacities);
+    const int32_t ready_queue_status = derive_ready_queue_capacities(ready_queue_populations, &ready_queue_capacities);
     if (ready_queue_status != 0) {
         LOG_ERROR(
             "host-orch: ready queue reachable population exceeds %" PRIu64 " (ready=%" PRIu64 "/%" PRIu64 "/%" PRIu64
@@ -1395,9 +1391,8 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         runtime_status = read_runtime_status(runtime, api, &host_header);
     }
     if (runtime_status != 0) {
-        int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);
         int32_t sched_error_code = host_header.sched_error_code.load(std::memory_order_relaxed);
-        LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, runtime_status);
+        LOG_RUNTIME_FAILURE(SIMPLER_ERROR_NONE, sched_error_code, runtime_status);
     }
 
     if (skip_tensor_copy_back) {

@@ -74,7 +74,6 @@ public:
         const auto off = sm_layout::segment_offsets(WINDOW);
         auto *header = reinterpret_cast<SharedMemoryHeader *>(image_.base());
         auto &tasks = header->tasks;
-        tasks.task_descriptors_offset = off.descriptors;
         tasks.completed_watermark.store(-1, std::memory_order_relaxed);
         tasks.total_tasks = static_cast<int32_t>(SUBMITTED);
         tasks.task_descriptors = descriptors();
@@ -235,7 +234,6 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     // The header's pitch-independent fields come across; the mirror slot past the
     // prefix does not.
     auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
-    EXPECT_EQ(tasks.task_descriptors_offset, sm_layout::segment_offsets(WINDOW).descriptors);
     EXPECT_EQ(tasks.completed_watermark.load(std::memory_order_relaxed), -1);
     // The device bounds its completed_watermark walk with this, and the restack is
     // the only thing that carries it there.
@@ -301,7 +299,7 @@ TEST(HbgSmCompaction, ZeroSubmittedShipsTheHeaderAlone) {
     EXPECT_EQ(compacted.bytes, compacted.off(0).end);
     EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(1).end);
     auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
-    EXPECT_EQ(tasks.task_descriptors_offset, sm_layout::segment_offsets(WINDOW).descriptors);
+    EXPECT_EQ(tasks.total_tasks, static_cast<int32_t>(SUBMITTED));
     EXPECT_EQ(tasks.task_descriptors, nullptr);
 }
 

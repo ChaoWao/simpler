@@ -169,7 +169,7 @@ public:
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
 
     // Total tasks the host orchestrator submitted, handed to the scheduler by
-    // SchedulerContext::on_orchestration_done. host_build_graph builds the whole
+    // SchedulerContext::on_graph_attached. host_build_graph builds the whole
     // graph on the host, so this scalar is the count's only carrier: the shared
     // memory header holds no task counter for the boot thread to read.
     int32_t host_total_tasks;

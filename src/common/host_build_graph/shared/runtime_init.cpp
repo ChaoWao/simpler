@@ -19,6 +19,7 @@
  * original files and the aicpu build only.
  */
 
+#include <new>
 #include <stdlib.h>
 #include <string.h>
 
@@ -205,18 +206,18 @@ void SchedulerState::destroy() {
 bool OrchestratorState::init(
     void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler_arg
 ) {
-    auto *orch = this;
-    *orch = OrchestratorState{};
+    // Reset in place rather than by move-assignment: fatal_code is a std::atomic,
+    // which is neither copy- nor move-assignable, and a re-init has to clear every
+    // field the previous pass left behind (the pool cursors below rely on it).
+    this->~OrchestratorState();
+    auto *orch = new (static_cast<void *>(this)) OrchestratorState{};
 
     always_assert(max_tasks > 0);
 
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
-    orch->fatal = false;
     orch->scheduler = scheduler_arg;
 
-    auto *orch_err = sm_layout::orch_error_code_addr(sm_base);
-
-    orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, orch_err);
+    orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, &orch->fatal_code);
 
     // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
     // so it holds for whichever SM this orchestrator was pointed at. The cursors
@@ -245,8 +246,6 @@ bool OrchestratorState::init(
 
     return true;
 }
-
-void OrchestratorState::set_scheduler(SchedulerState *scheduler) { this->scheduler = scheduler; }
 
 // =============================================================================
 // Top-level runtime arena
