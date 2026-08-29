@@ -852,10 +852,27 @@ pytest --runtime <rt> --level 2 --device 8-11 -n 4 --dist loadfile
 
 `pytest-xdist` starts 4 workers (`gw0`..`gw3`). Each worker's `pytest_configure` slices `--device 8-11` down to a single id (`gw0` → `8`, `gw1` → `9`, ...), and `st_worker` is session-scoped, so the worker initializes exactly one `ChipWorker(device=N)` and reuses it for every L2 class routed to it. `--dist loadfile` keeps all cases from one test file on the same worker, amortizing any file-level setup cost.
 
-An explicit `-p no:xdist` is authoritative for the L2 children inherited from
-the top-level invocation. The dispatcher omits `-n` and `--dist`, so each L2
-runtime subprocess executes serially. Resource-phase subprocess concurrency
-continues to follow `--max-parallel` because it does not use pytest-xdist.
+An explicit `-p no:xdist` or `-n 0` is authoritative for the L2 children
+inherited from the top-level invocation. The dispatcher does not append xdist
+options in either case, so each L2 runtime subprocess executes serially. `--pdb`
+reaches the same state, and reaches it on its own gate rather than through the
+worker count: xdist zeroes that count only for `-n auto` / `-n logical`, while
+a bare `--pdb` leaves it unset — and since the L2 child inherits `--pdb`, an
+appended `-n` would make xdist reject the child with
+`--pdb is incompatible with distributing tests`. An explicit top-level `--dist`
+(or its `-d` shortcut) is preserved too; the dispatcher adds only the options
+the invocation left unset.
+
+A top-level `-n N` with N > 0 is a different case: it puts xdist in
+distribution mode, whose `pytest_runtestloop` claims the session before this
+dispatcher's hook runs, so the phase split does not happen at all and every
+collected level runs in one flat xdist fanout. Size L2 parallelism with
+`--max-parallel`, not with a top-level `-n`.
+
+Resource-phase subprocess concurrency continues to follow `--max-parallel`
+because it does not use pytest-xdist. If plugin autoloading is disabled without
+blocking xdist explicitly, the dispatcher warns before falling back to serial
+L2 execution.
 
 ### L2 phase — standalone fanout
 

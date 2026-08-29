@@ -497,9 +497,10 @@ static_assert(sizeof(ChipSwimlaneDataHeader) % 64 == 0, "ChipSwimlaneDataHeader 
  *     DrainPublish. Resolve is contained by Complete or Dummy there.
  *
  *   HBG RESOLUTION-THREAD OUTER:
- *     Resolve, AsyncPoll, and Dummy. The host_build_graph runtime hands FIN'd
- *     slots from S threads to a dedicated P thread, so these are standalone,
- *     mutually exclusive P-thread bars rather than nested S-thread work.
+ *     ResolveStandalone, AsyncPoll, and Dummy. The host_build_graph runtime
+ *     hands FIN'd slots from S threads to a dedicated P thread, so these are
+ *     standalone, mutually exclusive P-thread bars rather than nested
+ *     S-thread work.
  *
  *   SEPARATE-LANE (converter routes to Worker View pid=4, not the sched lane):
  *     DummyTask and PredicatedSkip. One zero-width marker per dependency-only
@@ -522,10 +523,9 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     EarlyDispatch = 5,  // try_early_dispatch: early-dispatch pre-staging
                         // of a flagged producer's consumer's gated blocks.
                         // tasks_processed = blocks staged this pass.
-    // Inner in tensormap_and_ringbuffer (parent: Complete | Dummy); standalone
-    // P-thread outer phase in host_build_graph.
+    // Inner in tensormap_and_ringbuffer (parent: Complete | Dummy).
     Resolve = 6,  // Complete ready work after FIN observation. tasks_processed
-                  // is consumers visited (TMR) or completed SPSC slots (HBG).
+                  // is consumers visited.
     // Separate-lane (Worker View pid=4 AICPU_N)
     DummyTask = 7,      // Per-dummy identity marker (zero-width). phase_data.dummy_task
                         // carries the local/ring components of the full task identity.
@@ -550,6 +550,10 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     // phase_data.graph_task identifies the ring-0 outer Graph task and
     // tasks_processed is the number of in-graph tasks patched in this slice.
     GraphPrepare = 13,
+    // Outer on host_build_graph's dedicated P thread. Kept distinct from the
+    // nested TMR Resolve so post-processing never infers the role from rounded
+    // timestamps. tasks_processed is completed SPSC slots.
+    ResolveStandalone = 14,
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.

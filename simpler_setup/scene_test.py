@@ -2211,17 +2211,17 @@ class SceneTestCase:
         # slot but the dispatcher doesn't actually run tests here.
         args.device = device_ids[0]
 
-        # Resolve -j (max parallel) — 'auto' is CPU-aware on sim, device-count on hardware.
+        # Resolve --max-parallel; 'auto' is CPU-aware on sim and device-count on hardware.
         if args.max_parallel in (None, "", "auto"):
             args.max_parallel = default_max_parallel(args.platform, device_ids)
         else:
             try:
                 args.max_parallel = int(args.max_parallel)
             except (TypeError, ValueError):
-                print(f"ERROR: -j must be 'auto' or an integer, got {args.max_parallel!r}", file=sys.stderr)
+                print(f"ERROR: --max-parallel must be 'auto' or an integer, got {args.max_parallel!r}", file=sys.stderr)
                 sys.exit(2)
             if args.max_parallel < 1:
-                print(f"ERROR: -j must be >= 1, got {args.max_parallel}", file=sys.stderr)
+                print(f"ERROR: --max-parallel must be >= 1, got {args.max_parallel}", file=sys.stderr)
                 sys.exit(2)
         # Profiling + parallelism is safe: each test case sets its own
         # `output_prefix` on CallConfig (see run_class_cases) so diagnostic
@@ -2448,9 +2448,9 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
     l2_failed = False
     for rt in sorted(l2_by_runtime):
         classes = l2_by_runtime[rt]
-        # Chunk count = min(-j, number of classes). We intentionally do NOT
+        # Chunk count = min(--max-parallel, number of classes). We intentionally do NOT
         # include len(device_ids) here: each chunk uses 1 device and at most
-        # max_parallel chunks run concurrently, so a pool bigger than -j just
+        # max_parallel chunks run concurrently, so a larger device pool just
         # leaves unused ids. Fewer, larger chunks also amortize ChipWorker
         # init (layer-4 reuse) over more cases.
         n = min(args.max_parallel, len(classes))

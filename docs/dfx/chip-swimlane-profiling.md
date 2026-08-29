@@ -50,10 +50,11 @@ available.
   `release` / `dummy` / `early_dispatch` / `drain` / `graph_prepare`), plus
   nested phases.
   In `tensormap_and_ringbuffer`, `resolve` is nested within `complete` or
-  `dummy`; in `host_build_graph`, `resolve`, `async_poll`, and `dummy` are
-  standalone, mutually exclusive phases on the dedicated P thread. HBG
-  `resolve` uses that P thread's main scheduler lane; TMR's nested `resolve`
-  uses a sibling scheduler sub-lane. The drain sub-phases are nested within
+  `dummy`; in `host_build_graph`, `resolve_standalone`, `async_poll`, and
+  `dummy` are standalone, mutually exclusive phases on the dedicated P
+  thread. The converter renders `resolve_standalone` as `resolve` on that P
+  thread's main scheduler lane; TMR's nested `resolve` uses a sibling
+  scheduler sub-lane. The drain sub-phases are nested within
   their `drain` bar,
   and two **separate-lane**
   phases (`dummy_task` and `predicated_skip`, sampled immediately before
@@ -268,7 +269,8 @@ field but render differently in Perfetto:
 | `early_dispatch` | outer | sched | blocks staged by speculative early-dispatch this pass |
 | `drain` | outer | sched | blocks staged by this thread's global sync-start drain pass |
 | `graph_prepare` | outer | sched | Graph Definition nodes expanded this pass |
-| `resolve` | inner (TMR); P-thread outer (HBG) | TMR sched sub-lane; HBG P sched lane | consumers visited in `on_task_complete` (TMR); completed SPSC slots (HBG) |
+| `resolve` | inner (TMR) | TMR sched sub-lane | consumers visited in `on_task_complete` |
+| `resolve_standalone` | P-thread outer (HBG); rendered as `resolve` | HBG P sched lane | completed SPSC slots |
 | `drain_prepare` | inner | sched, nested in `drain` | subtasks prepared for global sync-start publication |
 | `drain_publish` | inner | sched, nested in `drain` | subtasks published during global sync-start staging |
 | `dummy_task` | separate-lane | Worker View AICPU_N (pid=4) | one dummy entering `on_task_complete()`; full identity is in `task_id` |
@@ -709,7 +711,7 @@ Both architectures use split phase streams:
   several (e.g. Complete, AsyncPoll, Dispatch, Release, plus Resolve).
   `ChipSwimlaneSchedPhaseKind` spans the outer phases
   (Complete, Dispatch, Release, Dummy, EarlyDispatch, AsyncPoll, Drain,
-  GraphPrepare), runtime-specific Resolve, the inner drain phases
+  GraphPrepare, ResolveStandalone), TMR's inner Resolve, the inner drain phases
   (DrainPrepare, DrainPublish), and
   the separate-lane markers (DummyTask, PredicatedSkip) — see §3.2 for how
   each is rendered. Carries loop_iter + tasks_processed + pop_hit /

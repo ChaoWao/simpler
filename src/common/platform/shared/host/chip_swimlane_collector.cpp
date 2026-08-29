@@ -1157,6 +1157,8 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                 return "early_dispatch";
             case ChipSwimlaneSchedPhaseKind::Resolve:
                 return "resolve";
+            case ChipSwimlaneSchedPhaseKind::ResolveStandalone:
+                return "resolve_standalone";
             case ChipSwimlaneSchedPhaseKind::DummyTask:
                 return "dummy_task";
             case ChipSwimlaneSchedPhaseKind::PredicatedSkip:

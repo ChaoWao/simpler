@@ -22,9 +22,9 @@
 #include "aicpu/platform_regs.h"
 #include "callable.h"
 #include "common/chip_swimlane_profiling.h"
-#include "host_build_graph/async_poll_phase_accumulator.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
+#include "host_build_graph/async_poll_phase_accumulator.h"
 #include "host_build_graph/runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"
@@ -52,7 +52,22 @@ static_assert(sizeof(simpler::hbg::Tensor) == TASKPAYLOAD_TENSOR_STRIDE);
 // Dispatch helpers
 // =============================================================================
 
-namespace {}
+namespace {
+#if SIMPLER_DFX
+void capture_shared_ready_depth(SchedulerState *scheduler, int16_t shared_depth[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
+    // Each shape's dispatch depth combines its regular lane with the sync-start
+    // lane; both feed dispatch_ready_tasks for that shape. The clamp is
+    // load-bearing: CHIP_PROF_READYQUEUE_SIZE is in the low thousands today but
+    // grows with platform scaling, and a depth above 32767 would wrap to a
+    // negative int16_t and silently corrupt the snapshot.
+    constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
+    for (int shape = 0; shape < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; shape++) {
+        const size_t depth = scheduler->ready_queues[shape].size() + scheduler->ready_sync_queues[shape].size();
+        shared_depth[shape] = static_cast<int16_t>(std::min(depth, kMax));
+    }
+}
+#endif
+}  // namespace
 
 // The early-dispatch core bitmask (EARLY_DISPATCH_CORE_MASK_WORDS * 64 bits) must cover
 // every global core_id, and the per-core doorbell table is sized to match.
@@ -905,17 +920,10 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     chip_swimlane.chip_swimlane_enabled = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
 
     const bool record_sched_phases = chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES;
-    auto capture_shared_depth = [&](int16_t shared_depth[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
-        constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
-        for (int shape = 0; shape < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; shape++) {
-            const size_t depth = sched_->ready_queues[shape].size() + sched_->ready_sync_queues[shape].size();
-            shared_depth[shape] = static_cast<int16_t>(std::min(depth, kMax));
-        }
-    };
     auto record_p_phase = [&](ChipSwimlaneSchedPhaseKind kind, uint64_t start_time, uint64_t end_time,
                               uint32_t tasks_processed, const int16_t shared_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
         int16_t shared_at_end[CHIP_SWIMLANE_NUM_QUEUE_SHAPES];
-        capture_shared_depth(shared_at_end);
+        capture_shared_ready_depth(sched_, shared_at_end);
         chip_swimlane_aicpu_record_sched_phase(
             thread_idx, kind, start_time, end_time, chip_swimlane.sched_loop_count, tasks_processed,
             /*pop_hit=*/0, /*pop_miss=*/0, shared_at_start, shared_at_end
@@ -969,7 +977,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                 if (record_sched_phases && resolve_t0 == 0) {
                     resolve_t0 = get_sys_cnt_aicpu();
                     flush_async_poll(resolve_t0);
-                    capture_shared_depth(resolve_shared_at_start);
+                    capture_shared_ready_depth(sched_, resolve_shared_at_start);
                 }
 #endif
 #if SIMPLER_SCHED_PROFILING
@@ -991,7 +999,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #if SIMPLER_DFX
         if (resolve_t0 != 0) {
             record_p_phase(
-                ChipSwimlaneSchedPhaseKind::Resolve, resolve_t0, get_sys_cnt_aicpu(), resolve_count,
+                ChipSwimlaneSchedPhaseKind::ResolveStandalone, resolve_t0, get_sys_cnt_aicpu(), resolve_count,
                 resolve_shared_at_start
             );
         }
@@ -1008,7 +1016,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
             uint64_t async_poll_t0 = 0;
             if (record_sched_phases) {
                 if (!async_poll_phase.active()) {
-                    capture_shared_depth(async_poll_shared_at_start);
+                    capture_shared_ready_depth(sched_, async_poll_shared_at_start);
                     async_poll_phase.begin();
                 }
                 async_poll_t0 = get_sys_cnt_aicpu();
@@ -1059,7 +1067,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
                 if (record_sched_phases && dummy_t0 == 0) {
                     dummy_t0 = get_sys_cnt_aicpu();
                     flush_async_poll(dummy_t0);
-                    capture_shared_depth(dummy_shared_at_start);
+                    capture_shared_ready_depth(sched_, dummy_shared_at_start);
                 }
 #endif
                 for (int di = 0; di < dummy_got; di++) {
@@ -1230,17 +1238,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     bool iter_shared_sampled = false;
     auto get_or_sample_shared = [&]() -> const int16_t * {
         if (!iter_shared_sampled) {
-            // Clamp to int16_t max before narrowing. CHIP_PROF_READYQUEUE_SIZE
-            // is in the low thousands today but could grow with platform
-            // scaling — without clamp, sizes above 32767 wrap to negatives
-            // and silently corrupt the snapshot.
-            constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
-            for (int s = 0; s < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; s++) {
-                // Total normal-source ready depth of shape `s` = regular ready lane + the
-                // sync_start Tier-0 lane; both feed dispatch_ready_tasks for this shape.
-                const size_t qsize = sched_->ready_queues[s].size() + sched_->ready_sync_queues[s].size();
-                iter_shared_snapshot[s] = static_cast<int16_t>(std::min(qsize, kMax));
-            }
+            capture_shared_ready_depth(sched_, iter_shared_snapshot);
             iter_shared_sampled = true;
         }
         return iter_shared_snapshot;
