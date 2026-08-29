@@ -1,6 +1,6 @@
 # `qwen3_14b_decode/` — Qwen3-14B 40-layer decode (CANN fused attention)
 
-Self-contained SceneTestCase port of pypto-lib
+Self-contained standalone-driver port of pypto-lib
 `models/qwen3/14b/decode_fwd.py` entry `decode_fwd_layers` with
 `_CHUNK_NLAYERS == 40`: **the whole Qwen3-14B decode stack as one fused
 dispatch** (hidden → hidden, no LM head), with the FP32 inter-layer residual
@@ -136,8 +136,9 @@ re-transcribe `CALLABLE` from `OUT/kernel_config.py` (which already records
 
 One deliberate deviation from `kernel_config.py`: `decode_fwd_layers` declares
 `k_cache` / `v_cache` as plain inputs, but the extern writes the current token's
-KV into them. The `CALLABLE` marks them `INOUT` so simpler copies the pools back
-and the golden can verify all 40 layers' KV writes, not just the hidden output.
+KV into them. The callable marks them `INOUT`; correctness runs explicitly copy
+the pools back so the golden can verify all 40 layers' KV writes, not just the
+hidden output.
 
 ## Running
 
@@ -146,20 +147,27 @@ and the golden can verify all 40 layers' KV writes, not just the hidden output.
 pytest examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode \
     --platform a2a3 --device ${DEVICE} --manual include
 
-# standalone
-python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/test_qwen3_14b_decode.py \
-    -p a2a3 -d ${DEVICE} --manual include
+# standalone correctness
+python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/main.py \
+    -p a2a3 -d ${DEVICE}
+
+# benchmark: one fixture upload, then device-only parameter reuse across rounds
+python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/main.py \
+    -p a2a3 -d ${DEVICE} --rounds 100 --skip-golden
 ```
 
-DFX is opt-in via the existing flags — no kernel changes needed:
+DFX is opt-in on the standalone driver — no kernel changes needed:
 
 ```bash
-pytest .../qwen3_14b_decode --platform a2a3 --device ${DEVICE} \
-    --manual include --enable-chip-swimlane 1 --enable-dep-gen
+python .../qwen3_14b_decode/main.py -p a2a3 -d ${DEVICE} \
+    --enable-dep-gen
+
+python .../qwen3_14b_decode/main.py -p a2a3 -d ${DEVICE} \
+    --enable-chip-swimlane 1
 ```
 
-Note that `--enable-dep-gen` / `--enable-chip-swimlane` on the full 40-layer graph
-can overflow the per-run SHM record buffer ("records dropped"); pypto-lib warns
+Note that dependency generation or chip swimlane on the full 40-layer graph can
+overflow the per-run SHM record buffer ("records dropped"); pypto-lib warns
 about the same thing for `decode_fwd.py --fwd-layers`. Capture on a smaller
 harvest if you need a clean trace.
 
@@ -168,10 +176,24 @@ harvest if you need a clean trace.
 Passes on device: output **and all 40 layers' KV caches** match the torch
 reference at `RTOL=5e-2 / ATOL=1e-1`.
 
-## Cost
+## Memory and round behavior
 
-It runs in the daily full scene-test sweep and is excluded from per-PR CI.
-Measured on this repo's a2a3 box, one device:
+All 20 entry tensors are allocated once with `Worker.malloc`. In
+`--skip-golden` benchmark mode, the 19 inputs are generated and uploaded one at
+a time, so the host never retains the complete 38 GiB fixture. The flag still
+uploads valid model weights, KV cache, and paging metadata; it skips only the
+torch reference and explicit D2H comparison. Every round reuses the same device
+addresses and does no automatic parameter staging or copy-back.
+
+Correctness mode materializes the host fixture once, uploads that same fixture,
+computes the torch golden in place, then reads back `out`, `k_cache`, and
+`v_cache` one at a time after the last round. The freshly allocated `out` buffer
+is not uploaded because the final `copy_out` task overwrites every element.
+
+## Historical cost
+
+Before the device-resident migration, it ran in the daily full scene-test sweep
+with the following one-device breakdown:
 
 | Phase | Wall |
 | ----- | ---- |

@@ -23,6 +23,7 @@ from simpler_setup.scene_test import (
     _dispatch_test_phases_standalone,
     effective_diagnostic_options,
     run_class_cases,
+    standalone_pytest_options,
 )
 
 
@@ -67,6 +68,31 @@ def test_dep_gen_extension_hook_uses_the_shared_multi_round_gate() -> None:
     request = SimpleNamespace(config=SimpleNamespace(getoption=lambda name, default=None: options.get(name, default)))
 
     assert not SceneTestCase._effective_enable_dep_gen(request)
+
+
+def test_thin_pytest_wrapper_forwards_the_shared_cli_contract() -> None:
+    options = {
+        "--rounds": 7,
+        "--skip-golden": True,
+        "--enable-chip-swimlane": 3,
+        "--dump-args": 2,
+        "--enable-pmu": 4,
+        "--enable-dep-gen": True,
+        "--enable-scope-stats": True,
+        "--enable-swimlane-overhead": True,
+    }
+    request = SimpleNamespace(config=SimpleNamespace(getoption=lambda name, default=None: options.get(name, default)))
+
+    assert standalone_pytest_options(request) == {
+        "rounds": 7,
+        "skip_golden": True,
+        "enable_chip_swimlane": 3,
+        "dump_args": 2,
+        "enable_pmu": 4,
+        "enable_dep_gen": True,
+        "enable_scope_stats": True,
+        "enable_swimlane_overhead": True,
+    }
 
 
 def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> None:

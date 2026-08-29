@@ -49,14 +49,14 @@ instead, and feed the finisher both (see the timeline command below).
 | Property | dsv4 FLASH decode | qwen3-14b decode |
 | -------- | ----------------- | ---------------- |
 | `--device-num` | 2 | 1 |
-| entry point | standalone driver — it owns its `Worker`, so no `--case` / `--manual` / `--level` and no module runner | `SceneTestCase` at `level=2`, driven through the module runner |
-| `CASE` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/main.py -p a2a3 --skip-golden` | `examples/a2a3/host_build_graph/qwen3_14b_decode/test_qwen3_14b_decode.py -p a2a3 --case TestQwen314BDecodeHostBuildGraph:: --skip-golden --manual only` |
-| parameters | child memory; **`--skip-golden` is not optional here** — without it the driver first streams a 42.6 GiB-per-rank fixture you are not measuring | host fixture (~38 GiB), built per run |
+| entry point | standalone driver — it owns its `Worker`, so no `--case` / `--manual` / `--level` and no module runner | standalone driver with the same ownership model |
+| `CASE` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/main.py -p a2a3 --skip-golden` | `examples/a2a3/host_build_graph/qwen3_14b_decode/main.py -p a2a3 --skip-golden` |
+| parameters | child memory; **`--skip-golden` is not optional here** — without it the driver first streams a 42.6 GiB-per-rank fixture you are not measuring | device-resident buffers; the valid fixture is streamed once, and `--skip-golden` skips only torch/D2H |
 | timeout | 3600 (cold compile is minutes) | 2400 |
 
-dsv4 needs no `--level 3` any more: the driver runs the L3 `Worker` in this
-process, so its chip children write straight to the log the `task-submit --run`
-command is redirected into. (Under the scene-test module runner they did not: it
+Neither case needs a `--level`: each driver runs its `Worker` in this process,
+so its chip children write straight to the log the `task-submit --run` command
+is redirected into. (Under the scene-test module runner they did not: it
 captured the child's stdout and the log ended up with zero `bind phase=` lines
 while the run still passed.)
 

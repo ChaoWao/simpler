@@ -84,6 +84,17 @@ jobs:
             --platform a2a3 --exclude-level 4 --require-pto-isa --compile-workers 8 -q \
             --manual "$MANUAL_MODE"
 
+      - name: Compile Qwen standalone kernels (a2a3)
+        if: inputs.manual_mode != 'exclude'
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          for family in tensormap_and_ringbuffer host_build_graph; do
+            .venv/bin/python "examples/a2a3/$family/qwen3_14b_decode/main.py" \
+              --platform a2a3 --compile-only --compile-workers 8
+          done
+
       - name: Run pytest scene tests (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh

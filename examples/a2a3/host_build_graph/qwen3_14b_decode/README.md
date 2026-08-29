@@ -4,6 +4,8 @@ This scene runs the complete Qwen3-14B decoder stack with the
 `host_build_graph` runtime. It reuses the kernels, fixture, and golden from the
 [`tensormap_and_ringbuffer` case](../../tensormap_and_ringbuffer/qwen3_14b_decode/README.md),
 but records one decoder layer as a Graph and replays it for the remaining 39.
+Its `main.py` delegates to the TMR standalone driver and changes only the
+runtime and orchestration source.
 
 ## Graph shape
 
@@ -38,12 +40,14 @@ configuration.
 ## Run
 
 ```bash
-.claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
 task-submit --device auto --device-num 1 --run \
-  ".venv/bin/python -m pytest \
-  examples/a2a3/host_build_graph/qwen3_14b_decode \
-  --platform a2a3 --device \$TASK_DEVICE --manual include"
+  ".claude/skills/onboard-arch-precheck/check.sh a2a3 && \
+   .venv/bin/python examples/a2a3/host_build_graph/qwen3_14b_decode/main.py \
+   -p a2a3 -d \"\$TASK_DEVICE\" --rounds 100 --skip-golden"
 ```
 
-The case runs in the daily full scene-test sweep and is excluded from per-PR
-CI.
+The driver allocates all entry parameters once in device memory, streams one
+valid fixture upload before the first round, and reuses the same addresses for
+every Graph replay. `--skip-golden` skips only torch computation and explicit
+D2H comparison. The thin pytest wrapper remains manual, so the case runs in the
+daily full scene-test sweep and is excluded from per-PR CI.
