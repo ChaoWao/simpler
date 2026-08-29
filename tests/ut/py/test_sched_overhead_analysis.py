@@ -249,6 +249,29 @@ def test_parse_scheduler_counts_hbg_p_thread_standalone_phases():
     assert threads[0]["phases_seen"] == {"resolve", "async_poll", "dummy", "idle"}
 
 
+def test_parse_scheduler_classifies_release_as_scheduler_work():
+    data = {
+        "aicpu_scheduler_phases": [
+            [
+                {
+                    "phase": "release",
+                    "start_time_us": 1.0,
+                    "end_time_us": 2.0,
+                    "loop_iter": 7,
+                    "tasks_processed": 5,
+                },
+                {"phase": "resolve", "start_time_us": 2.0, "end_time_us": 3.0, "loop_iter": 8},
+            ]
+        ]
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["role"] == "scheduler"
+    assert threads[0]["release_us"] == 1.0
+    assert threads[0]["phases_seen"] == {"release", "resolve"}
+
+
 def test_parse_scheduler_uses_explicit_hbg_resolve_discriminator_at_parent_boundary():
     data = {
         "aicpu_scheduler_phases": [

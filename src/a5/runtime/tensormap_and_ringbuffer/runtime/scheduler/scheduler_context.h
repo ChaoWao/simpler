@@ -111,8 +111,8 @@ public:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
     //  - latches submitted task count from shared memory
     //  - folds inline_completed_tasks into completed_tasks_
-    //  - flips orchestrator_done_ and triggers core transition
-    //    (skipped on fatal error — emergency_shutdown runs instead)
+    //  - flips orchestrator_done_ once no more tasks can be submitted
+    //  - triggers core transition, or emergency_shutdown on fatal error
     // Callers must invoke rt_orchestration_done(rt) before this — that
     // step belongs to the orchestrator lifecycle, not the scheduler.
     void on_orchestration_done(Runtime *runtime, RuntimeContext *rt, int32_t thread_idx, int32_t total_tasks);
@@ -175,7 +175,8 @@ private:
     // --- Task-execution tracking ---
     std::atomic<int32_t> completed_tasks_{0};
     int32_t total_tasks_{0};
-    // Device orchestration: set by last orchestrator when graph is built; schedulers poll it.
+    // Device orchestration: set when orchestration exits and no more tasks can
+    // be submitted; schedulers poll it.
     std::atomic<bool> orchestrator_done_{false};
     std::atomic<bool> completed_{false};
     uint64_t *func_id_to_addr_{nullptr};

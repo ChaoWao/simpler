@@ -199,16 +199,20 @@ void SchedulerContext::complete_slot_task(
         }
         chip_swimlane.phase_complete_count++;
 #endif
-        if (deferred_release_count < DEFERRED_RELEASE_CAP) {
-            deferred_release_slot_states[deferred_release_count++] = &slot_state;
-        } else {
-            while (deferred_release_count > 0) {
+        // At capacity, elide deferred releases (including the overflowing slot)
+        // when orchestration is done; otherwise drain then push.
+        bool release_elided = false;
+        if (deferred_release_count >= DEFERRED_RELEASE_CAP) {
+            release_elided = orchestrator_done_.load(std::memory_order_acquire);
+            drain_or_elide_deferred_releases(
+                sched_, deferred_release_slot_states, deferred_release_count, release_elided
 #if SIMPLER_SCHED_PROFILING
-                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+                ,
+                thread_idx
 #endif
-            }
+            );
+        }
+        if (!release_elided) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
         }
         completed_this_turn++;

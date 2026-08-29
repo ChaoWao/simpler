@@ -78,7 +78,10 @@ class TestChipSwimlane(SceneTestCase):
             "platforms": ["a5sim", "a5"],
             "manual": ["a5sim"],
             "params": {},
-            "required_sched_phases": ("release",),
+            # Tiny 5-task graphs often seal before an idle drain, so post-seal
+            # elision may drop every deferred release. Release E2E lives in
+            # TestChipSwimlaneManyAdds below.
+            "required_sched_phases": (),
         },
         {
             "name": "aicpu_threads_2",
@@ -86,7 +89,7 @@ class TestChipSwimlane(SceneTestCase):
             "manual": ["a5sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
-            "required_sched_phases": ("release",),
+            "required_sched_phases": (),
         },
     ]
 
@@ -113,6 +116,75 @@ class TestChipSwimlane(SceneTestCase):
                 f"TestChipSwimlane_{case['name']}",
                 since=run_marker,
                 expected_task_count=_EXPECTED_TASK_COUNT,
+                required_sched_phases=case["required_sched_phases"],
+            )
+
+
+# Short single-block adds (1 perf row each) + long SPMD (blocks per task).
+_SHORT_ADD_TASKS = 16
+_LONG_SPMD_TASKS = 4
+_SPMD_BLOCKS = 8
+_MANY_ADDS_TASK_COUNT = _SHORT_ADD_TASKS + _LONG_SPMD_TASKS * _SPMD_BLOCKS
+
+
+@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+class TestChipSwimlaneManyAdds(SceneTestCase):
+    """Short adds (pre-seal `release`) then long SPMD burst (post-seal elide)."""
+
+    CALLABLE = {
+        "orchestration": {
+            "source": "kernels/orchestration/many_adds_orch.cpp",
+            "function_name": "aicpu_orchestration_entry",
+            "signature": [D.IN, D.IN, D.OUT],
+        },
+        "incores": [
+            {
+                "func_id": 0,
+                "source": f"{KERNELS_BASE}/aiv/kernel_add.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
+            },
+            {
+                "func_id": 1,
+                "name": "SPMD_WRITE_SLOW_AIV",
+                "source": "../../spmd_sync_start_early_dispatch/kernels/aiv/kernel_spmd_write_slow.cpp",
+                "core_type": "aiv",
+                "signature": [D.INOUT],
+            },
+        ],
+    }
+
+    CASES = [
+        {
+            "name": "default",
+            "platforms": ["a5sim", "a5"],
+            "manual": ["a5sim"],
+            "params": {},
+            "required_sched_phases": ("release",),
+        },
+    ]
+
+    def generate_args(self, params):
+        SIZE = 128 * 128
+        return TaskArgsBuilder(
+            TensorArg("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(SIZE, dtype=torch.float32)),
+        )
+
+    def compute_golden(self, args, params):
+        args.f[:] = args.a + args.b
+
+    def test_run(self, st_platform, st_worker, request):
+        run_marker = int(time.time())
+        super().test_run(st_platform, st_worker, request)
+        if not request.config.getoption("--enable-chip-swimlane", default=0):
+            return
+        for case in self._matching_cases(st_platform, request):
+            validate_perf_artifact(
+                f"TestChipSwimlaneManyAdds_{case['name']}",
+                since=run_marker,
+                expected_task_count=_MANY_ADDS_TASK_COUNT,
                 required_sched_phases=case["required_sched_phases"],
             )
 

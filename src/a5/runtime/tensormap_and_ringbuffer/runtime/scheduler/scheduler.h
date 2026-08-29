@@ -1327,6 +1327,29 @@ struct SchedulerState {
 // Scheduler cold-path API is declared as SchedulerState member functions.
 // See init()/destroy()/print_stats()/print_queues() below the struct definition.
 
+// Drop deferred releases when release_elided; otherwise drain via on_task_release.
+// Callers set release_elided from orchestrator_done_ only at existing release
+// boundaries (full buffer / idle / exit); the async path always passes false.
+inline void drain_or_elide_deferred_releases(
+    SchedulerState *sched, ChipTaskSlotState **slots, int32_t &count, bool release_elided
+#if SIMPLER_SCHED_PROFILING
+    ,
+    int32_t thread_idx
+#endif
+) {
+    if (release_elided) {
+        count = 0;
+        return;
+    }
+    while (count > 0) {
+#if SIMPLER_SCHED_PROFILING
+        (void)sched->on_task_release(*slots[--count], thread_idx);
+#else
+        sched->on_task_release(*slots[--count]);
+#endif
+    }
+}
+
 // Short-circuit NotDeferred completions seen during drain so they don't grow
 // entries[]. Mirrors the a2a3 impl; see that mirror for the rationale.
 inline bool
@@ -1336,16 +1359,15 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 #else
     sink.sched->on_task_complete(slot_state);
 #endif
+    // Async path keeps exact deferred release (no graph-seal observation here).
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
-        while (*sink.deferred_release_count > 0) {
+        drain_or_elide_deferred_releases(
+            sink.sched, sink.deferred_release_slot_states, *sink.deferred_release_count, /*release_elided=*/false
 #if SIMPLER_SCHED_PROFILING
-            (void)sink.sched->on_task_release(
-                *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
-            );
-#else
-            sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
+            ,
+            sink.thread_idx
 #endif
-        }
+        );
     }
     sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
     sink.inline_completed++;
@@ -1408,13 +1430,13 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
             sched->on_task_complete(*entry.slot_state);
 #endif
             if (deferred_release_count >= deferred_release_capacity) {
-                while (deferred_release_count > 0) {
+                drain_or_elide_deferred_releases(
+                    sched, deferred_release_slot_states, deferred_release_count, /*release_elided=*/false
 #if SIMPLER_SCHED_PROFILING
-                    (void)sched->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                    sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+                    ,
+                    thread_idx
 #endif
-                }
+                );
             }
             deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
             result.completed++;

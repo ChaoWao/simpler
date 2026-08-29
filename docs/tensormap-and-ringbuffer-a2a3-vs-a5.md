@@ -4,7 +4,7 @@ This document describes the substantive differences in the current code under
 `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/`.
 
 > **Maintenance baseline:** The source layout and classifications were verified
-> on 2026-08-17. Recompute the counts and update the affected sections whenever
+> on 2026-09-03. Recompute the counts and update the affected sections whenever
 > the files or constants described here change.
 
 ## Comparison Boundary and Classification
@@ -112,6 +112,7 @@ The functional differences group into the following themes:
 | URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
 | Scheduler progress publication | AICPU topology and measured publication cost | No | Retain A5's 16-task batching; keep per-advance publication on A2/A3, where the portable implementation showed no significant benefit |
+| Terminal task release | Measured end-of-run scheduler cost | No | A5 traces show per-task release blocking the tail after task submission has ended, so successful A5 runs elide deferred release after the graph seal; retain incremental release on A2/A3 because no tail release blocking was found there |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
 | Scheduler trace attribution | Software diagnostic strategy | No | Preserve the current traces; converge only after comparing generated timelines |
 
@@ -292,6 +293,89 @@ without a demonstrated payoff. The same-device A5
 measurements instead showed lower Effective time in all eight workloads, with
 an unweighted mean reduction of `2.81%`. Full A2/A3 measurements are recorded
 in the [PR benchmark follow-up](https://github.com/hw-native-sys/simpler/pull/1575#issuecomment-5310909143).
+
+### Terminal Task Release: A5 Seal and Elision
+
+Task completion and task release are separate scheduler operations. Completion
+records the finished AICore work and unlocks dependent tasks. Release later
+drops the completed task's retained references, advances the ring's reclaim
+head across consumed slots, resets reusable slot state, and publishes reclaim
+progress. Both platforms defer this release work in a per-scheduler array with
+a capacity of 256 entries.
+
+A2/A3 preserves the incremental protocol for the whole run. It drains the
+array when it becomes full, during idle cleanup, and when dispatch exits. Every
+completed task therefore reaches `on_task_release()` before the scheduler
+returns.
+
+A5 follows the same protocol while the Orchestrator can still submit tasks.
+After `orchestrator_done_` marks the orchestration terminal, however, no new
+task can require a reclaimed ring slot. At the next existing full-array,
+idle-drain, or exit-drain boundary, A5 discards the deferred-release backlog
+instead of calling `on_task_release()` once per entry. Shared helper
+`drain_or_elide_deferred_releases` owns that decision. The seal is deliberately
+not loaded on every scheduler-loop iteration or every completion: completion
+and dependency unlocking remain unchanged, and the added acquire loads stay on
+boundaries that already perform release bookkeeping. At a sealed capacity
+boundary, the overflowing completed slot is also not deferred.
+
+The terminal flag is stored whenever orchestration exits, including after an
+orchestration error. At that point no later submission can consume reclaimed
+capacity, while `orch_error_code` independently carries the failure through
+emergency shutdown and host reporting. Later idle/exit drains may therefore
+elide on both success and failure; the next-run SM reset closes the lifecycle.
+
+Skipped incremental release does not need a terminal barrier or bulk slot
+closure. The next run clears the entire SM with `memset` and rebuilds flow
+control via `init_per_ring` → `fc.init()`, and the orchestrator already
+self-cleans each reused slot on submit. There is no functional downstream
+reader of terminal-exit `CONSUMED` watermarks between runs. An earlier
+barrier / `TerminalClose` layer was removed as redundant.
+
+This optimization is independent of the A5 K=16 progress-publication policy in
+the preceding section. K=16 controls how often an already-advanced reclaim
+head is copied to shared memory during the run. Terminal release elision avoids
+the per-task reference-count and ring-advance work itself after graph sealing;
+its deferred-release array still has capacity 256 and does not impose a
+16-task release limit.
+
+| Stage | A2/A3 | A5 |
+| ----- | ----- | -- |
+| Before graph sealing | Complete tasks, defer release, then incrementally call `on_task_release()` | Same |
+| After graph sealing | Continue incremental release | Drop deferred release work at existing release boundaries |
+| Successful Scheduler exit | Drain every remaining deferred entry | Drop remaining deferred entries; next run resets SM |
+| Orchestration failure | Emergency teardown after the existing error checks | Publish `orchestrator_done_`, then emergency teardown; exit/idle drains may elide because no later submission can use reclaimed capacity |
+| Scheduler / async failure after orchestration terminates | Emergency teardown | `orchestrator_done_` remains true, so exit/idle drains still elide; SM reset on the next run closes the lifecycle |
+| Profiling | Release phases | Release phases only when a real drain runs (no `terminal_close`) |
+
+| File | A5-only terminal-release role |
+| ---- | ----------------------------- |
+| `runtime/async_wait.h`, `runtime/scheduler/scheduler_completion.cpp` | Sync completion reads the graph seal at deferred-release capacity boundaries; async capacity drains keep exact release |
+| `runtime/scheduler/scheduler_dispatch.cpp` | Elide sealed idle/exit backlog drains via shared `drain_or_elide_deferred_releases`; skip DFX `release` when elided |
+| `runtime/scheduler/scheduler.h` | Define the shared drain-or-elide helper used by deferred-release sites |
+| `runtime/scheduler/scheduler_cold_path.cpp` | Publish `orchestrator_done_` whenever orchestration exits; propagate any orchestration error independently |
+
+The post-removal A/B was run only on the local A5 system against current
+`main`. The seven non-Qwen workloads improved by `9.753%` in Effective
+geometric mean; Qwen3 changed by `-0.010%`, and no workload regressed by 5% or
+more in Effective time. The largest Scheduler gains remain in the
+paged-attention-unroll family (`10.550%` to `14.021%` Effective). Full tables
+are recorded under the [PR #2070](https://github.com/hw-native-sys/simpler/pull/2070)
+benchmark discussion / local `outputs/pr2070_full_bench/` artifacts.
+
+The platform scope follows the observed bottleneck. On A5, the motivating
+timelines contain a visible tail after the Orchestrator has finished submitting
+tasks: Schedulers continue executing per-task release work even though no new
+task can consume the reclaimed capacity. That release interval extends the
+execution critical path, which gives seal-and-elide a direct optimization
+target. No tail release blocking was found on A2/A3. Its release work did not
+appear as the corresponding post-orchestration critical-path interval, so there
+is currently no performance evidence that A2/A3 would benefit from the extra
+graph-seal observation. A2/A3 therefore keeps the simpler incremental release
+protocol, and this experiment does not run an A2/A3 benchmark or port the
+implementation there. This is an evidence-based software decision rather than
+an A5 hardware requirement; revisit it if a future A2/A3 timeline exposes the
+same tail release blocking.
 
 ### Fatal Teardown
 
