@@ -29,9 +29,11 @@ namespace profiling_device {
 // The push/pop gates here implement the device half of the block-on-contention
 // backpressure protocol: on a full ready queue or empty free queue the writer
 // parks at its buffer-switch gate (via dfx_backpressure_device.h) until the host
-// clears the freeze, and only breaks to the single failure exit when the
-// 30-second host-crash backstop (Module::kBackpressureWaitCycles) trips. Full
-// design — dual-signal freeze, conjunction release, (0,0) escape-window and
+// clears the freeze. A pre-publication queue wait reports failure when the
+// 30-second host-crash backstop (Module::kBackpressureWaitCycles) trips. A
+// post-publication push-gate timeout leaves the enqueue successful because the
+// ready-queue tail already transferred buffer ownership to the host. Full design
+// — dual-signal freeze, conjunction release, (0,0) escape-window and
 // deadlock-freedom arguments — in docs/dfx/global-backpressure-design.md.
 template <typename Module>
 struct DeviceProfilerEngine {
@@ -147,11 +149,9 @@ struct DeviceProfilerEngine {
         // reaches its push gate during rq_freeze converges here → one aligned
         // common-mode gap; production resumes only after the host clears the
         // freeze (conjunction release).
-        if (!dfx_backpressure::push_freeze_barrier(header, Module::kBackpressureWaitCycles)) {
-            // Gate timeout: the entry is already published to the ready queue,
-            // so the caller (switch_buffer) accounts the dropped records.
-            return -1;
-        }
+        // The tail advance transfers ownership to the host and cannot be rolled
+        // back. A gate timeout must not make callers clear or reuse this buffer.
+        (void)dfx_backpressure::push_freeze_barrier(header, Module::kBackpressureWaitCycles);
         return 0;
     }
 

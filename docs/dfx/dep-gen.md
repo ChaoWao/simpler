@@ -73,6 +73,10 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
   This is the guarantee against silent shotgun modifications — anyone
   who changes `compute_task_fanin` semantics will trip the gate
   immediately and know to update the annotated mirror.
+  Explicit deps are a common captured input to both passes, so this gate
+  cannot independently validate their recorded kind bytes. The a2a3/a5
+  dep_gen chain scene tests validate that capture/replay round-trip across
+  inline and overflow records.
 - **Output.** `<output_prefix>/deps.json` — strided-Tensor schema with
   `tasks[]`, `tensors[]`, and tensor-annotated `edges[]` (see §4).
 
@@ -218,7 +222,7 @@ Each edge is `{pred, succ}` plus annotation. Fields:
 | `pred`, `succ` | uint64 (string) | always | `TaskId::raw` of producer and consumer |
 | `arg` | int32 | always | Consumer's arg-slot index; `-1` for `explicit` source |
 | `source` | string | always | `explicit` (from `explicit_deps[]`), `creator` (`owner_task_id` retention), or `tensormap` (overlap lookup hit) |
-| `flags` | string array | always | Subset of `["wait", "retain"]` — the edge's `DepFlags`. `wait` = ordering (readiness); `retain` = producer lifetime held until the consumer releases. `creator` edges are `["wait","retain"]`; `tensormap` edges `["wait"]`. `explicit` edges are **always recorded as `["wait","retain"]`**: the `DepGenRecord` does not carry per-dep kinds, so a replayed explicit dep cannot distinguish the ordering-only `CoreTaskArgsWithDeps::add_dep_wait()` API from the default. The differential gate is unaffected (both passes read the same constant). At runtime an `add_dep_wait()` edge is genuinely `["wait"]`; that distinction is a known replay limitation, not written to `deps.json`. |
+| `flags` | string array | `tensormap_and_ringbuffer` | Subset of `["wait", "retain"]` — the edge's `DepFlags`. `wait` = ordering (readiness); `retain` = producer lifetime held until the consumer releases. `creator` edges are `["wait","retain"]`; `tensormap` edges `["wait"]`. `explicit` edges start with the per-dependency kind captured at submit time, so `CoreTaskArgsWithDeps::add_dep_wait()` emits `["wait"]` while the default dependency kind emits `["wait","retain"]`. When the same producer is also the creator of an input, replay matches runtime fanin dedup by OR-accumulating the creator's flags into the explicit edge. The host_build_graph writer does not currently emit this field. |
 | `overlap` | string | `source=tensormap` | `covered` (producer slice fully contains consumer slice) or `other` |
 | `tensor_id` | uint64 (string) | not `explicit` | Identity of the underlying tensor; cross-references `tensors[]` |
 | `consumer_dtype` | string | not `explicit` | Element type the consumer reads as |
@@ -365,13 +369,14 @@ slots that overlay normal record slots in the buffer.
 | Submit `explicit_dep_count` | Chain shape | Per-submit slots used |
 | --------------------------- | ----------- | --------------------- |
 | `0 ≤ dc ≤ 64` | base only — fast path, no chain bookkeeping | 1 |
-| `65 ≤ dc ≤ 646` | base (64 deps) + 1 overflow (up to 582 deps) | 2 |
-| `647 ≤ dc ≤ 1228` | base + 2 overflow | 3 |
-| general | base + `⌈(dc − 64) / 582⌉` overflow | `1 + ⌈(dc − 64) / 582⌉` |
+| `65 ≤ dc ≤ 588` | base (64 deps) + 1 overflow (up to 524 deps) | 2 |
+| `589 ≤ dc ≤ 1112` | base + 2 overflow | 3 |
+| general | base + `⌈(dc − 64) / 524⌉` overflow | `1 + ⌈(dc − 64) / 524⌉` |
 
-**Wire format.** An overflow record reinterprets the same 4672-byte slot
-as `{ task_id (8) + flags (4) + dep_count (2) + _reserved (2) + deps[582] }` —
-no tensor blobs (those live on the base record). Replay distinguishes
+**Wire format.** An overflow record reinterprets the same 4736-byte slot
+as `{ task_id (8) + flags (4) + dep_count (2) + _reserved (2) +
+deps[524] + kinds[524] }`; `kinds[]` is a byte-for-byte parallel array of
+`DepFlags`. There are no tensor blobs (those live on the base record). Replay distinguishes
 the two views by `flags & DEP_GEN_FLAG_OVERFLOW`. Chain records always
 share the base's `task_id`, and the last one sets
 `DEP_GEN_FLAG_LAST_OVERFLOW` so replay knows the chain is complete
@@ -387,7 +392,7 @@ base via `task_id`.
 
 **Truncation tail.** A submit whose chain exceeds the buffer's slot
 budget (`PLATFORM_DEP_GEN_RECORDS_PER_BUFFER = 1024` slots → roughly
-`64 + 1023 × 582 = 595450` deps max in the best case) is logged via
+`64 + 1023 × 524 = 536116` deps max in the best case) is logged via
 `LOG_ERROR` and truncated to the largest dc that fits. Runtime
 correctness is unaffected — `CoreTaskArgs::set_dependencies` keeps the full dep
 list; only the dep_gen replay graph loses the tail.
@@ -398,7 +403,7 @@ list; only the dep_gen replay graph loses the tail.
 
 | Layer | File | Role |
 | ----- | ---- | ---- |
-| Shared-mem layout | `src/{a2a3,a5}/platform/include/common/dep_gen.h` | `DepGenRecord` (4672 B base, cache-line aligned, ≤64 inline explicit_deps, per-task `block_num`) + `DepGenOverflowRecord` chain view (≤582 deps per slot) + SPSC ring + per-thread ready queue. Byte-identical layout across platforms. |
+| Shared-mem layout | `src/common/platform/include/common/dep_gen.h` | `DepGenRecord` (4736 B base, cache-line aligned, ≤64 inline explicit deps and parallel kinds, per-task `block_num`) + `DepGenOverflowRecord` chain view (≤524 dep/kind pairs per slot) + SPSC ring + per-thread ready queue. The layout is shared across platforms. |
 | AICPU writer | `src/{a2a3,a5}/platform/include/aicpu/dep_gen_collector_aicpu.h`, `src/common/platform/shared/aicpu/dep_gen_collector_aicpu.cpp` | Single-instance write path; weak-fallback exported to host build. Both platforms share the same writer implementation — the writer accesses its own device-side view of shared memory, independent of how host↔device transport is implemented. |
 | Host collector | `src/common/platform/include/host/dep_gen_collector.h`, `src/common/platform/shared/host/dep_gen_collector.cpp` | `ProfilerBase<DepGenCollector, DepGenModule>` — drains ring → `records_` vector. On non-SVM platforms it uses the base `alloc_paired_buffer`, which malloc's a host shadow + `copy_to_device`'s it and registers it via `add_malloc_shadow` so teardown can free it; `reconcile_counters` explicitly `copy_from_device`'s the BufferState before reading, and `finalize` lets `BufferPoolManager::clear_mappings()` release all shadows as the single source of truth. |
 | Capture call site (device-orch) | `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/orchestrator.cpp` `submit_task_common` | One conditional block that snapshots inputs into the ring when `is_dep_gen_enabled()`; fires for both `submit_task` and `submit_dummy_task`. The schema carries `kernel_ids[3] = {aic, aiv0, aiv1}` so the swimlane post-processor can resolve `task_id → kernel` from `deps.json` at level=1 where the AICore record is the sole device-side identity source. Inactive subslots stay at `INVALID_KERNEL_ID = -1`. It also carries the SPMD logical block num (`block_num` on a2a3, `core_num` on a5's launch spec) as `tasks[].block_num`. |

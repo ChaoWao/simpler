@@ -166,8 +166,8 @@ void dep_gen_aicpu_init() {
 
 void dep_gen_aicpu_record_submit(
     uint64_t task_id_raw, bool in_manual_scope, bool early_dispatch, int tensor_count, const void *const *tensor_ptrs,
-    const uint8_t *arg_types, int explicit_dep_count, const uint64_t *explicit_deps_raw, int block_num,
-    const int32_t kernel_ids[3]
+    const uint8_t *arg_types, int explicit_dep_count, const uint64_t *explicit_deps_raw,
+    const uint8_t *explicit_dep_kinds_raw, uint8_t default_explicit_dep_kind, int block_num, const int32_t kernel_ids[3]
 ) {
     if (!g_enable_dep_gen) {
         return;
@@ -309,6 +309,11 @@ void dep_gen_aicpu_record_submit(
     // explicit_deps (tail of the entry, packed; replay reads only the first base_dc entries)
     if (base_dc > 0) {
         memcpy(rec->explicit_deps, explicit_deps_raw, static_cast<size_t>(base_dc) * sizeof(uint64_t));
+        if (explicit_dep_kinds_raw != nullptr) {
+            memcpy(rec->explicit_dep_kinds, explicit_dep_kinds_raw, static_cast<size_t>(base_dc));
+        } else {
+            memset(rec->explicit_dep_kinds, default_explicit_dep_kind, static_cast<size_t>(base_dc));
+        }
     }
 
     // arg_types
@@ -370,6 +375,11 @@ void dep_gen_aicpu_record_submit(
         over->_reserved = 0;
         if (chunk > 0) {
             memcpy(over->deps, explicit_deps_raw + written, static_cast<size_t>(chunk) * sizeof(uint64_t));
+            if (explicit_dep_kinds_raw != nullptr) {
+                memcpy(over->kinds, explicit_dep_kinds_raw + written, static_cast<size_t>(chunk));
+            } else {
+                memset(over->kinds, default_explicit_dep_kind, static_cast<size_t>(chunk));
+            }
         }
         written += chunk;
     }

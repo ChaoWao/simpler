@@ -14,16 +14,17 @@
  * overflow chain wire format.
  *
  * Submits N producers each writing X[0] = 42.0, then a dummy_T whose only
- * dependency surface is set_dependencies({all N producer ids}, N), then a
- * consumer that explicit-depends on the barrier and copies X[0] -> Y[0].
+ * dependency surface is set_dependencies_with_kinds({all N producer ids}, N), then a
+ * consumer that ordering-depends on the barrier and copies X[0] -> Y[0].
  *
  * Picking N > DEP_GEN_MAX_EXPLICIT_DEPS (=64) forces the dep_gen capture to
  * spill into one or more DepGenOverflowRecord slots; picking N to span the
- * 64 + k*326 boundaries exercises both single- and multi-overflow chains.
+ * 64 + k*524 boundaries exercises both single- and multi-overflow chains.
  *
  * Args layout: [X, Y, scalar(N)]
  *   - X: every producer writes it (tensormap auto-deps the chain so the
- *        SENTINEL is preserved); consumer reads it.
+ *        SENTINEL is preserved); consumer reads it. The value check is an
+ *        execution sanity check; deps.json verifies the explicit barrier.
  *   - Y: consumer writes it; host checks Y[0] == SENTINEL.
  *
  * Scalar: N (1 .. MAX_PRODUCERS).
@@ -36,9 +37,10 @@
 #define FUNC_WRITE_CONST 0
 #define FUNC_COPY_FIRST 1
 
-// Stack room for producer_ids[]. 500 covers everything we expect to test;
+// Stack room for producer_ids[] and producer_kinds[]. 600 covers the second
+// overflow boundary (64 + 524 + 1);
 // CHIP_DEP_LIST_POOL_SIZE (16384) is the real ceiling on a per-ring basis.
-static constexpr int32_t MAX_PRODUCERS = 500;
+static constexpr int32_t MAX_PRODUCERS = 600;
 
 extern "C" {
 
@@ -61,14 +63,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     }
 
     TaskId producer_ids[MAX_PRODUCERS];
+    DepFlags producer_kinds[MAX_PRODUCERS];
 
     // N producers each INOUT X. tensormap auto-deps them in a chain, so X[0]
-    // stays at SENTINEL through all of them — the host only checks the final
-    // value, which proves the barrier waited for every producer to finish.
+    // stays at SENTINEL through all of them. The final value is an execution
+    // sanity check; the deps.json assertions verify the explicit barrier.
     for (int32_t i = 0; i < n; i++) {
         CoreTaskArgs args;
         args.add_inout(ext_X);
         producer_ids[i] = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
+        producer_kinds[i] = (i % 2 == 0) ? DEP_WAIT : (DEP_WAIT | DEP_RETAIN);
     }
 
     // Dummy barrier with explicit deps on ALL N producers. dc=n > 64 forces
@@ -76,19 +80,35 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TaskId barrier_id;
     {
         CoreTaskArgs args;
-        args.set_dependencies(producer_ids, n);
+        args.set_dependencies_with_kinds(producer_ids, producer_kinds, n);
         barrier_id = rt_submit_dummy_task(args).task_id();
     }
 
-    // Consumer: explicit dep on barrier only, reads X, writes Y.
+    // Consumer: ordering-only dep on barrier, reads X, writes Y.
     {
-        CoreTaskArgs args;
-        TaskId consumer_deps[] = {barrier_id};
-        args.set_dependencies(consumer_deps, 1);
+        CoreTaskArgsWithDeps<1> args;
+        args.add_dep_wait(barrier_id);
         args.add_input(ext_X);
         args.add_inout(ext_Y);
         rt_submit_aic_task(FUNC_COPY_FIRST, args);
     }
+
+    // The final pair reaches the same producer through an explicit ordering
+    // dependency and runtime-output ownership. FaninBuilder folds both reasons
+    // into one WAIT|RETAIN edge.
+    uint32_t owned_shape[1] = {1};
+    TensorCreateInfo owned_ci(owned_shape, 1, DataType::FLOAT32);
+    CoreTaskArgs creator_args;
+    creator_args.add_output(owned_ci);
+    TaskOutputTensors creator_outputs = rt_submit_dummy_task(creator_args);
+    const simpler::tmr::Tensor &owned = creator_outputs.get_ref(0);
+
+    TaskId combined_dep = creator_outputs.task_id();
+    DepFlags combined_kind = DEP_WAIT;
+    CoreTaskArgs combined_args;
+    combined_args.set_dependencies_with_kinds(&combined_dep, &combined_kind, 1);
+    combined_args.add_input(owned);
+    rt_submit_dummy_task(combined_args);
 }
 
 }  // extern "C"

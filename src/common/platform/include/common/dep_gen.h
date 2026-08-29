@@ -38,11 +38,11 @@
  * runtime-agnostic.
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_COMMON_DEP_GEN_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_COMMON_DEP_GEN_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "arg_direction.h"  // CORE_MAX_TENSOR_ARGS
 #include "common/dfx_backpressure_device.h"
@@ -93,32 +93,35 @@ enum DepGenRecordFlags : uint32_t {
  * Per-submit_task capture. Replay reads these to reconstruct the dep graph.
  *
  * Layout:
- *   - task_id, flags, counts, explicit_deps, arg_types, kernel_id in the first
- *     cache lines
+ *   - task_id, flags, counts, explicit_deps, explicit_dep_kinds, arg_types,
+ *     kernel_id in the first cache lines
  *   - tensors[] (32 × 128 B opaque blobs) at the tail; covers ~88% of the entry
  *
- * Total size: 8 + 4 + 4 + 64*8 + 32 + 12 (kernel_id) + 4 (block_num) + 32*128
- *           = 4672 bytes.
- * Aligned to 64 B → 4672 B (already a multiple of 64). kernel_id + block_num
- * together pad tensors[] up to offset 576 = 9 * 64 so each 128-byte tensor
+ * Total size: 8 + 4 + 4 + 64*8 + 64 + 32 + 12 (kernel_id) + 4 (block_num) + 32*128
+ *           = 4736 bytes.
+ * Aligned to 64 B → 4736 B (already a multiple of 64). kernel_id + block_num
+ * together pad tensors[] up to offset 640 = 10 * 64 so each 128-byte tensor
  * blob covers exactly two cache lines instead of straddling three.
  */
 struct DepGenRecord {
-    uint64_t task_id;                                   // TaskId::raw, in the minting runtime's layout
-    uint32_t flags;                                     // DepGenRecordFlags bitmask
-    uint16_t tensor_count;                              // number of valid ChipTensor slots
-    uint16_t explicit_dep_count;                        // number of valid explicit_dep slots
-    uint64_t explicit_deps[DEP_GEN_MAX_EXPLICIT_DEPS];  // TaskId::raw, length = explicit_dep_count
-    uint8_t arg_types[CORE_MAX_TENSOR_ARGS];            // TensorArgType, length = tensor_count
+    uint64_t task_id;                                       // TaskId::raw, in the minting runtime's layout
+    uint32_t flags;                                         // DepGenRecordFlags bitmask
+    uint16_t tensor_count;                                  // number of valid ChipTensor slots
+    uint16_t explicit_dep_count;                            // number of valid explicit_dep slots
+    uint64_t explicit_deps[DEP_GEN_MAX_EXPLICIT_DEPS];      // TaskId::raw, length = explicit_dep_count
+    uint8_t explicit_dep_kinds[DEP_GEN_MAX_EXPLICIT_DEPS];  // DepFlags, parallel to explicit_deps[]
+    uint8_t arg_types[CORE_MAX_TENSOR_ARGS];                // TensorArgType, length = tensor_count
     int32_t kernel_id[3];  // per-subslot kernel id (AIC, AIV0, AIV1); INVALID_KERNEL_ID = -1
     uint32_t block_num;    // SPMD logical block count; 1 means non-SPMD
     uint8_t tensors[CORE_MAX_TENSOR_ARGS][DEP_GEN_TENSOR_SIZE];  // opaque ChipTensor blobs
 } __attribute__((aligned(64)));
 
-static_assert(sizeof(DepGenRecord) == 4672, "DepGenRecord size changed — update header comment + docs/dfx/dep-gen.md");
+static_assert(sizeof(DepGenRecord) == 4736, "DepGenRecord size changed — update header comment + docs/dfx/dep-gen.md");
 static_assert(sizeof(DepGenRecord) % 64 == 0, "DepGenRecord must be cache-line aligned");
 static_assert(offsetof(DepGenRecord, tensors) % 64 == 0, "DepGenRecord::tensors[] must start on a cache-line boundary");
-static_assert(offsetof(DepGenRecord, tensors) == 576, "DepGenRecord::tensors offset changed — update header comment");
+static_assert(offsetof(DepGenRecord, tensors) == 640, "DepGenRecord::tensors offset changed — update header comment");
+static_assert(std::is_trivially_copyable_v<DepGenRecord>, "DepGenRecord must remain trivially copyable");
+static_assert(std::is_standard_layout_v<DepGenRecord>, "DepGenRecord must remain standard layout");
 
 // =============================================================================
 // DepGenOverflowRecord — chain extension for submits with >DEP_GEN_MAX_EXPLICIT_DEPS deps
@@ -128,10 +131,11 @@ static_assert(offsetof(DepGenRecord, tensors) == 576, "DepGenRecord::tensors off
  * Number of deps carried by a single overflow record. Sized so a
  * DepGenOverflowRecord exactly overlays a DepGenRecord slot in the buffer.
  *
- * Layout: 16-byte header (task_id + flags + dep_count + _reserved) + deps[].
- * deps[] occupies (sizeof(DepGenRecord) - 16) / sizeof(uint64_t) = 582 entries.
+ * Layout: 16-byte header (task_id + flags + dep_count + _reserved) + parallel
+ * deps[] and kinds[] arrays. The largest pair of arrays that fits in one
+ * DepGenRecord slot carries 524 entries.
  */
-constexpr int DEP_GEN_OVERFLOW_DEPS_PER_RECORD = 582;
+constexpr int DEP_GEN_OVERFLOW_DEPS_PER_RECORD = 524;
 
 /**
  * Reinterpret-view of a DepGenRecord slot when flags & DEP_GEN_FLAG_OVERFLOW.
@@ -155,6 +159,7 @@ struct DepGenOverflowRecord {
     uint16_t dep_count;  // number of valid entries in deps[]
     uint16_t _reserved;
     uint64_t deps[DEP_GEN_OVERFLOW_DEPS_PER_RECORD];  // TaskId::raw, length = dep_count
+    uint8_t kinds[DEP_GEN_OVERFLOW_DEPS_PER_RECORD];  // DepFlags, parallel to deps[]
 } __attribute__((aligned(64)));
 
 static_assert(
@@ -163,6 +168,10 @@ static_assert(
 static_assert(
     alignof(DepGenOverflowRecord) == alignof(DepGenRecord), "DepGenOverflowRecord alignment must match DepGenRecord"
 );
+static_assert(
+    std::is_trivially_copyable_v<DepGenOverflowRecord>, "DepGenOverflowRecord must remain trivially copyable"
+);
+static_assert(std::is_standard_layout_v<DepGenOverflowRecord>, "DepGenOverflowRecord must remain standard layout");
 
 /**
  * Number of buffer slots (1 base + N overflow records) needed to capture a
@@ -324,5 +333,3 @@ inline DepGenBufferState *get_dep_gen_buffer_state(void *base_ptr, int instance_
     return reinterpret_cast<DepGenBufferState *>(reinterpret_cast<char *>(base_ptr) + sizeof(DepGenDataHeader)) +
            instance_index;
 }
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_COMMON_DEP_GEN_H_
