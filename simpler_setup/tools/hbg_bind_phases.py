@@ -128,9 +128,11 @@ def main() -> int:
     binds = parse_binds(args.log)
     if not binds:
         print(
-            f"{args.log}: no `bind phase=` lines. SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 and "
-            "--log-level timing must both be set, and a multi-device case must be "
-            "invoked as its own child command -- see docs/dfx/hbg-bind-phases.md.",
+            f"{args.log}: no `bind phase=` lines. Either SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 "
+            "was not set, or a diagnostic flag made CallConfig.output_prefix non-empty and "
+            "moved the whole host log to outputs/<case>_<ts>/host.<pid>.log -- parse those "
+            "instead. The log level is not a cause: TIMING is the default. "
+            "See docs/dfx/hbg-bind-phases.md.",
             file=sys.stderr,
         )
         return 1

@@ -14,14 +14,16 @@ still yields its whole host picture.
 
 ## The recipe
 
-Fill in `NAME`, `DEVICES`, `TIMEOUT`, `CASE` from the case table and `ENVS`,
-`TAIL` from the mode table, then run it verbatim.
+Fill in `NAME`, `RUN`, `DEVICES`, `TIMEOUT`, `CASE` from the case table and
+`ENVS`, `TAIL` from the mode table, then run it verbatim.
 `pip install --no-build-isolation -e .` first, and again after every `HEAD` move.
 
 ```bash
 HEAD_SHA=$(git rev-parse --short HEAD)
 NAME="<case>_<mode>"                    # e.g. qwen_numbers — see below
-LOG="outputs/bind_${NAME}_${HEAD_SHA}.log"; mkdir -p outputs
+RUN=<n>                                 # repetition: 1, 2, … within one A/B session
+LOG="outputs/bind_${NAME}_${HEAD_SHA}_r${RUN}.log"; mkdir -p outputs
+[ -e "$LOG" ] && { echo "refusing to overwrite $LOG — bump RUN"; exit 1; }
 MARK="outputs/.bind_start"; : >"$MARK"   # fixed mtime; "$LOG" keeps being appended to
 
 DEVICES=<N>                                            # per case
@@ -42,10 +44,13 @@ grep -c 'bind phase=' "$LOG"          # numbers mode: must be > 0
 `[stamp]` line is the same string that runs — which is what makes two logs
 comparable. Never hand-edit one arm's command without the other's.
 
-**`NAME` carries the case and the mode because `$LOG` is opened with a
-truncating `>`.** Two cases at one commit, or the same case in both modes, would
-otherwise write the same path and the second run would destroy the first log
-without saying so.
+**`$LOG` is opened with a truncating `>`, so its name has to separate every run
+this skill tells you to make.** `NAME` separates the two cases and the two modes,
+`HEAD_SHA` the two arms of a comparison, and `RUN` the repetitions — the
+comparison protocol runs each arm more than once, so `base, measure, base,
+measure` is two runs per commit that agree on case, mode and sha. The guard turns
+a forgotten `RUN` into a refusal; without all three fields a later run silently
+destroys an earlier log, and its own output looks entirely normal.
 
 **`--log-level timing` pins a condition rather than enabling anything.**
 `python/simpler/_log.py` puts the `simpler` logger at TIMING on import and
