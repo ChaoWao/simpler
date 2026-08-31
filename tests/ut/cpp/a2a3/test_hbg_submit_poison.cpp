@@ -193,9 +193,9 @@ TEST_F(HbgSubmitPoisonTest, InvalidDispatchPredicateIsRejectedBeforeTaskAllocati
     kernels.aiv0_kernel_id = 0;
 
     EXPECT_FALSE(orch.submit_task(kernels, args).task_id().is_valid());
-    EXPECT_TRUE(orch.fatal);
+    EXPECT_TRUE(orch.is_fatal());
     EXPECT_EQ(orch.task_allocator.active_count(), 0);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
+    EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
 }
 
 TEST_F(HbgSubmitPoisonTest, OutOfRangeDispatchPredicateIndexIsRejected) {
@@ -215,7 +215,7 @@ TEST_F(HbgSubmitPoisonTest, OutOfRangeDispatchPredicateIndexIsRejected) {
     kernels.aiv0_kernel_id = 0;
 
     EXPECT_FALSE(orch.submit_task(kernels, args).task_id().is_valid());
-    EXPECT_TRUE(orch.fatal);
+    EXPECT_TRUE(orch.is_fatal());
     EXPECT_EQ(orch.task_allocator.active_count(), 0);
-    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
+    EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
 }
