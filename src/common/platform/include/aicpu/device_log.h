@@ -14,16 +14,16 @@
  *
  * Layered design:
  *   - Low-level dev_log_*() functions are platform-specific (CANN dlog on
- *     real hardware, fprintf(stderr,...) in simulation).
+ *     real hardware, the process-owned HostLogger in simulation).
  *   - Onboard fills DEBUG/INFO/WARN/ERROR from CheckLogLevel(AICPU,...);
- *     simulation fills all flags from the host-provided threshold.
+ *     simulation queries the live threshold in its bound HostLogger state.
  *   - TIMING is a simpler level between INFO and WARN. Both backends gate it
  *     from the host threshold; onboard emits enabled messages through CANN
  *     WARN because CANN has no intermediate level.
  *
  * Platform Support:
  * - a2a3 / a5       : Real hardware with CANN dlog API
- * - a2a3sim / a5sim : Host-based simulation using fprintf(stderr,...)
+ * - a2a3sim / a5sim : Host-based simulation using HostLogger
  */
 
 #pragma once
@@ -44,14 +44,15 @@
 #endif
 
 // =============================================================================
-// Severity enable flags (defined in platform-specific device_log.cpp)
+// Platform-specific severity queries. Sim reads a live bound HostLogger state;
+// onboard reads the CANN-derived flags cached by its platform backend.
 // =============================================================================
 
-extern bool g_is_log_enable_debug;
-extern bool g_is_log_enable_info;
-extern bool g_is_log_enable_timing;
-extern bool g_is_log_enable_warn;
-extern bool g_is_log_enable_error;
+bool is_log_enable_debug();
+bool is_log_enable_info();
+bool is_log_enable_timing();
+bool is_log_enable_warn();
+bool is_log_enable_error();
 
 // =============================================================================
 // Configuration setters (called by AICPU kernel init from KernelArgs)
@@ -59,7 +60,7 @@ extern bool g_is_log_enable_error;
 
 // Levels use Python-compatible thresholds: DEBUG=10, INFO=20, TIMING=25,
 // WARN=30, ERROR=40, NUL=60. Onboard applies the threshold to TIMING while
-// CANN owns its native levels; simulation applies it to the full flag table.
+// CANN owns its native levels; simulation updates its bound HostLogger state.
 extern "C" void set_log_level(int level);
 
 // Hand the process-owned host-log state to the simulation AICPU backend, which
@@ -78,11 +79,9 @@ int bind_orchestration_host_log_state(void *handle, const char **error);
 // Platform-specific logging functions (low-level layer)
 //
 // va_list primitives used by the unified_log_* adapter to forward a caller's
-// variadic args. Both backends format a whole record into one stack buffer and
-// emit it in a single call: sim writes it with one write(2), kept under
-// PIPE_BUF so concurrent threads / forked workers on a shared stderr never
-// interleave partial records; onboard buffers because CANN's dlog API has no
-// va_list variant. Caller owns va_start/va_end.
+// variadic args. Sim delegates formatting and destination selection to
+// HostLogger; onboard buffers because CANN's dlog API has no va_list variant.
+// Caller owns va_start/va_end.
 // =============================================================================
 
 #include <cstdarg>
@@ -94,14 +93,8 @@ void dev_vlog_warn(const char *func, const char *fmt, va_list args);
 void dev_vlog_error(const char *func, const char *fmt, va_list args);
 
 // =============================================================================
-// Helper Functions
+// Initialization
 // =============================================================================
-
-inline bool is_log_enable_debug() { return g_is_log_enable_debug; }
-inline bool is_log_enable_info() { return g_is_log_enable_info; }
-inline bool is_log_enable_timing() { return g_is_log_enable_timing; }
-inline bool is_log_enable_warn() { return g_is_log_enable_warn; }
-inline bool is_log_enable_error() { return g_is_log_enable_error; }
 
 // Initialize log switch (platform-specific implementation)
 void init_log_switch();

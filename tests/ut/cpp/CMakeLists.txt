@@ -1112,6 +1112,40 @@ target_link_libraries(test_host_log_unbound PRIVATE
 )
 add_test(NAME test_host_log_unbound COMMAND test_host_log_unbound)
 
+# A dlopened module that compiles the host logger owns a private buffered
+# stream on the shared log file, so unloading it must not strand that buffer.
+add_library(test_host_log_unload_consumer SHARED
+    common/test_host_log_unload_consumer.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_include_directories(test_host_log_unload_consumer PRIVATE
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_unload_consumer PRIVATE pthread)
+
+add_executable(test_host_log_dso_unload
+    common/test_host_log_dso_unload.cpp
+    ${HOST_LOG_TEST_SOURCES}
+)
+target_compile_definitions(test_host_log_dso_unload PRIVATE
+    TEST_HOST_LOG_UNLOAD_CONSUMER_PATH="$<TARGET_FILE:test_host_log_unload_consumer>"
+)
+target_include_directories(test_host_log_dso_unload PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_host_log_dso_unload PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    ${CMAKE_DL_LIBS}
+    pthread
+)
+add_dependencies(test_host_log_dso_unload test_host_log_unload_consumer)
+add_test(NAME test_host_log_dso_unload COMMAND test_host_log_dso_unload)
+set_tests_properties(test_host_log_dso_unload PROPERTIES LABELS "no_hardware")
+
 set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
 function(add_device_phase_capture_test name host_strace device_strace expected)
     add_executable(${name}
@@ -1167,12 +1201,13 @@ target_link_libraries(test_onboard_device_log_level PRIVATE
 add_test(NAME test_onboard_device_log_level COMMAND test_onboard_device_log_level)
 set_tests_properties(test_onboard_device_log_level PROPERTIES LABELS "no_hardware")
 
-# Sim device-log record atomicity: concurrent threads and forked workers must
-# not interleave partial records on the shared stderr. Pure host code — compile
-# the sim backend alongside the test; no CANN, no hardware.
+# Sim device logging uses the bound HostLogger threshold, envelope, and output.
+# Pure host code — compile the sim adapter and HostLogger alongside the test;
+# no CANN, no hardware.
 add_executable(test_sim_device_log
     common/test_sim_device_log.cpp
     ${COMMON_PLATFORM_DIR}/sim/aicpu/device_log.cpp
+    ${SIMPLER_LOG_DIR}/host_log.cpp
 )
 target_include_directories(test_sim_device_log PRIVATE
     ${GTEST_INCLUDE_DIRS}

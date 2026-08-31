@@ -54,6 +54,7 @@ file(GLOB COMMON_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/aicpu/*.cpp"
 )
 list(APPEND AICPU_SOURCES ${COMMON_SOURCES})
+list(APPEND AICPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/log/host_log.cpp")
 
 # Then, collect sources from CUSTOM_SOURCE_DIRS (runtime sources)
 if(DEFINED CUSTOM_SOURCE_DIRS)

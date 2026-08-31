@@ -13,11 +13,12 @@
  * @brief Unified logging - Device implementation.
  *
  * Forwards the unified C ABI to dev_vlog_* primitives via va_list — no
- * intermediate vsnprintf-to-buffer round-trip in this layer. On sim,
- * dev_vlog_* is a single vfprintf (buffer-free); on onboard, it still
- * buffers internally because CANN's dlog has no va_list variant.
+ * intermediate vsnprintf-to-buffer round-trip in this layer. Sim dev_vlog_*
+ * delegates to the bound HostLogger; onboard buffers internally because
+ * CANN's dlog has no va_list variant.
  *
- * Level flags come from device_log.cpp's globals (set at init time).
+ * Severity queries are platform-specific: sim reads the live bound threshold,
+ * while onboard reads the CANN-derived flags initialized by device_log.cpp.
  */
 
 #include "common/unified_log.h"
