@@ -29,6 +29,7 @@ regression that reintroduces an unbounded spin fails the suite promptly
 instead of hanging CI.
 """
 
+import math
 import os
 import struct
 import threading
@@ -66,20 +67,21 @@ class _EventLike(Protocol):
 
 
 class _ManualClock:
-    def __init__(self, poll_advance_s: float = 1.0, advance_limit_s: float = 2.0) -> None:
+    def __init__(self) -> None:
         self.now = 0.0
-        self.poll_advance_s = poll_advance_s
-        self.advance_limit_s = advance_limit_s
 
     def monotonic(self) -> float:
         return self.now
 
-    def sleep(self, _seconds: float) -> None:
-        self.now = min(self.now + self.poll_advance_s, self.advance_limit_s)
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+        # Logical time controls deadlines; this zero-duration real sleep only
+        # yields execution to other processes.
+        time.sleep(0)
 
 
-def _install_manual_worker_clock(monkeypatch, *, poll_advance_s: float = 1.0) -> _ManualClock:
-    clock = _ManualClock(poll_advance_s)
+def _install_manual_worker_clock(monkeypatch) -> _ManualClock:
+    clock = _ManualClock()
     monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
     monkeypatch.setattr(worker_mod, "_sleep", clock.sleep)
     return clock
@@ -1335,7 +1337,7 @@ class TestLevel2Lifecycle:
         import simpler.worker as worker_mod  # noqa: PLC0415
 
         monkeypatch.setattr(worker_mod, "_CLOSE_CHILD_REAP_TIMEOUT_S", 1.0)
-        clock = _ManualClock(poll_advance_s=0.0, advance_limit_s=10.0)
+        clock = _ManualClock()
         monkeypatch.setattr(worker_mod, "_monotonic", clock.monotonic)
         w = Worker(level=3, num_sub_workers=0)
         w._worker = types.SimpleNamespace(close=lambda: None)  # look "started" for the L3 branch
@@ -1385,11 +1387,23 @@ class TestLevel2Lifecycle:
 
         monkeypatch.setattr(worker_mod.os, "waitpid", fake_waitpid)
         clock = _install_manual_worker_clock(monkeypatch)
+        # Rollback reaping starts from an already-advanced startup clock.
+        clock.now = 2.0
+        reap_budget_s = 1.0
+        max_polls = math.ceil(reap_budget_s / worker_mod._STARTUP_POLL_INTERVAL_S) * 2 + 10
+        advance_clock = clock.sleep
+
+        def bounded_sleep(seconds):
+            if polls.get(stuck_pid, 0) > max_polls:
+                raise AssertionError("reap polling did not stop at its logical deadline")
+            advance_clock(seconds)
+
+        monkeypatch.setattr(worker_mod, "_sleep", bounded_sleep)
         sub_shms, sub_pids = [_FakeShm()], [stuck_pid]
         chip_shms, chip_pids = [_FakeShm()], [90002]
         next_shms, next_pids = [_FakeShm()], [90003]
         groups = [(sub_shms, sub_pids), (chip_shms, chip_pids), (next_shms, next_pids)]
-        deadline = clock.monotonic() + 1.0
+        deadline = clock.monotonic() + reap_budget_s
         with _hard_timeout(_TEST_WALL_BUDGET_S):
             err = _run_catch(lambda: Worker._reap_child_groups(groups, deadline))  # type: ignore[arg-type]
         # The wedged child is a reported survivor, kept in its group...
