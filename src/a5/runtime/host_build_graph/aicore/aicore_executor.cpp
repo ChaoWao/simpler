@@ -18,6 +18,7 @@
 #include "dispatch_payload.h"
 #include "runtime.h"
 #include "scheduler/scheduler_memory.h"
+#include "scheduler/scheduler_ready.h"
 
 /**
  * Unified function pointer type for kernel dispatch
