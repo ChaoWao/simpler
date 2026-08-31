@@ -1,10 +1,10 @@
 # hbg: `rt_set_tensor_data`'s consumer-wait cannot observe device progress
 
 **Date**: 2026-08-28
-**Verdict**: **not fixed** — identified while retiring host-orchestration leftovers
-(#2068), left alone because the fix changes `rt_get_tensor_data` /
-`rt_set_tensor_data` semantics and first needs a verdict on which behavior is
-intended.
+**Verdict**: **fixed** — identified while retiring host-orchestration leftovers
+(#2068), left open until the intended semantics were settled, then resolved by
+reading 1 below: the wait is gone and scalar access rejects a tensor with a
+producer outright.
 
 ## The defect
 
@@ -95,6 +95,25 @@ optimized.
 - **Whether the same reading applies to the producer half.** It has a working case
   (inline-completed producers), so its timeout is not vacuous in the same way, and
   the two halves may not want the same treatment.
+
+## How it was resolved
+
+Reading 1. Both halves of the wait are deleted, and `get_tensor_data` /
+`set_tensor_data` now reject a tensor that has a producer — named either by
+`owner_task_id` or by an overlapping TensorMap entry — with `INVALID_ARGS` at the
+call, naming the producer task.
+
+The producer half went the same way rather than keeping its one working case: a
+runtime allocation completes inline on the host, but its buffer is uninitialized
+and lives in the graph heap with no host view, so the value it would have made
+readable does not exist. One rule now covers both halves.
+
+Two fields existed only to serve the consumer wait and went with it —
+`ChipTaskSlotState::last_consumer_local_id` and
+`SharedMemoryTaskHeader::completed_watermark`, the latter taking
+`update_completed_watermark()` and its per-completion CAS prefix walk out of the
+scheduler's completion path. Device fanin readiness reads `completion_flags[]`,
+which is untouched.
 
 ## Related
 

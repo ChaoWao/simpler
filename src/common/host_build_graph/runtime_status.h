@@ -34,7 +34,7 @@
 #define SIMPLER_ERROR_INVALID_ARGS 5  // Arg construction error (invalid args)
 // 6 retired: per-task fanin overflow is reported as FANIN_CAPACITY_EXCEEDED (4).
 #define SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID 7
-#define SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT 8
+#define SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT 8  // Not raised here; the number stays reserved across runtimes
 #define SIMPLER_ERROR_EXPLICIT_ORCH_FATAL 9
 #define SIMPLER_ERROR_SCOPE_TASKS_OVERFLOW 10  // Not raised here; the number stays reserved across runtimes
 #define SIMPLER_ERROR_TENSORMAP_OVERFLOW 11    // graph registers more outputs than the tensormap entry pool holds

@@ -1291,9 +1291,8 @@ static bool fanin_mark_seen(OrchestratorState &orch, TaskId producer_task_id) {
 // fanin_slots and fanin_count are that region and payload.fanin_count itself: the
 // region is named by a SelfRelativePtr delta, so the caller resolves it once, and
 // the count accumulates in place instead of being copied back at the end.
-static bool append_fanin_or_fail(
-    OrchestratorState &orch, TaskId producer_task_id, TaskId self_task_id, int32_t *fanin_slots, int32_t &fanin_count
-) {
+static bool
+append_fanin_or_fail(OrchestratorState &orch, TaskId producer_task_id, int32_t *fanin_slots, int32_t &fanin_count) {
     // Only a GLOBAL producer has an entry in the task table. An IN_GRAPH id's low
     // bits are a packed (Graph task, task index) pair, so using them as a table
     // index names an unrelated task — or, since get_slot_state_by_task_id does not
@@ -1316,10 +1315,10 @@ static bool append_fanin_or_fail(
         return false;
     }
     // An id past what this run has claimed names no task: get_slot_state_by_task_id
-    // does not bounds-check, so accepting it would write last_consumer_local_id into
-    // an unclaimed — or out-of-range — slot and record a fanin edge to nothing. Only
-    // ids handed back by a previous submit are valid here, and those are below
-    // active_count() because hbg mints them in order and never recycles one.
+    // does not bounds-check, so accepting it would record a fanin edge to an
+    // unclaimed — or out-of-range — slot. Only ids handed back by a previous submit
+    // are valid here, and those are below active_count() because hbg mints them in
+    // order and never recycles one.
     const int32_t prod_local = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
     if (prod_local < 0 || prod_local >= orch.task_allocator.active_count()) {
         orch.report_fatal(
@@ -1329,12 +1328,11 @@ static bool append_fanin_or_fail(
         );
         return false;
     }
-    // A local id is its own storage index and hbg never recycles a slot, so this
-    // entry is the producer's by construction — there is no stale-slot case to
+    // Dedup by producer local id, which is also its task-table slot. A local id is
+    // its own storage index and hbg never recycles a slot, so the entry that id
+    // names is the producer's by construction — there is no stale-slot case to
     // screen for. A COMPLETED producer is a real fanin edge under polling (its
     // completion_flags byte is set), so it is not screened out either.
-    ChipTaskSlotState *prod_state = &orch.sm_header->tasks.get_slot_state_by_task_id(prod_local);
-    // Dedup by producer local id, which is also its task-table slot.
     if (fanin_mark_seen(orch, producer_task_id)) {
         return true;
     }
@@ -1353,13 +1351,6 @@ static bool append_fanin_or_fail(
         return false;
     }
     fanin_slots[fanin_count++] = prod_local;
-
-    // Reclaim gate: record this task as a consumer of the producer. The producer
-    // slot retires once the completed_watermark reaches this consumer id.
-    const int32_t self_local = static_cast<int32_t>(simpler::hbg::task_local_id(self_task_id));
-    if (self_local > prod_state->last_consumer_local_id) {
-        prod_state->last_consumer_local_id = self_local;
-    }
     return true;
 }
 
@@ -1459,11 +1450,6 @@ static bool prepare_task(
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
     out->slot_state->task_kind = active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
-    // Reclaim gate: seed last_consumer to self, so a producer with no consumers
-    // is retirable once completed_watermark >= its own id. Each fanin edge bumps
-    // it in append_fanin_or_fail. completion_flags for this slot were cleared
-    // above (whole-graph-resident hbg never reuses a slot).
-    out->slot_state->last_consumer_local_id = static_cast<int32_t>(simpler::hbg::task_local_id(out->task_id));
     // payload.fanin_count is left untouched here: submit_task_common zeroes it before
     // its fanin appends, which accumulate into it in place.
 
@@ -1716,7 +1702,7 @@ static TaskOutputTensors submit_task_common(
         if (capture_dep_graph) {
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
-        if (!append_fanin_or_fail(*orch, dep_task_id, task_id, fanin_slots, payload.fanin_count)) {
+        if (!append_fanin_or_fail(*orch, dep_task_id, fanin_slots, payload.fanin_count)) {
             return result;
         }
     }
@@ -1728,7 +1714,7 @@ static TaskOutputTensors submit_task_common(
     };
 
     auto runtime_emit = [&](TaskId producer_task_id) -> bool {
-        return append_fanin_or_fail(*orch, producer_task_id, task_id, fanin_slots, payload.fanin_count);
+        return append_fanin_or_fail(*orch, producer_task_id, fanin_slots, payload.fanin_count);
     };
 
     // The capture branch instantiates compute_task_fanin with a live Annotate;
@@ -1774,9 +1760,9 @@ static TaskOutputTensors submit_task_common(
     task.packed_buffer_end = prepared.alloc_result.packed_end;
 
     // append_fanin_or_fail wrote every producer's local id into the payload's fanin
-    // region, counted them in payload.fanin_count, and bumped each producer's
-    // last_consumer_local_id. payload.init writes tensor_count/scalar_count only and
-    // must not touch either, or it would discard that.
+    // region and counted them in payload.fanin_count. payload.init writes
+    // tensor_count/scalar_count only and must not touch either, or it would discard
+    // that.
     payload.init(args, result, prepared.alloc_result, layout);
 
     // Predicate validation runs before task allocation. Copy the resolved, bounded
@@ -1786,9 +1772,9 @@ static TaskOutputTensors submit_task_common(
 
     // === STEP 6: close the fanin region (device boot classifies) ===
     // Polling + host-orch: append_fanin_or_fail already wrote each producer's local
-    // id into the payload's fanin region, counted them in payload.fanin_count, and
-    // bumped each producer's last_consumer_local_id. There is NO fanout adjacency, NO
-    // dep_pool, and NO ready routing here — the initial device boot scan classifies
+    // id into the payload's fanin region and counted them in payload.fanin_count.
+    // There is NO fanout adjacency, NO dep_pool, and NO ready routing here — the
+    // initial device boot scan classifies
     // each task once. A -1 result from classify_fanin_state routes the task through
     // push_ready_routed; otherwise the returned index selects the producer passed
     // to register_wake. Wake retargeting in register_wake may reclassify a task
@@ -2010,7 +1996,6 @@ bool graph_submit_outer(
     orch->tensor_pool_cursor += tensor_slots;
     orch->scalar_pool_cursor += scalar_span;
     slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
-    slot.last_consumer_local_id = static_cast<int32_t>(simpler::hbg::task_local_id(task_id));
     slot.active_mask = ActiveMask{};
     slot.task_attrs = TaskAttrs{};
     slot.total_required_subtasks = 0;
@@ -2039,7 +2024,7 @@ bool graph_submit_outer(
     next_fanin_seen_epoch(orch);
     int32_t *fanin_slots = payload.fanin_data();
     auto emit = [&](TaskId producer_id) -> bool {
-        return append_fanin_or_fail(*orch, producer_id, task_id, fanin_slots, payload.fanin_count);
+        return append_fanin_or_fail(*orch, producer_id, fanin_slots, payload.fanin_count);
     };
     // An outer GRAPH task is an ordinary task, so the dependency graph
     // has to carry it: without this the whole Graph — and every edge into it —
@@ -2967,7 +2952,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // codegen task there is no Arg-driven hint to honor here, so mark it
         // unconditionally.
         prepared.slot_state->task_attrs.set_early_resolve(true);
-        prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is the host-visible mirror
+        prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is only the completion mirror
         // Polling: pre-set the device-visible completion_flags byte in the H2D
         // image. Consumers poll completion_flags (not task_state), so a hidden-alloc
         // producer completed here on the host must publish its flag too — otherwise

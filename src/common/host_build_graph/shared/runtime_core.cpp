@@ -26,8 +26,6 @@
 #include <string.h>
 #include <time.h>
 
-#include <algorithm>
-
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
@@ -65,13 +63,11 @@ __attribute__((weak, visibility("hidden"))) void graph_record_wait_impl(RuntimeC
 
 // Host fallback for the host-orchestration path. The AICPU cycle counter is a
 // device register unavailable on the host, so return a monotonic wall-clock
-// scaled to that counter's cycle units (PLATFORM_PROF_SYS_CNT_FREQ). The
-// cycle-denominated timeouts that run during host orchestration
-// (TENSOR_DATA_TIMEOUT_CYCLES in wait_for_tensor_ready, the fanin spill
-// pool's backstop) then fire at their intended wall-clock; a constant 0 would
-// make them no-ops and spin forever. The AICPU build links the strong device
-// counter from device_time.cpp; hidden visibility keeps this off the global
-// dynamic symbol table.
+// scaled to that counter's cycle units (PLATFORM_PROF_SYS_CNT_FREQ). Any
+// cycle-denominated deadline evaluated during host orchestration then fires at
+// its intended wall-clock; a constant 0 would make it a no-op and spin forever.
+// The AICPU build links the strong device counter from device_time.cpp; hidden
+// visibility keeps this off the global dynamic symbol table.
 __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -81,12 +77,6 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
     return static_cast<uint64_t>(ts.tv_sec) * PLATFORM_PROF_SYS_CNT_FREQ +
            static_cast<uint64_t>(ts.tv_nsec) * PLATFORM_PROF_SYS_CNT_FREQ / 1000000000ull;
 }
-
-// Derived here, not in runtime_types.h: that header is included by orchestrations
-// that define PLATFORM_PROF_SYS_CNT_FREQ locally, so pulling the platform header into
-// it caused a redefinition conflict (#1189). Scaling MS by the counter frequency (like
-// SCHEDULER_TIMEOUT_CYCLES) keeps the data-wait wall-clock identical across arches.
-static constexpr uint64_t TENSOR_DATA_TIMEOUT_CYCLES = (TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
 
 // =============================================================================
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
@@ -169,164 +159,40 @@ void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, c
     va_end(args);
 }
 
-// Validate every producer reference before waiting on its slot. The host builds
-// the complete graph before device scheduling starts, so a live device producer
-// cannot complete during this call; the timeout remains a defensive failure
-// backstop rather than a synchronization mechanism for orchestration code.
-// For writes, completed_watermark additionally protects against overwriting a
-// producer while one of its submitted consumers is still live.
-MAYBE_UNINITIALIZED_BEGIN
-static bool wait_for_tensor_ready(
-    RuntimeContext *rt, const simpler::hbg::Tensor &tensor, bool wait_for_consumers, const char *caller
-) {
-    TaskId owner = tensor.owner_task_id;
+// Scalar access is confined to tensors no task produces. This runtime completes
+// orchestration before the device scheduler starts, so a producer submitted here
+// has not run and a runtime allocation holds no initialized content: there is no
+// value to read and no write that survives the producer. Both accessors reject
+// such a tensor rather than wait on state that cannot change during the call.
+//
+// A producer reaches a tensor two ways: it created the buffer (owner_task_id), or
+// it wrote a region overlapping this one (a TensorMap entry). Either one rejects.
+static bool require_no_producer(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, const char *caller) {
     OrchestratorState &orch = *rt->orchestrator;
 
-    // Segmented wait: collect up to kSegmentCap producer slots, then flush by
-    // spinning on each. When the segment fills, we wait for the accumulated
-    // batch before continuing to gather more. Dedup is per-segment only; a
-    // producer that appears in two segments is waited on twice, which is
-    // idempotent (task_state is monotonic) and only adds one atomic load on
-    // the second encounter.
-    constexpr int kSegmentCap = 64;
-    const ChipTaskSlotState *seg[kSegmentCap];
-    int seg_count = 0;
-    bool failed = false;
-
-    // Returns nullptr for every rejected producer, having latched the fatal.
-    // Callers branch on the returned pointer, not on `failed`: the slot is
-    // dereferenced immediately and a null return is the only safe signal.
-    auto resolve_producer = [&](TaskId producer) -> const ChipTaskSlotState * {
-        if (!producer.is_valid() || !simpler::hbg::is_global_task(producer)) {
-            orch.report_fatal(
-                SIMPLER_ERROR_INVALID_ARGS, caller,
-                "tensor producer task %#llx is in id space %u, not GLOBAL; host_build_graph resolves a producer "
-                "against its one task table",
-                static_cast<unsigned long long>(producer.raw),
-                static_cast<unsigned int>(simpler::hbg::task_id_space(producer))
-            );
-            failed = true;
-            return nullptr;
-        }
-
-        auto &tasks = orch.sm_header->tasks;
-        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(producer));
-        auto &slot = tasks.get_slot_state_by_task_id(local_id);
-        if (slot.to_descriptor().task_id != producer) {
-            orch.report_fatal(
-                SIMPLER_ERROR_INVALID_ARGS, caller,
-                "tensor producer task %#llx does not match the descriptor bound to slot %d",
-                static_cast<unsigned long long>(producer.raw), local_id
-            );
-            failed = true;
-            return nullptr;
-        }
-        return &slot;
-    };
-
-    auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot.to_descriptor().task_id));
-        uint64_t t0 = get_sys_cnt_aicpu();
-        int32_t spin_count = 0;
-        while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
-            SPIN_WAIT_HINT();
-            if ((++spin_count & 1023) == 0) {
-                // A fatal latched earlier in this orchestration breaks the wait;
-                // cold path only.
-                if (orch.is_fatal()) {
-                    failed = true;
-                    return;
-                }
-                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
-                    orch.report_fatal(
-                        SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): producer (local=%d) not completed",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, local_id
-                    );
-                    failed = true;
-                    return;
-                }
-            }
-        }
-    };
-
-    auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = simpler::hbg::task_local_id(slot.to_descriptor().task_id);
-        uint64_t t0 = get_sys_cnt_aicpu();
-        int32_t spin_count = 0;
-        // Polling: all consumers of this producer have retired once the
-        // completed_watermark reaches the producer's highest consumer id (set at
-        // submit in append_fanin_or_fail). Replaces the fanout_refcount ==
-        // fanout_count wiring check, which polling removes.
-        SharedMemoryTaskHeader &cons_tasks = orch.sm_header->tasks;
-        while (cons_tasks.completed_watermark.load(std::memory_order_acquire) < slot.last_consumer_local_id) {
-            SPIN_WAIT_HINT();
-            if ((++spin_count & 1023) == 0) {
-                // A fatal latched earlier in this orchestration breaks the wait;
-                // cold path only.
-                if (orch.is_fatal()) {
-                    failed = true;
-                    return;
-                }
-                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
-                    orch.report_fatal(
-                        SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): consumers of producer (local=%d) not done",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, local_id
-                    );
-                    failed = true;
-                    return;
-                }
-            }
-        }
-    };
-
-    auto flush_segment = [&]() {
-        for (int i = 0; i < seg_count; i++) {
-            wait_one_producer(*seg[i]);
-            if (failed) return;
-            if (!wait_for_consumers) continue;
-            wait_one_consumers(*seg[i]);
-            if (failed) return;
-        }
-        seg_count = 0;
-    };
-
-    auto try_push = [&](const ChipTaskSlotState &s) {
-        for (int j = 0; j < seg_count; j++) {
-            if (seg[j] == &s) return;  // per-segment dedup
-        }
-        if (seg_count == kSegmentCap) {
-            flush_segment();
-            if (failed) return;
-        }
-        seg[seg_count++] = &s;
-    };
-
-    auto do_wait = [&]() {
-        // Step A: creator retention — read owner directly from tensor metadata
-        if (owner.is_valid()) {
-            const auto *slot = resolve_producer(owner);
-            if (slot == nullptr) return;
-            try_push(*slot);
-        }
-
-        // Step B: modifier writer lookup (OverlapMap), direct callback
+    TaskId producer = tensor.owner_task_id;
+    if (!producer.is_valid()) {
         orch.tensor_map.lookup(tensor, [&](ChipTensorMapEntry &entry, OverlapStatus) -> bool {
-            TaskId pid = entry.producer_task_id;
-            const auto *slot = resolve_producer(pid);
-            if (slot == nullptr) return false;
-            try_push(*slot);
-            return !failed;
+            if (!entry.producer_task_id.is_valid()) {
+                return true;
+            }
+            producer = entry.producer_task_id;
+            return false;  // the first overlapping writer already decides the call
         });
-        if (failed) return;
-        flush_segment();
-    };
+    }
+    if (!producer.is_valid()) {
+        return true;
+    }
 
-    do_wait();
-    return !failed;
+    orch.report_fatal(
+        SIMPLER_ERROR_INVALID_ARGS, caller,
+        "tensor is produced by task %#llx (id space %u); host_build_graph finishes orchestration before the "
+        "device starts, so a submitted kernel has not written this buffer and a runtime allocation is "
+        "uninitialized -- pass the value as an orchestration argument, or have a task write it",
+        static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(simpler::hbg::task_id_space(producer))
+    );
+    return false;
 }
-MAYBE_UNINITIALIZED_END
 
 uint64_t
 get_tensor_data(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
@@ -338,7 +204,7 @@ get_tensor_data(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t
         return 0;
     }
 
-    if (!wait_for_tensor_ready(rt, tensor, false, __FUNCTION__)) {
+    if (!require_no_producer(rt, tensor, __FUNCTION__)) {
         return 0;
     }
 
@@ -369,8 +235,7 @@ void set_tensor_data(
         return;
     }
 
-    // Wait for producer + all consumers before writing (WAW + WAR safety)
-    if (!wait_for_tensor_ready(rt, tensor, true, __FUNCTION__)) {
+    if (!require_no_producer(rt, tensor, __FUNCTION__)) {
         return;
     }
 

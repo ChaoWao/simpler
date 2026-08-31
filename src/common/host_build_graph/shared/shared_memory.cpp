@@ -135,10 +135,6 @@ void SharedMemoryHandle::destroy() {
 //
 // no need init data in pool, init pool data when used
 void SharedMemoryHandle::init_header() {
-    // Polling completion: -1 = "no task completed yet"; the first task to
-    // complete (local_id 0) advances the watermark to 0.
-    header->tasks.completed_watermark.store(-1, std::memory_order_relaxed);
-
     // 0 until run_host_orchestration writes the run's count; init runs before
     // orchestration, so the real value is not known here yet.
     header->tasks.total_tasks = 0;

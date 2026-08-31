@@ -74,7 +74,6 @@ public:
         const auto off = sm_layout::segment_offsets(WINDOW);
         auto *header = reinterpret_cast<SharedMemoryHeader *>(image_.base());
         auto &tasks = header->tasks;
-        tasks.completed_watermark.store(-1, std::memory_order_relaxed);
         tasks.total_tasks = static_cast<int32_t>(SUBMITTED);
         storage_ = reinterpret_cast<ChipTaskStorage *>(image_.base() + off.storage);
         tasks.task_storage = storage_;
@@ -102,7 +101,6 @@ public:
             for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
                 entry.payload.fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
             }
-            entry.slot.last_consumer_local_id = static_cast<int32_t>(i);
             entry.slot.in_graph_task_index = static_cast<int32_t>(200 + i);
             completion_flags()[i].store(static_cast<uint8_t>(i & 1), std::memory_order_relaxed);
         }
@@ -223,7 +221,6 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
         EXPECT_EQ(simpler::hbg::task_local_id(entry.task.task_id), i) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
-        EXPECT_EQ(entry.slot.last_consumer_local_id, static_cast<int32_t>(i)) << "slot " << i;
         EXPECT_EQ(entry.slot.in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;
         EXPECT_EQ(compacted.completion_flags()[i].load(std::memory_order_relaxed), static_cast<uint8_t>(i & 1))
             << "slot " << i;
@@ -231,8 +228,7 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     // The header's pitch-independent fields come across; the mirror slot past the
     // prefix does not.
     auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
-    EXPECT_EQ(tasks.completed_watermark.load(std::memory_order_relaxed), -1);
-    // The device bounds its completed_watermark walk with this, and the restack is
+    // The device bounds its slot walks with this, and the restack is
     // the only thing that carries it there.
     EXPECT_EQ(tasks.total_tasks, static_cast<int32_t>(SUBMITTED));
 }

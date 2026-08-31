@@ -214,9 +214,8 @@ therefore also its slot index: ids run `0..capacity-1`, never wrap, and every
 segment is indexed by the id directly — there is no slot mask, so the capacity need
 not be a power of two.
 
-`completed_watermark` records the contiguous prefix of completed device tasks.
-It supports completion/consumer metadata only; it reclaims neither task slots
-nor heap.
+Completion is published per task, in `completion_flags[local_id]`, and reclaims
+neither task slots nor heap.
 
 There is no post-run sweep that makes graph space reusable. Runtime destruction
 releases the complete arena, and the next run starts from a newly initialized
@@ -315,8 +314,7 @@ boot classifier and wake lists are the active readiness path.
   generation-tagged global drain before launch.
 - Every lane completion increments `completed_subtasks`. The task completes once
   that count equals `block_num * popcount(active_mask)`.
-- Completion sets the task's flag, advances the contiguous
-  `completed_watermark`, and reclassifies its wake-list consumers.
+- Completion sets the task's flag and reclassifies its wake-list consumers.
 
 The drain's `pending_task` stays valid for the complete attempt: all participant
 threads load it before the coordinator can pass the stage-done barrier and clear
@@ -326,13 +324,13 @@ could strand the drain protocol, so the active path relies on that invariant.
 ## 8. Scalar Access During Construction
 
 `get_tensor_data` and `set_tensor_data` operate on registered host views of
-external tensors. They cannot wait for a submitted device producer because the
-device scheduler starts only after orchestration returns. Runtime-created graph-
-heap outputs also have no host view.
-
-Producer references are checked against the complete bound descriptor ID before
-a slot is used, preventing masked-slot aliasing. See
-[SCALAR_DATA_ACCESS.md](SCALAR_DATA_ACCESS.md) for the supported contract.
+external tensors, and only on tensors that no submitted task produces. A producer
+— named either by the tensor's `owner_task_id` or by an overlapping TensorMap
+entry — fails the call with `INVALID_ARGS`, because the device scheduler starts
+only after orchestration returns and nothing it produces exists yet. A runtime
+allocation is rejected by the same rule; its graph-heap buffer has no host view
+either. See [SCALAR_DATA_ACCESS.md](SCALAR_DATA_ACCESS.md) for the supported
+contract.
 
 ## 9. Errors and Diagnostics
 
@@ -343,8 +341,7 @@ the shared-memory header, and an orchestration code into
 runs on the host. Important validation paths include:
 
 - invalid arguments (`-5`);
-- sync-start residency violations (`-7`);
-- tensor wait timeout (`-8`); and
+- sync-start residency violations (`-7`); and
 - scheduler timeout (`-100`).
 
 Device logs contain scheduler records only. Host graph-construction diagnostics

@@ -45,8 +45,8 @@ inline constexpr uint8_t SUBTASK_MASK_AIV1 = (1u << 2);  // 0x4
 
 // Dispatch-predicate comparison operator. The scheduler evaluates the predicate
 // at the dispatch point — the task is ready (fanin satisfied), so the predicate
-// address' producer has completed and the value read is current, without the
-// wait_for_tensor_ready() stall that get_tensor_data() pays in orchestration.
+// address' producer has completed and the value read is current, which is what
+// orchestration cannot do: get_tensor_data rejects a tensor with a producer.
 // PASS => dispatch normally; FAIL => retire inline via the dep-only path.
 enum class PredicateOp : uint8_t { NONE = 0, EQ, NE, GT, LT, GE, LE };
 

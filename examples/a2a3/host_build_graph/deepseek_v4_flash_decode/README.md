@@ -148,12 +148,13 @@ submit-every-task form of this orchestration, both ranks `outcome=0`
 
 ## Runtime gap this case exposed
 
-This gap is independent of the `hc_head_linear` MTE fault:
+This gap is independent of the `hc_head_linear` MTE fault, and is now closed:
 
-- **`get_tensor_data` on a task-produced tensor burns its full timeout.** The
-  wait can never be satisfied in this runtime — the device does not execute until
-  orchestration finishes — yet `wait_for_tensor_ready` spins the whole 15 s before
-  failing. The condition is decidable at the call.
+- **`get_tensor_data` on a task-produced tensor used to burn a 15 s timeout.**
+  The wait could never be satisfied in this runtime — the device does not execute
+  until orchestration finishes — and the condition is decidable at the call, so
+  both accessors now reject a tensor with a producer immediately with
+  `INVALID_ARGS`.
 
 ## Running
 

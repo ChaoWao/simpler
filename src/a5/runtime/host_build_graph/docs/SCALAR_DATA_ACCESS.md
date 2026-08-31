@@ -11,8 +11,9 @@ external tensors; they do not interleave host code with device execution.
 | ------------ | ----------------- | ----------------- |
 | External tensor with no submitted producer | Reads the staged host value | Updates the staged host value |
 | External control/output tensor not referenced by a task | Reads immediately | Writes immediately |
-| Runtime-created output | Unsupported: no registered host view | Unsupported: no registered host view |
-| Tensor owned by a submitted device task | Unsupported during graph construction | Unsupported during graph construction |
+| External tensor a submitted task writes (`OUTPUT`/`INOUT`) | Fails with `INVALID_ARGS` | Fails with `INVALID_ARGS` |
+| Output of a submitted task | Fails with `INVALID_ARGS` | Fails with `INVALID_ARGS` |
+| Runtime allocation (`alloc_tensors`) | Fails with `INVALID_ARGS` | Fails with `INVALID_ARGS` |
 | Tensor with an invalid or stale owner task ID | Fails with `INVALID_ARGS` | Fails with `INVALID_ARGS` |
 
 The supported write changes the data that will be copied to the device. Every
@@ -41,14 +42,14 @@ The execution order is:
 3. The host copies the graph image to device memory.
 4. AICPU schedulers boot and dispatch the graph.
 
-A producer submitted in step 1 cannot become `COMPLETED` until step 4. Waiting
-for that producer from the orchestration call cannot make progress. The runtime
-keeps a timeout as a defensive failure backstop, but it is not a supported
-synchronization mechanism.
+A producer submitted in step 1 cannot become `COMPLETED` until step 4, so a read
+of its output would see the buffer's pre-run content and a write would be
+overwritten by the producer itself. Both accessors therefore reject a tensor
+with a producer outright — there is no wait and no timeout.
 
-Runtime-created output buffers also live in the graph heap and have no host-view
-registration. Even if their address is nonzero, host orchestration must not
-dereference or modify them.
+A runtime allocation is rejected on the same rule. Its creator completes on the
+host, but the buffer is uninitialized, lives in the graph heap, and has no
+host-view registration.
 
 ## No Initial-Value Fill on a Runtime Allocation
 
@@ -66,25 +67,25 @@ correct under Graph Execution, where a value written once while recording would
 reach none of the replays: each submission materializes its outputs at addresses
 it derives for itself, from a heap block whose prior contents it never reads.
 
-## Ownership Validation
+## Producer Rejection
 
-Before a wait slot is used, the runtime verifies:
+A producer reaches a tensor two ways, and either one rejects the call:
 
-- the task ID is valid and lies in the `GLOBAL` id space — an `IN_GRAPH` id packs
-  its Graph task and task index into the low bits, so it indexes no task table
-  slot (see `src/common/host_build_graph/task_id_encoding.h`);
-- the task table slot that ID indexes has a bound task descriptor; and
-- the descriptor's full task ID matches the tensor's owner/producer ID.
+- the tensor names a creator in `owner_task_id` — the task that allocated it,
+  whether an ordinary submit or `alloc_tensors`;
+- an entry in the TensorMap names a task that wrote a region overlapping this
+  one, which is how an external tensor passed as `OUTPUT`/`INOUT` acquires a
+  producer.
 
-The full-ID check prevents a slot lookup from aliasing an unused or
-different task. A failure latches `SIMPLER_ERROR_INVALID_ARGS` and the run returns
-status `-5`; reads return zero and writes stop only after that fatal status is
-recorded.
+An invalid or stale owner ID is rejected by the first rule like any other
+producer, so a forged ID cannot reach a task-table slot. A rejection latches
+`SIMPLER_ERROR_INVALID_ARGS` and names the producer task; the run returns status
+`-5`, reads return zero, and writes do not happen.
 
 ## Practical Rules
 
-- Use scalar access only on external, host-staged tensors with no device
-  producer or outstanding device consumer.
+- Use scalar access only on external, host-staged tensors that no submitted task
+  produces.
 - Use tensor dependencies to order device tasks; do not use host scalar access
   as a device synchronization barrier.
 - Pass values needed for graph construction as orchestration inputs or scalars.
