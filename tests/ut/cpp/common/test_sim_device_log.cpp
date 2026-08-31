@@ -15,6 +15,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -30,6 +31,7 @@
 #include "aicpu/device_log.h"
 #include "common/host_log_state.h"
 #include "common/log_level.h"
+#include "host_log.h"
 
 namespace {
 
@@ -173,6 +175,36 @@ TEST(SimDeviceLogTest, UsesHostEnvelopeAndLiveBoundThreshold) {
     emit(3, "worker", "warn-visible");
     captured = testing::internal::GetCapturedStderr();
     EXPECT_NE(captured.find("][WARN] worker: warn-visible\n"), std::string::npos);
+}
+
+TEST(SimDeviceLogTest, BoundLogDirectoryTakesSimRecordsInsteadOfStderr) {
+    char directory_template[] = "/tmp/simpler-sim-device-log-XXXXXX";
+    char *directory = mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+
+    bind_level(simpler::log::LogLevel::DEBUG);
+    HostLogger::get_instance().set_log_directory(directory);
+
+    testing::internal::CaptureStderr();
+    emit(4, "chip_worker", "device-record-to-file");
+    const std::string captured = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(captured.find("device-record-to-file"), std::string::npos)
+        << "a bound directory is the logger's destination for device records too";
+
+    // The destination is a property of the logger, so a sim device record lands
+    // in the same per-process file as every host record. An ERROR is written
+    // through rather than buffered, so it is on disk by the time this reads.
+    const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
+    std::ifstream input(path);
+    ASSERT_TRUE(input.good());
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    input.close();
+    EXPECT_NE(contents.find("][ERROR] chip_worker: device-record-to-file\n"), std::string::npos);
+
+    g_log_state.log_directory_bound = 0;
+    g_log_state.log_directory[0] = '\0';
+    EXPECT_EQ(unlink(path.c_str()), 0);
+    EXPECT_EQ(rmdir(directory), 0);
 }
 
 TEST(SimDeviceLogTest, MultiThreadedRecordsStayIntact) {

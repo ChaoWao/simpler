@@ -1,0 +1,78 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Every DSO that compiles the host logger owns a private buffered stream on the
+// shared per-process log file. This pins the consequence: unloading such a
+// module must put that stream's tail on disk, because dlclose discards the
+// mapping the buffer lives in. DeviceRunner::unload_executor_binaries() does
+// exactly this to the sim AICPU SO on every teardown.
+
+#include <fstream>
+#include <string>
+
+#include <dlfcn.h>
+#include <unistd.h>
+
+#include <gtest/gtest.h>
+
+#include "common/host_log_state.h"
+#include "host_log.h"
+
+using simpler::log::LogLevel;
+
+namespace {
+
+size_t count_occurrences(const std::string &haystack, const std::string &needle) {
+    size_t total = 0;
+    for (size_t at = haystack.find(needle); at != std::string::npos; at = haystack.find(needle, at + needle.size())) {
+        ++total;
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST(HostLogUnloadTest, UnloadedModuleLeavesNoRecordsInItsPrivateBuffer) {
+    constexpr int kRecords = 200;
+
+    char directory_template[] = "/tmp/simpler-host-log-unload-XXXXXX";
+    char *directory = mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+
+    HostLogger &owner = HostLogger::get_instance();
+    owner.set_level(LogLevel::DEBUG);
+    owner.set_log_directory(directory);
+
+    void *handle = dlopen(TEST_HOST_LOG_UNLOAD_CONSUMER_PATH, RTLD_NOW | RTLD_LOCAL);
+    ASSERT_NE(handle, nullptr) << dlerror();
+
+    dlerror();
+    auto bind = reinterpret_cast<int (*)(SimplerHostLogState *)>(dlsym(handle, "test_host_log_unload_bind"));
+    ASSERT_NE(bind, nullptr) << dlerror();
+    dlerror();
+    auto emit = reinterpret_cast<void (*)(int)>(dlsym(handle, "test_host_log_unload_emit"));
+    ASSERT_NE(emit, nullptr) << dlerror();
+
+    ASSERT_EQ(bind(owner.state()), 0);
+    emit(kRecords);
+    ASSERT_EQ(dlclose(handle), 0);
+
+    const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
+    std::ifstream input(path);
+    ASSERT_TRUE(input.good());
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    input.close();
+
+    EXPECT_EQ(count_occurrences(contents, "] unloaded_module: record="), static_cast<size_t>(kRecords));
+
+    EXPECT_EQ(unlink(path.c_str()), 0);
+    EXPECT_EQ(rmdir(directory), 0);
+}

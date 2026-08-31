@@ -29,9 +29,9 @@ Each host module:
                   └─ simpler_host_log_bind_state(state*)
 
 Device logging:
-       AICPU keeps the device backend
-            ├─ sim: set_log_level(...) seeds its current level flags
-            └─ onboard: CANN level is sampled during device init
+       dev_vlog_* compatibility interface
+            ├─ sim: bound HostLogger → same state, envelope, and destination
+            └─ onboard: separate CANN backend sampled during device init
 ```
 
 One threshold controls `DEBUG / INFO / TIMING / WARN / ERROR`; `NUL` suppresses
@@ -59,7 +59,7 @@ src/common/platform/
 ├── include/aicpu/device_log.h               device backend declarations
 ├── shared/aicpu/unified_log_device.cpp      LOG_* ABI → dev_vlog_* adapter
 ├── onboard/aicpu/device_log.cpp             onboard CANN backend
-└── sim/aicpu/device_log.cpp                 sim AICPU stderr backend
+└── sim/aicpu/device_log.cpp                 dev_vlog_* → bound HostLogger adapter
 ```
 
 There is no standalone `libsimpler_log.so`. Host consumers compile the two
@@ -133,9 +133,11 @@ Machine-readable `[STRACE]` records satisfy that bound. Longer human-readable
 records are best-effort and may interleave across module boundaries. Blocking
 and drop accounting for those writes remain part of issue #1792 item 6.
 
-The AICPU `dev_vlog_*` functions remain separate. Sim formats a single stderr
-record; onboard forwards through CANN dlog. Folding sim's device logger into
-the host backend is tracked separately by issue #1792 item 5.
+The AICPU `dev_vlog_*` interface remains source-compatible on both platforms.
+Sim implements it as a thin `va_list` adapter into its bound `HostLogger`, so it
+shares the live threshold, envelope, destination, and fallback with the other
+host-side modules in that process. Only real-silicon AICPU retains a separate
+backend, because its records go through CANN dlog rather than a host process.
 
 ## Cross-DSO host state
 
@@ -229,16 +231,14 @@ trace/swimlane JSON while leaving event timestamps monotonic and relative. See
 ### AICPU sim
 
 ```text
-[DEBUG]  func: [file.cpp:line] message
-[INFO]   func: [file.cpp:line] message
-[TIMING] func: [file.cpp:line] message
-[WARN]   func: [file.cpp:line] message
-[ERROR]  func: [file.cpp:line] message
+[mono_ns=MONOTONIC_NS][T0xTID][LEVEL] func: [file.cpp:line] message
 ```
 
-This is still the sim device backend, so it has no host monotonic/tid prefix.
-Onboard AICPU uses the CANN dlog format. Device TIMING uses CANN WARN and adds a
-`[TIMING]` message tag.
+Sim AICPU runs on a host CPU inside the host process and uses the same envelope
+and destination as every other bound host module. The `dev_vlog_*` names remain
+as the compatibility boundary `unified_log_device.cpp` consumes. Onboard AICPU
+uses the CANN dlog format. Device TIMING uses CANN WARN and adds a `[TIMING]`
+message tag.
 
 ## Configuration flow
 
@@ -250,7 +250,7 @@ Onboard AICPU uses the CANN dlog format. Device TIMING uses CANN WARN and adds a
 | `_ChipWorker.init()` | Load sim context and host runtime, then bind each module's logger state | `src/common/worker/chip_worker.cpp` |
 | `simpler_init` | Onboard maps the bound threshold to CANN; attach and take executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
 | Nested host load | Bind generated host orchestration/AICore logger state before entry | runtime maker / sim device runner |
-| AICPU init | Snapshot the applicable device threshold | platform AICPU init |
+| AICPU init | Sim binds the live host state; onboard snapshots CANN policy | platform AICPU init |
 
 The Python level is still sampled during worker initialization. Calling
 `logger.setLevel(...)` does not itself call the native setter; recreate or
@@ -321,6 +321,8 @@ There is no logger build step or logger field in `RuntimeBinaries`. Instead:
 
 - `_task_interface`, all host runtimes, sim-context, and sim AICore targets add
   `host_log.cpp` and `unified_log_host.cpp` to their source lists.
+- Sim AICPU targets add `host_log.cpp` while keeping `unified_log_device.cpp`;
+  the device ABI delegates to HostLogger there.
 - Host-compiled generated orchestration SOs receive the same sources through
   `KernelCompiler.get_orchestration_cache_inputs`; those sources therefore
   participate in the scene-test cache key.
@@ -336,7 +338,7 @@ There is no logger build step or logger field in `RuntimeBinaries`. Instead:
 | Change the user-facing level model | `python/simpler/_log.py` and `docs/testing.md` |
 | Change host output or STRACE grammar | `src/common/log/host_log.cpp` |
 | Change the shared-state ABI | `src/common/log/include/common/host_log_state.h` |
-| Change sim AICPU output | `src/common/platform/sim/aicpu/device_log.cpp` |
+| Change sim AICPU adaptation | `src/common/platform/sim/aicpu/device_log.cpp` |
 | Change onboard CANN tagging | `src/common/platform/onboard/aicpu/device_log.cpp` |
 | Add a host logging consumer | compile both host logger sources, include `src/common/log/include`, and bind state during module init |
 | Add a level | `log_level.h`, `_log.py`, `simpler_setup/log_config.py`, and AICPU `set_log_level` |

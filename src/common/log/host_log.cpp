@@ -155,6 +155,7 @@ long host_trace_tid() {
 
 struct HostLogFileSink {
     HostLogFileSink();
+    ~HostLogFileSink();
 
     std::mutex mutex;
     FILE *stream = nullptr;
@@ -176,6 +177,18 @@ HostLogFileSink::HostLogFileSink() {
     // that thread the mutex owner at the fork boundary, so both the parent and
     // child handlers can release it without inheriting an owner that vanished.
     (void)pthread_atfork(host_log_sink_before_fork, host_log_sink_after_fork, host_log_sink_after_fork);
+}
+
+// One sink per DSO that compiles this file, so each holds its own buffered
+// stream on the shared per-process log. Closing it here is what puts that
+// buffer's tail on disk when the DSO is unloaded: dlclose runs this destructor,
+// and a dlopened module's records would otherwise be discarded with its mapping.
+// A stream this process did not open belongs to the parent that forked it and
+// is left alone, so the parent's copied stdio buffer is never flushed twice.
+HostLogFileSink::~HostLogFileSink() {
+    std::scoped_lock lock(mutex);
+    if (stream != nullptr && pid == getpid()) (void)std::fclose(stream);
+    stream = nullptr;
 }
 
 // Append one already-formatted record. The <=`PIPE_BUF` single-write rule that

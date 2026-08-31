@@ -62,6 +62,14 @@ boundary, not a clean floor. A system tracer would hand the bytes to a consumer
 instead, and would bound its buffer and count what it drops; this does neither,
 deliberately.
 
+Every DSO that compiles the logger holds its own buffered stream on that one
+file, so the buffering above is per module rather than per process: a `WARN` from
+one module does not put another module's pending records on disk. Unloading a
+module closes its stream, so a `dlclose` — which the sim device runner performs
+on the AICPU SO at every teardown — leaves no records behind in the mapping it
+drops. A stream inherited across `fork` belongs to the parent and is left alone,
+so a child never flushes the parent's copied buffer a second time.
+
 ## Reading a run back
 
 Every record carries its own `pid`, so the tools take several inputs and
