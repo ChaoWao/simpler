@@ -26,6 +26,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -179,4 +180,42 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     const TaskPayload &cons_pl = tasks.task_payloads[simpler::hbg::task_local_id(consumer.task_id())];
     EXPECT_EQ(cons_pl.fanin_count, 1);
     EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(simpler::hbg::task_local_id(root.task_id())));
+}
+
+TEST_F(HbgSubmitPoisonTest, InvalidDispatchPredicateIsRejectedBeforeTaskAllocation) {
+    orch.begin_scope();
+    CoreTaskArgs args;
+    CoreTaskPredicate predicate;
+    predicate.op = PredicateOp::GT;
+    predicate.target = 0;
+    args.set_predicate(predicate);
+    MixedKernels kernels{};
+    kernels.aiv0_kernel_id = 0;
+
+    EXPECT_FALSE(orch.submit_task(kernels, args).task_id().is_valid());
+    EXPECT_TRUE(orch.fatal);
+    EXPECT_EQ(orch.task_allocator.active_count(), 0);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
+}
+
+TEST_F(HbgSubmitPoisonTest, OutOfRangeDispatchPredicateIndexIsRejected) {
+    orch.begin_scope();
+    std::array<int32_t, 4> values{};
+    uint32_t shape[] = {static_cast<uint32_t>(values.size())};
+    simpler::hbg::Tensor operand = simpler::hbg::make_tensor_external(values.data(), shape, 1, DataType::INT32);
+    CoreTaskPredicate predicate;
+    predicate.operand.tensor = &operand;
+    predicate.operand.ndims = 1;
+    predicate.operand.indices[0] = static_cast<uint32_t>(values.size());
+    predicate.op = PredicateOp::GT;
+    CoreTaskArgs args;
+    args.add_input(operand);
+    args.set_predicate(predicate);
+    MixedKernels kernels{};
+    kernels.aiv0_kernel_id = 0;
+
+    EXPECT_FALSE(orch.submit_task(kernels, args).task_id().is_valid());
+    EXPECT_TRUE(orch.fatal);
+    EXPECT_EQ(orch.task_allocator.active_count(), 0);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_INVALID_ARGS);
 }

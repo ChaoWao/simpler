@@ -1579,6 +1579,73 @@ static bool ensure_tensormap_capacity(OrchestratorState *orch, int32_t needed) {
     return false;
 }
 
+static bool
+resolve_dispatch_predicate(OrchestratorState *orch, const CoreTaskPredicate &predicate, DispatchPredicate *resolved) {
+    if (resolved == nullptr) return false;
+    *resolved = DispatchPredicate{};
+    if (predicate.op == PredicateOp::NONE) return true;
+
+    switch (predicate.op) {
+    case PredicateOp::EQ:
+    case PredicateOp::NE:
+    case PredicateOp::GT:
+    case PredicateOp::LT:
+    case PredicateOp::GE:
+    case PredicateOp::LE:
+        break;
+    case PredicateOp::NONE:
+        return true;
+    default:
+        orch->report_fatal(SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "dispatch predicate has an invalid operator");
+        return false;
+    }
+
+    const simpler::hbg::Tensor *operand = predicate.operand.tensor;
+    if (operand == nullptr || operand->buffer.addr == 0 || predicate.operand.ndims == 0 ||
+        predicate.operand.ndims > operand->ndims || predicate.operand.ndims > MAX_TENSOR_DIMS) {
+        orch->report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "dispatch predicate has an invalid operand tensor"
+        );
+        return false;
+    }
+
+    uint64_t element_offset = operand->start_offset;
+    for (uint32_t dim = 0; dim < predicate.operand.ndims; ++dim) {
+        if (predicate.operand.indices[dim] >= operand->shapes[dim] ||
+            (predicate.operand.indices[dim] != 0 &&
+             operand->strides[dim] >
+                 (UINT64_MAX - element_offset) / static_cast<uint64_t>(predicate.operand.indices[dim]))) {
+            orch->report_fatal(
+                SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "dispatch predicate index is outside the operand tensor"
+            );
+            return false;
+        }
+        element_offset +=
+            static_cast<uint64_t>(predicate.operand.indices[dim]) * static_cast<uint64_t>(operand->strides[dim]);
+    }
+
+    const uint64_t element_size = get_element_size(operand->dtype);
+    if ((element_size != 1 && element_size != 2 && element_size != 4 && element_size != 8) ||
+        operand->buffer.size < element_size || element_offset > (operand->buffer.size - element_size) / element_size) {
+        orch->report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "dispatch predicate element is outside the operand buffer"
+        );
+        return false;
+    }
+    const uint64_t byte_offset = element_offset * element_size;
+    if (operand->buffer.addr > UINT64_MAX - byte_offset ||
+        ((operand->buffer.addr + byte_offset) & (element_size - 1)) != 0) {
+        orch->report_fatal(SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "dispatch predicate operand address is invalid");
+        return false;
+    }
+
+    resolved->addr = operand->buffer.addr + byte_offset;
+    resolved->target = predicate.target;
+    resolved->elem_size = static_cast<uint8_t>(element_size);
+    resolved->op = predicate.op;
+    return true;
+}
+
 // Shared body for submit_task / submit_dummy_task. Caller has already validated
 // args.has_error, decided active_mask (empty for dummy), and resolved the per-slot
 // kernel_ids (all INVALID_KERNEL_ID for dummy). Performs tensormap sync, fanin
@@ -1591,6 +1658,8 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_START();
     ORCH_PHASE_START();
     TaskOutputTensors result;
+    DispatchPredicate resolved_predicate{};
+    if (!resolve_dispatch_predicate(orch, args.predicate(), &resolved_predicate)) return result;
     OutputLayout layout = calculate_output_layout(args);
     PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
@@ -1711,25 +1780,9 @@ static TaskOutputTensors submit_task_common(
     // must not touch either, or it would discard that.
     payload.init(args, result, prepared.alloc_result, layout);
 
-    // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
-    // now so the scheduler can read it at the dispatch point with a single load,
-    // no Arg/simpler::hbg::Tensor access. Both branches write predicate.op explicitly because
-    // a payload slot is raw shared memory with no constructor; op == NONE means
-    // "always dispatch".
-    {
-        const CoreTaskPredicate &pred = args.predicate();
-        if (pred.op != PredicateOp::NONE && pred.operand.tensor != nullptr && pred.operand.tensor->buffer.addr != 0) {
-            uint64_t elem_size = get_element_size(pred.operand.tensor->dtype);
-            uint64_t flat_offset = pred.operand.tensor->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
-            payload.predicate.addr = pred.operand.tensor->buffer.addr + flat_offset * elem_size;
-            payload.predicate.target = pred.target;
-            payload.predicate.elem_size = static_cast<uint8_t>(elem_size);
-            payload.predicate.op = pred.op;
-        } else {
-            payload.predicate.addr = 0;
-            payload.predicate.op = PredicateOp::NONE;
-        }
-    }
+    // Predicate validation runs before task allocation. Copy the resolved, bounded
+    // operand address into the device payload only after the rest of the payload exists.
+    payload.predicate = resolved_predicate;
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 
     // === STEP 6: close the fanin region (device boot classifies) ===
