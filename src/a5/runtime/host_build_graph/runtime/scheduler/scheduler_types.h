@@ -636,16 +636,16 @@ inline constexpr uint32_t SCHEDULER_PENDING_SLOT_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_CALLABLE_CAPACITY = 1024;
 inline constexpr uint32_t SCHEDULER_CORE_TYPE_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_CLUSTER_CAPACITY = SCHEDULER_WORKER_CAPACITY / 3;
+inline constexpr uint32_t SCHEDULER_RESOLVER_CAPACITY = SCHEDULER_CLUSTER_CAPACITY;
 inline constexpr uint32_t SCHEDULER_GANG_COHORT_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD = 7;
 inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_SHARD_COUNT =
-    (SCHEDULER_CLUSTER_CAPACITY + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD - 1) /
+    (SCHEDULER_RESOLVER_CAPACITY + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD - 1) /
     SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
 inline constexpr int64_t SCHEDULER_TASK_ID_INVALID = -1;
 inline constexpr int64_t SCHEDULER_WAKE_LIST_OPEN = -1;
 inline constexpr int64_t SCHEDULER_WAKE_LIST_CLOSED = -2;
 inline constexpr int64_t SCHEDULER_INBOX_EMPTY = -1;
-inline constexpr int64_t SCHEDULER_INBOX_LINK_UNPUBLISHED = -2;
 inline constexpr uint64_t SCHEDULER_READY_PENDING_EMPTY = UINT64_MAX;
 
 enum class SchedulerTaskState : int64_t {
@@ -913,6 +913,7 @@ enum class SchedulerErrorSite : uint64_t {
     COMPLETION_WAITER_NOT_EXECUTABLE = 64,
     COMPLETION_READY_APPEND_FAILED = 65,
     COMPLETION_READY_PUBLISH_FAILED = 66,
+    COMPLETION_INVALID_SHAPE = 67,
 };
 
 struct alignas(128) SchedulerRunControl {
@@ -1059,9 +1060,8 @@ struct alignas(128) SchedulerWorkerContext {
     uint64_t ready_pop_count;
     uint64_t ready_steal_count;
     uint64_t ready_cas_retry_count;
-    uint64_t ready_link_wait_count;
-    uint64_t ready_link_wait_max;
-    uint64_t ready_stats_reserved[2];
+    uint64_t ready_contention_giveup_count;
+    uint64_t ready_stats_reserved[3];
     uint64_t executed_task_count;
     uint64_t task_state_poll_count;
     uint64_t fanin_state_load_count;
@@ -1209,10 +1209,20 @@ static_assert(sizeof(SchedulerGangCommand) == 128, "gang command layout changed"
 static_assert(alignof(SchedulerGangCommand) == 128, "gang command alignment changed");
 static_assert(sizeof(SchedulerReadyDirectoryShard) == 64, "ready directory shard must occupy one cache line");
 static_assert(alignof(SchedulerReadyDirectoryShard) == 64, "ready directory shard alignment changed");
+static_assert(SCHEDULER_RESOLVER_CAPACITY <= SCHEDULER_WORKER_CAPACITY, "resolver capacity exceeds worker storage");
+static_assert(
+    SCHEDULER_READY_DIRECTORY_SHARD_COUNT * SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD >=
+        SCHEDULER_RESOLVER_CAPACITY,
+    "ready directory does not cover every resolver"
+);
 static_assert(
     offsetof(SchedulerReadyDirectory, bootstrap_ready_types) ==
         SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_READY_DIRECTORY_SHARD_COUNT * 64,
     "bootstrap flags must follow the ready directory shards"
+);
+static_assert(
+    offsetof(SchedulerReadyDirectory, bootstrap_ready_types) % 64 == 0,
+    "bootstrap flags must begin on a cache-line boundary"
 );
 static_assert(
     sizeof(SchedulerReadyDirectory) == ((offsetof(SchedulerReadyDirectory, bootstrap_ready_types) +
@@ -1336,7 +1346,7 @@ inline bool scheduler_plan_layout(
         !SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_WORKER_CAPACITY, SchedulerReadyInbox, ready_inboxes_offset
         ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_CLUSTER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) ||
+        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_RESOLVER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) ||
         !scheduler_layout_reserve(
             &cursor, sizeof(SchedulerReadyDirectory), alignof(SchedulerReadyDirectory), &next.ready_directory_offset
         ) ||
@@ -1377,7 +1387,7 @@ inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLay
     for (uint64_t i = 0; i < SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_WORKER_CAPACITY; ++i)
         ready[i].head = SCHEDULER_INBOX_EMPTY;
     auto *ready_owners = scheduler_state_at<SchedulerReadyOwnerState>(base, layout.ready_owner_states_offset);
-    for (uint64_t owner = 0; owner < SCHEDULER_CLUSTER_CAPACITY; ++owner) {
+    for (uint64_t owner = 0; owner < SCHEDULER_RESOLVER_CAPACITY; ++owner) {
         for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT; ++type)
             ready_owners[owner].queues[type].pending_endpoints = SCHEDULER_READY_PENDING_EMPTY;
     }

@@ -120,6 +120,8 @@ struct FixtureStorage {
         scheduler_state = std::make_unique<SchedulerStateBuffer>(layout);
         run_control = scheduler_state_at<SchedulerRunControl>(scheduler_state->base(), layout.run_control_offset);
         contexts = scheduler_state_at<SchedulerWorkerContext>(scheduler_state->base(), layout.worker_contexts_offset);
+        owner_states =
+            scheduler_state_at<SchedulerReadyOwnerState>(scheduler_state->base(), layout.ready_owner_states_offset);
         run_control->aiv_active_worker_count = workers;
         run_control->resolver_count = workers;
         for (uint64_t worker = 0; worker < workers; ++worker) {
@@ -146,6 +148,7 @@ struct FixtureStorage {
             context.runtime_worker_count = workers;
             context.worker_index = worker;
             context.inbox_index = worker;
+            scheduler_ready_owner_init(&owner_states[worker]);
         }
         metadata = scheduler_state_at<SchedulerTaskMetadata>(scheduler_state->base(), layout.task_metadata_offset);
         callable_addresses = scheduler_state_at<uint64_t>(scheduler_state->base(), layout.callable_addresses_offset);
@@ -165,6 +168,7 @@ struct FixtureStorage {
     std::unique_ptr<SchedulerStateBuffer> scheduler_state;
     SchedulerRunControl *run_control{nullptr};
     SchedulerWorkerContext *contexts{nullptr};
+    SchedulerReadyOwnerState *owner_states{nullptr};
     SchedulerTaskMetadata *metadata{nullptr};
     uint64_t *callable_addresses{nullptr};
 };
@@ -225,14 +229,13 @@ TEST(SchedulerBootstrap, PublishesExclusiveInboxAndAggregatesDirectory) {
     ASSERT_TRUE(
         scheduler_bootstrap_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[1], 1, &batch, &stats)
     );
-    scheduler_cache_barrier();
     uint64_t ready_types = 0;
     ASSERT_TRUE(scheduler_bootstrap_ready_batch_publish(
         storage.scheduler_state->base(), &storage.contexts[1], 0, 0, &batch, &stats, &ready_types
     ));
     auto *directory = scheduler_ready_directory_at(storage.scheduler_state->base(), &storage.contexts[1]);
     directory->bootstrap_ready_types[0] = ready_types;
-    scheduler_bootstrap_ready_directory_publish(storage.scheduler_state->base(), &storage.contexts[1], 2);
+    ASSERT_TRUE(scheduler_bootstrap_ready_directory_publish(storage.scheduler_state->base(), &storage.contexts[1], 2));
 
     auto *controls =
         scheduler_state_at<SchedulerTaskControl>(storage.scheduler_state->base(), storage.layout.task_controls_offset);
@@ -245,6 +248,54 @@ TEST(SchedulerBootstrap, PublishesExclusiveInboxAndAggregatesDirectory) {
     EXPECT_EQ(stats.batch_count, 1u);
 }
 
+TEST(SchedulerReadyInbox, RejectsResolverCapacityBoundary) {
+    FixtureStorage storage(1, 1);
+    SchedulerReadyStats stats{};
+    SchedulerReadyBatch batch{};
+    ASSERT_TRUE(scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[0], 0, &batch, &stats));
+    uint64_t ready_types = 0;
+
+    EXPECT_FALSE(scheduler_bootstrap_ready_batch_publish(
+        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_RESOLVER_CAPACITY, &batch, &stats,
+        &ready_types
+    ));
+    storage.contexts[0].inbox_index = SCHEDULER_RESOLVER_CAPACITY;
+    EXPECT_FALSE(scheduler_ready_owner_maintain_type(
+        storage.scheduler_state->base(), &storage.contexts[0], 0, &storage.owner_states[0]
+    ));
+    EXPECT_FALSE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_RESOLVER_CAPACITY, &batch, &stats,
+        &storage.owner_states[0]
+    ));
+    storage.contexts[0].inbox_index = 0;
+    EXPECT_FALSE(scheduler_bootstrap_ready_directory_publish(
+        storage.scheduler_state->base(), &storage.contexts[0], SCHEDULER_RESOLVER_CAPACITY + 1
+    ));
+}
+
+TEST(SchedulerReadyInbox, RequiresOwnerStateForPublishAndClaim) {
+    FixtureStorage storage(1, 1);
+    GraphBuffer graph(1);
+    graph.executable(0, 0);
+    SchedulerReadyStats stats{};
+    SchedulerReadyBatch batch{};
+    ASSERT_TRUE(scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[0], 0, &batch, &stats));
+
+    EXPECT_FALSE(
+        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[0], 0, 0, &batch, &stats, nullptr)
+    );
+    uint64_t cursor = 0;
+    SchedulerReadyClaim claim{};
+    EXPECT_FALSE(scheduler_claim_ready_for_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 1, 0, &cursor,
+        &stats, &claim, nullptr
+    ));
+    EXPECT_FALSE(scheduler_resolve_completion(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, nullptr, nullptr,
+        nullptr, nullptr
+    ));
+}
+
 TEST(SchedulerReadyInbox, BatchPushAndOwnerMaintenancePreserveFifoAndDirectory) {
     constexpr uint64_t kTasks = 4;
     FixtureStorage storage(kTasks, 1);
@@ -252,7 +303,7 @@ TEST(SchedulerReadyInbox, BatchPushAndOwnerMaintenancePreserveFifoAndDirectory) 
     for (uint64_t task = 0; task < kTasks; ++task)
         graph.executable(task, 0);
     SchedulerReadyBatch batch{};
-    SchedulerReadyOwnerState owner_state{};
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     SchedulerReadyStats stats{};
     for (uint64_t task = 0; task < kTasks; ++task)
         ASSERT_TRUE(
@@ -312,7 +363,7 @@ TEST(SchedulerReadyInbox, OwnerPromotesPendingBankAfterPublishedBankDrains) {
     GraphBuffer graph(kTasks);
     for (uint64_t task = 0; task < kTasks; ++task)
         graph.executable(task, 0);
-    SchedulerReadyOwnerState owner_state{};
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     SchedulerReadyStats stats{};
     SchedulerReadyBatch published{};
     SchedulerReadyBatch pending{};
@@ -365,7 +416,7 @@ TEST(SchedulerReadyInbox, OlderPendingBankPrecedesBatchArrivingAfterDrain) {
     GraphBuffer graph(kTasks);
     for (uint64_t task = 0; task < kTasks; ++task)
         graph.executable(task, 0);
-    SchedulerReadyOwnerState owner_state{};
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     SchedulerReadyStats stats{};
     for (int64_t task = 0; task < 2; ++task) {
         SchedulerReadyBatch batch{};
@@ -408,7 +459,7 @@ TEST(SchedulerReadyInbox, ThiefCannotObserveOrPromoteOwnerPendingBank) {
     GraphBuffer graph(2);
     graph.executable(0, 0);
     graph.executable(1, 0);
-    SchedulerReadyOwnerState owner_state{};
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[1];
     SchedulerReadyStats stats{};
     for (int64_t task = 0; task < 2; ++task) {
         SchedulerReadyBatch batch{};
@@ -445,15 +496,15 @@ TEST(SchedulerReadyInbox, StealsOnlyFromMarkedVictim) {
     SchedulerReadyBatch batch{};
     SchedulerReadyStats stats{};
     ASSERT_TRUE(scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[1], 0, &batch, &stats));
-    ASSERT_TRUE(
-        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[1], 0, 1, &batch, &stats)
-    );
+    ASSERT_TRUE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[1], 0, 1, &batch, &stats, &storage.owner_states[1]
+    ));
 
     uint64_t cursor = 1;
     SchedulerReadyClaim claim{};
     ASSERT_TRUE(scheduler_claim_ready_for_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 2, 0, &cursor,
-        &stats, &claim
+        &stats, &claim, &storage.owner_states[0]
     ));
     EXPECT_EQ(claim.task_id, 0);
     EXPECT_EQ(claim.inbox_index, 1u);
@@ -479,7 +530,7 @@ TEST(SchedulerReadyInbox, BootstrapPublishesIndependentDirectoryShards) {
     directory->bootstrap_ready_types[7] = UINT64_C(1) << 1;
     directory->bootstrap_ready_types[13] = (UINT64_C(1) << 0) | (UINT64_C(1) << 1);
 
-    scheduler_bootstrap_ready_directory_publish(storage.scheduler_state->base(), &storage.contexts[0], 14);
+    ASSERT_TRUE(scheduler_bootstrap_ready_directory_publish(storage.scheduler_state->base(), &storage.contexts[0], 14));
 
     EXPECT_EQ(directory->core_types[0][0].bits, (UINT64_C(1) << 0) | (UINT64_C(1) << 6));
     EXPECT_EQ(directory->core_types[1][0].bits, 0u);
@@ -498,21 +549,21 @@ TEST(SchedulerReadyInbox, SparseDirectoryWrapsWithinShard) {
     ASSERT_TRUE(
         scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[13], 0, &high_batch, &stats)
     );
-    ASSERT_TRUE(
-        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[13], 0, 13, &high_batch, &stats)
-    );
+    ASSERT_TRUE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[13], 0, 13, &high_batch, &stats, &storage.owner_states[13]
+    ));
     ASSERT_TRUE(
         scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[8], 1, &low_batch, &stats)
     );
-    ASSERT_TRUE(
-        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[8], 0, 8, &low_batch, &stats)
-    );
+    ASSERT_TRUE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[8], 0, 8, &low_batch, &stats, &storage.owner_states[8]
+    ));
 
     uint64_t cursor = 12;
     SchedulerReadyClaim claim{};
     ASSERT_TRUE(scheduler_claim_ready_for_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[7], storage.run_control, 14, 0, &cursor,
-        &stats, &claim
+        &stats, &claim, &storage.owner_states[7]
     ));
     EXPECT_EQ(claim.task_id, 0);
     EXPECT_EQ(claim.inbox_index, 13u);
@@ -520,7 +571,7 @@ TEST(SchedulerReadyInbox, SparseDirectoryWrapsWithinShard) {
 
     ASSERT_TRUE(scheduler_claim_ready_for_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[7], storage.run_control, 14, 0, &cursor,
-        &stats, &claim
+        &stats, &claim, &storage.owner_states[7]
     ));
     EXPECT_EQ(claim.task_id, 1);
     EXPECT_EQ(claim.inbox_index, 8u);
@@ -534,22 +585,22 @@ TEST(SchedulerReadyInbox, DoesNotStealAcrossDirectoryShards) {
     SchedulerReadyBatch batch{};
     SchedulerReadyStats stats{};
     ASSERT_TRUE(scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[8], 0, &batch, &stats));
-    ASSERT_TRUE(
-        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[8], 0, 8, &batch, &stats)
-    );
+    ASSERT_TRUE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[8], 0, 8, &batch, &stats, &storage.owner_states[8]
+    ));
 
     uint64_t cursor = 1;
     SchedulerReadyClaim claim{};
     ASSERT_TRUE(scheduler_claim_ready_for_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 14, 0, &cursor,
-        &stats, &claim
+        &stats, &claim, &storage.owner_states[0]
     ));
     EXPECT_EQ(claim.task_id, SCHEDULER_TASK_ID_INVALID);
 
     cursor = 8;
     ASSERT_TRUE(scheduler_claim_ready_for_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[7], storage.run_control, 14, 0, &cursor,
-        &stats, &claim
+        &stats, &claim, &storage.owner_states[7]
     ));
     EXPECT_EQ(claim.task_id, 0);
     EXPECT_EQ(claim.inbox_index, 8u);
@@ -566,6 +617,90 @@ TEST(SchedulerDispatch, RejectsKernelIdBeforeCallableTableAccess) {
     SchedulerReadyClaim ready_claim{};
     ready_claim.task_id = 0;
 
+    EXPECT_FALSE(scheduler_fill_dispatch_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
+        ready_claim
+    ));
+    EXPECT_EQ(storage.run_control->scheduler_error, static_cast<uint64_t>(SchedulerGraphResult::INVALID_CALLABLE));
+    EXPECT_EQ(storage.run_control->error_site, static_cast<uint64_t>(SchedulerErrorSite::DISPATCH_INVALID_CALLABLE));
+}
+
+TEST(SchedulerDispatch, RejectsInvalidSingleSubtaskShapeBeforeMetadataIndex) {
+    FixtureStorage storage(1, 1);
+    GraphBuffer graph(1);
+    graph.executable(0, 0);
+    storage.contexts[0].core_type = static_cast<int32_t>(CoreType::AIC);
+    storage.metadata[0].active_mask = 0;
+    SchedulerFreeSlotClaim slot_claim{0, 0, 0};
+    SchedulerReadyClaim ready_claim{};
+    ready_claim.task_id = 0;
+
+    EXPECT_FALSE(scheduler_fill_dispatch_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
+        ready_claim
+    ));
+    EXPECT_EQ(storage.run_control->scheduler_error, static_cast<uint64_t>(SchedulerGraphResult::UNSUPPORTED_SHAPE));
+    EXPECT_EQ(storage.run_control->error_site, static_cast<uint64_t>(SchedulerErrorSite::DISPATCH_INVALID_SHAPE));
+}
+
+TEST(SchedulerDispatch, RejectsCoreTypeMismatch) {
+    FixtureStorage storage(1, 1);
+    GraphBuffer graph(1);
+    graph.executable(0, 0);
+    storage.contexts[0].core_type = static_cast<int32_t>(CoreType::AIV);
+    SchedulerFreeSlotClaim slot_claim{0, 0, 0};
+    SchedulerReadyClaim ready_claim{};
+    ready_claim.task_id = 0;
+
+    EXPECT_FALSE(scheduler_fill_dispatch_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
+        ready_claim
+    ));
+    EXPECT_EQ(storage.run_control->error_site, static_cast<uint64_t>(SchedulerErrorSite::DISPATCH_INVALID_SHAPE));
+}
+
+TEST(SchedulerDispatch, RejectsUnknownTargetCoreType) {
+    FixtureStorage storage(1, 1);
+    GraphBuffer graph(1);
+    graph.executable(0, 1);
+    storage.contexts[0].core_type = 2;
+    storage.metadata[0].kernel_ids[1] = 1;
+    storage.metadata[0].active_mask = 2;
+    SchedulerFreeSlotClaim slot_claim{0, 0, 0};
+    SchedulerReadyClaim ready_claim{};
+    ready_claim.task_id = 0;
+
+    EXPECT_FALSE(scheduler_fill_dispatch_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
+        ready_claim
+    ));
+    EXPECT_EQ(storage.run_control->scheduler_error, static_cast<uint64_t>(SchedulerGraphResult::UNSUPPORTED_SHAPE));
+    EXPECT_EQ(storage.run_control->error_site, static_cast<uint64_t>(SchedulerErrorSite::DISPATCH_INVALID_SHAPE));
+}
+
+TEST(SchedulerDispatch, WrapsGenerationAndRejectsZeroCallable) {
+    FixtureStorage storage(2, 1);
+    GraphBuffer graph(2);
+    graph.executable(0, 0);
+    graph.executable(1, 0);
+    storage.contexts[0].core_type = static_cast<int32_t>(CoreType::AIC);
+    SchedulerFreeSlotClaim slot_claim{0, 0, UINT32_MAX};
+    SchedulerReadyClaim ready_claim{};
+    ready_claim.task_id = 0;
+
+    ASSERT_TRUE(scheduler_fill_dispatch_slot(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
+        ready_claim
+    ));
+    auto *slot = scheduler_dispatch_slot_at(storage.scheduler_state->base(), &storage.contexts[0], 0, 0);
+    EXPECT_EQ(slot->generation, 1u);
+    EXPECT_EQ(scheduler_dispatch_generation(slot->publication), 1u);
+
+    storage.callable_addresses[1] = 0;
+    storage.run_control->error_claimed = 0;
+    storage.run_control->scheduler_error = 0;
+    slot_claim.slot_index = 1;
+    ready_claim.task_id = 1;
     EXPECT_FALSE(scheduler_fill_dispatch_slot(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, slot_claim,
         ready_claim
@@ -612,10 +747,37 @@ TEST(SchedulerDispatch, AcceptsLastCallableAndInlineSentinel) {
 TEST(SchedulerPredicate, DistinguishesFailedAndMalformedPredicates) {
     GraphBuffer graph(1);
     graph.executable(0, 0);
-    alignas(8) int64_t value = 3;
-    graph.predicate(0, reinterpret_cast<uint64_t>(&value), 8, static_cast<uint8_t>(PredicateOp::GT), 4);
-    EXPECT_EQ(scheduler_evaluate_task_predicate(graph.graph(), 0), SchedulerPredicateResult::FAIL);
-    graph.predicate(0, reinterpret_cast<uint64_t>(&value), 8, static_cast<uint8_t>(PredicateOp::LE), 4);
+    alignas(8) int64_t value = 5;
+    struct PredicateCase {
+        PredicateOp op;
+        int64_t pass_target;
+        int64_t fail_target;
+    };
+    constexpr std::array<PredicateCase, 6> cases{{
+        {PredicateOp::EQ, 5, 6},
+        {PredicateOp::NE, 6, 5},
+        {PredicateOp::GT, 4, 5},
+        {PredicateOp::LT, 6, 5},
+        {PredicateOp::GE, 5, 6},
+        {PredicateOp::LE, 5, 4},
+    }};
+    constexpr std::array<uint8_t, 4> element_sizes{1, 2, 4, 8};
+    for (uint8_t element_size : element_sizes) {
+        for (const PredicateCase &predicate_case : cases) {
+            graph.predicate(
+                0, reinterpret_cast<uint64_t>(&value), element_size, static_cast<uint8_t>(predicate_case.op),
+                predicate_case.pass_target
+            );
+            EXPECT_EQ(scheduler_evaluate_task_predicate(graph.graph(), 0), SchedulerPredicateResult::PASS);
+            graph.predicate(
+                0, reinterpret_cast<uint64_t>(&value), element_size, static_cast<uint8_t>(predicate_case.op),
+                predicate_case.fail_target
+            );
+            EXPECT_EQ(scheduler_evaluate_task_predicate(graph.graph(), 0), SchedulerPredicateResult::FAIL);
+        }
+    }
+
+    graph.predicate(0, 0, 0, static_cast<uint8_t>(PredicateOp::NONE));
     EXPECT_EQ(scheduler_evaluate_task_predicate(graph.graph(), 0), SchedulerPredicateResult::PASS);
 
     graph.predicate(0, 0, 8, static_cast<uint8_t>(PredicateOp::GT));
@@ -684,9 +846,9 @@ TEST(SchedulerReadyInbox, ConcurrentConsumersNeverDuplicateTask) {
             scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[0], task, &batch, nullptr)
         );
     }
-    ASSERT_TRUE(
-        scheduler_ready_batch_push(storage.scheduler_state->base(), &storage.contexts[0], 0, 0, &batch, nullptr)
-    );
+    ASSERT_TRUE(scheduler_ready_batch_push(
+        storage.scheduler_state->base(), &storage.contexts[0], 0, 0, &batch, nullptr, &storage.owner_states[0]
+    ));
     std::vector<std::atomic<uint32_t>> seen(kTasks);
     std::atomic<uint64_t> claimed{0};
     std::atomic<bool> failed{false};
@@ -726,8 +888,7 @@ TEST(SchedulerReadyInbox, OwnerPushRacesThiefWithoutLosingTasks) {
     GraphBuffer graph(kTasks);
     for (uint64_t task = 0; task < kTasks; ++task)
         graph.executable(task, 0);
-    SchedulerReadyOwnerState owner_state{};
-    scheduler_ready_owner_init(&owner_state);
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     std::vector<std::atomic<uint32_t>> seen(kTasks);
     std::atomic<uint64_t> claimed{0};
     std::atomic<bool> failed{false};
@@ -795,8 +956,7 @@ TEST(SchedulerReadyInbox, PendingPromotionRacesThiefWithoutReplayingTasks) {
     GraphBuffer graph(kTasks);
     for (uint64_t task = 0; task < kTasks; ++task)
         graph.executable(task, 0);
-    SchedulerReadyOwnerState owner_state{};
-    scheduler_ready_owner_init(&owner_state);
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     SchedulerReadyBatch published{};
     ASSERT_TRUE(
         scheduler_ready_batch_append(storage.scheduler_state->base(), &storage.contexts[0], 0, &published, nullptr)
@@ -895,7 +1055,7 @@ TEST(SchedulerReadyWake, ConcurrentRegistrationAndCloseResolveEveryConsumerExact
         scheduler_gm_store(controls[0].state, static_cast<int64_t>(SchedulerTaskState::DONE));
         if (!scheduler_resolve_completion(
                 graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, nullptr,
-                nullptr, nullptr
+                nullptr, nullptr, &storage.owner_states[0]
             ))
             failed.store(true, std::memory_order_relaxed);
     });
@@ -940,7 +1100,7 @@ TEST(SchedulerReadyWake, WakeResolvePublishesConsumerToResolverLocalInbox) {
     controls[0].state = static_cast<int64_t>(SchedulerTaskState::DONE);
     ASSERT_TRUE(scheduler_resolve_completion(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, &wake, &ready,
-        &completion
+        &completion, &storage.owner_states[0]
     ));
     EXPECT_EQ(completion.resolve_count, 1u);
     int64_t task = SCHEDULER_TASK_ID_INVALID;
@@ -962,7 +1122,7 @@ TEST(SchedulerReadyWake, WakeResolveQueuesBehindOlderPublishedWork) {
     SchedulerWakeStats wake{};
     SchedulerReadyStats ready{};
     SchedulerCompletionStats completion{};
-    SchedulerReadyOwnerState owner_state{};
+    SchedulerReadyOwnerState &owner_state = storage.owner_states[0];
     EXPECT_EQ(
         scheduler_route_task(
             graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 1, &wake
@@ -979,7 +1139,7 @@ TEST(SchedulerReadyWake, WakeResolveQueuesBehindOlderPublishedWork) {
     controls[0].state = static_cast<int64_t>(SchedulerTaskState::DONE);
     ASSERT_TRUE(scheduler_resolve_completion(
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, &wake, &ready,
-        &completion, false, true, nullptr, &owner_state
+        &completion, &owner_state, false, true, nullptr
     ));
     EXPECT_EQ(completion.resolve_count, 1u);
     EXPECT_EQ(scheduler_ready_pending_head(owner_state.queues[0].pending_endpoints), 1);
@@ -996,6 +1156,31 @@ TEST(SchedulerReadyWake, WakeResolveQueuesBehindOlderPublishedWork) {
         graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, 0, &task, &ready
     ));
     EXPECT_EQ(task, 1);
+}
+
+TEST(SchedulerReadyWake, RejectsInvalidWaiterShapeBeforeReadyBatchIndex) {
+    FixtureStorage storage(2, 1);
+    GraphBuffer graph(2);
+    graph.executable(0, 0);
+    graph.executable(1, 0, {0});
+    storage.metadata[1].active_mask = 0;
+    storage.metadata[1].flags |= SCHEDULER_TASK_HAS_FANIN;
+    ASSERT_EQ(
+        scheduler_route_task(
+            graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 1, nullptr
+        ),
+        SchedulerRouteResult::WAITING
+    );
+    auto *controls =
+        scheduler_state_at<SchedulerTaskControl>(storage.scheduler_state->base(), storage.layout.task_controls_offset);
+    controls[0].state = static_cast<int64_t>(SchedulerTaskState::DONE);
+
+    EXPECT_FALSE(scheduler_resolve_completion(
+        graph.graph(), storage.scheduler_state->base(), &storage.contexts[0], storage.run_control, 0, nullptr, nullptr,
+        nullptr, &storage.owner_states[0]
+    ));
+    EXPECT_EQ(storage.run_control->scheduler_error, static_cast<uint64_t>(SchedulerGraphResult::UNSUPPORTED_SHAPE));
+    EXPECT_EQ(storage.run_control->error_site, static_cast<uint64_t>(SchedulerErrorSite::COMPLETION_INVALID_SHAPE));
 }
 
 }  // namespace
