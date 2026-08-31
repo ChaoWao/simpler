@@ -101,10 +101,29 @@ Four switches and one flag make the measurement, and each is load-bearing:
 | Switch | Why |
 | ------ | --- |
 | `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` | emits the `bind phase=` lines at all |
-| `--log-level timing` | enables the TIMING records used by the report; this is the SceneTest default |
+| `--log-level timing` | pins the level the report is read at, and is the only way it reaches the `[stamp]` line; TIMING is already the default, so this records a condition rather than enabling one |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | keeps CPU golden imports from loading `torch_npu`; the `torch_backend_autoload` timing record confirms the effective setting and observed module state |
 | `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
 | `--skip-golden` | with the device skipped the outputs a golden check compares are never produced. Qwen still streams its valid fixture once before the measured rounds; on dsv4 the flag also skips the 42.6 GiB-per-rank fixture upload |
+
+**`--log-level` overrides a level that is already TIMING; it does not turn the
+records on.** There is one control point and it is the Python logger named
+`simpler`: [`python/simpler/_log.py`](../../python/simpler/_log.py) sets it to
+TIMING at import when nothing else has, and `Worker` snapshots that logger's
+effective level once — feeding it to the host log and to every forked chip
+child, which is why the same level governs the host and device sides.
+`configure_logging()` in
+[`simpler_setup/log_config.py`](../../simpler_setup/log_config.py) is the only
+way a CLI moves that snapshot; there is no environment variable.
+
+The recipe passes `--log-level timing` anyway, because **the level is the one
+measurement condition with no record of its own in the log.** Autoload state has
+`torch_backend_autoload`; the level has nothing, so a run that omits the flag
+leaves it implicit in whichever default that commit compiled in. Two arms of a
+cross-commit A/B could then run at different levels with neither `[stamp]`
+showing it — the same silent-mismatch failure the autoload record exists to
+prevent. Passing it puts the level in the stamp, where a `diff` of the two first
+lines catches a mismatch.
 
 SceneTest and the standalone Qwen driver emit one `torch_backend_autoload`
 record per interpreter after torch-dependent argument preparation and before
@@ -114,6 +133,13 @@ observed module state and is the authoritative field if the environment changed
 after torch was imported. `raw` is the JSON-encoded environment value (`null`
 when unset); values longer than 64 characters carry their first 64 characters
 and `raw_truncated=true`, keeping the record single-line and bounded.
+
+**The dsv4 driver is neither of those two, so a dsv4 log carries no such
+record** — `hbg_bind_phases` prints "backend-autoload state must be established
+before comparing this log" on every dsv4 measurement. The check below that this
+is the one condition already known to have produced a wrong number therefore has
+no in-log witness on that case; the `[stamp]` line is all a dsv4 A/B has, so both
+arms must be read off it by hand.
 
 **`SIMPLER_SKIP_DEVICE_RUN` is presence-based.** `SIMPLER_SKIP_DEVICE_RUN=0` still
 skips; `unset` it. It is a temporary handle from the dsv4 bring-up and is deleted
