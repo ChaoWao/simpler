@@ -35,15 +35,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-_SCHED_OUTER_PHASES = (
-    "complete",
-    "async_poll",
-    "dispatch",
-    "release",
-    "dummy",
-    "early_dispatch",
-    "drain",
-    "graph_prepare",
+from simpler_setup.tools.scheduler_phase_records import (
+    SCHED_OUTER_PHASES as _SCHED_OUTER_PHASES,
+)
+from simpler_setup.tools.scheduler_phase_records import (
+    canonical_sched_phase,
+    nested_resolve_record_ids,
+    scheduler_thread_role,
 )
 
 
@@ -229,23 +227,12 @@ def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
         # thread. Count only the latter so the P thread is not dropped without
         # double-counting TMR's nested bars.
         outer_recs = [r for r in records if r.get("phase") in _SCHED_OUTER_PHASES]
-        resolve_parents = sorted(
-            (
-                (r.get("start_time_us", 0), r.get("end_time_us", 0))
-                for r in outer_recs
-                if r.get("phase") in ("complete", "dummy")
-            ),
-            key=lambda interval: interval[0],
-        )
-        resolve_parent_starts = [interval[0] for interval in resolve_parents]
-
-        def is_nested_resolve(rec):
-            start = rec.get("start_time_us", 0)
-            end = rec.get("end_time_us", 0)
-            parent_idx = bisect.bisect_right(resolve_parent_starts, start) - 1
-            return parent_idx >= 0 and end <= resolve_parents[parent_idx][1]
-
-        standalone_resolve = [r for r in records if r.get("phase") == "resolve" and not is_nested_resolve(r)]
+        nested_resolve_ids = nested_resolve_record_ids(records)
+        standalone_resolve = [
+            record
+            for record in records
+            if canonical_sched_phase(record.get("phase")) == "resolve" and id(record) not in nested_resolve_ids
+        ]
         work_recs = sorted(
             outer_recs + standalone_resolve,
             key=lambda r: r.get("start_time_us", 0),
@@ -261,7 +248,7 @@ def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
         prev_end = None
 
         for rec in work_recs:
-            phase = rec["phase"]
+            phase = canonical_sched_phase(rec["phase"])
             start = rec.get("start_time_us", 0)
             end = rec.get("end_time_us", 0)
             # Idle = wall-clock gap between this record and the previous
@@ -297,16 +284,10 @@ def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
         finishes_per_loop = total_finishes / loops if loops > 0 else 0.0
         pop_total = pop_hit + pop_miss
         pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0.0
-        phases_seen = {rec["phase"] for rec in work_recs}
+        phases_seen = {canonical_sched_phase(rec["phase"]) for rec in work_recs}
         if phase_us["idle"] > 0:
             phases_seen.add("idle")
-        scheduler_only_phases = {"complete", "dispatch", "release", "early_dispatch", "drain", "graph_prepare"}
-        has_scheduler_work = bool(phases_seen & scheduler_only_phases)
-        has_resolution_work = bool(phases_seen & {"resolve", "async_poll", "dummy"})
-        is_unassigned_thread = bool(assigned_thread_indices) and tid not in assigned_thread_indices
-        is_resolution_thread = (
-            has_resolution_work and not has_scheduler_work and (bool(standalone_resolve) or is_unassigned_thread)
-        )
+        role = scheduler_thread_role(records, assigned_thread_indices, tid, nested_resolve_ids)
 
         t = {
             # `completed` remains the legacy logical-task field used by the
@@ -322,7 +303,7 @@ def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
             "pop_miss": pop_miss,
             "pop_hit_rate": pop_hit_rate,
             "format": "json_phase",
-            "role": "resolution" if is_resolution_thread else "scheduler",
+            "role": role,
             "phases_seen": phases_seen,
         }
         for p, us in phase_us.items():

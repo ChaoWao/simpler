@@ -246,6 +246,42 @@ def test_parse_scheduler_counts_hbg_p_thread_standalone_phases():
     assert threads[0]["phases_seen"] == {"resolve", "async_poll", "dummy", "idle"}
 
 
+def test_parse_scheduler_uses_explicit_hbg_resolve_discriminator_at_parent_boundary():
+    data = {
+        "aicpu_scheduler_phases": [
+            [
+                {"phase": "dummy", "start_time_us": 1.0, "end_time_us": 2.0, "loop_iter": 1},
+                {
+                    "phase": "resolve_standalone",
+                    "start_time_us": 2.0,
+                    "end_time_us": 2.0,
+                    "loop_iter": 2,
+                },
+            ]
+        ]
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["role"] == "resolution"
+    assert threads[0]["phases_seen"] == {"dummy", "resolve"}
+
+
+def test_parse_scheduler_treats_legacy_resolve_touching_parent_boundary_as_standalone():
+    data = {
+        "aicpu_scheduler_phases": [
+            [
+                {"phase": "complete", "start_time_us": 1.0, "end_time_us": 2.0, "loop_iter": 1},
+                {"phase": "resolve", "start_time_us": 2.0, "end_time_us": 2.0, "loop_iter": 2},
+            ]
+        ]
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["phases_seen"] == {"complete", "resolve"}
+
+
 def test_parse_scheduler_does_not_double_count_tmr_nested_resolve():
     data = {
         "aicpu_scheduler_phases": [
@@ -273,6 +309,40 @@ def test_parse_scheduler_does_not_double_count_tmr_nested_resolve():
     assert threads[0]["total_us"] == 8.0
     assert threads[0]["role"] == "scheduler"
     assert threads[0]["phases_seen"] == {"complete", "dummy", "idle"}
+
+
+def test_parse_scheduler_does_not_double_count_tmr_resolve_starting_with_its_parent():
+    # TMR stamps a Dummy bar's start and the first dummy's Resolve two
+    # get_sys_cnt_aicpu() reads apart, so on a2a3's 20 ns sys-cnt tick they
+    # routinely coincide. The Resolve is still nested and still excluded.
+    data = {
+        "aicpu_scheduler_phases": [
+            [
+                {
+                    "phase": "dummy",
+                    "start_time_us": 1.0,
+                    "end_time_us": 5.0,
+                    "loop_iter": 1,
+                    "tasks_processed": 2,
+                },
+                {"phase": "resolve", "start_time_us": 1.0, "end_time_us": 3.0, "loop_iter": 1},
+                {
+                    "phase": "dispatch",
+                    "start_time_us": 5.0,
+                    "end_time_us": 6.0,
+                    "loop_iter": 1,
+                    "tasks_processed": 1,
+                },
+            ]
+        ]
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["dummy_us"] == 4.0
+    assert threads[0]["resolve_us"] == 0.0
+    assert threads[0]["total_us"] == 5.0
+    assert threads[0]["role"] == "scheduler"
 
 
 def test_scheduler_loop_summary_keeps_scheduler_and_resolution_rates_separate():

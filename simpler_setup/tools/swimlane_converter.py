@@ -36,6 +36,11 @@ from pathlib import Path
 from typing import Any
 
 from simpler_setup.tools.clock_correlation import build_clock_alignment
+from simpler_setup.tools.scheduler_phase_records import (
+    canonical_sched_phase,
+    nested_resolve_record_ids,
+    scheduler_thread_role,
+)
 
 
 def _func_id_to_letter(func_id):
@@ -137,28 +142,6 @@ def _decode_in_graph_task_id(task_id):
         return None
     local = tid & 0xFFFFFFFF
     return local >> 10, local & 0x3FF
-
-
-def _nested_resolve_record_ids(records):
-    """Return Resolve records contained by a Complete or Dummy parent."""
-    parents = sorted(
-        (
-            (record.get("start_time_us", 0), record.get("end_time_us", 0))
-            for record in records
-            if record.get("phase") in ("complete", "dummy")
-        ),
-        key=lambda interval: interval[0],
-    )
-    parent_starts = [interval[0] for interval in parents]
-    nested = set()
-    for record in records:
-        if record.get("phase") != "resolve":
-            continue
-        start_us = record.get("start_time_us", 0)
-        parent_idx = bisect.bisect_right(parent_starts, start_us) - 1
-        if parent_idx >= 0 and record.get("end_time_us", 0) <= parents[parent_idx][1]:
-            nested.add(id(record))
-    return nested
 
 
 def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR0912
@@ -1825,17 +1808,10 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         for thread_idx, thread_records in enumerate(scheduler_phases):
             tid = sched_lane_tid(thread_idx, 0)
             resolve_tid = sched_lane_tid(thread_idx, 1)
-            nested_resolve_ids = _nested_resolve_record_ids(thread_records)
-            thread_phase_names = {record.get("phase") for record in thread_records}
-            scheduler_only_phases = {"complete", "dispatch", "release", "early_dispatch", "drain", "graph_prepare"}
-            has_scheduler_work = bool(thread_phase_names & scheduler_only_phases)
-            has_resolution_work = bool(thread_phase_names & {"resolve", "async_poll", "dummy"})
-            is_unassigned_thread = bool(assigned_thread_indices) and thread_idx not in assigned_thread_indices
-            has_standalone_resolve = any(
-                record.get("phase") == "resolve" and id(record) not in nested_resolve_ids for record in thread_records
-            )
+            nested_resolve_ids = nested_resolve_record_ids(thread_records)
             is_resolution_thread = (
-                has_resolution_work and not has_scheduler_work and (has_standalone_resolve or is_unassigned_thread)
+                scheduler_thread_role(thread_records, assigned_thread_indices, thread_idx, nested_resolve_ids)
+                == "resolution"
             )
 
             # Thread name metadata
@@ -1871,7 +1847,8 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             # virtual worker, so we route them to Worker View (pid=4) AICPU_N
             # (where N = the AICPU id of the sched thread that drained them).
             for record in thread_records:
-                phase = record.get("phase", "unknown")
+                raw_phase = record.get("phase", "unknown")
+                phase = canonical_sched_phase(raw_phase)
                 if phase in ("dummy_task", "predicated_skip"):
                     start_us = record["start_time_us"]
                     end_us = record["end_time_us"]
@@ -1986,7 +1963,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         tasks_processed = matched_finish_rows
                         phase_args["tasks_processed"] = tasks_processed
                 display_name = f"{phase}({tasks_processed})"
-                event_tid = resolve_tid if phase == "resolve" and id(record) in nested_resolve_ids else tid
+                event_tid = resolve_tid if raw_phase == "resolve" and id(record) in nested_resolve_ids else tid
                 events.append(
                     {
                         "args": phase_args,

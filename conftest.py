@@ -901,7 +901,7 @@ def _base_pytest_argv(session, *, strip_options=()):
 
 
 def _resolve_max_parallel(cfg, platform: str, device_ids: list[int]) -> int:
-    """Parse the -j/--max-parallel CLI value; 'auto' → platform-aware default."""
+    """Parse --max-parallel; 'auto' selects a platform-aware default."""
     raw = cfg.getoption("--max-parallel", default="auto")
     if raw in (None, "", "auto"):
         return _ps.default_max_parallel(platform or "", device_ids)
@@ -912,6 +912,56 @@ def _resolve_max_parallel(cfg, platform: str, device_ids: list[int]) -> int:
     if val < 1:
         raise pytest.UsageError(f"--max-parallel must be >= 1, got {val}")
     return val
+
+
+def _invocation_has_option(cfg, options):
+    """Return whether the original command line contains one of ``options``."""
+    for arg in cfg.invocation_params.args:
+        text = str(arg)
+        if text in options or any(text.startswith(f"{option}=") for option in options):
+            return True
+    return False
+
+
+def _l2_xdist_options(cfg, max_parallel: int):
+    """Return whether L2 uses xdist, child defaults, and the worker label.
+
+    ``numprocesses`` arrives here as ``None`` or ``0``. A top-level ``-n N``
+    with N > 0 puts xdist in distribution mode, and its ``pytest_runtestloop``
+    runs the whole session before this dispatcher's own hook is reached, so a
+    positive worker count is only ever seen from a direct caller.
+
+    ``--pdb`` is serial whatever ``numprocesses`` says: xdist zeroes the worker
+    count only for ``-n auto`` / ``-n logical``, so a bare ``--pdb`` arrives
+    with it unset — and the L2 child inherits ``--pdb``, which xdist rejects
+    with a usage error as soon as ``-n`` puts the child in distribution mode.
+    """
+    plugin_active = cfg.pluginmanager.hasplugin("xdist")
+    if not plugin_active or cfg.getoption("usepdb", default=False):
+        return False, [], None
+
+    requested_workers = cfg.getoption("numprocesses", default=None)
+    if requested_workers == 0:
+        return False, [], None
+
+    if requested_workers is None and max_parallel <= 1:
+        return False, [], None
+
+    options = []
+    if requested_workers is None:
+        options.extend(["-n", str(max_parallel)])
+    # xdist rewrites its effective default from ``no`` to ``load`` as soon as
+    # ``-n`` is active. Inspect the original command line so that derived
+    # ``load`` does not masquerade as an explicit user choice. ``-d`` is
+    # xdist's shortcut for ``--dist=load`` and overrides a ``--dist`` passed
+    # alongside it, so it is an explicit choice too. The scan sees the
+    # invocation argv only: a ``--dist`` coming from ini ``addopts`` reads as
+    # unset here, and ``addopts`` is prepended to the child's argv, so the
+    # appended default wins over it.
+    if not _invocation_has_option(cfg, {"--dist", "-d"}):
+        options.extend(["--dist", "loadfile"])
+    worker_label = requested_workers if requested_workers is not None else max_parallel
+    return True, options, worker_label
 
 
 def _emit_group(header: str, body: str) -> None:
@@ -1061,8 +1111,8 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
     # worker slices --device 0-7 down to one id in pytest_configure (above),
     # and the session-scoped st_worker fixture reuses one ChipWorker per
     # (runtime, device).
-    xdist_active = max_parallel > 1 and cfg.pluginmanager.hasplugin("xdist")
-    if max_parallel > 1 and not xdist_active and not cfg.pluginmanager.is_blocked("xdist"):
+    xdist_active, xdist_options, xdist_workers = _l2_xdist_options(cfg, max_parallel)
+    if max_parallel > 1 and not cfg.pluginmanager.hasplugin("xdist") and not cfg.pluginmanager.is_blocked("xdist"):
         print(
             "\n[warning] --max-parallel > 1 but the pytest-xdist plugin is not active; "
             "falling back to serial L2 phase. Install or enable pytest-xdist to use L2 parallelism.\n",
@@ -1071,7 +1121,7 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
     for rt in l2_runtimes:
         cmd = base_args + ["--runtime", rt, "--level", "2"]
         if xdist_active:
-            cmd += ["-n", str(max_parallel), "--dist", "loadfile"]
+            cmd += xdist_options
         # Per-runtime sink for the in-process poison guards (issue #1110). Each
         # xdist worker appends the classes it poison-skips; we re-run them in a
         # fresh subprocess after this one exits so they don't silently lose
@@ -1085,7 +1135,7 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
         # need to buffer their stdout — we can stream it directly through
         # the group markers. ``::group::`` on its own line before the run
         # opens the fold; ``::endgroup::`` after closes it.
-        label = f"L2 {rt}" + (f" [-n {max_parallel}]" if xdist_active else "")
+        label = f"L2 {rt}" + (f" [-n {xdist_workers}]" if xdist_active else "")
         start = time.monotonic()
         print(f"::group::{label}", flush=True)
         result = subprocess.run(cmd, check=False, cwd=cwd, env=run_env)

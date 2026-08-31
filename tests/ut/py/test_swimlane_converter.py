@@ -847,7 +847,7 @@ def test_hbg_resolution_thread_uses_one_lane_and_exports_queue_depths(tmp_path):
         [],
         [
             {
-                "phase": "resolve",
+                "phase": "resolve_standalone",
                 "start_time_us": 1.0,
                 "end_time_us": 2.0,
                 "tasks_processed": 1,

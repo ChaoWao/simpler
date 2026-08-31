@@ -79,14 +79,14 @@ class TestSchedulerPhases(SceneTestCase):
             ]
             assert len(resolution_threads) == 1, f"expected one core-less P thread, found {len(resolution_threads)}"
             resolution_thread = resolution_threads[0]
-            required = {"resolve", "dummy"}
+            required = {"resolve_standalone", "dummy"}
             emitted = {record.get("phase") for record in resolution_thread}
             assert required <= emitted, f"missing P-thread phases: {sorted(required - emitted)}"
 
             records = [record for record in resolution_thread if record.get("phase") in required]
             assert all(record["loop_iter"] > 0 for record in records)
             assert all(record["end_time_us"] >= record["start_time_us"] for record in records)
-            assert sum(record["tasks_processed"] for record in records if record["phase"] == "resolve") >= 1
+            assert sum(record["tasks_processed"] for record in records if record["phase"] == "resolve_standalone") >= 1
             assert sum(record["tasks_processed"] for record in records if record["phase"] == "dummy") == 1
             assert len(resolution_thread) < 64, "P-thread phase aggregation produced excessive records"
 

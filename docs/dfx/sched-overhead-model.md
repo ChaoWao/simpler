@@ -113,9 +113,14 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 
 For TMR captures, Resolve is nested in Complete or Dummy and is excluded from
 the phase total to avoid double counting. For HBG captures, Resolve is
-standalone work on the P thread and is included. Empty HBG async polling is
-reported as compact `AsyncPoll(0)` bars, so its measured CPU cost contributes
-to the scheduler budget instead of being reconstructed as idle. HBG's S
+standalone work on the P thread and is included. The two are told apart by the
+`resolve_standalone` phase discriminator the HBG P thread emits, not by
+timestamp containment; a capture predating that discriminator falls back to
+containment, where a Resolve ending exactly at its Complete or Dummy parent's
+end counts as standalone. Both spellings report under the `resolve` label.
+Empty HBG async polling is reported as compact `AsyncPoll(0)` bars, so its
+measured CPU cost contributes to the scheduler budget instead of being
+reconstructed as idle. HBG's S
 threads detect AICore FIN and dispatch work, while its P thread resolves
 completion state and dependencies. Part 5 reports their loop rates separately;
 the Tail-OH-to-loop comparison uses only S-thread loops because Tail OH ends at
