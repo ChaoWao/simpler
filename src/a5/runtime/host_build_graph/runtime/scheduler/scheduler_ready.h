@@ -311,8 +311,7 @@ inline __aicore__ void scheduler_record_error(
     scheduler_gm_store(run_control->error_task_id, static_cast<uint64_t>(task_id));
     if (graph != nullptr) {
         scheduler_gm_store(run_control->error_graph_task_count, graph->task_count);
-        scheduler_gm_store(run_control->error_descriptors_address, graph->descriptors_address);
-        scheduler_gm_store(run_control->error_payloads_address, graph->payloads_address);
+        scheduler_gm_store(run_control->error_storage_address, graph->storage_address);
         scheduler_gm_store(run_control->error_task_window_mask, graph->task_window_mask);
     }
     if (context != nullptr) {

@@ -39,7 +39,6 @@ Runtime::Runtime() {
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;
-    slot_states_ptr_ = nullptr;
     orch_args_storage_.clear();
     prebuilt_arena_base_ = nullptr;
     prebuilt_runtime_offset_ = 0;
@@ -63,7 +62,6 @@ Runtime::Runtime() {
 void *Runtime::get_gm_sm_ptr() const { return gm_sm_ptr_; }
 const simpler::hbg::EntryArgsStorage &Runtime::get_orch_args() const { return orch_args_storage_; }
 void Runtime::set_gm_sm_ptr(void *p) { gm_sm_ptr_ = p; }
-void Runtime::set_slot_states_ptr(void *p) { slot_states_ptr_ = p; }
 // The one place a boundary ChipTensor becomes this runtime's Tensor. Called from
 // the host, before any orchestration runs, so nothing inside the runtime — on the
 // host or on the AICPU — ever holds the boundary form.

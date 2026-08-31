@@ -559,7 +559,7 @@ struct SchedulerState {
         } else {
             ResourceShape shape = slot_state->active_mask.to_shape();
             if (shape == ResourceShape::DUMMY ||
-                (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
+                (slot_state->task_attrs.has_predicate() && !slot_state->to_payload().predicate.pass())) {
                 pushed = dummy_ready_queue.push(slot_state);
             } else if (slot_state->task_attrs.requires_sync_start()) {
                 pushed = ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
@@ -594,7 +594,7 @@ struct SchedulerState {
     // lists. The decision is terminal: tasks are never re-polled; a producer's
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     int classify_fanin_state(const ChipTaskSlotState *s) const {
-        const TaskPayload &p = *s->payload;
+        const TaskPayload &p = s->to_payload();
         const SharedMemoryTaskHeader &tasks = *task_view.tasks;
         const int32_t *fanin = p.fanin_data();
         for (int32_t i = p.fanin_count - 1; i >= 0; i--) {
@@ -624,7 +624,7 @@ struct SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &tasks.get_slot_state_by_task_id(consumer->payload->fanin_data()[state]);
+            producer = &tasks.get_slot_state_by_task_id(consumer->to_payload().fanin_data()[state]);
         }
     }
 
@@ -635,7 +635,7 @@ struct SchedulerState {
     // watermark >= producer.last_consumer_local_id). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
-        const int32_t task_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot_state.task->task_id));
+        const int32_t task_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot_state.to_descriptor().task_id));
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
@@ -644,7 +644,7 @@ struct SchedulerState {
         ChipTaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
         while (waiter != nullptr && waiter != WAKE_LIST_SENTINEL) {
             ChipTaskSlotState *next = waiter->next_in_wake_list;
-            if (waiter->payload->fanin_count == 1) {
+            if (waiter->to_payload().fanin_count == 1) {
                 push_ready_routed(waiter);  // single-fanin waiter was waiting only on us
                 waiter = next;
                 continue;
@@ -653,7 +653,7 @@ struct SchedulerState {
             if (state < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_wake(&tasks.get_slot_state_by_task_id(waiter->payload->fanin_data()[state]), waiter);
+                register_wake(&tasks.get_slot_state_by_task_id(waiter->to_payload().fanin_data()[state]), waiter);
             }
             waiter = next;
         }
@@ -775,7 +775,7 @@ struct SchedulerState {
 
     inline void record_published_blocks(ChipTaskSlotState &slot_state, int32_t count) {
         if (count <= 0 || !slot_state.task_attrs.allow_early_resolve()) return;
-        slot_state.payload->published_block_count.fetch_add(static_cast<int16_t>(count), std::memory_order_seq_cst);
+        slot_state.to_payload().published_block_count.fetch_add(static_cast<int16_t>(count), std::memory_order_seq_cst);
     }
 
     // Ring one sync_start cohort from its stable staged_core_mask. The caller owns
@@ -783,7 +783,7 @@ struct SchedulerState {
     // global staging completes, while the corresponding per-core table entries are live.
     inline void ring_all_staged_doorbells(ChipTaskSlotState &slot_state) {
         for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
-            uint64_t bits = slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst);
+            uint64_t bits = slot_state.to_payload().staged_core_mask[w].load(std::memory_order_seq_cst);
             while (bits != 0) {
                 int core_id = w * 64 + __builtin_ctzll(bits);
                 bits &= bits - 1;
@@ -816,14 +816,16 @@ struct SchedulerState {
 
     inline void cancel_early_sync_drain(ChipTaskSlotState &slot_state) {
         uint8_t previous =
-            slot_state.payload->early_sync_drain_state.exchange(EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
+            slot_state.to_payload().early_sync_drain_state.exchange(EARLY_SYNC_DRAIN_NONE, std::memory_order_seq_cst);
         if ((previous & EARLY_SYNC_DRAIN_OWNER) == 0) return;
         if ((previous & EARLY_SYNC_DRAIN_READY) != 0) {
             push_ready_routed(&slot_state);
             return;
         }
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_STAGING) {
-            early_sync_start_queue.push_tagged(&slot_state, static_cast<uint64_t>(slot_state.task->task_id.raw));
+        if (slot_state.to_payload().early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_STAGING) {
+            early_sync_start_queue.push_tagged(
+                &slot_state, static_cast<uint64_t>(slot_state.to_descriptor().task_id.raw)
+            );
         }
     }
 
@@ -852,19 +854,19 @@ struct SchedulerState {
         // happens-before its final store. Read the seed first, then the mask, so
         // observing the final count cannot be paired with a partially published
         // mask when producer release races staging.
-        int32_t running_cores = slot_state.payload->running_slot_count.load(std::memory_order_seq_cst);
+        int32_t running_cores = slot_state.to_payload().running_slot_count.load(std::memory_order_seq_cst);
         int32_t staged_cores = 0;
         for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_cores +=
-                __builtin_popcountll(slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst));
+                __builtin_popcountll(slot_state.to_payload().staged_core_mask[w].load(std::memory_order_seq_cst));
         if (staged_cores == 0) return false;
         if (running_cores != staged_cores) return false;
-        if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_DISPATCHED)
+        if (slot_state.to_payload().early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_DISPATCHED)
             return false;
-        if (!try_claim_early_dispatch_launch(*slot_state.payload)) return false;
+        if (!try_claim_early_dispatch_launch(slot_state.to_payload())) return false;
         ring_all_staged_doorbells(slot_state);
         wmb();
-        slot_state.payload->early_dispatch_launch_state.store(
+        slot_state.to_payload().early_dispatch_launch_state.store(
             EARLY_DISPATCH_LAUNCH_COMPLETE, std::memory_order_release
         );
         return true;

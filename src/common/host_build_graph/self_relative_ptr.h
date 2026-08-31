@@ -20,9 +20,8 @@
  *
  * The block is `memcpy`'d to the device as one image, so a delta between two
  * addresses inside it is invariant under the move while a raw pointer is not.
- * Every user has to satisfy that precondition: a GLOBAL task's payload and
- * descriptor live in the same shared-memory image as its slot state, and a Graph
- * task's live in the same InGraphTaskStorage.
+ * Every user has to satisfy that precondition: a task payload's argument regions
+ * live in the same image as the payload itself, in the pools past the task array.
  *
  * A zero delta means unbound — a field can never coincide with its own target.
  * Zeroed memory therefore reads as null, which is what the slot's pristine state

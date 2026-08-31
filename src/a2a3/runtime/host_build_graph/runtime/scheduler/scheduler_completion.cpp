@@ -104,7 +104,8 @@ void SchedulerContext::complete_slot_task(
     AICoreCompletionMailbox *mailbox = rt_ != nullptr ? rt_->aicore_mailbox : nullptr;
     bool defer_completion_to_consumer = false;
 
-    if (slot_state.payload != nullptr) {
+    // Scoped so the slab reference does not outlive the drain below it.
+    {
         volatile DeferredCompletionSlab *deferred_slab = &deferred_slab_per_core_[core_id][expected_reg_task_id & 1];
         int32_t slab_err = deferred_slab->error_code;
         if (slab_err != SIMPLER_ERROR_NONE) {
@@ -133,7 +134,7 @@ void SchedulerContext::complete_slot_task(
             // be this thread or a later one).
             slot_state.mark_any_subtask_deferred();
 
-            const TaskId token = slot_state.task->task_id;
+            const TaskId token = slot_state.to_descriptor().task_id;
             for (uint32_t i = 0; i < cond_count; ++i) {
                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
                 while (!mailbox->try_push_condition(
@@ -161,10 +162,12 @@ void SchedulerContext::complete_slot_task(
     }
 #endif
 
-    if (task_complete && slot_state.payload != nullptr && slot_state.has_any_subtask_deferred()) {
+    if (task_complete && slot_state.has_any_subtask_deferred()) {
         // Some subtask of this task registered conditions; finish the
         // registration by handing the slot_state off to the consumer.
-        while (!mailbox->try_push_normal_done(slot_state.task->task_id, reinterpret_cast<uint64_t>(&slot_state))) {
+        while (
+            !mailbox->try_push_normal_done(slot_state.to_descriptor().task_id, reinterpret_cast<uint64_t>(&slot_state))
+        ) {
             sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);
             SPIN_WAIT_HINT();
         }
@@ -175,14 +178,15 @@ void SchedulerContext::complete_slot_task(
 #if SIMPLER_DFX
         if (is_dump_args_enabled()) {
             dump_args_for_task<SUBTASK_SLOT_COUNT>(
-                thread_idx, slot_state, ArgsDumpStage::AFTER_COMPLETION,
+                thread_idx, slot_state.to_descriptor(), slot_state.to_payload(), slot_state.active_mask,
+                ArgsDumpStage::AFTER_COMPLETION,
                 [](ActiveMask active_mask, int raw_subtask_id) {
                     return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
                 },
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);
                 },
-                &slot_state.payload->dump_metadata
+                &slot_state.to_payload().dump_metadata
             );
         }
 #endif
@@ -215,7 +219,7 @@ void SchedulerContext::complete_slot_task(
             ) != 0) {
             LOG_ERROR(
                 "Core %d: chip_swimlane_aicpu_complete_task failed for task 0x%" PRIx64, core_id,
-                static_cast<uint64_t>(slot_state.task->task_id.raw)
+                static_cast<uint64_t>(slot_state.to_descriptor().task_id.raw)
             );
         }
 #if SIMPLER_SCHED_PROFILING
@@ -225,8 +229,8 @@ void SchedulerContext::complete_slot_task(
 
     if (is_pmu_enabled()) {
         pmu_aicpu_record_task(
-            core_id, thread_idx, slot_state.task->task_id.raw,
-            slot_state.task->kernel_id[static_cast<int32_t>(subslot)], hank[core_id].core_type
+            core_id, thread_idx, slot_state.to_descriptor().task_id.raw,
+            slot_state.to_descriptor().kernel_id[static_cast<int32_t>(subslot)], hank[core_id].core_type
         );
     }
 #endif
@@ -273,8 +277,8 @@ void SchedulerContext::check_running_cores_for_completion(
         // Cheap cacheable load; no MMIO. Pending slot is empty while gated.
         {
             ChipTaskSlotState *rs = core.running_slot_state;
-            if (rs != nullptr && rs->payload != nullptr &&
-                rs->payload->early_dispatch_state.load(std::memory_order_relaxed) == EARLY_DISPATCH_STAGING) {
+            if (rs != nullptr &&
+                rs->to_payload().early_dispatch_state.load(std::memory_order_relaxed) == EARLY_DISPATCH_STAGING) {
                 continue;
             }
         }
@@ -312,11 +316,11 @@ void SchedulerContext::check_running_cores_for_completion(
         // as a normal task and wait for an ack that never comes -> deadlock (the
         // nondeterministic sync_start stall).
         uint8_t pending_ss =
-            (core.pending_slot_state != nullptr && core.pending_slot_state->payload != nullptr) ?
-                core.pending_slot_state->payload->early_dispatch_state.load(std::memory_order_relaxed) :
+            core.pending_slot_state != nullptr ?
+                core.pending_slot_state->to_payload().early_dispatch_state.load(std::memory_order_relaxed) :
                 static_cast<uint8_t>(EARLY_DISPATCH_NONE);
         bool pending_gated =
-            (core.pending_slot_state != nullptr && core.pending_slot_state->payload != nullptr &&
+            (core.pending_slot_state != nullptr &&
              (pending_ss == EARLY_DISPATCH_STAGING ||
               (pending_ss == EARLY_DISPATCH_DISPATCHED && core.pending_slot_state->task_attrs.requires_sync_start())));
         SlotTransition t = decide_slot_transition(
@@ -391,7 +395,7 @@ void SchedulerContext::check_running_cores_for_completion(
                 bool sync_start_promote = pending_gated && promoted->task_attrs.requires_sync_start();
                 promote_pending_to_running(core);  // Case 2 or Case 3 (with pending)
                 if (sync_start_promote) {
-                    promoted->payload->running_slot_count.fetch_add(1, std::memory_order_seq_cst);
+                    promoted->to_payload().running_slot_count.fetch_add(1, std::memory_order_seq_cst);
                     if (sched_->maybe_rendezvous_ring(*promoted)) {
                         sched_->propagate_dispatch_fanin(*promoted);
                     }
@@ -564,7 +568,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
             if (gated) {
                 for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                     if (my_mask[w] != 0) {
-                        slot_state->payload->staged_core_mask[w].fetch_or(my_mask[w], std::memory_order_seq_cst);
+                        slot_state->to_payload().staged_core_mask[w].fetch_or(my_mask[w], std::memory_order_seq_cst);
                     }
                 }
             }
@@ -676,7 +680,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // OWNER is acquired before the drain is published and persists through
     // completion, so every staging thread makes the same gate decision even if
     // producer release changes early_dispatch_state during the barrier.
-    bool gated = slot_state->payload != nullptr && SchedulerState::owns_early_sync_drain(*slot_state->payload);
+    bool gated = SchedulerState::owns_early_sync_drain(slot_state->to_payload());
 
     if (coordinator) {
         ResourceShape shape = slot_state->active_mask.to_shape();
@@ -738,7 +742,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
         // Seed the rendezvous with the running-slot cores staged across all threads; pending
         // cores advance it as they promote. maybe_rendezvous_ring (producer release) rings iff
         // this already equals popcount(staged_core_mask) — i.e. no pending spill.
-        slot_state->payload->running_slot_count.store(
+        slot_state->to_payload().running_slot_count.store(
             static_cast<int16_t>(drain_state_.drain_running_staged.load(std::memory_order_acquire)),
             std::memory_order_seq_cst
         );
@@ -763,5 +767,5 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     } else {
         sched_->propagate_dispatch_fanin(*slot_state);
     }
-    SchedulerState::finish_early_sync_drain(*slot_state->payload);
+    SchedulerState::finish_early_sync_drain(slot_state->to_payload());
 }

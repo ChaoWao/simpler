@@ -75,15 +75,13 @@ protected:
         sm_arena.release();
     }
 
-    // Fill the task table (descriptors / payloads / slot_states / completion_flags)
-    // with poison. init_header wrote only the header, so this is the state the table
+    // Fill the task table (storage entries / completion_flags) with poison.
+    // init_header wrote only the header, so this is the state the table
     // is in before any submit writes it — modelling the never-zeroed device SM.
     void poison_task_table() {
         auto &tasks = sm_handle->header->tasks;
         const size_t n = static_cast<size_t>(CHIP_DEFAULT_GRAPH_TASKS);
-        std::memset(tasks.task_descriptors, POISON, n * sizeof(TaskDescriptor));
-        std::memset(tasks.task_payloads, POISON, n * sizeof(TaskPayload));
-        std::memset(tasks.slot_states, POISON, n * sizeof(ChipTaskSlotState));
+        std::memset(tasks.task_storage, POISON, n * sizeof(ChipTaskStorage));
         std::memset(tasks.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
     }
 };
@@ -135,9 +133,10 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     // Every claimed slot's device-read fields must carry real values, not poison.
     for (int32_t local = 0; local < total; local++) {
         SCOPED_TRACE(testing::Message() << "slot local_id=" << local);
-        const TaskDescriptor &desc = tasks.task_descriptors[local];
-        const TaskPayload &pl = tasks.task_payloads[local];
-        const ChipTaskSlotState &st = tasks.slot_states[local];
+        const ChipTaskStorage &entry = tasks.storage_at(local);
+        const TaskDescriptor &desc = entry.task;
+        const TaskPayload &pl = entry.payload;
+        const ChipTaskSlotState &st = entry.slot;
 
         // Descriptor: the task id is written to this exact local id.
         EXPECT_EQ(simpler::hbg::task_local_id(desc.task_id), static_cast<uint32_t>(local));
@@ -164,8 +163,9 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     }
 
     // Field-specific coverage on the real task: tensors, scalar, packed output buffer.
-    const TaskDescriptor &root_desc = tasks.task_descriptors[simpler::hbg::task_local_id(root.task_id())];
-    const TaskPayload &root_pl = tasks.task_payloads[simpler::hbg::task_local_id(root.task_id())];
+    const ChipTaskStorage &root_entry = tasks.storage_at(simpler::hbg::task_local_id(root.task_id()));
+    const TaskDescriptor &root_desc = root_entry.task;
+    const TaskPayload &root_pl = root_entry.payload;
     EXPECT_EQ(root_pl.tensor_count, 1);
     EXPECT_EQ(root_pl.scalar_count, 1);
     EXPECT_EQ(root_pl.dump_metadata.dump_arg_mask, (uint64_t{1} << 0) | (uint64_t{1} << 1));
@@ -176,7 +176,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     EXPECT_EQ(root_desc.kernel_id[static_cast<int>(SubtaskSlot::AIV0)], 0);
 
     // The consumer's fanin is written: two duplicate deps dedupe to one.
-    const TaskPayload &cons_pl = tasks.task_payloads[simpler::hbg::task_local_id(consumer.task_id())];
+    const TaskPayload &cons_pl = tasks.storage_at(simpler::hbg::task_local_id(consumer.task_id())).payload;
     EXPECT_EQ(cons_pl.fanin_count, 1);
     EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(simpler::hbg::task_local_id(root.task_id())));
 }

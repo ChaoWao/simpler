@@ -1315,17 +1315,25 @@ static bool append_fanin_or_fail(
         );
         return false;
     }
-    ChipTaskSlotState *prod_state = &orch.sm_header->tasks.get_slot_state_by_task_id(
-        static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id))
-    );
-    // Skip a stale/reused producer slot: the cached owner id no longer resolves
-    // to this producer (defensive — whole-graph-resident hbg does not reuse slots
-    // at build time). A COMPLETED producer IS a real fanin edge under polling (its
-    // completion_flags byte is set), so it is not skipped.
-    if (prod_state->task == nullptr ||
-        simpler::hbg::task_local_id(prod_state->task->task_id) != simpler::hbg::task_local_id(producer_task_id)) {
-        return true;
+    // An id past what this run has claimed names no task: get_slot_state_by_task_id
+    // does not bounds-check, so accepting it would write last_consumer_local_id into
+    // an unclaimed — or out-of-range — slot and record a fanin edge to nothing. Only
+    // ids handed back by a previous submit are valid here, and those are below
+    // active_count() because hbg mints them in order and never recycles one.
+    const int32_t prod_local = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
+    if (prod_local < 0 || prod_local >= orch.task_allocator.active_count()) {
+        orch.report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
+            "producer task %#llx names slot %d, which this run has not submitted (%d claimed)",
+            static_cast<unsigned long long>(producer_task_id.raw), prod_local, orch.task_allocator.active_count()
+        );
+        return false;
     }
+    // A local id is its own storage index and hbg never recycles a slot, so this
+    // entry is the producer's by construction — there is no stale-slot case to
+    // screen for. A COMPLETED producer is a real fanin edge under polling (its
+    // completion_flags byte is set), so it is not screened out either.
+    ChipTaskSlotState *prod_state = &orch.sm_header->tasks.get_slot_state_by_task_id(prod_local);
     // Dedup by producer local id, which is also its task-table slot.
     if (fanin_mark_seen(orch, producer_task_id)) {
         return true;
@@ -1344,7 +1352,7 @@ static bool append_fanin_or_fail(
         orch_mark_fatal(&orch, SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED);
         return false;
     }
-    fanin_slots[fanin_count++] = static_cast<int32_t>(simpler::hbg::task_local_id(producer_task_id));
+    fanin_slots[fanin_count++] = prod_local;
 
     // Reclaim gate: record this task as a consumer of the producer. The producer
     // slot retires once the completed_watermark reaches this consumer id.
@@ -1402,9 +1410,10 @@ static bool prepare_task(
     }
 
     out->task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(out->alloc_result.task_id));
-    out->slot_state = &orch->sm_header->tasks.get_slot_state_by_task_id(out->alloc_result.task_id);
-    out->task = &orch->sm_header->tasks.task_descriptors[out->alloc_result.task_id];
-    out->payload = &orch->sm_header->tasks.task_payloads[out->alloc_result.task_id];
+    ChipTaskStorage &storage = orch->sm_header->tasks.storage_at(out->alloc_result.task_id);
+    out->slot_state = &storage.slot;
+    out->task = &storage.task;
+    out->payload = &storage.payload;
 
     // Bind the three argument regions before prefetch() and init(), both of which
     // dereference them. The scalar cursor advances in whole cache lines because init()
@@ -1433,16 +1442,6 @@ static bool prepare_task(
     orch->sm_header->tasks.completion_flags[out->alloc_result.task_id].store(0, std::memory_order_relaxed);
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
-
-    // Re-bind payload/task pointers each submit. Value is per-slot constant
-    // (same as &task_payloads[slot] / &task_descriptors[slot]), but writing
-    // here lets TaskHeaderView::init() skip the O(max_tasks) bind loop.
-    // Both writes hit the same 64B slot_state cache line we're about to
-    // dirty below, so the extra cost is two stores on an already-hot line.
-    // Must precede the Orch-side wiring publish at the end of
-    // submit_task_common — that publish is the first read of slot_state->task /
-    // slot_state->payload by scheduler threads.
-    out->slot_state->bind_buffers(out->payload, out->task);
 
     // prepare_task does NO payload writes: all payload content (tensors/scalars +
     // early-dispatch fields) is initialized in TaskPayload::init, the
@@ -1987,9 +1986,10 @@ bool graph_submit_outer(
     }
     const TaskId task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(allocation.task_id));
     SharedMemoryTaskHeader &tasks = orch->sm_header->tasks;
-    TaskDescriptor &task = tasks.task_descriptors[allocation.task_id];
-    TaskPayload &payload = tasks.task_payloads[allocation.task_id];
-    ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(allocation.task_id);
+    ChipTaskStorage &storage = tasks.storage_at(allocation.task_id);
+    TaskDescriptor &task = storage.task;
+    TaskPayload &payload = storage.payload;
+    ChipTaskSlotState &slot = storage.slot;
 
     // Init-on-write, as in prepare_task: this slot's dynamic scheduling fields and
     // completion flag are established here, at the claim, because nothing else
@@ -1999,7 +1999,6 @@ bool graph_submit_outer(
     slot.reset_for_reuse();
     tasks.completion_flags[allocation.task_id].store(0, std::memory_order_relaxed);
 
-    slot.bind_buffers(&payload, &task);
     // Graph boundaries use the same compact argument pools as ordinary tasks. The
     // outer payload carries the invocation data; graph_context only names the
     // shared Definition until device initialization replaces it with GraphExecution.
@@ -2115,8 +2114,7 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
                                                 graph_record_definition(*state, definition_it->second);
         if (definition == nullptr || definition->execution_storage_bytes == 0 ||
             definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
-            pending.outer_slot == nullptr || pending.outer_slot->task == nullptr ||
-            pending.outer_slot->task_kind != TaskKind::GRAPH) {
+            pending.outer_slot == nullptr || pending.outer_slot->task_kind != TaskKind::GRAPH) {
             if (failed_key != nullptr) *failed_key = pending.full_key;
             return false;
         }
@@ -2131,8 +2129,9 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
             if (failed_key != nullptr) *failed_key = pending.full_key;
             return false;
         }
-        pending.outer_slot->task->packed_buffer_base = packed_base;
-        pending.outer_slot->task->packed_buffer_end = packed_end;
+        TaskDescriptor &outer_task = pending.outer_slot->to_descriptor();
+        outer_task.packed_buffer_base = packed_base;
+        outer_task.packed_buffer_end = packed_end;
         pending.deferred_heap = false;
     }
     return true;

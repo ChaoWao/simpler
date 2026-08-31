@@ -141,10 +141,10 @@ void SchedulerContext::build_payload(
     bool force_gate
 ) {
     int32_t slot_idx = static_cast<int32_t>(subslot);
-    uint64_t callable_addr = get_function_bin_addr(slot_state.task->kernel_id[slot_idx]);
+    uint64_t callable_addr = get_function_bin_addr(slot_state.to_descriptor().kernel_id[slot_idx]);
     const CoreCallable *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
     dispatch_payload.function_bin_addr = callable->resolved_addr();
-    auto &payload = *slot_state.payload;
+    auto &payload = slot_state.to_payload();
     // A claimed early-stage range stays gated even if producer completion flips
     // the shared state before this payload is built. All other dispatches run on
     // pickup.
@@ -181,7 +181,7 @@ void SchedulerContext::build_payload(
     // AsyncCtx::make(non-null) result). args[PAYLOAD_LOCAL_CONTEXT_INDEX] /
     // [PAYLOAD_GLOBAL_CONTEXT_INDEX] are per-(core, buf_idx) constants, also
     // prefilled in init().
-    dispatch_payload.local_context.async_ctx.task_token = slot_state.task->task_id;
+    dispatch_payload.local_context.async_ctx.task_token = slot_state.to_descriptor().task_id;
 }
 
 SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
@@ -227,9 +227,9 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
         "Thread %d: Dispatched %s %s task %" PRId64 " kernel_id=[%d,%d,%d] block_idx=%d/total_blocks=%d to"
         " core_offset=%d core_id=%d reg_task_id=%u",
         thread_idx, to_pending ? "pending" : "idle", subslot_name(subslot),
-        static_cast<int64_t>(slot_state.task->task_id.raw), slot_state.task->kernel_id[0],
-        slot_state.task->kernel_id[1], slot_state.task->kernel_id[2], block_idx, slot_state.logical_block_num,
-        core_offset, core_id, reg_task_id
+        static_cast<int64_t>(slot_state.to_descriptor().task_id.raw), slot_state.to_descriptor().kernel_id[0],
+        slot_state.to_descriptor().kernel_id[1], slot_state.to_descriptor().kernel_id[2], block_idx,
+        slot_state.logical_block_num, core_offset, core_id, reg_task_id
     );
 
     // AICore buffer rotation lives on the dispatch path: count this dispatch
@@ -264,14 +264,15 @@ int SchedulerContext::prepare_block_for_dispatch(
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
         dump_args_for_task<SUBTASK_SLOT_COUNT>(
-            thread_idx, slot_state, ArgsDumpStage::BEFORE_DISPATCH,
+            thread_idx, slot_state.to_descriptor(), slot_state.to_payload(), slot_state.active_mask,
+            ArgsDumpStage::BEFORE_DISPATCH,
             [](ActiveMask active_mask, int raw_subtask_id) {
                 return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
             },
             [this](int32_t func_id) {
                 return get_function_bin_addr(func_id);
             },
-            &slot_state.payload->dump_metadata
+            &slot_state.to_payload().dump_metadata
         );
     }
 #endif
@@ -681,13 +682,13 @@ int32_t SchedulerContext::stage_consumer_blocks(
     // Publish all this thread's gated cores into the shared mask in one OR per word
     // (vs one per subtask) so release sees them; seq_cst keeps the self-ring order.
     for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
-        if (my_cores[w] != 0) c->payload->staged_core_mask[w].fetch_or(my_cores[w], std::memory_order_seq_cst);
+        if (my_cores[w] != 0) c->to_payload().staged_core_mask[w].fetch_or(my_cores[w], std::memory_order_seq_cst);
 
     // Full publication and release are independent events. The seq_cst
     // state/launch/count operations form a two-sided handshake. A released
     // block must ring before contributing to the publication count.
     bool released =
-        staged > 0 && c->payload->early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_DISPATCHED;
+        staged > 0 && c->to_payload().early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_DISPATCHED;
 
     // Claim only bits the release path did not take. Local handles remain valid
     // even if the shared per-core table is reused before this thread resumes.
@@ -696,7 +697,7 @@ int32_t SchedulerContext::stage_consumer_blocks(
         for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             if (my_cores[w] != 0) {
                 owned[w] =
-                    SchedulerState::claim_late_staged_doorbell_bits(c->payload->staged_core_mask[w], my_cores[w]);
+                    SchedulerState::claim_late_staged_doorbell_bits(c->to_payload().staged_core_mask[w], my_cores[w]);
             }
         }
         for (int i = 0; i < n; i++) {
@@ -752,8 +753,8 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, 
     int got = sched_->early_dispatch_queues[s].pop_batch_tagged(batch, task_id_snapshots, cores.count());
     for (int bi = 0; bi < got; bi++) {
         ChipTaskSlotState *c = batch[bi];
-        if (static_cast<uint64_t>(c->task->task_id.raw) != task_id_snapshots[bi]) continue;
-        if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != EARLY_DISPATCH_STAGING)
+        if (static_cast<uint64_t>(c->to_descriptor().task_id.raw) != task_id_snapshots[bi]) continue;
+        if (c->to_payload().early_dispatch_state.load(std::memory_order_acquire) != EARLY_DISPATCH_STAGING)
             continue;  // released
 
         // The single free-core bucket for this phase. For MIX, an active-mask-aware
@@ -791,7 +792,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, 
             if (!sched_->early_dispatch_queues[s].push_tagged(c, task_id_snapshots[bi]))
                 LOG_DEBUG(
                     "[EARLY_DISPATCH] queue full on re-push, consumer=%" PRId64,
-                    static_cast<int64_t>(c->task->task_id.raw)
+                    static_cast<int64_t>(c->to_descriptor().task_id.raw)
                 );
         }
         // stage_consumer_blocks fills the idle bucket (RUNNING slot) then the pend
@@ -839,10 +840,10 @@ int32_t SchedulerContext::try_early_dispatch(
     // STAGING -> DISPATCHED. A non-STAGING pop was already released and is dropped.
     uint64_t sync_task_id_snapshot = 0;
     if (ChipTaskSlotState *c = sched_->early_sync_start_queue.pop_tagged(&sync_task_id_snapshot)) {
-        bool current_sync_task =
-            static_cast<uint64_t>(c->task->task_id.raw) == sync_task_id_snapshot && c->task_attrs.requires_sync_start();
-        if (current_sync_task && SchedulerState::try_claim_early_sync_drain(*c->payload)) {
-            if (c->payload->early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_STAGING) {
+        bool current_sync_task = static_cast<uint64_t>(c->to_descriptor().task_id.raw) == sync_task_id_snapshot &&
+                                 c->task_attrs.requires_sync_start();
+        if (current_sync_task && SchedulerState::try_claim_early_sync_drain(c->to_payload())) {
+            if (c->to_payload().early_dispatch_state.load(std::memory_order_seq_cst) != EARLY_DISPATCH_STAGING) {
                 sched_->cancel_early_sync_drain(*c);
             } else if (drain_state_.sync_start_pending.load(std::memory_order_acquire) == 0 &&
                        tracker.count_available_blocks(
@@ -851,20 +852,20 @@ int32_t SchedulerContext::try_early_dispatch(
                 // From this point onward the operation is all-or-nothing. Only this
                 // scheduler mutates its tracker, and global drain coordinators must
                 // wait for this scheduler's generation-tagged ack before inspecting it.
-                SchedulerState::mark_early_sync_drain_armed(*c->payload);
+                SchedulerState::mark_early_sync_drain_armed(c->to_payload());
                 always_assert(c->next_block_idx.load(std::memory_order_seq_cst) == 0);
                 SyncStartStageResult staged = stage_sync_start_cores(
                     c, c->logical_block_num, thread_idx, /*gated=*/true, /*record_drain_phases=*/false
                 );
                 always_assert(staged.staged_blocks == c->logical_block_num);
-                c->payload->running_slot_count.store(
+                c->to_payload().running_slot_count.store(
                     static_cast<int16_t>(staged.running_cores), std::memory_order_seq_cst
                 );
                 sched_->retry_sync_start_rendezvous_after_staging(*c);
-                SchedulerState::finish_early_sync_drain(*c->payload);
+                SchedulerState::finish_early_sync_drain(c->to_payload());
                 total_staged += staged.staged_blocks;
             } else if (enter_drain_mode(c, c->logical_block_num)) {
-                SchedulerState::mark_early_sync_drain_armed(*c->payload);
+                SchedulerState::mark_early_sync_drain_armed(c->to_payload());
             } else {
                 sched_->cancel_early_sync_drain(*c);
             }
@@ -1409,7 +1410,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (thread_idx < active_sched_threads_) {
             ChipTaskSlotState *graph_slot = sched_->graph_ready_queue.pop();
             if (graph_slot != nullptr) {
-                if (graph_slot->task != nullptr && graph_slot->task_kind == TaskKind::GRAPH) {
+                if (graph_slot->task_kind == TaskKind::GRAPH) {
                     (void)sched_->activate_graph_task(*graph_slot);
                     made_progress = true;
                 } else {
@@ -1421,8 +1422,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             uint64_t prepare_task_id = 0;
             ChipTaskSlotState *prepare_slot = sched_->graph_prepare_queue.pop_tagged(&prepare_task_id);
             if (prepare_slot != nullptr) {
-                const bool valid_slot = prepare_slot->task != nullptr && prepare_slot->task_kind == TaskKind::GRAPH &&
-                                        prepare_slot->task->task_id.raw == prepare_task_id;
+                const bool valid_slot = prepare_slot->task_kind == TaskKind::GRAPH &&
+                                        prepare_slot->to_descriptor().task_id.raw == prepare_task_id;
                 if (!valid_slot) {
                     fail_scheduler(runtime, thread_idx, SIMPLER_ERROR_INVALID_ARGS);
                     break;

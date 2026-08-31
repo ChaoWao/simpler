@@ -48,19 +48,18 @@ public:
         while (capacity_ < std::max<size_t>(task_count, 1))
             capacity_ <<= 1;
         if (capacity_ > kMaxTaskCount) throw std::invalid_argument("test graph exceeds GraphBuffer capacity");
-        descriptors_ = image_->descriptors.data();
-        payloads_ = image_->payloads.data();
+        storage_ = image_->storage.data();
         fanins_ = image_->fanins.data();
         for (size_t task = 0; task < capacity_; ++task) {
-            descriptors_[task].task_id = TaskId{static_cast<uint64_t>(task)};
-            payloads_[task].bind_regions(
+            storage_[task].task.task_id = TaskId{static_cast<uint64_t>(task)};
+            storage_[task].payload.bind_regions(
                 nullptr, nullptr, fanins_ + task * static_cast<size_t>(SCHEDULER_GRAPH_MAX_FANIN)
             );
-            if (payloads_[task].fanin_data() == nullptr) {
+            if (storage_[task].payload.fanin_data() == nullptr) {
                 throw std::logic_error("test graph fanin region must share its contiguous image");
             }
             for (int slot = 0; slot < 3; ++slot)
-                descriptors_[task].kernel_id[slot] = INVALID_KERNEL_ID;
+                storage_[task].task.kernel_id[slot] = INVALID_KERNEL_ID;
         }
     }
 
@@ -68,32 +67,32 @@ public:
         ASSERT_LT(task, task_count_);
         ASSERT_LT(subtask_slot, 3);
         ASSERT_LE(fanins.size(), static_cast<size_t>(SCHEDULER_GRAPH_MAX_FANIN));
-        descriptors_[task].kernel_id[subtask_slot] = 1;
-        payloads_[task].fanin_count = static_cast<int32_t>(fanins.size());
-        ASSERT_TRUE(fanins.empty() || payloads_[task].fanin_data() != nullptr);
-        std::copy(fanins.begin(), fanins.end(), payloads_[task].fanin_data());
+        storage_[task].task.kernel_id[subtask_slot] = 1;
+        storage_[task].payload.fanin_count = static_cast<int32_t>(fanins.size());
+        ASSERT_TRUE(fanins.empty() || storage_[task].payload.fanin_data() != nullptr);
+        std::copy(fanins.begin(), fanins.end(), storage_[task].payload.fanin_data());
     }
 
     void mixed(size_t task, uint8_t active_mask) {
         ASSERT_LT(task, task_count_);
         for (uint8_t subtask_slot = 0; subtask_slot < 3; ++subtask_slot) {
-            if ((active_mask & (1U << subtask_slot)) != 0) descriptors_[task].kernel_id[subtask_slot] = 1;
+            if ((active_mask & (1U << subtask_slot)) != 0) storage_[task].task.kernel_id[subtask_slot] = 1;
         }
-        payloads_[task].fanin_count = 0;
+        storage_[task].payload.fanin_count = 0;
     }
 
     void predicate(size_t task, uint64_t addr, uint8_t elem_size, uint8_t op, int64_t target = 0) {
         ASSERT_LT(task, task_count_);
-        payloads_[task].predicate.addr = addr;
-        payloads_[task].predicate.target = target;
-        payloads_[task].predicate.elem_size = elem_size;
-        payloads_[task].predicate.op = static_cast<PredicateOp>(op);
+        storage_[task].payload.predicate.addr = addr;
+        storage_[task].payload.predicate.target = target;
+        storage_[task].payload.predicate.elem_size = elem_size;
+        storage_[task].payload.predicate.op = static_cast<PredicateOp>(op);
     }
 
     SchedulerGraphView graph() const {
         return {
-            reinterpret_cast<uint64_t>(descriptors_),
-            reinterpret_cast<uint64_t>(payloads_),
+            reinterpret_cast<uint64_t>(storage_),
+            0,
             task_count_,
             capacity_ - 1,
         };
@@ -101,17 +100,17 @@ public:
 
 private:
     static constexpr size_t kMaxTaskCount = 8192;
+    // One storage array, as production has it — see the same note in
+    // test_hbg_scheduler_contracts.cpp.
     struct alignas(64) GraphImage {
-        std::array<TaskDescriptor, kMaxTaskCount> descriptors{};
-        std::array<TaskPayload, kMaxTaskCount> payloads{};
+        std::array<ChipTaskStorage, kMaxTaskCount> storage{};
         std::array<int32_t, kMaxTaskCount * SCHEDULER_GRAPH_MAX_FANIN> fanins{};
     };
 
     size_t task_count_;
     size_t capacity_{1};
     std::unique_ptr<GraphImage> image_;
-    TaskDescriptor *descriptors_{nullptr};
-    TaskPayload *payloads_{nullptr};
+    ChipTaskStorage *storage_{nullptr};
     int32_t *fanins_{nullptr};
 };
 

@@ -212,7 +212,7 @@ int SchedulerContext::prepare_block_for_dispatch(
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
         dump_args_for_task<SUBTASK_SLOT_COUNT>(
-            thread_idx, slot_state, ArgsDumpStage::BEFORE_DISPATCH,
+            thread_idx, *slot_state.task, *slot_state.payload, slot_state.active_mask, ArgsDumpStage::BEFORE_DISPATCH,
             [](ActiveMask active_mask, int raw_subtask_id) {
                 return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
             },

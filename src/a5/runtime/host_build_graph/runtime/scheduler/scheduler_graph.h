@@ -25,9 +25,15 @@
 #define __aicore__
 #endif
 
-inline constexpr uint32_t SCHEDULER_GRAPH_TASK_DESCRIPTOR_STRIDE = 40;
+// A task's three records share one ChipTaskStorage, so AICore reaches both the
+// ones it reads from a single base: the array strides by the storage, and each
+// record sits at a fixed offset inside it. These are literals because the AICore
+// .o cannot include runtime_types.h; scheduler.h checks them against the types at
+// compile time, and the contract UT again at run time.
+inline constexpr uint32_t SCHEDULER_GRAPH_TASK_STORAGE_STRIDE = 320;
+inline constexpr uint32_t SCHEDULER_GRAPH_DESCRIPTOR_OFFSET = 0;
 // TaskPayload includes the early-dispatch cache line in this wire layout.
-inline constexpr uint32_t SCHEDULER_GRAPH_TASK_PAYLOAD_STRIDE = 192;
+inline constexpr uint32_t SCHEDULER_GRAPH_PAYLOAD_OFFSET = 128;
 inline constexpr uint32_t SCHEDULER_GRAPH_TASK_ID_OFFSET = 0;
 inline constexpr uint32_t SCHEDULER_GRAPH_KERNEL_IDS_OFFSET = 8;
 inline constexpr uint32_t SCHEDULER_GRAPH_FANIN_COUNT_OFFSET = 8;
@@ -49,8 +55,13 @@ enum class SchedulerGraphResult : uint64_t {
 };
 
 struct SchedulerGraphView {
-    uint64_t descriptors_address;
-    uint64_t payloads_address;
+    // Base of the ChipTaskStorage array. One address, because a task's descriptor
+    // and payload are members of one entry rather than peers in two arrays.
+    uint64_t storage_address;
+    // Held so the view keeps its 32-byte wire size. A producer writes 0; the two
+    // entry points below reject a non-zero read, so a later field cannot be
+    // reintroduced over a value some earlier producer already put here.
+    uint64_t reserved;
     uint64_t task_count;
     // Kept in the wire view for diagnostics. HBG task ids directly index the
     // whole-graph-resident tables and never wrap, so this value must not be
@@ -80,20 +91,20 @@ struct SchedulerDispatchPredicate {
 };
 
 static_assert(sizeof(SchedulerGraphView) == 32, "read-only graph view layout changed");
-static_assert(offsetof(SchedulerGraphView, descriptors_address) == 0, "descriptor address offset changed");
-static_assert(offsetof(SchedulerGraphView, payloads_address) == 8, "payload address offset changed");
+static_assert(offsetof(SchedulerGraphView, storage_address) == 0, "storage address offset changed");
 static_assert(sizeof(SchedulerTaskInfo) == 24, "root classification result layout changed");
 static_assert(sizeof(SchedulerTaskShape) == 24, "task shape result layout changed");
 static_assert(sizeof(SchedulerDispatchPredicate) == 24, "dispatch predicate layout changed");
 
-inline __aicore__ __gm__ uint8_t *scheduler_graph_descriptor(const SchedulerGraphView &graph, int64_t task_id) {
+inline __aicore__ __gm__ uint8_t *scheduler_graph_storage(const SchedulerGraphView &graph, int64_t task_id) {
     uint64_t slot = static_cast<uint64_t>(task_id);
-    return reinterpret_cast<__gm__ uint8_t *>(graph.descriptors_address) +
-           slot * SCHEDULER_GRAPH_TASK_DESCRIPTOR_STRIDE;
+    return reinterpret_cast<__gm__ uint8_t *>(graph.storage_address) + slot * SCHEDULER_GRAPH_TASK_STORAGE_STRIDE;
+}
+inline __aicore__ __gm__ uint8_t *scheduler_graph_descriptor(const SchedulerGraphView &graph, int64_t task_id) {
+    return scheduler_graph_storage(graph, task_id) + SCHEDULER_GRAPH_DESCRIPTOR_OFFSET;
 }
 inline __aicore__ __gm__ uint8_t *scheduler_graph_payload(const SchedulerGraphView &graph, int64_t task_id) {
-    uint64_t slot = static_cast<uint64_t>(task_id);
-    return reinterpret_cast<__gm__ uint8_t *>(graph.payloads_address) + slot * SCHEDULER_GRAPH_TASK_PAYLOAD_STRIDE;
+    return scheduler_graph_storage(graph, task_id) + SCHEDULER_GRAPH_PAYLOAD_OFFSET;
 }
 
 inline __aicore__ int32_t
@@ -114,8 +125,8 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_id, 
         {0, 0, 0}
     };
     if (graph.task_count == 0) return SchedulerGraphResult::EMPTY;
-    if (graph.descriptors_address == 0 || graph.payloads_address == 0 || task_id < 0 ||
-        static_cast<uint64_t>(task_id) >= graph.task_count) {
+    if (graph.reserved != 0) return SchedulerGraphResult::INVALID_ARGUMENTS;
+    if (graph.storage_address == 0 || task_id < 0 || static_cast<uint64_t>(task_id) >= graph.task_count) {
         return SchedulerGraphResult::INVALID_TASK_COUNT;
     }
 
@@ -163,7 +174,8 @@ inline __aicore__ SchedulerGraphResult scheduler_materialize_task_payload_resolv
         block_idx >= block_num) {
         return SchedulerGraphResult::INVALID_CALLABLE;
     }
-    if (graph.payloads_address == 0 || task.task_id < 0 || static_cast<uint64_t>(task.task_id) >= graph.task_count) {
+    if (graph.reserved != 0) return SchedulerGraphResult::INVALID_ARGUMENTS;
+    if (graph.storage_address == 0 || task.task_id < 0 || static_cast<uint64_t>(task.task_id) >= graph.task_count) {
         return SchedulerGraphResult::INVALID_TASK_COUNT;
     }
     __gm__ uint8_t *payload = scheduler_graph_payload(graph, task.task_id);

@@ -76,40 +76,38 @@ public:
         auto &tasks = header->tasks;
         tasks.completed_watermark.store(-1, std::memory_order_relaxed);
         tasks.total_tasks = static_cast<int32_t>(SUBMITTED);
-        tasks.task_descriptors = descriptors();
-        tasks.task_payloads = payloads();
-        tasks.slot_states = slot_states();
+        storage_ = reinterpret_cast<ChipTaskStorage *>(image_.base() + off.storage);
+        tasks.task_storage = storage_;
         tasks.completion_flags = completion_flags();
-        (void)off;
 
         // Each live slot takes a packed region in each pool, exactly as the
         // orchestrator's bump cursors hand them out, and gets content that identifies
         // the slot so the compaction can be checked element by element.
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
-            descriptors()[i].task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(i));
-            payloads()[i].tensor_count = TENSORS_PER_TASK;
-            payloads()[i].scalar_count = SCALARS_PER_TASK;
-            payloads()[i].fanin_count = FANIN_PER_TASK;
-            payloads()[i].bind_regions(
+            ChipTaskStorage &entry = storage_[i];
+            entry.task.task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(i));
+            entry.payload.tensor_count = TENSORS_PER_TASK;
+            entry.payload.scalar_count = SCALARS_PER_TASK;
+            entry.payload.fanin_count = FANIN_PER_TASK;
+            entry.payload.bind_regions(
                 tensor_pool() + i * TENSORS_PER_TASK, scalar_pool() + i * SCALARS_PER_TASK,
                 fanin_pool() + i * FANIN_STRIDE
             );
             for (int32_t j = 0; j < TENSORS_PER_TASK; ++j) {
-                payloads()[i].tensor_data()[j].buffer.addr = 0x1000 + i * 0x10 + j;
+                entry.payload.tensor_data()[j].buffer.addr = 0x1000 + i * 0x10 + j;
             }
             for (int32_t j = 0; j < SCALARS_PER_TASK; ++j) {
-                payloads()[i].scalar_data()[j] = 0x3000 + i * 0x10 + j;
+                entry.payload.scalar_data()[j] = 0x3000 + i * 0x10 + j;
             }
             for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
-                payloads()[i].fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
+                entry.payload.fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
             }
-            slot_states()[i].last_consumer_local_id = static_cast<int32_t>(i);
-            slot_states()[i].in_graph_task_index = static_cast<int32_t>(200 + i);
-            slot_states()[i].bind_buffers(&payloads()[i], &descriptors()[i]);
+            entry.slot.last_consumer_local_id = static_cast<int32_t>(i);
+            entry.slot.in_graph_task_index = static_cast<int32_t>(200 + i);
             completion_flags()[i].store(static_cast<uint8_t>(i & 1), std::memory_order_relaxed);
         }
         // A slot past the submitted prefix, to prove it does not travel.
-        descriptors()[SUBMITTED].task_id = simpler::hbg::make_global_task(0xBEEF);
+        storage_[SUBMITTED].task.task_id = simpler::hbg::make_global_task(0xBEEF);
     }
 
     // Overwrite the three fields that can hold a graph-heap address with ones out
@@ -118,11 +116,12 @@ public:
     // is what makes "only heap addresses move" checkable on the same image.
     void plant_heap_addresses() {
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
+            ChipTaskStorage &entry = storage_[i];
             const uint64_t packed = HEAP_VIRTUAL_BASE + i * kPackedStride;
-            descriptors()[i].packed_buffer_base = reinterpret_cast<void *>(packed);
-            descriptors()[i].packed_buffer_end = reinterpret_cast<void *>(packed + kPackedStride);
-            payloads()[i].predicate.addr = packed + 8;
-            payloads()[i].tensor_data()[0].buffer.addr = packed;
+            entry.task.packed_buffer_base = reinterpret_cast<void *>(packed);
+            entry.task.packed_buffer_end = reinterpret_cast<void *>(packed + kPackedStride);
+            entry.payload.predicate.addr = packed + 8;
+            entry.payload.tensor_data()[0].buffer.addr = packed;
         }
     }
 
@@ -133,12 +132,10 @@ public:
 
     const char *base() const { return image_.base(); }
 
-    TaskDescriptor *descriptors() {
-        return reinterpret_cast<TaskDescriptor *>(image_.base() + sm_layout::segment_offsets(WINDOW).descriptors);
-    }
-    TaskPayload *payloads() {
-        return reinterpret_cast<TaskPayload *>(image_.base() + sm_layout::segment_offsets(WINDOW).payloads);
-    }
+    // A task's three records share one storage entry, so each is reached by
+    // indexing this array and naming the member — never by striding an array of
+    // that record's own type, which the merged layout no longer has.
+    ChipTaskStorage *storage() { return storage_; }
     simpler::hbg::Tensor *tensor_pool() {
         return reinterpret_cast<simpler::hbg::Tensor *>(image_.base() + sm_layout::segment_offsets(WINDOW).tensor_pool);
     }
@@ -148,9 +145,6 @@ public:
     int32_t *fanin_pool() {
         return reinterpret_cast<int32_t *>(image_.base() + sm_layout::segment_offsets(WINDOW).fanin_pool);
     }
-    ChipTaskSlotState *slot_states() {
-        return reinterpret_cast<ChipTaskSlotState *>(image_.base() + sm_layout::segment_offsets(WINDOW).slot_states);
-    }
     std::atomic<uint8_t> *completion_flags() {
         return reinterpret_cast<std::atomic<uint8_t> *>(
             image_.base() + sm_layout::segment_offsets(WINDOW).completion_flags
@@ -159,6 +153,7 @@ public:
 
 private:
     AlignedImage image_;
+    ChipTaskStorage *storage_{nullptr};
 };
 
 // What a bind of `submitted` tasks put in the pools, given the per-task shape the
@@ -180,6 +175,10 @@ struct Compacted {
     AlignedImage image;
     uint64_t bytes;
     sm_layout::BindUsage used;
+    // Resolved at construction, like the three above it. The three records of a
+    // task are this array plus a member, so nothing here hands out a per-record
+    // accessor — that is the shape the merged layout removed.
+    ChipTaskStorage *storage{nullptr};
 
     explicit Compacted(
         Mirror &mirror, uint64_t submitted = SUBMITTED, const sm_layout::HeapRebase &rebase = kNoHeapAddresses
@@ -188,16 +187,13 @@ struct Compacted {
         bytes(0),
         used(usage_for(submitted)) {
         bytes = sm_layout::compact_live_image(mirror.base(), WINDOW, used, rebase, image.base());
+        storage = reinterpret_cast<ChipTaskStorage *>(image.base() + off().storage);
     }
 
     sm_layout::SegmentOffsets off(uint64_t submitted = SUBMITTED) const {
         return sm_layout::segment_offsets(sm_layout::image_extents(usage_for(submitted)));
     }
 
-    TaskPayload *payload_at(uint64_t i) { return reinterpret_cast<TaskPayload *>(image.base() + off().payloads) + i; }
-    TaskDescriptor *descriptors() { return reinterpret_cast<TaskDescriptor *>(image.base() + off().descriptors); }
-    TaskPayload *payloads() { return payload_at(0); }
-    ChipTaskSlotState *slot_states() { return reinterpret_cast<ChipTaskSlotState *>(image.base() + off().slot_states); }
     simpler::hbg::Tensor *tensor_pool() {
         return reinterpret_cast<simpler::hbg::Tensor *>(image.base() + off().tensor_pool);
     }
@@ -223,11 +219,12 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     Compacted compacted(mirror);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        EXPECT_EQ(simpler::hbg::task_local_id(compacted.descriptors()[i].task_id), i) << "slot " << i;
-        EXPECT_EQ(compacted.payload_at(i)->tensor_count, TENSORS_PER_TASK) << "slot " << i;
-        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
-        EXPECT_EQ(compacted.slot_states()[i].last_consumer_local_id, static_cast<int32_t>(i)) << "slot " << i;
-        EXPECT_EQ(compacted.slot_states()[i].in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;
+        const ChipTaskStorage &entry = compacted.storage[i];
+        EXPECT_EQ(simpler::hbg::task_local_id(entry.task.task_id), i) << "slot " << i;
+        EXPECT_EQ(entry.payload.tensor_count, TENSORS_PER_TASK) << "slot " << i;
+        EXPECT_EQ(entry.payload.tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
+        EXPECT_EQ(entry.slot.last_consumer_local_id, static_cast<int32_t>(i)) << "slot " << i;
+        EXPECT_EQ(entry.slot.in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;
         EXPECT_EQ(compacted.completion_flags()[i].load(std::memory_order_relaxed), static_cast<uint8_t>(i & 1))
             << "slot " << i;
     }
@@ -240,16 +237,17 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
     EXPECT_EQ(tasks.total_tasks, static_cast<int32_t>(SUBMITTED));
 }
 
-// The load-bearing one. Restacking changes the distance between a slot state and
-// its payload, so a binding copied verbatim would resolve to the mirror — a host
-// address, in device memory.
-TEST(HbgSmCompaction, RebindsEverySlotInsideTheImage) {
+// A slot state's siblings are ChipTaskStorage's own layout, so the restack's change
+// of pitch cannot move them apart: each record of a shipped entry resolves to that
+// same entry, with nothing re-taken.
+TEST(HbgSmCompaction, SlotBindingsSurviveTheChangeOfPitch) {
     Mirror mirror;
     Compacted compacted(mirror);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        EXPECT_EQ(compacted.slot_states()[i].payload.get(), compacted.payload_at(i)) << "slot " << i;
-        EXPECT_EQ(compacted.slot_states()[i].task.get(), &compacted.descriptors()[i]) << "slot " << i;
+        const ChipTaskStorage &entry = compacted.storage[i];
+        EXPECT_EQ(&entry.slot.to_payload(), &entry.payload) << "slot " << i;
+        EXPECT_EQ(&entry.slot.to_descriptor(), &entry.task) << "slot " << i;
     }
 }
 
@@ -261,17 +259,15 @@ TEST(HbgSmCompaction, BindingsSurviveTheCopyToTheDevice) {
 
     AlignedImage landed(compacted.bytes);
     std::memcpy(landed.base(), compacted.image.base(), compacted.bytes);
-    // The image's own layout, not the mirror's. The four slot-pitched offsets happen
+    // The image's own layout, not the mirror's. The two slot-pitched offsets happen
     // to agree between the two, but reading them off the mirror overload here would
     // stop being true the moment a pool moved ahead of them.
     const auto off = compacted.off();
-    auto *slots = reinterpret_cast<ChipTaskSlotState *>(landed.base() + off.slot_states);
-    auto *payloads = reinterpret_cast<TaskPayload *>(landed.base() + off.payloads);
-    auto *descriptors = reinterpret_cast<TaskDescriptor *>(landed.base() + off.descriptors);
+    auto *storage = reinterpret_cast<ChipTaskStorage *>(landed.base() + off.storage);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        EXPECT_EQ(slots[i].payload.get(), &payloads[i]) << "slot " << i;
-        EXPECT_EQ(slots[i].task.get(), &descriptors[i]) << "slot " << i;
+        EXPECT_EQ(&storage[i].slot.to_payload(), &storage[i].payload) << "slot " << i;
+        EXPECT_EQ(&storage[i].slot.to_descriptor(), &storage[i].task) << "slot " << i;
     }
 }
 
@@ -283,9 +279,7 @@ TEST(HbgSmCompaction, LeavesNoHostPointerInTheHeader) {
     Compacted compacted(mirror);
 
     auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
-    EXPECT_EQ(tasks.task_descriptors, nullptr);
-    EXPECT_EQ(tasks.task_payloads, nullptr);
-    EXPECT_EQ(tasks.slot_states, nullptr);
+    EXPECT_EQ(tasks.task_storage, nullptr);
     EXPECT_EQ(tasks.completion_flags, nullptr);
 }
 
@@ -300,7 +294,7 @@ TEST(HbgSmCompaction, ZeroSubmittedShipsTheHeaderAlone) {
     EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(1).end);
     auto &tasks = reinterpret_cast<const SharedMemoryHeader *>(compacted.image.base())->tasks;
     EXPECT_EQ(tasks.total_tasks, static_cast<int32_t>(SUBMITTED));
-    EXPECT_EQ(tasks.task_descriptors, nullptr);
+    EXPECT_EQ(tasks.task_storage, nullptr);
 }
 
 // The pools ship what the bind used, not what the mirror is dimensioned for. That
@@ -315,7 +309,8 @@ TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
     EXPECT_LT(compacted.bytes, sm_layout::segment_offsets(WINDOW).end);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        TaskPayload *shipped = compacted.payload_at(i);
+        const ChipTaskStorage &entry = compacted.storage[i];
+        const TaskPayload *shipped = &entry.payload;
         EXPECT_EQ(shipped->tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(shipped->scalar_count, SCALARS_PER_TASK) << "slot " << i;
         EXPECT_EQ(shipped->fanin_count, FANIN_PER_TASK) << "slot " << i;
@@ -331,7 +326,7 @@ TEST(HbgSmCompaction, PackedPoolsShipFewerBytesAndStillResolve) {
             EXPECT_EQ(shipped->fanin_data()[j], static_cast<int32_t>(0x50 + i * 0x10 + j))
                 << "slot " << i << " arg " << j;
         }
-        EXPECT_EQ(compacted.slot_states()[i].payload.get(), shipped) << "slot " << i;
+        EXPECT_EQ(&entry.slot.to_payload(), shipped) << "slot " << i;
     }
 }
 
@@ -352,7 +347,7 @@ TEST(HbgSmCompaction, RebindsEveryArgumentRegionInsideTheImage) {
     const char *fanin_end = fanin_begin + compacted.used.fanin_elems * sizeof(int32_t);
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        TaskPayload *shipped = compacted.payload_at(i);
+        const TaskPayload *shipped = &compacted.storage[i].payload;
         const char *t = reinterpret_cast<const char *>(shipped->tensor_data());
         const char *s = reinterpret_cast<const char *>(shipped->scalar_data());
         const char *f = reinterpret_cast<const char *>(shipped->fanin_data());
@@ -373,13 +368,14 @@ TEST(HbgSmCompaction, UnboundRegionsStayUnbound) {
     Mirror mirror;
     // Slot 2 stands in for the outer GRAPH task.
     constexpr uint64_t GRAPH_SLOT = 2;
-    mirror.payloads()[GRAPH_SLOT].tensor_count = 0;
-    mirror.payloads()[GRAPH_SLOT].scalar_count = 0;
-    mirror.payloads()[GRAPH_SLOT].bind_regions(nullptr, nullptr, mirror.fanin_pool() + GRAPH_SLOT * FANIN_STRIDE);
+    TaskPayload &graph_payload = mirror.storage()[GRAPH_SLOT].payload;
+    graph_payload.tensor_count = 0;
+    graph_payload.scalar_count = 0;
+    graph_payload.bind_regions(nullptr, nullptr, mirror.fanin_pool() + GRAPH_SLOT * FANIN_STRIDE);
 
     Compacted compacted(mirror);
 
-    TaskPayload *shipped = compacted.payload_at(GRAPH_SLOT);
+    const TaskPayload *shipped = &compacted.storage[GRAPH_SLOT].payload;
     EXPECT_EQ(shipped->tensor_data(), nullptr);
     EXPECT_EQ(shipped->scalar_data(), nullptr);
     // Its fanin region still resolves, and still inside the image.
@@ -390,8 +386,8 @@ TEST(HbgSmCompaction, UnboundRegionsStayUnbound) {
         EXPECT_EQ(shipped->fanin_data()[j], static_cast<int32_t>(0x50 + GRAPH_SLOT * 0x10 + j)) << "arg " << j;
     }
     // Its neighbours are untouched by the unbound slot.
-    EXPECT_EQ(compacted.payload_at(1)->tensor_data()[0].buffer.addr, 0x1000 + 1 * 0x10);
-    EXPECT_EQ(compacted.payload_at(3)->tensor_data()[0].buffer.addr, 0x1000 + 3 * 0x10);
+    EXPECT_EQ(compacted.storage[1].payload.tensor_data()[0].buffer.addr, 0x1000 + 1 * 0x10);
+    EXPECT_EQ(compacted.storage[3].payload.tensor_data()[0].buffer.addr, 0x1000 + 3 * 0x10);
 }
 
 // A slot names its payload, and a payload names its regions, by an int32 delta, so
@@ -427,16 +423,14 @@ TEST(HbgSmCompaction, SegmentLayoutHoldsForANonPowerOfTwoCapacity) {
         const sm_layout::ImageExtents e = sm_layout::mirror_extents(capacity);
         const sm_layout::SegmentOffsets off = sm_layout::segment_offsets(e);
 
-        // The descriptors sit right after the padded header, whatever the pitch.
-        EXPECT_EQ(off.descriptors, CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE))
-            << "capacity " << capacity;
+        // The storage sits right after the padded header, whatever the pitch.
+        EXPECT_EQ(off.storage, CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE)) << "capacity " << capacity;
 
-        const uint64_t starts[] = {off.descriptors, off.payloads,    off.slot_states, off.completion_flags,
-                                   off.fanin_pool,  off.tensor_pool, off.scalar_pool, off.end};
+        const uint64_t starts[] = {off.storage,     off.completion_flags, off.fanin_pool,
+                                   off.tensor_pool, off.scalar_pool,      off.end};
         const uint64_t spans[] = {
-            capacity * sizeof(TaskDescriptor),    capacity * sizeof(TaskPayload),
-            capacity * sizeof(ChipTaskSlotState), capacity * sizeof(std::atomic<uint8_t>),
-            e.fanin_elems * sizeof(int32_t),      e.tensor_elems * sizeof(simpler::hbg::Tensor),
+            capacity * sizeof(ChipTaskStorage), capacity * sizeof(std::atomic<uint8_t>),
+            e.fanin_elems * sizeof(int32_t),    e.tensor_elems * sizeof(simpler::hbg::Tensor),
             e.scalar_elems * sizeof(uint64_t),
         };
         for (size_t i = 0; i < std::size(spans); ++i) {
@@ -459,14 +453,13 @@ TEST(HbgSmCompaction, MovesEveryHeapAddressOntoTheRealBase) {
     Compacted compacted(mirror, SUBMITTED, {REAL_BASE, Mirror::kHeapUsed});
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
+        const ChipTaskStorage &entry = compacted.storage[i];
         const uint64_t packed = REAL_BASE + i * Mirror::kPackedStride;
-        EXPECT_EQ(reinterpret_cast<uint64_t>(compacted.descriptors()[i].packed_buffer_base), packed) << "slot " << i;
-        EXPECT_EQ(
-            reinterpret_cast<uint64_t>(compacted.descriptors()[i].packed_buffer_end), packed + Mirror::kPackedStride
-        ) << "slot "
-          << i;
-        EXPECT_EQ(compacted.payload_at(i)->predicate.addr, packed + 8) << "slot " << i;
-        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[0].buffer.addr, packed) << "slot " << i;
+        EXPECT_EQ(reinterpret_cast<uint64_t>(entry.task.packed_buffer_base), packed) << "slot " << i;
+        EXPECT_EQ(reinterpret_cast<uint64_t>(entry.task.packed_buffer_end), packed + Mirror::kPackedStride)
+            << "slot " << i;
+        EXPECT_EQ(entry.payload.predicate.addr, packed + 8) << "slot " << i;
+        EXPECT_EQ(entry.payload.tensor_data()[0].buffer.addr, packed) << "slot " << i;
     }
 }
 
@@ -481,7 +474,7 @@ TEST(HbgSmCompaction, LeavesNonHeapAddressesAlone) {
 
     // Tensor 1 of every task kept the address the Mirror gave it.
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        EXPECT_EQ(compacted.payload_at(i)->tensor_data()[1].buffer.addr, 0x1000 + i * 0x10 + 1) << "slot " << i;
+        EXPECT_EQ(compacted.storage[i].payload.tensor_data()[1].buffer.addr, 0x1000 + i * 0x10 + 1) << "slot " << i;
     }
 }
 
@@ -497,7 +490,7 @@ TEST(HbgSmCompaction, RebaseIsANoOpWhenNothingCameFromTheHeap) {
     ASSERT_EQ(rebased.bytes, plain.bytes);
     EXPECT_EQ(std::memcmp(rebased.image.base(), plain.image.base(), rebased.bytes), 0);
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
-        EXPECT_EQ(rebased.payload_at(i)->predicate.addr, 0u) << "slot " << i;
+        EXPECT_EQ(rebased.storage[i].payload.predicate.addr, 0u) << "slot " << i;
     }
 }
 
@@ -521,9 +514,10 @@ TEST(HbgSmCompaction, MovesEveryGraphBoundaryAddressOntoTheRealBase) {
     // One GRAPH task whose boundaries all live in the graph heap. task_kind is what
     // tells the restack which element type this task's region holds.
     constexpr uint64_t GRAPH_SLOT = 0;
-    mirror.slot_states()[GRAPH_SLOT].task_kind = TaskKind::GRAPH;
-    mirror.payloads()[GRAPH_SLOT].tensor_count = static_cast<int32_t>(BOUNDARIES);
-    auto *boundaries = reinterpret_cast<GraphTensor *>(mirror.payloads()[GRAPH_SLOT].tensor_data());
+    ChipTaskStorage &graph_entry = mirror.storage()[GRAPH_SLOT];
+    graph_entry.slot.task_kind = TaskKind::GRAPH;
+    graph_entry.payload.tensor_count = static_cast<int32_t>(BOUNDARIES);
+    auto *boundaries = reinterpret_cast<GraphTensor *>(graph_entry.payload.tensor_data());
     for (uint32_t j = 0; j < BOUNDARIES; ++j) {
         boundaries[j] = GraphTensor{};
         boundaries[j].buffer_addr = HEAP_VIRTUAL_BASE + 0x1000 * (j + 1);
@@ -531,7 +525,7 @@ TEST(HbgSmCompaction, MovesEveryGraphBoundaryAddressOntoTheRealBase) {
     }
 
     Compacted compacted(mirror, SUBMITTED, {REAL_BASE, 1ULL << 30});
-    const auto *shipped = reinterpret_cast<const GraphTensor *>(compacted.payload_at(GRAPH_SLOT)->tensor_data());
+    const auto *shipped = reinterpret_cast<const GraphTensor *>(compacted.storage[GRAPH_SLOT].payload.tensor_data());
     for (uint32_t j = 0; j < BOUNDARIES; ++j) {
         EXPECT_EQ(shipped[j].buffer_addr, REAL_BASE + 0x1000 * (j + 1)) << "boundary " << j;
         EXPECT_EQ(shipped[j].buffer_size, 0x40u) << "boundary " << j << " had a neighbouring field rewritten";

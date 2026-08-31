@@ -212,7 +212,7 @@ static bool wait_for_tensor_ready(
         auto &tasks = orch.sm_header->tasks;
         int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(producer));
         auto &slot = tasks.get_slot_state_by_task_id(local_id);
-        if (slot.task == nullptr || slot.task->task_id != producer) {
+        if (slot.to_descriptor().task_id != producer) {
             orch.report_fatal(
                 SIMPLER_ERROR_INVALID_ARGS, caller,
                 "tensor producer task %#llx does not match the descriptor bound to slot %d",
@@ -225,7 +225,7 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_producer = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot.task->task_id));
+        int32_t local_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot.to_descriptor().task_id));
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         while (slot.task_state.load(std::memory_order_acquire) < CHIP_TASK_COMPLETED) {
@@ -251,7 +251,7 @@ static bool wait_for_tensor_ready(
     };
 
     auto wait_one_consumers = [&](const ChipTaskSlotState &slot) {
-        int32_t local_id = simpler::hbg::task_local_id(slot.task->task_id);
+        int32_t local_id = simpler::hbg::task_local_id(slot.to_descriptor().task_id);
         uint64_t t0 = get_sys_cnt_aicpu();
         int32_t spin_count = 0;
         // Polling: all consumers of this producer have retired once the
