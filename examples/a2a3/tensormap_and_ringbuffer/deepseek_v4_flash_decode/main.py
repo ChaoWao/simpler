@@ -82,6 +82,7 @@ from simpler_setup.goldens.deepseek_v4_flash_decode import (
     T,
     param_tensors,
 )
+from simpler_setup.log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
 from simpler_setup.parallel_scheduler import device_range_to_list
 from simpler_setup.scene_test import (
     build_output_prefix,
@@ -910,6 +911,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--enable-dep-gen", action="store_true", help="Enable dep_gen capture (needs --rounds 1)")
     parser.add_argument("--enable-scope-stats", action="store_true", help="Emit per-scope ring-fill peaks")
+    parser.add_argument("--log-level", choices=LOG_LEVEL_CHOICES, default=DEFAULT_LOG_LEVEL)
     parser.add_argument("--compile-only", action="store_true", help="compile the kernels and exit, no device needed")
     parser.add_argument("--compile-workers", type=int, default=None)
     return parser.parse_args(argv)
@@ -917,6 +919,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None, **overrides) -> int:
     cli = parse_args(argv)
+    configure_logging(cli.log_level)
     return run(
         device_range_to_list(cli.device),
         cli.platform,
