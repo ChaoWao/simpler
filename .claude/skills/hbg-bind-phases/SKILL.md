@@ -14,14 +14,18 @@ still yields its whole host picture.
 
 ## The recipe
 
-Fill in `ENVS`, `CASE`, `TAIL` from the two tables below, then run it verbatim.
+Fill in `NAME`, `DEVICES`, `TIMEOUT`, `CASE` from the case table and `ENVS`,
+`TAIL` from the mode table, then run it verbatim.
 `pip install --no-build-isolation -e .` first, and again after every `HEAD` move.
 
 ```bash
 HEAD_SHA=$(git rev-parse --short HEAD)
-LOG="outputs/bind_${HEAD_SHA}.log"; mkdir -p outputs
+NAME="<case>_<mode>"                    # e.g. qwen_numbers — see below
+LOG="outputs/bind_${NAME}_${HEAD_SHA}.log"; mkdir -p outputs
 MARK="outputs/.bind_start"; : >"$MARK"   # fixed mtime; "$LOG" keeps being appended to
 
+DEVICES=<N>                                            # per case
+TIMEOUT=<seconds>                                      # per case
 ENVS="SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 \
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 SIMPLER_SKIP_DEVICE_RUN=1"          # + mode delta
 CASE="examples/.../<entry>.py -p a2a3"                # exactly as the case table gives it
@@ -29,7 +33,7 @@ TAIL="--rounds 6 --log-level timing"                                 # per mode
 
 .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
 echo "[stamp] $HEAD_SHA env $ENVS python $CASE $TAIL" >"$LOG"
-task-submit --device auto --device-num <N> --timeout 3600 --max-time 3600 \
+task-submit --device auto --device-num "$DEVICES" --timeout "$TIMEOUT" --max-time "$TIMEOUT" \
   --run "env $ENVS python $CASE $TAIL -d \$TASK_DEVICE" >>"$LOG" 2>&1
 grep -c 'bind phase=' "$LOG"          # numbers mode: must be > 0
 ```
@@ -37,6 +41,21 @@ grep -c 'bind phase=' "$LOG"          # numbers mode: must be > 0
 `env` prefixes the assignments so they survive coming from a variable, and the
 `[stamp]` line is the same string that runs — which is what makes two logs
 comparable. Never hand-edit one arm's command without the other's.
+
+**`NAME` carries the case and the mode because `$LOG` is opened with a
+truncating `>`.** Two cases at one commit, or the same case in both modes, would
+otherwise write the same path and the second run would destroy the first log
+without saying so.
+
+**`--log-level timing` pins a condition rather than enabling anything.**
+`python/simpler/_log.py` puts the `simpler` logger at TIMING on import and
+`Worker` snapshots that one logger for the host log and for every forked chip
+child, so the `bind phase=` records are already on without it. What passing it
+buys is the `[stamp]` line: the level is the one measurement condition with no
+record of its own in the log — unlike `torch_backend_autoload` — so a run that
+omits the flag leaves it implicit in whatever that commit's default happens to
+be. Two arms of a cross-commit A/B can then run at different levels with neither
+stamp showing it.
 
 **In timeline mode that last check reports 0 on a run that worked.** A diagnostic
 flag makes `CallConfig.output_prefix` non-empty, and a non-empty prefix moves
@@ -48,11 +67,13 @@ instead, and feed the finisher both (see the timeline command below).
 
 | Property | dsv4 FLASH decode | qwen3-14b decode |
 | -------- | ----------------- | ---------------- |
-| `--device-num` | 2 | 1 |
+| `NAME` prefix | `dsv4` | `qwen` |
+| `DEVICES` | 2 | 1 |
 | entry point | standalone driver — it owns its `Worker`, so no `--case` / `--manual` / `--level` and no module runner | standalone driver with the same ownership model |
 | `CASE` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/main.py -p a2a3 --skip-golden` | `examples/a2a3/host_build_graph/qwen3_14b_decode/main.py -p a2a3 --skip-golden` |
 | parameters | child memory; **`--skip-golden` is not optional here** — without it the driver first streams a 42.6 GiB-per-rank fixture you are not measuring | device-resident buffers; the valid fixture is streamed once, and `--skip-golden` skips only torch/D2H |
-| timeout | 3600 (cold compile is minutes) | 2400 |
+| `TIMEOUT` | 3600 (cold compile is minutes) | 2400 |
+| emits `torch_backend_autoload` | **no** — the parser says so above the table, and a dsv4 A/B has no in-log witness for the autoload state | yes |
 
 Neither case needs a `--level`: each driver runs its `Worker` in this process,
 so its chip children write straight to the log the `task-submit --run` command
@@ -64,6 +85,7 @@ while the run still passed.)
 
 | Field | numbers | timeline |
 | ----- | ------- | -------- |
+| `NAME` suffix | `_numbers` | `_timeline` |
 | `ENVS` delta | none | `+ SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
 | `TAIL` | `--rounds 6 --log-level timing` | `--rounds 1 --enable-pmu 2 --log-level timing` |
 | finish with | the parser, below | `strace_timing`, below |
