@@ -48,7 +48,7 @@ protected:
 
     // A Graph task's heap allocation covers its tasks' packed outputs *and* the
     // execution storage the device materializes into, so the pool has to hold a
-    // GraphExecution header plus one InGraphTaskStorage (~5 KB) on top of the
+    // GraphExecution header plus one ChipTaskStorage (~5 KB) on top of the
     // outputs. 4 KB used to be enough when the storage came from a separate
     // device allocation.
     static constexpr size_t HEAP_BYTES = 64 * 1024;
@@ -133,10 +133,10 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     // Distinct bases alone would still pass if finalization handed out a wrong
     // extent, so pin the length the Definition asks for and the disjointness two
     // shells of one Graph must have.
-    const auto *first_base = static_cast<const char *>(first_upload->outer_slot->task->packed_buffer_base);
-    const auto *first_end = static_cast<const char *>(first_upload->outer_slot->task->packed_buffer_end);
-    const auto *second_base = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_base);
-    const auto *second_end = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_end);
+    const auto *first_base = static_cast<const char *>(first_upload->outer_slot->to_descriptor().packed_buffer_base);
+    const auto *first_end = static_cast<const char *>(first_upload->outer_slot->to_descriptor().packed_buffer_end);
+    const auto *second_base = static_cast<const char *>(second_upload->outer_slot->to_descriptor().packed_buffer_base);
+    const auto *second_end = static_cast<const char *>(second_upload->outer_slot->to_descriptor().packed_buffer_end);
     const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
     ASSERT_EQ(definitions.entries.size(), 1u);
     ASSERT_EQ(definitions.entries[0].full_key, first_upload->full_key);
@@ -258,8 +258,8 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
         const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
         ASSERT_TRUE(upload.has_value());
         EXPECT_EQ(upload->full_key, definition->full_key) << "shell " << i;
-        const auto *base = static_cast<const char *>(upload->outer_slot->task->packed_buffer_base);
-        const auto *end = static_cast<const char *>(upload->outer_slot->task->packed_buffer_end);
+        const auto *base = static_cast<const char *>(upload->outer_slot->to_descriptor().packed_buffer_base);
+        const auto *end = static_cast<const char *>(upload->outer_slot->to_descriptor().packed_buffer_end);
         EXPECT_EQ(static_cast<uint64_t>(end - base), expected_extent) << "shell " << i;
         ranges.emplace_back(base, end);
     }
@@ -719,8 +719,8 @@ TEST_F(HbgGraphSubmitFailureTest, ConcurrentDefinitionsFinalizeInSubmissionOrder
         const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
         ASSERT_TRUE(upload.has_value()) << "Graph " << i;
         EXPECT_NE(upload->full_key, 0u) << "Graph " << i;
-        const auto *base = static_cast<const char *>(upload->outer_slot->task->packed_buffer_base);
-        const auto *end = static_cast<const char *>(upload->outer_slot->task->packed_buffer_end);
+        const auto *base = static_cast<const char *>(upload->outer_slot->to_descriptor().packed_buffer_base);
+        const auto *end = static_cast<const char *>(upload->outer_slot->to_descriptor().packed_buffer_end);
         ASSERT_NE(base, nullptr) << "Graph " << i;
         ASSERT_GT(end, base) << "Graph " << i;
         if (previous_end != nullptr) {
@@ -820,7 +820,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
         << "the shell's block sits above the ordinary task's, not before it";
     SharedMemoryTaskHeader &tasks = sm_handle->header->tasks;
     const int32_t shell_slot = static_cast<int32_t>(simpler::hbg::task_local_id(graph.task_id));
-    const TaskDescriptor *shell = tasks.slot_states[shell_slot].task.get();
+    const TaskDescriptor *shell = &tasks.storage_at(shell_slot).task;
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
     EXPECT_GE(
@@ -956,8 +956,8 @@ TEST_F(HbgGraphSubmitFailureTest, RecordsAGraphWhoseBoundaryLivesInTheHeapWindow
 // storage is reused raw memory that no constructor runs over, and compact_live_image
 // translates every submitted slot's predicate.addr as a graph-heap address.
 TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefined) {
-    TaskPayload *payloads = sm_handle->header->tasks.task_payloads;
-    ASSERT_NE(payloads, nullptr);
+    ChipTaskStorage *storage = sm_handle->header->tasks.task_storage;
+    ASSERT_NE(storage, nullptr);
     // 0x4A repeated has 01 as its top two bits, so read as an address it lands
     // inside [HEAP_VIRTUAL_BASE, GRAPH_RECORD_VIRTUAL_BASE) — the quarter of the
     // 64-bit range that the rebase would mistake for a graph-heap allocation. The
@@ -965,10 +965,10 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     // slot is poisoned the way a reused one would be.
     constexpr int kPoisonedSlots = 8;
     for (int i = 0; i < kPoisonedSlots; ++i) {
-        std::memset(&payloads[i].predicate, 0x4A, sizeof(payloads[i].predicate));
+        std::memset(&storage[i].payload.predicate, 0x4A, sizeof(storage[i].payload.predicate));
     }
-    ASSERT_GE(payloads[0].predicate.addr, HEAP_VIRTUAL_BASE);
-    ASSERT_LT(payloads[0].predicate.addr, GRAPH_RECORD_VIRTUAL_BASE);
+    ASSERT_GE(storage[0].payload.predicate.addr, HEAP_VIRTUAL_BASE);
+    ASSERT_LT(storage[0].payload.predicate.addr, GRAPH_RECORD_VIRTUAL_BASE);
 
     orch.begin_scope();
     uint32_t shape[] = {16};
@@ -981,6 +981,6 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
 
     const uint64_t slot = simpler::hbg::task_local_id(outputs.task_id());
     ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
-    EXPECT_EQ(payloads[slot].predicate.op, PredicateOp::NONE);
-    EXPECT_EQ(payloads[slot].predicate.addr, 0u);
+    EXPECT_EQ(storage[slot].payload.predicate.op, PredicateOp::NONE);
+    EXPECT_EQ(storage[slot].payload.predicate.addr, 0u);
 }

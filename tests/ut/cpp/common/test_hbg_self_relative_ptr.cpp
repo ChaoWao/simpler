@@ -94,38 +94,40 @@ TEST(HbgSelfRelativePtr, SurvivesABlockCopyToAnotherAddress) {
     EXPECT_EQ(moved->to_after.get(), &moved->after_payload);
 }
 
-// bind_buffers is the only writer, and the slot state it writes into is copied as
-// part of the same image as its payload and descriptor.
-TEST(HbgSelfRelativePtr, SlotStateBindingSurvivesTheImageCopy) {
-    struct Image {
-        TaskDescriptor descriptor;
-        TaskPayload payload;
-        ChipTaskSlotState slot;
-    };
-
-    // Real objects, not byte buffers: the slot state is alignas(64), which
+// A task's three records reach each other by ChipTaskStorage's layout alone, so the
+// resolution is against whichever copy of the storage the caller holds — nothing is
+// stored, and an image copy needs no fix-up.
+TEST(HbgSelfRelativePtr, SiblingAccessorsResolveWithinTheirOwnStorage) {
+    // Real objects, not byte buffers: the storage is alignas(64), which
     // std::vector<std::byte>::data() does not promise.
-    Image source{};
-    Image destination{};
-    Image *origin = &source;
-    origin->slot.bind_buffers(&origin->payload, &origin->descriptor);
-    ASSERT_EQ(origin->slot.payload.get(), &origin->payload);
-    ASSERT_EQ(origin->slot.task.get(), &origin->descriptor);
+    ChipTaskStorage source{};
+    ChipTaskStorage destination{};
 
-    std::memcpy(&destination, &source, sizeof(Image));
-    Image *moved = &destination;
-    ASSERT_NE(reinterpret_cast<void *>(moved), reinterpret_cast<void *>(origin));
+    EXPECT_EQ(&source.slot.to_payload(), &source.payload);
+    EXPECT_EQ(&source.slot.to_descriptor(), &source.task);
+    EXPECT_EQ(&source.task.to_slot(), &source.slot);
+    EXPECT_EQ(&source.task.to_payload(), &source.payload);
+    EXPECT_EQ(&source.payload.to_slot(), &source.slot);
+    EXPECT_EQ(&source.payload.to_descriptor(), &source.task);
 
-    EXPECT_EQ(moved->slot.payload.get(), &moved->payload);
-    EXPECT_EQ(moved->slot.task.get(), &moved->descriptor);
+    std::memcpy(&destination, &source, sizeof(ChipTaskStorage));
+    ASSERT_NE(reinterpret_cast<void *>(&destination), reinterpret_cast<void *>(&source));
+
+    // The copy's records name the copy, not the original.
+    EXPECT_EQ(&destination.slot.to_payload(), &destination.payload);
+    EXPECT_EQ(&destination.slot.to_descriptor(), &destination.task);
+    EXPECT_EQ(&destination.payload.to_slot(), &destination.slot);
 }
 
-// The descriptor ABI AICore consumes and the one-cache-line slot state are both
-// unchanged by the representation: the eight bytes the two deltas save become
-// tail padding inside the same 64.
+// The descriptor and the one-cache-line slot state both occupy exactly the cache
+// line ChipTaskStorage places them on, so the container's slot offset is the
+// descriptor's size and its payload offset is twice that.
 TEST(HbgSelfRelativePtr, KeepsTheSharedMemoryAbiSizes) {
     EXPECT_EQ(sizeof(ChipTaskSlotState), 64u);
-    EXPECT_EQ(sizeof(TaskDescriptor), 40u);
-    EXPECT_EQ(sizeof(SelfRelativePtr<TaskPayload>), 4u);
+    EXPECT_EQ(sizeof(TaskDescriptor), 64u);
+    EXPECT_EQ(sizeof(SelfRelativePtr<simpler::hbg::Tensor>), 4u);
     EXPECT_EQ(offsetof(TaskDescriptor, packed_buffer_base), 24u);
+    EXPECT_EQ(sizeof(ChipTaskStorage), 320u);
+    EXPECT_EQ(offsetof(ChipTaskStorage, slot), sizeof(TaskDescriptor));
+    EXPECT_EQ(offsetof(ChipTaskStorage, payload), offsetof(ChipTaskStorage, slot) + sizeof(ChipTaskSlotState));
 }

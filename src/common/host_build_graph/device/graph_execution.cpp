@@ -25,10 +25,10 @@ GraphExecution *acquire_execution_storage(
     uint32_t scalar_arg_count
 ) {
     GraphExecutionStorageLayout layout{};
-    // InGraphTaskStorage, not GraphExecution: the in-graph task array's alignment is the widest
+    // ChipTaskStorage, not GraphExecution: the in-graph task array's alignment is the widest
     // the storage carries, and tasks_offset only rounds up relative to this base, so
     // an under-aligned base would leave every alignas(64) in-graph task entry misaligned.
-    if (storage_addr == 0 || storage_addr % alignof(InGraphTaskStorage) != 0 ||
+    if (storage_addr == 0 || storage_addr % alignof(ChipTaskStorage) != 0 ||
         !graph_execution_storage_layout(task_count, tensor_arg_count, scalar_arg_count, &layout) ||
         layout.total_bytes > storage_bytes) {
         return nullptr;
@@ -37,7 +37,7 @@ GraphExecution *acquire_execution_storage(
     execution->task_count = task_count;
     execution->remaining_tasks.store(task_count, std::memory_order_relaxed);
     auto *base = reinterpret_cast<uint8_t *>(execution);
-    execution->task_storage = reinterpret_cast<InGraphTaskStorage *>(base + layout.tasks_offset);
+    execution->task_storage = reinterpret_cast<ChipTaskStorage *>(base + layout.tasks_offset);
     execution->task_tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(base + layout.tensors_offset);
     execution->task_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
     return execution;
@@ -263,9 +263,8 @@ bool graph_predicate_resolve(
 }  // namespace
 
 GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
-    if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.task == nullptr || outer_slot.payload == nullptr ||
-        outer_slot.task->packed_buffer_base == nullptr || outer_slot.task->packed_buffer_end == nullptr ||
-        outer_slot.graph_context == nullptr) {
+    if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.to_descriptor().packed_buffer_base == nullptr ||
+        outer_slot.to_descriptor().packed_buffer_end == nullptr || outer_slot.graph_context == nullptr) {
         return nullptr;
     }
 
@@ -277,7 +276,7 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
     auto *definition_header =
         reinterpret_cast<GraphDefinitionHeader *>(definition_addr - sizeof(GraphDefinitionHeader));
     const GraphDefinition *definition = graph_definition_object_framed(*definition_header);
-    TaskPayload &payload = *outer_slot.payload;
+    TaskPayload &payload = outer_slot.to_payload();
     if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
         definition->task_count > MAX_IN_GRAPH_TASKS ||
         payload.tensor_count != static_cast<int32_t>(definition->boundary_count) ||
@@ -287,8 +286,8 @@ GraphExecution *graph_execution_localize(ChipTaskSlotState &outer_slot) {
         return nullptr;
     }
 
-    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
-    const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_end);
+    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.to_descriptor().packed_buffer_base);
+    const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.to_descriptor().packed_buffer_end);
     if (outer_end < outer_base || definition->required_heap > UINTPTR_MAX - outer_base ||
         definition->execution_storage_bytes > outer_end - outer_base ||
         definition->required_heap > outer_end - outer_base - definition->execution_storage_bytes) {
@@ -319,9 +318,8 @@ GraphMaterializeResult graph_execution_materialize_slice(
     ChipTaskSlotState &outer_slot, GraphExecution &execution, int32_t max_tasks, int32_t *tasks_materialized
 ) {
     if (tasks_materialized != nullptr) *tasks_materialized = 0;
-    if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.task == nullptr ||
-        outer_slot.task->packed_buffer_base == nullptr || max_tasks <= 0 || execution.definition == nullptr ||
-        execution.task_storage == nullptr) {
+    if (outer_slot.task_kind != TaskKind::GRAPH || outer_slot.to_descriptor().packed_buffer_base == nullptr ||
+        max_tasks <= 0 || execution.definition == nullptr || execution.task_storage == nullptr) {
         return GraphMaterializeResult::INVALID;
     }
 
@@ -391,11 +389,11 @@ GraphMaterializeResult graph_execution_materialize_slice(
 
     const int32_t first = execution.materialized_tasks;
     const int32_t last = std::min(execution.task_count, first + max_tasks);
-    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
+    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.to_descriptor().packed_buffer_base);
     for (int32_t i = first; i < last; ++i) {
-        InGraphTaskStorage *storage = &execution.task_at(i);
+        ChipTaskStorage *storage = &execution.task_at(i);
         if (i >= execution.constructed_tasks) {
-            storage = new (storage) InGraphTaskStorage;
+            storage = new (storage) ChipTaskStorage;
             execution.constructed_tasks++;
         }
         TaskDescriptor &task = storage->task;
@@ -403,7 +401,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         ChipTaskSlotState &slot = storage->slot;
 
         task.task_id = simpler::hbg::make_in_graph_task(
-            simpler::hbg::task_local_id(outer_slot.task->task_id), static_cast<uint32_t>(i)
+            simpler::hbg::task_local_id(outer_slot.to_descriptor().task_id), static_cast<uint32_t>(i)
         );
         const InGraphTaskDefinition &source = tasks[i];
         const uint64_t task_offset = in_graph_task_offsets[i];
@@ -415,7 +413,6 @@ GraphMaterializeResult graph_execution_materialize_slice(
 
         slot.reset_for_reuse();
         slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
-        slot.bind_buffers(&payload, &task);
         slot.active_mask = ActiveMask(source.active_mask);
         slot.task_attrs = TaskAttrs(source.task_attrs);
         slot.total_required_subtasks = source.total_required_subtasks;

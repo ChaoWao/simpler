@@ -17,9 +17,10 @@
  *   +---------------------------+
  *   | SharedMemoryHeader        |  (completion watermark + scheduler error state)
  *   +---------------------------+
- *   | TaskDescriptor[]          |
- *   | TaskPayload[]             |
- *   | ChipTaskSlotState[]       |
+ *   | ChipTaskStorage[]         |  (descriptor + slot state + payload, per task)
+ *   | std::atomic<uint8_t>[]    |  (completion flags, one byte per task)
+ *   +---------------------------+
+ *   | fanin / tensor / scalar   |  (the argument pools payloads name by delta)
  *   +---------------------------+
  *
  * Design principles:
@@ -68,25 +69,28 @@ struct alignas(64) SharedMemoryTaskHeader {
     // (concurrent CAS-advance by completing threads).
     alignas(64) std::atomic<int32_t> completed_watermark;
 
-    // Segment pointers (host-side, set by setup_pointers)
-    alignas(64) TaskDescriptor *task_descriptors;
-    TaskPayload *task_payloads;
-    ChipTaskSlotState *slot_states;
+    // The task storage array (host-side, set by setup_pointers). One entry per slot,
+    // holding that task's descriptor, slot state and payload — see ChipTaskStorage.
+    alignas(64) ChipTaskStorage *task_storage;
 
     // Polling-completion state (device-addressed array, one byte per slot).
     // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
     // on_mixed_task_complete; reader = consumer fanin polling (is_completion_flag_set).
     // Cleared per-slot in orch::prepare_task as each slot is claimed. Indexed by
-    // local task id, like every other segment — so it covers GLOBAL tasks only. An
+    // local task id, like the storage array — so it covers GLOBAL tasks only. An
     // IN_GRAPH task holds no slot here and publishes completion through its own
     // ChipTaskSlotState::task_state instead; the Graph's outer shell is the GLOBAL
     // task that carries a flag for the whole body.
+    //
+    // A byte array of its own rather than a field of ChipTaskStorage: a fanin scan
+    // reads many producers' flags at once, which one cache line answers here and
+    // would take one line per producer inside the storage stride.
     //
     // A hidden-alloc task is the one flag the host presets to 1: it completes during
     // orchestration, and a consumer polls this array rather than task_state.
     std::atomic<uint8_t> *completion_flags;
 
-    // Tasks this run submitted, i.e. the slot count the four segments above are
+    // Tasks this run submitted, i.e. the slot count the two segments above are
     // pitched to. Written once by the host after orchestration (run_host_orchestration)
     // and read-only from then on, so it packs into the padding rather than taking a
     // line of its own. Bounds the completed_watermark walk: no slot at or above it was
@@ -126,23 +130,18 @@ struct alignas(64) SharedMemoryTaskHeader {
         }
     }
 
-    // A task id is its own slot index, so every segment is indexed directly.
-    TaskDescriptor &get_task_by_task_id(int32_t local_id) { return task_descriptors[local_id]; }
-
-    // No get_payload_by_task_id here: a payload is reached through its slot
-    // state's `payload` delta, which the image's restack rebinds to the real
-    // address.
-
-    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id) { return slot_states[local_id]; }
+    // A task id is its own storage index, so the three records it names are reached
+    // by one index into one array.
+    ChipTaskStorage &storage_at(int32_t local_id) { return task_storage[local_id]; }
+    TaskDescriptor &get_task_by_task_id(int32_t local_id) { return task_storage[local_id].task; }
+    ChipTaskSlotState &get_slot_state_by_task_id(int32_t local_id) { return task_storage[local_id].slot; }
 };
 
 static_assert(sizeof(SharedMemoryTaskHeader) == 128, "SharedMemoryTaskHeader layout drift");
-static_assert(
-    offsetof(SharedMemoryTaskHeader, task_descriptors) == 64, "SharedMemoryTaskHeader task_descriptors layout drift"
-);
+static_assert(offsetof(SharedMemoryTaskHeader, task_storage) == 64, "SharedMemoryTaskHeader task_storage layout drift");
 // The device reads this one out of the H2D'd header, so it is pinned separately from the
 // segment pointers above, which are host-side only.
-static_assert(offsetof(SharedMemoryTaskHeader, total_tasks) == 96, "SharedMemoryTaskHeader total_tasks layout drift");
+static_assert(offsetof(SharedMemoryTaskHeader, total_tasks) == 80, "SharedMemoryTaskHeader total_tasks layout drift");
 
 /**
  * Shared memory header structure
@@ -206,7 +205,7 @@ struct SharedMemoryHandle {
     bool init(void *sm_base, uint64_t sm_size, uint64_t max_tasks);
 
     // Attach to an ALREADY-populated shared memory region: point the handle and
-    // the task header's segment pointers (descriptors / payloads / slot_states)
+    // the task header's segment pointers (storage / completion flags)
     // at `sm_base`, but do NOT reset the watermark / slot states.
     // Used by host_build_graph host-orch, where the host orchestrator populated
     // the SM and H2D'd it; the device must re-point at its own SM base without
@@ -215,7 +214,7 @@ struct SharedMemoryHandle {
     // `live_slots` is the pitch the uploaded arrays were laid out with — the
     // number of slots the host actually submitted, not the `max_tasks` the mirror
     // was dimensioned for. It must match what the host used or every segment past
-    // the descriptors resolves to the wrong address, so both sides derive it from
+    // the storage resolves to the wrong address, so both sides derive it from
     // the same count.
     // Every task id is below it, and indexes its slot directly.
     //
@@ -242,8 +241,8 @@ private:
 // =============================================================================
 //
 // When the host pre-builds a runtime-arena image, it needs the device-side
-// addresses of several SM sub-fields (the task header, the task_descriptors
-// arrays) so it can wire them into the scheduler init_data path without
+// addresses of several SM sub-fields (the task header, the task storage
+// array) so it can wire them into the scheduler init_data path without
 // dereferencing the SM — the SM lives in device memory and cannot be touched
 // from host.
 //
@@ -260,18 +259,20 @@ inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
 }
 
 // Byte offsets (from the SM base) of the image's segments. The layout is: header, then
-// descriptors -> payloads -> slot_states -> completion_flags -> the three argument
-// pools, every segment CHIP_ALIGN_UP-padded. ImageExtents dimensions them: the
-// mirror for the worst case the API allows, the image for what this bind holds, which
-// is what makes the live prefixes contiguous and the upload one copy.
+// storage -> completion_flags -> the three argument pools, every segment
+// CHIP_ALIGN_UP-padded. ImageExtents dimensions them: the mirror for the worst case the
+// API allows, the image for what this bind holds, which is what makes the live prefixes
+// contiguous and the upload one copy.
+//
+// One storage segment, not three: a task's descriptor, slot state and payload sit in one
+// ChipTaskStorage, so their relative positions are that type's layout and survive the
+// restack's change of pitch untouched.
 //
 // The pools sit last because nothing on the device resolves a segment past
-// completion_flags: a payload names its argument regions by delta, so the four
+// completion_flags: a payload names its argument regions by delta, so the two
 // slot-pitched offsets are all the attach path computes.
 struct SegmentOffsets {
-    uint64_t descriptors;
-    uint64_t payloads;
-    uint64_t slot_states;
+    uint64_t storage;
     uint64_t completion_flags;  // polling-completion byte array (1 byte/slot)
     uint64_t fanin_pool;
     uint64_t tensor_pool;
@@ -307,12 +308,8 @@ inline ImageExtents mirror_extents(uint64_t max_tasks) noexcept {
 inline SegmentOffsets segment_offsets(const ImageExtents &e) noexcept {
     uint64_t off = CHIP_ALIGN_UP(sizeof(SharedMemoryHeader), CHIP_ALIGN_SIZE);
     SegmentOffsets o{};
-    o.descriptors = off;
-    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskDescriptor), CHIP_ALIGN_SIZE);
-    o.payloads = off;
-    off += CHIP_ALIGN_UP(e.slots * sizeof(TaskPayload), CHIP_ALIGN_SIZE);
-    o.slot_states = off;
-    off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskSlotState), CHIP_ALIGN_SIZE);
+    o.storage = off;
+    off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskStorage), CHIP_ALIGN_SIZE);
     o.completion_flags = off;
     off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), CHIP_ALIGN_SIZE);
     o.fanin_pool = off;
@@ -406,11 +403,12 @@ inline uint64_t rebased_heap_addr(uint64_t addr, const HeapRebase &rebase) noexc
 //   - the task header's segment pointers name the mirror's arrays, so they leave as
 //     null rather than carrying host addresses into device memory (the device
 //     resolves them in attach_populated);
-//   - a slot state names its payload and descriptor, and a payload names its three
-//     argument regions, by a delta from the naming field's own address; the restack
-//     changed those distances, so every one is re-taken against the image. A region
-//     keeps its position within its pool, so the re-take is the same arithmetic with
-//     the image's bases;
+//   - a payload names its three argument regions by a delta from the naming field's
+//     own address; the restack changed those distances, so every one is re-taken
+//     against the image. A region keeps its position within its pool, so the re-take
+//     is the same arithmetic with the image's bases. A task's own three records need
+//     no such re-take: they share one ChipTaskStorage, so their distances are that
+//     type's layout and the change of pitch cannot reach them;
 //   - every heap address the orchestrator wrote is in the HEAP_VIRTUAL_BASE window,
 //     so `rebase` moves it onto the device region committed after orchestration.
 //     Three fields carry one: a descriptor's packed buffer bounds (read on the
@@ -438,21 +436,18 @@ inline uint64_t compact_live_image(
     const SegmentOffsets from = segment_offsets(mirror);
     const SegmentOffsets to = segment_offsets(image_extents(used));
 
-    // The header and the descriptors offset are pitch-independent, so the header
+    // The header and the storage offset are pitch-independent, so the header
     // lands where it already was.
-    std::memcpy(out_base, mirror_base, to.descriptors);
+    std::memcpy(out_base, mirror_base, to.storage);
     auto &out_tasks = reinterpret_cast<SharedMemoryHeader *>(out_base)->tasks;
-    out_tasks.task_descriptors = nullptr;
-    out_tasks.task_payloads = nullptr;
-    out_tasks.slot_states = nullptr;
+    out_tasks.task_storage = nullptr;
     out_tasks.completion_flags = nullptr;
 
     const uint64_t nt = used.submitted_tasks;
-    std::memcpy(out_base + to.descriptors, mirror_base + from.descriptors, nt * sizeof(TaskDescriptor));
-    // One copy, not one per payload: TaskPayload is fixed-size, so the mirror and
-    // the image share a stride. Each pool is likewise one copy of its own prefix.
-    std::memcpy(out_base + to.payloads, mirror_base + from.payloads, nt * sizeof(TaskPayload));
-    std::memcpy(out_base + to.slot_states, mirror_base + from.slot_states, nt * sizeof(ChipTaskSlotState));
+    // One copy for all three of a task's records: ChipTaskStorage is fixed-size, so
+    // the mirror and the image share a stride. Each pool is likewise one copy of its
+    // own prefix.
+    std::memcpy(out_base + to.storage, mirror_base + from.storage, nt * sizeof(ChipTaskStorage));
     std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
     std::memcpy(
@@ -460,10 +455,8 @@ inline uint64_t compact_live_image(
     );
     std::memcpy(out_base + to.scalar_pool, mirror_base + from.scalar_pool, used.scalar_elems * sizeof(uint64_t));
 
-    auto *out_slots = reinterpret_cast<ChipTaskSlotState *>(out_base + to.slot_states);
-    auto *out_descriptors = reinterpret_cast<TaskDescriptor *>(out_base + to.descriptors);
-    auto *out_payloads = reinterpret_cast<TaskPayload *>(out_base + to.payloads);
-    const auto *mirror_payloads = reinterpret_cast<const TaskPayload *>(mirror_base + from.payloads);
+    auto *out_storage = reinterpret_cast<ChipTaskStorage *>(out_base + to.storage);
+    const auto *mirror_storage = reinterpret_cast<const ChipTaskStorage *>(mirror_base + from.storage);
     auto *out_fanin = reinterpret_cast<int32_t *>(out_base + to.fanin_pool);
     auto *out_tensors = reinterpret_cast<simpler::hbg::Tensor *>(out_base + to.tensor_pool);
     auto *out_scalars = reinterpret_cast<uint64_t *>(out_base + to.scalar_pool);
@@ -476,8 +469,9 @@ inline uint64_t compact_live_image(
     // pool — and the translation below depends on it, so it is asserted rather than
     // re-derived.
     for (uint64_t i = 0; i < nt; ++i) {
-        out_slots[i].bind_buffers(&out_payloads[i], &out_descriptors[i]);
-        const TaskPayload &src = mirror_payloads[i];
+        ChipTaskStorage &out_entry = out_storage[i];
+        TaskPayload &out_payload = out_entry.payload;
+        const TaskPayload &src = mirror_storage[i].payload;
         const simpler::hbg::Tensor *src_tensors = src.tensor_data();
         const uint64_t *src_scalars = src.scalar_data();
         const int32_t *src_fanin = src.fanin_data();
@@ -492,7 +486,7 @@ inline uint64_t compact_live_image(
         debug_assert(
             src_fanin == nullptr || (src_fanin >= mirror_fanin && src_fanin <= mirror_fanin + used.fanin_elems)
         );
-        out_payloads[i].bind_regions(
+        out_payload.bind_regions(
             src_tensors == nullptr ? nullptr : out_tensors + (src_tensors - mirror_tensors),
             src_scalars == nullptr ? nullptr : out_scalars + (src_scalars - mirror_scalars),
             src_fanin == nullptr ? nullptr : out_fanin + (src_fanin - mirror_fanin)
@@ -503,24 +497,24 @@ inline uint64_t compact_live_image(
         // simpler::hbg::Tensor slots graph_boundary_tensor_pool_slots reserves for them. Walking
         // the pool itself as one simpler::hbg::Tensor array would reach only the first boundary
         // of each Graph and rewrite bytes in the middle of the rest.
-        if (out_slots[i].task_kind == TaskKind::GRAPH) {
-            auto *boundaries = reinterpret_cast<GraphTensor *>(out_payloads[i].tensor_data());
-            for (int32_t j = 0; j < out_payloads[i].tensor_count; ++j) {
+        if (out_entry.slot.task_kind == TaskKind::GRAPH) {
+            auto *boundaries = reinterpret_cast<GraphTensor *>(out_payload.tensor_data());
+            for (int32_t j = 0; j < out_payload.tensor_count; ++j) {
                 boundaries[j].buffer_addr = rebased_heap_addr(boundaries[j].buffer_addr, rebase);
             }
         } else {
-            simpler::hbg::Tensor *tensors = out_payloads[i].tensor_data();
-            for (int32_t j = 0; j < out_payloads[i].tensor_count; ++j) {
+            simpler::hbg::Tensor *tensors = out_payload.tensor_data();
+            for (int32_t j = 0; j < out_payload.tensor_count; ++j) {
                 tensors[j].buffer.addr = rebased_heap_addr(tensors[j].buffer.addr, rebase);
             }
         }
-        TaskDescriptor &out_task = out_descriptors[i];
+        TaskDescriptor &out_task = out_entry.task;
         out_task.packed_buffer_base = reinterpret_cast<void *>(
             rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_base), rebase)
         );
         out_task.packed_buffer_end =
             reinterpret_cast<void *>(rebased_heap_addr(reinterpret_cast<uint64_t>(out_task.packed_buffer_end), rebase));
-        out_payloads[i].predicate.addr = rebased_heap_addr(out_payloads[i].predicate.addr, rebase);
+        out_payload.predicate.addr = rebased_heap_addr(out_payload.predicate.addr, rebase);
     }
     return to.end;
 }

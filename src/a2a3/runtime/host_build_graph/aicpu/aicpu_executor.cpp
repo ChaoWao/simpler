@@ -307,7 +307,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
         if (boot_ok) {
             runtime_bind_ops(rt);
-            runtime->set_slot_states_ptr(nullptr);
 
             sched_ctx_.bind_runtime(rt);
 

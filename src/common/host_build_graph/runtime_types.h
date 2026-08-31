@@ -233,6 +233,7 @@ struct OutputLayout {
 // =============================================================================
 
 struct ChipTaskSlotState;  // Forward declaration (defined below)
+struct TaskPayload;        // Forward declaration (defined below)
 
 // =============================================================================
 // Task Descriptor
@@ -247,7 +248,7 @@ struct ChipTaskSlotState;  // Forward declaration (defined below)
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
-struct TaskDescriptor {
+struct alignas(64) TaskDescriptor {
     // Task identity. See src/common/host_build_graph/task_id_encoding.h: the
     // upper 32 bits are this runtime's id space, not a ring index.
     TaskId task_id;
@@ -258,11 +259,21 @@ struct TaskDescriptor {
     // Packed output buffer (all outputs packed into single contiguous buffer)
     void *packed_buffer_base;  // Start of packed buffer in GM Heap
     void *packed_buffer_end;   // End of packed buffer (for heap reclamation)
+
+    // Pads the descriptor to the cache line ChipTaskStorage places the slot state
+    // on, which is what makes that container's slot offset equal to this size.
+    uint8_t reserved[24];
+
+    // This task's other two records, defined below once ChipTaskStorage is complete.
+    ChipTaskSlotState &to_slot();
+    const ChipTaskSlotState &to_slot() const;
+    TaskPayload &to_payload();
+    const TaskPayload &to_payload() const;
 };
 
 // A 4-byte alignment pad follows kernel_id[3]; the scheduler and shared-memory
 // ABI depend on the descriptor size and packed_buffer_base offset staying fixed.
-static_assert(sizeof(TaskDescriptor) == 40, "TaskDescriptor size is part of the shared-memory ABI");
+static_assert(sizeof(TaskDescriptor) == 64, "TaskDescriptor size is part of the shared-memory ABI");
 static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer_base offset must be unchanged");
 
 // =============================================================================
@@ -514,6 +525,12 @@ struct TaskPayload {
         running_slot_count.store(0, std::memory_order_relaxed);
         early_sync_drain_state.store(EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
     }
+
+    // This task's other two records, defined below once ChipTaskStorage is complete.
+    TaskDescriptor &to_descriptor();
+    const TaskDescriptor &to_descriptor() const;
+    ChipTaskSlotState &to_slot();
+    const ChipTaskSlotState &to_slot() const;
 };
 
 // TaskPayload layout verification (offsetof requires complete type). The counts
@@ -583,12 +600,6 @@ struct alignas(64) ChipTaskSlotState {
     // the host completion-wait and the cold-path stall dump.
     std::atomic<ChipTaskState> task_state;
 
-    // --- Per-slot constant, re-bound by orch::prepare_task each submit ---
-    // Self-relative, so the SM image needs no pointer fix-up on its way to the
-    // device: both targets sit in the same block as this field.
-    simpler::hbg::SelfRelativePtr<TaskPayload> payload;
-    simpler::hbg::SelfRelativePtr<TaskDescriptor> task;
-
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
     // A pending consumer whose fanin scan finds an unmet producer registers on
     // that producer's wake list (CAS push through next_in_wake_list). On
@@ -643,6 +654,9 @@ struct alignas(64) ChipTaskSlotState {
     // so the outer task cannot be mistaken for an in-graph one.
     void *graph_context{nullptr};
 
+    // Keeps the record at one cache line now that the two deltas are gone.
+    uint8_t reserved[16];
+
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
         int16_t current = next_block_idx.load(std::memory_order_relaxed);
         while (current < block_limit && max_count > 0) {
@@ -660,11 +674,6 @@ struct alignas(64) ChipTaskSlotState {
         return 0;
     }
 
-    void bind_buffers(TaskPayload *p, TaskDescriptor *t) {
-        payload.set(p);
-        task.set(t);
-    }
-
     // Publishes completion. For an IN_GRAPH task this store is the whole
     // publication — that task has no completion_flags byte. For a GLOBAL task it
     // accompanies the completion_flags[slot] store that on_mixed_task_complete
@@ -679,8 +688,8 @@ struct alignas(64) ChipTaskSlotState {
      * Reset dynamic scheduling fields to their pristine values. Called once per
      * slot as the orchestrator claims it in prepare_task, and again as an
      * in-graph task's storage is materialized — whole-graph-resident hbg has no
-     * execution-time slot recycle. Skips payload/task (bound once) and
-     * task_state (the orchestrator sets PENDING when it populates the slot).
+     * execution-time slot recycle. Skips task_state (the orchestrator sets PENDING
+     * when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
      */
     void reset_for_reuse() {
@@ -698,9 +707,119 @@ struct alignas(64) ChipTaskSlotState {
         // Payload early-dispatch/fanin fields are (re)initialized in
         // TaskPayload::init on every submit, before the slot is visible.
     }
+
+    // This task's other two records, defined below once ChipTaskStorage is complete.
+    // They are that type's layout rather than stored state: a record is always a
+    // member of one, so the distances are fixed and no delta is kept here.
+    TaskPayload &to_payload();
+    const TaskPayload &to_payload() const;
+    TaskDescriptor &to_descriptor();
+    const TaskDescriptor &to_descriptor() const;
 };
 
 static_assert(sizeof(ChipTaskSlotState) == 64);
+
+// =============================================================================
+// Per-Task Storage
+// =============================================================================
+
+/**
+ * One task's three shared-memory records, held together so their relative
+ * positions are a property of this type rather than data any of them stores.
+ *
+ * Every hbg task's records live in one of these — that is the invariant the
+ * accessors below rest on, and none of the three types may be instantiated on its
+ * own. A GLOBAL task's storage sits in the shared-memory storage segment, indexed by
+ * its local task id (SharedMemoryTaskHeader::storage_at); an IN_GRAPH task's sits in
+ * its Graph's own heap tail, indexed by its position in the body
+ * (GraphExecution::task_at). The two therefore share one addressing rule, which is
+ * what lets the scheduler reach a task's descriptor and payload from its slot state
+ * with neither record naming the other.
+ *
+ * Field order is part of the layout AICore reads: it resolves a descriptor and a
+ * payload from this type's base by the byte offsets in scheduler_graph.h. That
+ * header is A5-only and cannot be reached from here, so the reverse lookup lives
+ * on the A5 side, in scheduler.h — the asserts below only pin this type's own
+ * shape.
+ */
+struct alignas(64) ChipTaskStorage {
+    TaskDescriptor task;
+    ChipTaskSlotState slot;
+    // The payload carries its argument regions as deltas into pools past the task
+    // array, so its size is the same for every task and the storage array strides by
+    // this type.
+    TaskPayload payload;
+};
+
+// offsetof is defined for a standard-layout type, which is what the accessors need.
+static_assert(std::is_standard_layout_v<ChipTaskStorage>);
+static_assert(std::is_trivially_destructible_v<ChipTaskStorage>);
+static_assert(sizeof(ChipTaskStorage) == 320);
+static_assert(offsetof(ChipTaskStorage, slot) == sizeof(TaskDescriptor));
+static_assert(offsetof(ChipTaskStorage, payload) == offsetof(ChipTaskStorage, slot) + sizeof(ChipTaskSlotState));
+
+// A record's siblings, reached by ChipTaskStorage's own layout. Valid because none of
+// the three types is ever instantiated outside one — that is the invariant the whole
+// set rests on, and the only thing a caller has to keep true.
+//
+// Each distance is a function-local compile-time constant, so an accessor is one
+// constant displacement and nothing about the layout leaks into a namespace. They are
+// ptrdiff_t because half of them are negative.
+#define CHIP_TASK_STORAGE_DELTA(from, to) \
+    (static_cast<ptrdiff_t>(offsetof(ChipTaskStorage, to)) - static_cast<ptrdiff_t>(offsetof(ChipTaskStorage, from)))
+
+inline ChipTaskSlotState &TaskDescriptor::to_slot() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(task, slot);
+    return *reinterpret_cast<ChipTaskSlotState *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const ChipTaskSlotState &TaskDescriptor::to_slot() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(task, slot);
+    return *reinterpret_cast<const ChipTaskSlotState *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+inline TaskPayload &TaskDescriptor::to_payload() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(task, payload);
+    return *reinterpret_cast<TaskPayload *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const TaskPayload &TaskDescriptor::to_payload() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(task, payload);
+    return *reinterpret_cast<const TaskPayload *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+
+inline TaskDescriptor &ChipTaskSlotState::to_descriptor() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(slot, task);
+    return *reinterpret_cast<TaskDescriptor *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const TaskDescriptor &ChipTaskSlotState::to_descriptor() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(slot, task);
+    return *reinterpret_cast<const TaskDescriptor *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+inline TaskPayload &ChipTaskSlotState::to_payload() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(slot, payload);
+    return *reinterpret_cast<TaskPayload *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const TaskPayload &ChipTaskSlotState::to_payload() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(slot, payload);
+    return *reinterpret_cast<const TaskPayload *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+
+inline TaskDescriptor &TaskPayload::to_descriptor() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(payload, task);
+    return *reinterpret_cast<TaskDescriptor *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const TaskDescriptor &TaskPayload::to_descriptor() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(payload, task);
+    return *reinterpret_cast<const TaskDescriptor *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+inline ChipTaskSlotState &TaskPayload::to_slot() {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(payload, slot);
+    return *reinterpret_cast<ChipTaskSlotState *>(reinterpret_cast<char *>(this) + kDelta);
+}
+inline const ChipTaskSlotState &TaskPayload::to_slot() const {
+    constexpr ptrdiff_t kDelta = CHIP_TASK_STORAGE_DELTA(payload, slot);
+    return *reinterpret_cast<const ChipTaskSlotState *>(reinterpret_cast<const char *>(this) + kDelta);
+}
+
+#undef CHIP_TASK_STORAGE_DELTA
 
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.

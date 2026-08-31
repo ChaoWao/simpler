@@ -48,19 +48,18 @@ public:
         while (capacity_ < std::max<size_t>(task_count, 1))
             capacity_ <<= 1;
         if (capacity_ > kMaxTaskCount) throw std::invalid_argument("test graph exceeds GraphBuffer capacity");
-        descriptors_ = image_->descriptors.data();
-        payloads_ = image_->payloads.data();
+        storage_ = image_->storage.data();
         fanins_ = image_->fanins.data();
         for (size_t task = 0; task < capacity_; ++task) {
-            descriptors_[task].task_id = TaskId{static_cast<uint64_t>(task)};
-            payloads_[task].bind_regions(
+            storage_[task].task.task_id = TaskId{static_cast<uint64_t>(task)};
+            storage_[task].payload.bind_regions(
                 nullptr, nullptr, fanins_ + task * static_cast<size_t>(SCHEDULER_GRAPH_MAX_FANIN)
             );
-            if (payloads_[task].fanin_data() == nullptr) {
+            if (storage_[task].payload.fanin_data() == nullptr) {
                 throw std::logic_error("test graph fanin region must share its contiguous image");
             }
             for (int slot = 0; slot < 3; ++slot)
-                descriptors_[task].kernel_id[slot] = INVALID_KERNEL_ID;
+                storage_[task].task.kernel_id[slot] = INVALID_KERNEL_ID;
         }
     }
 
@@ -68,18 +67,19 @@ public:
         ASSERT_LT(task, task_count_);
         ASSERT_LT(subtask_slot, 3);
         ASSERT_LE(fanins.size(), static_cast<size_t>(SCHEDULER_GRAPH_MAX_FANIN));
-        descriptors_[task].kernel_id[subtask_slot] = 1;
-        payloads_[task].fanin_count = static_cast<int32_t>(fanins.size());
-        ASSERT_TRUE(fanins.empty() || payloads_[task].fanin_data() != nullptr);
-        std::copy(fanins.begin(), fanins.end(), payloads_[task].fanin_data());
+        storage_[task].task.kernel_id[subtask_slot] = 1;
+        storage_[task].payload.fanin_count = static_cast<int32_t>(fanins.size());
+        ASSERT_TRUE(fanins.empty() || storage_[task].payload.fanin_data() != nullptr);
+        std::copy(fanins.begin(), fanins.end(), storage_[task].payload.fanin_data());
     }
 
-    TaskPayload &payload(size_t task) { return payloads_[task]; }
+    TaskPayload &payload(size_t task) { return storage_[task].payload; }
+    ChipTaskStorage *storage() { return storage_; }
 
     SchedulerGraphView graph() const {
         return {
-            reinterpret_cast<uint64_t>(descriptors_),
-            reinterpret_cast<uint64_t>(payloads_),
+            reinterpret_cast<uint64_t>(storage_),
+            0,
             task_count_,
             capacity_ - 1,
         };
@@ -87,22 +87,27 @@ public:
 
 private:
     static constexpr size_t kMaxTaskCount = 16;
+    // One storage array, as production has it — the descriptor and payload of a
+    // task are members of one entry. Two parallel arrays would model the layout
+    // this runtime no longer uses and would let the wire strides drift unnoticed.
     struct alignas(64) GraphImage {
-        std::array<TaskDescriptor, kMaxTaskCount> descriptors{};
-        std::array<TaskPayload, kMaxTaskCount> payloads{};
+        std::array<ChipTaskStorage, kMaxTaskCount> storage{};
         std::array<int32_t, kMaxTaskCount * SCHEDULER_GRAPH_MAX_FANIN> fanins{};
     };
 
     size_t task_count_;
     size_t capacity_{1};
     std::unique_ptr<GraphImage> image_;
-    TaskDescriptor *descriptors_{nullptr};
-    TaskPayload *payloads_{nullptr};
+    ChipTaskStorage *storage_{nullptr};
     int32_t *fanins_{nullptr};
 };
 
 TEST(SchedulerState, PlansAndInitializesReadyState) {
-    EXPECT_EQ(sizeof(TaskPayload), SCHEDULER_GRAPH_TASK_PAYLOAD_STRIDE);
+    // The reverse lookup for the wire constants AICore addresses with. They are
+    // literals there because the AICore .o cannot see these types; here it can.
+    EXPECT_EQ(sizeof(ChipTaskStorage), SCHEDULER_GRAPH_TASK_STORAGE_STRIDE);
+    EXPECT_EQ(offsetof(ChipTaskStorage, task), SCHEDULER_GRAPH_DESCRIPTOR_OFFSET);
+    EXPECT_EQ(offsetof(ChipTaskStorage, payload), SCHEDULER_GRAPH_PAYLOAD_OFFSET);
     EXPECT_EQ(offsetof(TaskPayload, predicate), SCHEDULER_GRAPH_PREDICATE_OFFSET);
     AicoreSchedulerLayout layout{};
     ASSERT_TRUE(scheduler_plan_layout(5, 3, 2, &layout));
@@ -182,28 +187,60 @@ TEST(SchedulerMetadata, ProjectsExistingSubmitTypesWithoutChangingTheirSemantics
     EXPECT_EQ(inline_flags, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_INLINE);
 }
 
+// AICore addresses a task's records by literal offsets, because its .o cannot see
+// the types. The reverse lookup in PlansAndInitializesReadyState only proves the
+// constants carry the right values; it cannot catch a helper that strides by the
+// wrong one. That failure is invisible at task 0 — every candidate stride agrees
+// there — so this walks several tasks and checks both records of each against the
+// entry they belong to.
+TEST(SchedulerGraph, AddressesEveryTaskAtTheStorageStride) {
+    constexpr size_t kTasks = 4;
+    struct alignas(64) GraphImage {
+        std::array<ChipTaskStorage, kTasks> storage{};
+    } image;
+    auto &storage = image.storage;
+    SchedulerGraphView graph{reinterpret_cast<uint64_t>(storage.data()), 0, kTasks, kTasks - 1};
+
+    for (size_t task = 0; task < kTasks; ++task) {
+        SCOPED_TRACE(testing::Message() << "task " << task);
+        EXPECT_EQ(
+            scheduler_graph_descriptor(graph, static_cast<int64_t>(task)),
+            reinterpret_cast<uint8_t *>(&storage[task].task)
+        );
+        EXPECT_EQ(
+            scheduler_graph_payload(graph, static_cast<int64_t>(task)),
+            reinterpret_cast<uint8_t *>(&storage[task].payload)
+        );
+    }
+
+    // Consecutive tasks are one whole storage apart, not one record apart. The
+    // pre-merge strides (64 for a descriptor, 192 for a payload) satisfy the loop
+    // above at task 0 and fail it everywhere else; this states the step directly.
+    const auto *first = scheduler_graph_descriptor(graph, 0);
+    const auto *second = scheduler_graph_descriptor(graph, 1);
+    EXPECT_EQ(second - first, SCHEDULER_GRAPH_TASK_STORAGE_STRIDE);
+    EXPECT_EQ(scheduler_graph_payload(graph, 0) - scheduler_graph_descriptor(graph, 0), SCHEDULER_GRAPH_PAYLOAD_OFFSET);
+}
+
 TEST(SchedulerGraph, NonPowerOfTwoWindowKeepsDirectTaskIdIndexing) {
     struct alignas(64) GraphImage {
-        std::array<TaskDescriptor, 3> descriptors{};
-        std::array<TaskPayload, 3> payloads{};
+        std::array<ChipTaskStorage, 3> storage{};
         std::array<std::array<int32_t, SCHEDULER_GRAPH_MAX_FANIN>, 3> fanins{};
     } image;
-    auto &descriptors = image.descriptors;
-    auto &payloads = image.payloads;
+    auto &storage = image.storage;
     auto &fanins = image.fanins;
-    for (size_t task = 0; task < descriptors.size(); ++task) {
-        descriptors[task].task_id = TaskId{task};
+    for (size_t task = 0; task < storage.size(); ++task) {
+        storage[task].task.task_id = TaskId{task};
         for (int slot = 0; slot < 3; ++slot)
-            descriptors[task].kernel_id[slot] = INVALID_KERNEL_ID;
-        payloads[task].bind_regions(nullptr, nullptr, fanins[task].data());
+            storage[task].task.kernel_id[slot] = INVALID_KERNEL_ID;
+        storage[task].payload.bind_regions(nullptr, nullptr, fanins[task].data());
     }
-    descriptors[1].kernel_id[0] = 1;
-    SchedulerGraphView graph{
-        reinterpret_cast<uint64_t>(descriptors.data()), reinterpret_cast<uint64_t>(payloads.data()), 3, 2
-    };
+    storage[1].task.kernel_id[0] = 1;
+    SchedulerGraphView graph{reinterpret_cast<uint64_t>(storage.data()), 0, 3, 2};
 
-    EXPECT_EQ(scheduler_graph_descriptor(graph, 1), reinterpret_cast<uint8_t *>(&descriptors[1]));
-    EXPECT_EQ(scheduler_graph_payload(graph, 1), reinterpret_cast<uint8_t *>(&payloads[1]));
+    // Both records of task 1 resolve from the one base, at that entry's stride.
+    EXPECT_EQ(scheduler_graph_descriptor(graph, 1), reinterpret_cast<uint8_t *>(&storage[1].task));
+    EXPECT_EQ(scheduler_graph_payload(graph, 1), reinterpret_cast<uint8_t *>(&storage[1].payload));
     SchedulerTaskShape shape{};
     EXPECT_EQ(scheduler_classify_task_shape(graph, 1, &shape), SchedulerGraphResult::OK);
     EXPECT_EQ(shape.task_id, 1);
@@ -228,6 +265,28 @@ TEST(SchedulerGraph, RejectsUnboundNonEmptyFaninRegion) {
 
     SchedulerTaskShape shape{};
     EXPECT_EQ(scheduler_classify_task_shape(graph.graph(), 1, &shape), SchedulerGraphResult::INVALID_FANIN_ID);
+}
+
+// The view's reserved word exists so its wire size survived the collapse from two
+// addresses to one. A non-zero read means the producer is writing a field this
+// build does not know about, so both entry points refuse rather than proceed on a
+// view they cannot fully interpret.
+TEST(SchedulerGraph, RejectsAViewWithANonZeroReservedWord) {
+    GraphBuffer graph(1);
+    graph.executable(0, 0);
+
+    SchedulerGraphView dirty = graph.graph();
+    dirty.reserved = 1;
+
+    SchedulerTaskShape shape{};
+    EXPECT_EQ(scheduler_classify_task_shape(dirty, 0, &shape), SchedulerGraphResult::INVALID_ARGUMENTS);
+
+    DispatchPayload payload{};
+    SchedulerTaskInfo task{0, 1, 0, CoreType::AIC};
+    EXPECT_EQ(
+        scheduler_materialize_task_payload_resolved(dirty, task, 0x1000, &payload),
+        SchedulerGraphResult::INVALID_ARGUMENTS
+    );
 }
 
 TEST(SchedulerDispatchPayload, DisablesDeferredCompletionWithoutASlab) {
@@ -262,11 +321,11 @@ TEST(SchedulerDispatchPayload, RejectsInvalidGraphBoundsBeforeReadingPayload) {
         SchedulerGraphResult::INVALID_TASK_COUNT
     );
 
-    SchedulerGraphView missing_payload = graph.graph();
-    missing_payload.payloads_address = 0;
+    SchedulerGraphView missing_storage = graph.graph();
+    missing_storage.storage_address = 0;
     SchedulerTaskInfo valid_task{0, 1, 0, CoreType::AIC};
     EXPECT_EQ(
-        scheduler_materialize_task_payload_resolved(missing_payload, valid_task, 0x1000, &payload),
+        scheduler_materialize_task_payload_resolved(missing_storage, valid_task, 0x1000, &payload),
         SchedulerGraphResult::INVALID_TASK_COUNT
     );
 }

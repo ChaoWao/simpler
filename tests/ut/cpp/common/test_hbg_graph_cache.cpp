@@ -162,11 +162,11 @@ class AlignedStorage {
 public:
     explicit AlignedStorage(size_t bytes, uint8_t fill = 0) :
         bytes_(bytes) {
-        data_ = ::operator new(bytes, std::align_val_t(alignof(InGraphTaskStorage)));
+        data_ = ::operator new(bytes, std::align_val_t(alignof(ChipTaskStorage)));
         std::memset(data_, fill, bytes);
     }
 
-    ~AlignedStorage() { ::operator delete(data_, std::align_val_t(alignof(InGraphTaskStorage))); }
+    ~AlignedStorage() { ::operator delete(data_, std::align_val_t(alignof(ChipTaskStorage))); }
 
     void *data() const { return data_; }
     uint8_t *bytes() const { return static_cast<uint8_t *>(data_); }
@@ -198,11 +198,10 @@ public:
         const auto *definition = reinterpret_cast<const GraphDefinition *>(definition_image.data());
         heap_bytes_ = static_cast<size_t>(definition->required_heap);
         storage_ = std::make_unique<AlignedStorage>(heap_bytes_ + definition->execution_storage_bytes, fill);
-        task_.packed_buffer_base = base();
-        task_.packed_buffer_end = end();
-        slot_.task_kind = TaskKind::GRAPH;
-        slot_.bind_buffers(&payload_, &task_);
-        payload_.bind_regions(boundary_tensors_.data(), boundary_scalars_.data(), nullptr);
+        storage_entry_.task.packed_buffer_base = base();
+        storage_entry_.task.packed_buffer_end = end();
+        storage_entry_.slot.task_kind = TaskKind::GRAPH;
+        storage_entry_.payload.bind_regions(boundary_tensors_.data(), boundary_scalars_.data(), nullptr);
     }
 
     uint8_t *base() const { return storage_->bytes(); }
@@ -230,22 +229,23 @@ public:
         std::memset(boundary_tensors_.data(), 0, TENSOR_SLOTS * sizeof(simpler::hbg::Tensor));
         const GraphTensor boundary = make_test_tensor(boundary_address);
         new (boundary_tensors_.data()) GraphTensor{boundary};
-        payload_.tensor_count = static_cast<int32_t>(definition->boundary_count);
-        payload_.scalar_count = static_cast<int32_t>(definition->boundary_scalar_count);
+        storage_entry_.payload.tensor_count = static_cast<int32_t>(definition->boundary_count);
+        storage_entry_.payload.scalar_count = static_cast<int32_t>(definition->boundary_scalar_count);
         std::fill_n(boundary_scalars_.data(), definition->boundary_scalar_count, uint64_t{0});
         if (definition->boundary_scalar_count != 0) {
             boundary_scalars_[definition->boundary_scalar_count - 1] = boundary_scalar;
         }
-        slot_.graph_context = const_cast<GraphDefinition *>(definition);
-        return graph_execution_localize(slot_);
+        storage_entry_.slot.graph_context = const_cast<GraphDefinition *>(definition);
+        return graph_execution_localize(storage_entry_.slot);
     }
 
 private:
     size_t heap_bytes_{0};
     std::unique_ptr<AlignedStorage> storage_;
-    TaskDescriptor task_{};
-    TaskPayload payload_{};
-    ChipTaskSlotState slot_{};
+    // One storage entry, as production has it: a slot state reaches its descriptor
+    // and payload by ChipTaskStorage's layout, so three separate members would
+    // resolve outside themselves.
+    ChipTaskStorage storage_entry_{};
     std::array<simpler::hbg::Tensor, TENSOR_SLOTS> boundary_tensors_{};
     std::array<uint64_t, SCALAR_SPAN> boundary_scalars_{};
 };
@@ -315,9 +315,9 @@ TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     GraphExecutionStorageLayout layout{};
 
     ASSERT_TRUE(graph_execution_storage_layout(TASK_COUNT, TENSOR_ARGS, SCALAR_ARGS, &layout));
-    EXPECT_EQ(layout.tasks_offset % alignof(InGraphTaskStorage), 0U);
+    EXPECT_EQ(layout.tasks_offset % alignof(ChipTaskStorage), 0U);
     EXPECT_GE(layout.tasks_offset, sizeof(GraphExecution));
-    EXPECT_EQ(layout.tensors_offset, layout.tasks_offset + TASK_COUNT * sizeof(InGraphTaskStorage));
+    EXPECT_EQ(layout.tensors_offset, layout.tasks_offset + TASK_COUNT * sizeof(ChipTaskStorage));
     EXPECT_EQ(layout.tensors_offset % alignof(simpler::hbg::Tensor), 0U);
     EXPECT_EQ(layout.scalars_offset, layout.tensors_offset + TENSOR_ARGS * sizeof(simpler::hbg::Tensor));
     EXPECT_EQ(layout.total_bytes, layout.scalars_offset + SCALAR_ARGS * sizeof(uint64_t));
@@ -375,7 +375,7 @@ TEST(GraphExecutionStorage, RejectsInvalidInGraphTaskCount) {
     EXPECT_FALSE(graph_execution_storage_bytes(static_cast<int32_t>(MAX_IN_GRAPH_TASKS) + 1, 1, 1, &storage_bytes));
     // A Definition with no arguments at all still needs its in-graph task array.
     EXPECT_TRUE(graph_execution_storage_bytes(1, 0, 0, &storage_bytes));
-    EXPECT_GE(storage_bytes, sizeof(GraphExecution) + sizeof(InGraphTaskStorage));
+    EXPECT_GE(storage_bytes, sizeof(GraphExecution) + sizeof(ChipTaskStorage));
 }
 
 // A resubmission gets the same heap tail back, so the bytes it starts from are
@@ -394,20 +394,22 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(first_boundary.data()), 17);
     ASSERT_NE(execution, nullptr);
 
-    TaskDescriptor outer_task{};
+    // A whole storage entry: the slot reaches its descriptor by ChipTaskStorage's
+    // layout, so a bare slot state would resolve outside itself.
+    ChipTaskStorage outer{};
+    TaskDescriptor &outer_task = outer.task;
     outer_task.task_id = simpler::hbg::make_global_task(7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    ChipTaskSlotState outer_slot{};
+    ChipTaskSlotState &outer_slot = outer.slot;
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;
 
     // The execution and in-graph task storage both occupy the outer heap tail after
     // required_heap.
     EXPECT_EQ(static_cast<void *>(execution), heap.execution());
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
-    InGraphTaskStorage &storage = execution->task_at(0);
+    ChipTaskStorage &storage = execution->task_at(0);
     ASSERT_EQ(storage.payload.scalar_count, 1);
     ASSERT_EQ(storage.payload.tensor_count, 1);
     EXPECT_EQ(storage.payload.scalar_data()[0], 17U);
@@ -470,13 +472,13 @@ TEST(GraphExecutionReplay, MaterializesBoundaryScalarPoolWiderThanTaskPayload) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 21);
     ASSERT_NE(execution, nullptr);
 
-    TaskDescriptor outer_task{};
+    ChipTaskStorage outer{};
+    TaskDescriptor &outer_task = outer.task;
     outer_task.task_id = simpler::hbg::make_global_task(7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    ChipTaskSlotState outer_slot{};
+    ChipTaskSlotState &outer_slot = outer.slot;
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;
 
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
@@ -657,7 +659,7 @@ TEST(GraphExecutionErrors, InvalidInGraphTaskCompletionIsReported) {
 TEST(GraphExecutionProgress, InGraphTaskResolutionIsNotAHostCompletion) {
     SchedulerState scheduler{};
     GraphDefinition definition{};
-    InGraphTaskStorage task{};
+    ChipTaskStorage task{};
     GraphExecution execution{};
     execution.definition = &definition;
     execution.tasks = &task;
@@ -696,13 +698,13 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
         heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17);
     ASSERT_NE(execution, nullptr);
 
-    TaskDescriptor outer_task{};
+    ChipTaskStorage outer{};
+    TaskDescriptor &outer_task = outer.task;
     outer_task.task_id = simpler::hbg::make_global_task(5);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
-    ChipTaskSlotState outer_slot{};
+    ChipTaskSlotState &outer_slot = outer.slot;
     outer_slot.task_kind = TaskKind::GRAPH;
-    outer_slot.task.set(&outer_task);
     outer_slot.graph_context = execution;
 
     EXPECT_EQ(static_cast<void *>(execution), heap.execution());
@@ -712,7 +714,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     // not the 0xAA fill: state machine, counters and atomics all start from
     // values only the device side wrote.
     for (int32_t i = 0; i < execution->task_count; ++i) {
-        const InGraphTaskStorage &storage = execution->task_at(i);
+        const ChipTaskStorage &storage = execution->task_at(i);
         ASSERT_EQ(storage.slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_PENDING);
         ASSERT_EQ(storage.slot.task_kind, TaskKind::KERNEL);
         ASSERT_EQ(storage.slot.completed_subtasks.load(std::memory_order_relaxed), 0);

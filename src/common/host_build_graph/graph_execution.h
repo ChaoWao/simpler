@@ -313,16 +313,6 @@ enum class GraphMaterializeResult : uint8_t {
     PREPARED = 3,
 };
 
-struct alignas(64) InGraphTaskStorage {
-    TaskDescriptor task;
-    ChipTaskSlotState slot;
-    // The payload carries its argument regions as deltas into pools past the task
-    // array, so its size is the same for every task and the slot names it by a delta
-    // from the slot's own address. Field order here therefore constrains nothing, and
-    // task_at strides the storage by this type.
-    TaskPayload payload;
-};
-
 inline constexpr uint8_t GRAPH_EXECUTION_STATE_MASK = 0x7;
 inline constexpr uint8_t GRAPH_EXECUTION_EXTERNAL_READY = 0x8;
 
@@ -346,8 +336,8 @@ struct GraphExecution {
     int32_t constructed_tasks{0};
     uint32_t consumed_tensor_args{0};
     ChipTaskSlotState *outer_slot{nullptr};
-    InGraphTaskStorage *tasks{nullptr};
-    InGraphTaskStorage *task_storage{nullptr};
+    ChipTaskStorage *tasks{nullptr};
+    ChipTaskStorage *task_storage{nullptr};
     // This execution's task argument pools, in the storage tail past task_storage.
     // Every task payload's tensor and scalar deltas point here; its pool position is
     // the Definition's tensor_offset / scalar_offset.
@@ -361,14 +351,14 @@ struct GraphExecution {
     const uint64_t *boundary_scalars{nullptr};
     uint32_t boundary_scalar_count{0};
 
-    InGraphTaskStorage &task_at(int32_t index) const { return task_storage[index]; }
+    ChipTaskStorage &task_at(int32_t index) const { return task_storage[index]; }
 };
 
-static_assert(std::is_trivially_destructible_v<InGraphTaskStorage>);
+static_assert(std::is_trivially_destructible_v<ChipTaskStorage>);
 // The tensor pool starts right after the in-graph task array, and the scalar pool starts
 // after a whole number of ChipTensors.
 static_assert(
-    alignof(InGraphTaskStorage) % alignof(simpler::hbg::Tensor) == 0,
+    alignof(ChipTaskStorage) % alignof(simpler::hbg::Tensor) == 0,
     "an in-graph task entry must be at least simpler::hbg::Tensor-aligned: the tensor pool follows the "
     "in-graph task array"
 );
@@ -379,7 +369,7 @@ static_assert(std::is_trivially_destructible_v<GraphExecution>);
 // The whole storage is aligned for its widest member, so one base check covers the
 // header as well as the in-graph task array that follows it.
 static_assert(
-    alignof(InGraphTaskStorage) % alignof(GraphExecution) == 0,
+    alignof(ChipTaskStorage) % alignof(GraphExecution) == 0,
     "the in-graph task array's alignment must subsume the execution header's"
 );
 static_assert(sizeof(GraphTensor) <= sizeof(simpler::hbg::Tensor));
@@ -390,7 +380,7 @@ inline constexpr size_t graph_boundary_tensor_pool_slots(uint32_t tensor_count) 
 }
 
 // The outer GRAPH task's heap tail occupies
-// [GraphExecution][InGraphTaskStorage x task_count][simpler::hbg::Tensor x tensor_arg_count]
+// [GraphExecution][ChipTaskStorage x task_count][simpler::hbg::Tensor x tensor_arg_count]
 // [uint64_t x scalar_arg_count].
 //
 // The last two regions are the in-graph task payloads' argument pools, indexed by the
@@ -412,9 +402,9 @@ inline bool graph_execution_storage_layout(
     if (out == nullptr || task_count <= 0 || task_count > static_cast<int32_t>(MAX_IN_GRAPH_TASKS)) {
         return false;
     }
-    constexpr size_t ALIGNMENT = alignof(InGraphTaskStorage);
+    constexpr size_t ALIGNMENT = alignof(ChipTaskStorage);
     out->tasks_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
-    out->tensors_offset = out->tasks_offset + static_cast<size_t>(task_count) * sizeof(InGraphTaskStorage);
+    out->tensors_offset = out->tasks_offset + static_cast<size_t>(task_count) * sizeof(ChipTaskStorage);
     out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(simpler::hbg::Tensor);
     out->total_bytes = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
     return true;

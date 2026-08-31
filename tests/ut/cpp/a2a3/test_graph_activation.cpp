@@ -58,15 +58,14 @@ protected:
     // One in-graph task whose slot is a routable single-block KERNEL/AIC
     // task in the given completion state, with its payload wired the way
     // materialization leaves it for the wake/route path.
-    static void init_in_graph_task(InGraphTaskStorage &task, int32_t task_index, ChipTaskState state) {
-        memset(&task, 0, sizeof(InGraphTaskStorage));
+    static void init_in_graph_task(ChipTaskStorage &task, int32_t task_index, ChipTaskState state) {
+        memset(&task, 0, sizeof(ChipTaskStorage));
         task.slot.task_state.store(state);
         task.slot.in_graph_task_index = task_index;
         task.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         task.slot.task_kind = TaskKind::KERNEL;
         task.slot.total_required_subtasks = 1;
         task.slot.logical_block_num = 1;
-        task.slot.payload.set(&task.payload);
     }
 };
 
@@ -74,7 +73,7 @@ protected:
 // == SENTINEL) reaches graph_first_unmet_producer, which reads task_state and
 // routes it — it is never lost on the closed wake list.
 TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegister) {
-    auto tasks = std::make_unique<InGraphTaskStorage[]>(2);
+    auto tasks = std::make_unique<ChipTaskStorage[]>(2);
     init_in_graph_task(tasks[0], 0, CHIP_TASK_COMPLETED);    // producer, already completed
     init_in_graph_task(tasks[1], 1, CHIP_TASK_PENDING);      // consumer of task 0
     tasks[0].slot.wake_list_head.store(WAKE_LIST_SENTINEL);  // its wake list already drained
@@ -98,7 +97,7 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
 // publish time, and wake-chains one with a still-pending producer so it
 // routes exactly once that producer completes and drains its wake list.
 TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPending) {
-    auto tasks = std::make_unique<InGraphTaskStorage[]>(4);
+    auto tasks = std::make_unique<ChipTaskStorage[]>(4);
     init_in_graph_task(tasks[0], 0, CHIP_TASK_COMPLETED);  // root, completed
     init_in_graph_task(tasks[1], 1, CHIP_TASK_PENDING);    // root, pending
     init_in_graph_task(tasks[2], 2, CHIP_TASK_PENDING);    // consumer of task 0 (completed)
@@ -133,11 +132,10 @@ TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPe
 TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
     GraphDefinition definition{};
     auto complete_in_state = [&](GraphExecutionState state) {
-        auto task = std::make_unique<InGraphTaskStorage[]>(1);
-        memset(task.get(), 0, sizeof(InGraphTaskStorage));
+        auto task = std::make_unique<ChipTaskStorage[]>(1);
+        memset(task.get(), 0, sizeof(ChipTaskStorage));
         task[0].slot.in_graph_task_index = 0;
         task[0].slot.total_required_subtasks = 1;
-        task[0].slot.payload.set(&task[0].payload);
 
         GraphExecution exec{};
         exec.definition = &definition;
@@ -170,11 +168,12 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
 // struct's layout, no fault and no error code.
 TEST_F(GraphActivationTest, CompleteTaskTakesTheOrdinaryPathForTheOuterGraphTask) {
     GraphDefinition definition{};
-    TaskDescriptor outer_task{};
-    outer_task.task_id = simpler::hbg::make_global_task(0);
+    // A whole storage entry, not a bare slot state: a slot reaches its descriptor by
+    // ChipTaskStorage's layout, so one on its own would resolve outside itself.
+    ChipTaskStorage outer{};
+    outer.task.task_id = simpler::hbg::make_global_task(0);
 
-    ChipTaskSlotState slot{};
-    slot.task.set(&outer_task);
+    ChipTaskSlotState &slot = outer.slot;
     slot.task_kind = TaskKind::GRAPH;
     slot.graph_context = &definition;
 

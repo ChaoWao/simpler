@@ -149,8 +149,8 @@ void format_core_status(
     int64_t task_id_raw = -1;
     if (core_state && core_state->running_slot_state) {
         int32_t subslot = static_cast<int32_t>(core_state->running_subslot);
-        kernel = core_state->running_slot_state->task->kernel_id[subslot];
-        task_id_raw = static_cast<int64_t>(core_state->running_slot_state->task->task_id.raw);
+        kernel = core_state->running_slot_state->to_descriptor().kernel_id[subslot];
+        task_id_raw = static_cast<int64_t>(core_state->running_slot_state->to_descriptor().task_id.raw);
     }
     uint64_t cond_reg = read_reg(reg_addr_for_cond, RegId::COND);
     int32_t hw_state = EXTRACT_TASK_STATE(cond_reg);
@@ -221,18 +221,18 @@ void SchedulerContext::log_stall_diagnostics(
             // Polling: no fanin_refcount. Recompute met/total from the inline
             // fanin ids vs the completion_flags (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
-            int32_t fi = slot_state.payload != nullptr ? slot_state.payload->fanin_count : 0;
+            int32_t fi = slot_state.to_payload().fanin_count;
             int32_t rc = 0;
-            if (slot_state.payload != nullptr) {
-                const int32_t *fanin = slot_state.payload->fanin_data();
+            {
+                const int32_t *fanin = slot_state.to_payload().fanin_data();
                 for (int32_t k = 0; k < fi; k++) {
                     if (tasks.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
                 }
             }
-            int32_t kid_aic = slot_state.task->kernel_id[0];
-            int32_t kid_aiv0 = slot_state.task->kernel_id[1];
-            int32_t kid_aiv1 = slot_state.task->kernel_id[2];
-            int64_t task_id = static_cast<int64_t>(slot_state.task->task_id.raw);
+            int32_t kid_aic = slot_state.to_descriptor().kernel_id[0];
+            int32_t kid_aiv0 = slot_state.to_descriptor().kernel_id[1];
+            int32_t kid_aiv1 = slot_state.to_descriptor().kernel_id[2];
+            int64_t task_id = static_cast<int64_t>(slot_state.to_descriptor().task_id.raw);
             if (st >= CHIP_TASK_COMPLETED) continue;
             // task_state has no intermediate ready/running value — it
             // stays PENDING until the worker stores COMPLETED. Classify
@@ -364,19 +364,23 @@ int32_t SchedulerContext::handle_timeout_exit(
         // Capture the in-flight kernels' partial output before signalling the
         // cores to exit, so the dump reflects the live stuck state.
         if (is_dump_args_enabled()) {
-            dump_running_task_outputs<SUBTASK_SLOT_COUNT>(
-                thread_idx, cores_total_num_,
+            dump_running_task_outputs(
+                cores_total_num_,
                 [this](int32_t cid) {
                     return core_exec_states_[cid].running_slot_state;
                 },
-                [](ActiveMask active_mask, int raw_subtask_id) {
-                    return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
-                },
-                [this](int32_t func_id) {
-                    return get_function_bin_addr(func_id);
-                },
-                [](const ChipTaskSlotState &slot_state) {
-                    return &slot_state.payload->dump_metadata;
+                [this, thread_idx](const ChipTaskSlotState &slot_state) {
+                    dump_args_for_task<SUBTASK_SLOT_COUNT>(
+                        thread_idx, slot_state.to_descriptor(), slot_state.to_payload(), slot_state.active_mask,
+                        ArgsDumpStage::AFTER_COMPLETION,
+                        [](ActiveMask active_mask, int raw_subtask_id) {
+                            return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
+                        },
+                        [this](int32_t func_id) {
+                            return get_function_bin_addr(func_id);
+                        },
+                        &slot_state.to_payload().dump_metadata
+                    );
                 }
             );
         }
@@ -1086,13 +1090,13 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
         ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(id);
         if (slot.task_kind == TaskKind::GRAPH) {
             if (graph_execution_localize(slot) == nullptr) slot.graph_context = nullptr;
-            if (!sched_->push_graph_prepare(&slot, slot.task->task_id.raw, thread_idx)) return;
+            if (!sched_->push_graph_prepare(&slot, slot.to_descriptor().task_id.raw, thread_idx)) return;
         }
         int32_t state = sched_->classify_fanin_state(&slot);
         if (state < 0) {
             sched_->push_ready_routed(&slot);
         } else {
-            int32_t prod_local = slot.payload->fanin_data()[state];
+            int32_t prod_local = slot.to_payload().fanin_data()[state];
             sched_->register_wake(&tasks.get_slot_state_by_task_id(prod_local), &slot);
         }
     }

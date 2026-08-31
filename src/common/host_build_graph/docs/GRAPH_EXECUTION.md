@@ -373,7 +373,7 @@ records on either side of H2D.
 
 In-graph tasks consume no task-table slots. Their descriptor, payload, slot
 state, and argument pools live in the tail of the outer `GRAPH` task's own heap block,
-past `required_heap`: `[GraphExecution][InGraphTaskStorage...][tensor pool][scalar pool]`. One
+past `required_heap`: `[GraphExecution][ChipTaskStorage...][tensor pool][scalar pool]`. One
 `TaskAllocator::alloc` covers both the packed outputs and this execution storage,
 so they are reclaimed together without a separate device allocation or release path.
 

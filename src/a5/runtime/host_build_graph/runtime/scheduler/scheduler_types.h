@@ -953,8 +953,8 @@ struct alignas(128) SchedulerRunControl {
     volatile uint64_t error_core_id;
     volatile uint64_t error_core_type;
     volatile uint64_t error_graph_task_count;
-    volatile uint64_t error_descriptors_address;
-    volatile uint64_t error_payloads_address;
+    volatile uint64_t error_storage_address;
+    volatile uint64_t error_reserved_address;
     volatile uint64_t error_task_window_mask;
     volatile uint64_t error_site;
     uint64_t error_reserved[6];
@@ -1005,8 +1005,13 @@ struct alignas(128) SchedulerWorkerContext {
     volatile int32_t active;
     volatile uint64_t run_control_offset;
     volatile uint64_t task_controls_offset;
-    volatile uint64_t graph_descriptors_address;
-    volatile uint64_t graph_payloads_address;
+    // Base of this run's ChipTaskStorage array. One address: a task's descriptor
+    // and payload are members of one entry, so AICore strides by the storage.
+    volatile uint64_t graph_storage_address;
+    // Held so the wire layout survived the collapse from two addresses to one.
+    // Whoever wires this context up must write 0 here and reject a non-zero read,
+    // or a later field can be reintroduced over a value someone else is using.
+    volatile uint64_t graph_reserved_address;
     volatile uint64_t scheduler_state_base_address;
     volatile uint64_t dispatch_payload_offset;
     volatile uint64_t trace_cells_offset;

@@ -507,8 +507,7 @@ bool bind_graph_definitions(
 
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
-        if (!upload.has_value() || upload->outer_slot == nullptr || upload->outer_slot->task_kind != TaskKind::GRAPH ||
-            upload->outer_slot->task == nullptr || upload->outer_slot->payload == nullptr) {
+        if (!upload.has_value() || upload->outer_slot == nullptr || upload->outer_slot->task_kind != TaskKind::GRAPH) {
             LOG_ERROR("host-orch: invalid pending Graph task");
             return false;
         }
@@ -534,13 +533,14 @@ bool bind_graph_definitions(
                 definition->scalar_arg_count, &storage_layout
             ) ||
             storage_layout.total_bytes != definition->execution_storage_bytes ||
-            upload->outer_slot->payload->tensor_count != static_cast<int32_t>(definition->boundary_count) ||
-            upload->outer_slot->payload->scalar_count != static_cast<int32_t>(definition->boundary_scalar_count)) {
+            upload->outer_slot->to_payload().tensor_count != static_cast<int32_t>(definition->boundary_count) ||
+            upload->outer_slot->to_payload().scalar_count != static_cast<int32_t>(definition->boundary_scalar_count)) {
             LOG_ERROR("host-orch: invalid Graph Definition for task");
             return false;
         }
-        const uintptr_t outer_base = reinterpret_cast<uintptr_t>(upload->outer_slot->task->packed_buffer_base);
-        const uintptr_t outer_end = reinterpret_cast<uintptr_t>(upload->outer_slot->task->packed_buffer_end);
+        const uintptr_t outer_base =
+            reinterpret_cast<uintptr_t>(upload->outer_slot->to_descriptor().packed_buffer_base);
+        const uintptr_t outer_end = reinterpret_cast<uintptr_t>(upload->outer_slot->to_descriptor().packed_buffer_end);
         if (outer_end < outer_base || definition->required_heap > UINTPTR_MAX - outer_base ||
             storage_layout.total_bytes > outer_end - outer_base ||
             definition->required_heap > outer_end - outer_base - storage_layout.total_bytes) {
@@ -548,7 +548,7 @@ bool bind_graph_definitions(
             return false;
         }
         const uintptr_t storage_addr = outer_base + definition->required_heap;
-        if (storage_addr % alignof(InGraphTaskStorage) != 0) {
+        if (storage_addr % alignof(ChipTaskStorage) != 0) {
             LOG_ERROR("host-orch: Graph runtime storage address is misaligned");
             return false;
         }
@@ -616,7 +616,7 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: host SM mirror of %" PRIu64 " bytes unavailable", sm_size);
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    std::memset(host_sm, 0, sm_segs.descriptors);
+    std::memset(host_sm, 0, sm_segs.storage);
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
     // Host-owned and destroyed with this frame, so rt->orchestrator is dropped on
@@ -909,7 +909,7 @@ int32_t run_host_orchestration(
         reinterpret_cast<uint64_t>(gm_heap) < HEAP_VIRTUAL_BASE && "device memory reaches into the virtual heap window"
     );
     // The alignment bind_graph_definitions checked on the virtual base — a Graph
-    // task's runtime storage must land on alignof(InGraphTaskStorage) — carries to
+    // task's runtime storage must land on alignof(ChipTaskStorage) — carries to
     // the real base only while the two are congruent: both are aligned to
     // kDefaultBaseAlign, and that covers the storage's own requirement.
     static_assert(
@@ -917,7 +917,7 @@ int32_t run_host_orchestration(
         "the virtual heap base must share the committed region's alignment"
     );
     static_assert(
-        alignof(InGraphTaskStorage) <= DeviceArena::kDefaultBaseAlign,
+        alignof(ChipTaskStorage) <= DeviceArena::kDefaultBaseAlign,
         "an in-graph task's storage alignment must be covered by the heap region's base alignment"
     );
     always_assert(reinterpret_cast<uint64_t>(gm_heap) % DeviceArena::kDefaultBaseAlign == 0);

@@ -184,8 +184,7 @@ public:
 private:
     // Kernel binary tracking for cleanup
 
-    void *gm_sm_ptr_;        // GM pointer to shared memory (device)
-    void *slot_states_ptr_;  // Pointer to ChipTaskSlotState array (scheduler-private, for profiling)
+    void *gm_sm_ptr_;                                   // GM pointer to shared memory (device)
     simpler::hbg::EntryArgsStorage orch_args_storage_;  // Entry args, adopted on the host
 
     // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
@@ -245,7 +244,6 @@ public:
     void *get_gm_sm_ptr() const;
     const simpler::hbg::EntryArgsStorage &get_orch_args() const;
     void set_gm_sm_ptr(void *p);
-    void set_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
 
     // Prebuilt-arena fast path (trb only). Set by host's

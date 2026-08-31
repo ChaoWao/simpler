@@ -41,19 +41,17 @@ void SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     char *base = (char *)sm_base;
     header = (SharedMemoryHeader *)base;
 
-    // descriptors / payloads / slot_states — offsets from the single source
+    // storage / completion_flags — offsets from the single source
     // of truth (sm_layout::segment_offsets), so this setup and the
     // device-address helpers cannot drift.
     //
-    // Only the four slot-pitched segments, and no argument pool: the pool extents
-    // differ between the mirror and the image, while these four depend on the pitch
+    // Only the two slot-pitched segments, and no argument pool: the pool extents
+    // differ between the mirror and the image, while these two depend on the pitch
     // alone. The orchestrator holds the mirror's pool bases; the device resolves an
     // argument region through the payload's delta and needs no base at all.
     auto off = sm_layout::segment_offsets(sm_layout::image_extents({pitch, 0, 0, 0}));
     auto &tasks = header->tasks;
-    tasks.task_descriptors = (TaskDescriptor *)(base + off.descriptors);
-    tasks.task_payloads = (TaskPayload *)(base + off.payloads);
-    tasks.slot_states = (ChipTaskSlotState *)(base + off.slot_states);
+    tasks.task_storage = (ChipTaskStorage *)(base + off.storage);
     tasks.completion_flags = (std::atomic<uint8_t> *)(base + off.completion_flags);
 }
 
@@ -83,21 +81,20 @@ bool SharedMemoryHandle::attach_populated(
 ) {
     if (!sm_base_arg || sm_size_arg == 0) return false;
     // A pitch above `max_tasks` names a slot the host could not have built, and one
-    // below what the host used would place every segment past the descriptors
+    // below what the host used would place every segment past the storage
     // short. This is the whole contract between the two sides, checked once at
     // attach rather than trusted.
     if (live_slots == 0 || live_slots > max_tasks) return false;
-    // The image must at least hold the four slot-pitched segments; anything beyond
+    // The image must at least hold the two slot-pitched segments; anything beyond
     // that is its argument pools, whose extents are the bind's cursors and are not
-    // recomputable here. The first pool's offset is exactly where those four end.
+    // recomputable here. The first pool's offset is exactly where those two end.
     const uint64_t slots_end = sm_layout::segment_offsets(sm_layout::image_extents({live_slots, 0, 0, 0})).fanin_pool;
     if (image_bytes < slots_end) return false;
     // The region holds the compacted image, so that is what has to fit — the
     // dimensioned size is no longer its size.
     if (sm_size_arg < image_bytes) return false;
-    // A slot state names its payload and descriptor by an int32 delta from its own
-    // address, and a payload names its argument regions the same way, so no two
-    // positions in the image may be further apart than that.
+    // A payload names its argument regions by an int32 delta from its own address, so
+    // no two positions in the image may be further apart than that.
     if (image_bytes > static_cast<uint64_t>(INT32_MAX)) return false;
 
     sm_base = sm_base_arg;
@@ -105,7 +102,7 @@ bool SharedMemoryHandle::attach_populated(
     is_owner = false;
     setup_pointers(live_slots);
     // Deliberately NO init_header: the SM already holds the host orchestrator's
-    // task graph (descriptors, slot states, completion flags).
+    // task graph (storage entries and completion flags).
     return true;
 }
 
@@ -151,7 +148,7 @@ void SharedMemoryHandle::init_header() {
     header->sched_error_code.store(SIMPLER_ERROR_NONE, std::memory_order_relaxed);
     header->sched_error_thread.store(-1, std::memory_order_relaxed);
 
-    // Per-slot init (slot_states.reset_for_reuse() + active_mask, and clearing the
+    // Per-slot init (slot.reset_for_reuse() + active_mask, and clearing the
     // completion flag) happens init-on-write in orch::prepare_task as each slot
     // [0, total_tasks) is claimed, so the SM init/upload cost tracks the task
     // count, not the size the table was dimensioned for. The device reads no slot

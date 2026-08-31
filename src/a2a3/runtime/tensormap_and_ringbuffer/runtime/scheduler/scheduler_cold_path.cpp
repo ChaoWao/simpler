@@ -450,16 +450,22 @@ int32_t SchedulerContext::handle_timeout_exit(
         // Capture the in-flight kernels' partial output before signalling the
         // cores to exit, so the dump reflects the live stuck state.
         if (is_dump_args_enabled()) {
-            dump_running_task_outputs<SUBTASK_SLOT_COUNT>(
-                thread_idx, cores_total_num_,
+            dump_running_task_outputs(
+                cores_total_num_,
                 [this](int32_t cid) {
                     return core_exec_states_[cid].running_slot_state;
                 },
-                [](ActiveMask active_mask, int raw_subtask_id) {
-                    return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
-                },
-                [this](int32_t func_id) {
-                    return get_function_bin_addr(func_id);
+                [this, thread_idx](const ChipTaskSlotState &slot_state) {
+                    dump_args_for_task<SUBTASK_SLOT_COUNT>(
+                        thread_idx, *slot_state.task, *slot_state.payload, slot_state.active_mask,
+                        ArgsDumpStage::AFTER_COMPLETION,
+                        [](ActiveMask active_mask, int raw_subtask_id) {
+                            return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
+                        },
+                        [this](int32_t func_id) {
+                            return get_function_bin_addr(func_id);
+                        }
+                    );
                 }
             );
         }
