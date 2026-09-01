@@ -22,9 +22,9 @@
 #include "host_build_graph/runtime_types.h"
 #include "tensor.h"
 
-inline constexpr uint32_t MAX_IN_GRAPH_TASKS = 1024;
+inline constexpr int32_t MAX_IN_GRAPH_TASKS = 1024;
 static_assert(
-    MAX_IN_GRAPH_TASKS <= (1u << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
+    MAX_IN_GRAPH_TASKS <= (1 << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
     "an in-graph task index must fit the low field of an IN_GRAPH task id"
 );
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
@@ -111,8 +111,11 @@ struct InGraphTaskDefinition {
     int32_t tensor_count;
     int32_t scalar_count;
     int32_t total_output_size;
-    uint32_t tensor_offset;
-    uint32_t scalar_offset;
+    // Element indices into the Definition's argument pools, not byte offsets: each
+    // pairs with the count above it to form [offset, offset + count), so it carries
+    // that count's type.
+    int32_t tensor_offset;
+    int32_t scalar_offset;
     ArgsDumpTaskMetadata dump_metadata;
 };
 
@@ -161,15 +164,23 @@ static_assert(sizeof(GraphDefinitionHeader) % GRAPH_DEFINITION_OBJECT_ALIGN == 0
 struct GraphDefinition {
     uint64_t full_key;
     uint64_t required_heap;
+    // The header splits by range, not by name. Everything that counts *things* is
+    // signed: each is capped by MAX_IN_GRAPH_TASKS times a per-task constant, so the
+    // largest of them (edge_count, at 1024 x 1023) still clears INT32_MAX by three
+    // orders of magnitude, and a signed count makes a corrupt wire value testable
+    // with `< 0` instead of turning it into a huge index. Everything that counts
+    // *bytes* stays unsigned because graph_layout_section dimensions the image
+    // against UINT32_MAX: total_bytes and the off_ fields below reach 4 GB by design,
+    // and halving that range would be a functional change.
     uint32_t total_bytes;
-    uint32_t task_count;
-    uint32_t edge_count;
-    uint32_t root_count;
-    uint32_t boundary_count;
-    uint32_t boundary_scalar_count;
-    uint32_t tensor_arg_count;
-    uint32_t scalar_arg_count;
-    uint32_t predicate_count;
+    int32_t task_count;
+    int32_t edge_count;
+    int32_t root_count;
+    int32_t boundary_count;
+    int32_t boundary_scalar_count;
+    int32_t tensor_arg_count;
+    int32_t scalar_arg_count;
+    int32_t predicate_count;
     // Bytes the GraphExecution header, in-graph task array and in-graph task
     // argument pools need in the outer Graph task's heap tail. Invocation
     // boundaries live in the outer task payload's compact argument-pool regions
@@ -285,11 +296,14 @@ inline bool graph_tensor_wire_valid(const GraphTensor &tensor) {
     return tensor.start_offset <= buffer_elements && tensor.extent_elem <= buffer_elements - tensor.start_offset;
 }
 
+// A section's length is the same int32 every counting field of the header carries.
+// A negative one is rejected outright rather than left to wrap through the size_t
+// comparison, so a corrupt header cannot widen a section by either route.
 template <typename T>
-inline const T *graph_definition_array(const GraphDefinition &definition, uint32_t offset, uint32_t count) {
-    if (offset == 0 || offset > definition.total_bytes || offset % alignof(T) != 0) return nullptr;
+inline const T *graph_definition_array(const GraphDefinition &definition, uint32_t offset, int32_t count) {
+    if (count < 0 || offset == 0 || offset > definition.total_bytes || offset % alignof(T) != 0) return nullptr;
     const size_t remaining = static_cast<size_t>(definition.total_bytes - offset);
-    if (count > remaining / sizeof(T)) return nullptr;
+    if (static_cast<size_t>(count) > remaining / sizeof(T)) return nullptr;
     return reinterpret_cast<const T *>(reinterpret_cast<const uint8_t *>(&definition) + offset);
 }
 
@@ -334,7 +348,7 @@ struct GraphExecution {
     int32_t task_count{0};
     int32_t materialized_tasks{0};
     int32_t constructed_tasks{0};
-    uint32_t consumed_tensor_args{0};
+    int32_t consumed_tensor_args{0};
     ChipTaskSlotState *outer_slot{nullptr};
     ChipTaskStorage *tasks{nullptr};
     ChipTaskStorage *task_storage{nullptr};
@@ -344,12 +358,12 @@ struct GraphExecution {
     simpler::hbg::Tensor *task_tensor_pool{nullptr};
     uint64_t *task_scalar_pool{nullptr};
     const GraphDefinition *definition{nullptr};
-    const uint32_t *fanin_offsets{nullptr};
+    const int32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
     const GraphTensor *boundary_tensors{nullptr};
-    uint32_t boundary_tensor_count{0};
+    int32_t boundary_tensor_count{0};
     const uint64_t *boundary_scalars{nullptr};
-    uint32_t boundary_scalar_count{0};
+    int32_t boundary_scalar_count{0};
 
     ChipTaskStorage &task_at(int32_t index) const { return task_storage[index]; }
 };
@@ -397,9 +411,10 @@ struct GraphExecutionStorageLayout {
 };
 
 inline bool graph_execution_storage_layout(
-    int32_t task_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, GraphExecutionStorageLayout *out
+    int32_t task_count, int32_t tensor_arg_count, int32_t scalar_arg_count, GraphExecutionStorageLayout *out
 ) {
-    if (out == nullptr || task_count <= 0 || task_count > static_cast<int32_t>(MAX_IN_GRAPH_TASKS)) {
+    if (out == nullptr || task_count <= 0 || task_count > MAX_IN_GRAPH_TASKS || tensor_arg_count < 0 ||
+        scalar_arg_count < 0) {
         return false;
     }
     constexpr size_t ALIGNMENT = alignof(ChipTaskStorage);
@@ -411,7 +426,7 @@ inline bool graph_execution_storage_layout(
 }
 
 inline bool graph_execution_storage_bytes(
-    int32_t task_count, uint32_t tensor_arg_count, uint32_t scalar_arg_count, size_t *storage_bytes
+    int32_t task_count, int32_t tensor_arg_count, int32_t scalar_arg_count, size_t *storage_bytes
 ) {
     GraphExecutionStorageLayout layout{};
     if (storage_bytes == nullptr ||

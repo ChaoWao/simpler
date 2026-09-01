@@ -178,7 +178,7 @@ TEST_F(HbgSlotClaimTest, CachedGraphReplayClaimsAPoisonedSlot) {
     poison_slot(1);
     const GraphScopeResult replay = orch.graph_begin(0x51ADC1A2, boundary_args, 0x1736);
     ASSERT_TRUE(replay.task_id.is_valid());
-    ASSERT_EQ(simpler::hbg::task_local_id(replay.task_id), 1u);
+    ASSERT_EQ(simpler::hbg::task_local_id(replay.task_id), 1);
 
     expect_slot_pristine(1);
 }

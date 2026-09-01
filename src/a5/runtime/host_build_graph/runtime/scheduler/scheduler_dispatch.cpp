@@ -901,11 +901,10 @@ int32_t SchedulerContext::try_early_dispatch(
 
 // P owns no AICore cores. It drains the per-S CompletedTaskQueues and runs
 // on_task_complete for every finished task: publish completion_flags, drain the
-// wake list (route/re-register waiters into the ready queues), advance the
-// watermark. As the sole producer of the ready queues its enqueues never
-// contend. P owns completed_tasks_ and the terminal completed_ flip, so the S
-// threads keep dispatching until P has resolved the whole graph (watermark fully
-// advanced) — the host's wait_for_consumers never observes a stranded prefix.
+// wake list (route/re-register waiters into the ready queues). As the sole
+// producer of the ready queues its enqueues never contend. P owns
+// completed_tasks_ and the terminal completed_ flip, so the S threads keep
+// dispatching until P has resolved the whole graph.
 int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread_idx) {
     always_assert(sched_ != nullptr);
     SharedMemoryHeader *header = sched_->sm_header;

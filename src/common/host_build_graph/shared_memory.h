@@ -172,7 +172,7 @@ struct SharedMemoryHandle {
 
     // Attach to an ALREADY-populated shared memory region: point the handle and
     // the task header's segment pointers (storage / completion flags)
-    // at `sm_base`, but do NOT reset the watermark / slot states.
+    // at `sm_base`, but do NOT reset the slot states.
     // Used by host_build_graph host-orch, where the host orchestrator populated
     // the SM and H2D'd it; the device must re-point at its own SM base without
     // wiping the contents (unlike init, which also resets the header).

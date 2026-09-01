@@ -56,9 +56,9 @@ std::vector<std::byte>
 make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_scalar_count = 1) {
     std::vector<std::byte> image(sizeof(GraphDefinition));
 
-    std::vector<uint32_t> fanin_offsets{0, 0, 1};
+    std::vector<int32_t> fanin_offsets{0, 0, 1};
     std::vector<uint16_t> fanin_indices{0};
-    std::vector<uint32_t> fanout_offsets{0, 1, 1};
+    std::vector<int32_t> fanout_offsets{0, 1, 1};
     std::vector<uint16_t> fanout_indices{1};
     std::vector<uint16_t> roots{0};
     std::vector<uint64_t> in_graph_task_offsets{0, 64};
@@ -114,8 +114,7 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     definition.off_scalar_sources = append_section(image, scalar_sources);
     size_t execution_storage_bytes = 0;
     graph_execution_storage_bytes(
-        static_cast<int32_t>(definition.task_count), definition.tensor_arg_count, definition.scalar_arg_count,
-        &execution_storage_bytes
+        definition.task_count, definition.tensor_arg_count, definition.scalar_arg_count, &execution_storage_bytes
     );
     definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     definition.total_bytes = static_cast<uint32_t>(image.size());
@@ -229,8 +228,8 @@ public:
         std::memset(boundary_tensors_.data(), 0, TENSOR_SLOTS * sizeof(simpler::hbg::Tensor));
         const GraphTensor boundary = make_test_tensor(boundary_address);
         new (boundary_tensors_.data()) GraphTensor{boundary};
-        storage_entry_.payload.tensor_count = static_cast<int32_t>(definition->boundary_count);
-        storage_entry_.payload.scalar_count = static_cast<int32_t>(definition->boundary_scalar_count);
+        storage_entry_.payload.tensor_count = definition->boundary_count;
+        storage_entry_.payload.scalar_count = definition->boundary_scalar_count;
         std::fill_n(boundary_scalars_.data(), definition->boundary_scalar_count, uint64_t{0});
         if (definition->boundary_scalar_count != 0) {
             boundary_scalars_[definition->boundary_scalar_count - 1] = boundary_scalar;
@@ -372,7 +371,7 @@ TEST(GraphExecutionStorage, RejectsInvalidInGraphTaskCount) {
 
     EXPECT_FALSE(graph_execution_storage_bytes(0, 1, 1, &storage_bytes));
     EXPECT_FALSE(graph_execution_storage_bytes(-1, 1, 1, &storage_bytes));
-    EXPECT_FALSE(graph_execution_storage_bytes(static_cast<int32_t>(MAX_IN_GRAPH_TASKS) + 1, 1, 1, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(MAX_IN_GRAPH_TASKS + 1, 1, 1, &storage_bytes));
     // A Definition with no arguments at all still needs its in-graph task array.
     EXPECT_TRUE(graph_execution_storage_bytes(1, 0, 0, &storage_bytes));
     EXPECT_GE(storage_bytes, sizeof(GraphExecution) + sizeof(ChipTaskStorage));
@@ -523,6 +522,56 @@ TEST(GraphDefinitionObject, RejectsHeaderFramingAnotherGraph) {
         << "the object localizes while its header and image agree";
 
     definition_object.reframe_full_key(GRAPH_KEY_VALUE + 1);
+    EXPECT_EQ(heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr);
+}
+
+// task_count is read off the wire and signed, so a corrupt Definition can present a
+// non-positive one. Two layers refuse it -- graph_execution_localize's own gate and
+// graph_execution_storage_layout behind it -- and this pins the contract rather than
+// either implementation: whichever layer moves, a Definition with no tasks must not
+// localize. It matters because every CSR section is fetched with `task_count + 1`, so a
+// -1 that reached bind_graph_topology would ask for zero elements, get a live pointer,
+// and read fanin_offsets one slot before the array.
+TEST(GraphDefinitionObject, RejectsNonPositiveInGraphTaskCount) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x4567;
+    std::array<uint8_t, 64> boundary{};
+    for (const int32_t task_count : {-1, 0}) {
+        std::vector<std::byte> definition =
+            make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()));
+        reinterpret_cast<GraphDefinition *>(definition.data())->task_count = task_count;
+        const TestDefinitionObject definition_object(definition);
+        OuterHeap heap(definition);
+        EXPECT_EQ(
+            heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr
+        ) << "task_count="
+          << task_count;
+    }
+}
+
+// An in-graph task's pool offsets are signed, which makes a negative one representable
+// where the unsigned span tests used to reject it as a huge value. Signed, those tests go
+// blind: a negative offset is below tensor_arg_count, and subtracting it *widens* the
+// remaining span, so both `offset > count` and `count > total - offset` pass. Only the
+// explicit negative test in bind_graph_topology rejects it, and it belongs there rather
+// than in the per-slice materialize path, which runs after the pointer is bound.
+TEST(GraphDefinitionObject, RejectsNegativeInGraphTaskArgOffset) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x4567;
+    std::array<uint8_t, 64> boundary{};
+    std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()));
+    {
+        const TestDefinitionObject definition_object(definition);
+        OuterHeap heap(definition);
+        ASSERT_NE(
+            heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr
+        ) << "the unmodified Definition localizes";
+    }
+
+    auto *header = reinterpret_cast<GraphDefinition *>(definition.data());
+    auto *tasks = reinterpret_cast<InGraphTaskDefinition *>(definition.data() + header->off_in_graph_tasks);
+    tasks[1].tensor_offset = -1;
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition);
     EXPECT_EQ(heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr);
 }
 

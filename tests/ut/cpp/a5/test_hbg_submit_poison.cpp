@@ -139,7 +139,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         const ChipTaskSlotState &st = entry.slot;
 
         // Descriptor: the task id is written to this exact local id.
-        EXPECT_EQ(simpler::hbg::task_local_id(desc.task_id), static_cast<uint32_t>(local));
+        EXPECT_EQ(simpler::hbg::task_local_id(desc.task_id), local);
         // task_state is written at submit (reset_for_reuse skips it): PENDING for a
         // dispatchable task, COMPLETED for a pre-completed hidden-alloc. Either way a
         // real enum, never poison.
@@ -178,5 +178,5 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     // The consumer's fanin is written: two duplicate deps dedupe to one.
     const TaskPayload &cons_pl = tasks.storage_at(simpler::hbg::task_local_id(consumer.task_id())).payload;
     EXPECT_EQ(cons_pl.fanin_count, 1);
-    EXPECT_EQ(cons_pl.fanin_data()[0], static_cast<int32_t>(simpler::hbg::task_local_id(root.task_id())));
+    EXPECT_EQ(cons_pl.fanin_data()[0], simpler::hbg::task_local_id(root.task_id()));
 }

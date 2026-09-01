@@ -511,7 +511,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
 
     EXPECT_FALSE(replay.execute_block);
     ASSERT_TRUE(replay.task_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_local_id(replay.task_id), static_cast<uint32_t>(allocator.capacity() - 1));
+    EXPECT_EQ(simpler::hbg::task_local_id(replay.task_id), allocator.capacity() - 1);
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
@@ -819,7 +819,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
     SharedMemoryTaskHeader &tasks = sm_handle->header->tasks;
-    const int32_t shell_slot = static_cast<int32_t>(simpler::hbg::task_local_id(graph.task_id));
+    const int32_t shell_slot = simpler::hbg::task_local_id(graph.task_id);
     const TaskDescriptor *shell = &tasks.storage_at(shell_slot).task;
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
@@ -979,8 +979,8 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     ASSERT_TRUE(outputs.task_id().is_valid());
     ASSERT_FALSE(orch.is_fatal());
 
-    const uint64_t slot = simpler::hbg::task_local_id(outputs.task_id());
-    ASSERT_LT(slot, static_cast<uint64_t>(kPoisonedSlots)) << "the submitted slot must be one this test poisoned";
+    const int32_t slot = simpler::hbg::task_local_id(outputs.task_id());
+    ASSERT_LT(slot, kPoisonedSlots) << "the submitted slot must be one this test poisoned";
     EXPECT_EQ(storage[slot].payload.predicate.op, PredicateOp::NONE);
     EXPECT_EQ(storage[slot].payload.predicate.addr, 0u);
 }

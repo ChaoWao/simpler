@@ -526,15 +526,14 @@ bool bind_graph_definitions(
             return false;
         }
         GraphExecutionStorageLayout storage_layout{};
-        if (definition->task_count == 0 || definition->task_count > MAX_IN_GRAPH_TASKS ||
+        if (definition->task_count <= 0 || definition->task_count > MAX_IN_GRAPH_TASKS ||
             definition->full_key != upload->full_key ||
             !graph_execution_storage_layout(
-                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
-                definition->scalar_arg_count, &storage_layout
+                definition->task_count, definition->tensor_arg_count, definition->scalar_arg_count, &storage_layout
             ) ||
             storage_layout.total_bytes != definition->execution_storage_bytes ||
-            upload->outer_slot->to_payload().tensor_count != static_cast<int32_t>(definition->boundary_count) ||
-            upload->outer_slot->to_payload().scalar_count != static_cast<int32_t>(definition->boundary_scalar_count)) {
+            upload->outer_slot->to_payload().tensor_count != definition->boundary_count ||
+            upload->outer_slot->to_payload().scalar_count != definition->boundary_scalar_count) {
             LOG_ERROR("host-orch: invalid Graph Definition for task");
             return false;
         }
@@ -561,7 +560,7 @@ bool bind_graph_definitions(
                 LOG_ERROR("host-orch: invalid Graph Definition in-graph task array");
                 return false;
             }
-            for (uint32_t i = 0; i < definition->task_count; ++i) {
+            for (int32_t i = 0; i < definition->task_count; ++i) {
                 // Sizing takes the kind materialize will give this task. add_task
                 // singles out GRAPH and routes everything else by shape, and a Graph
                 // body member is never the shell, so the shape decides. Derived here
