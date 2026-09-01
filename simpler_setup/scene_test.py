@@ -575,13 +575,73 @@ class CallableNamespace:
 # ---------------------------------------------------------------------------
 
 
-def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker):
+def _pin_l2_round_inputs(worker, test_args: TaskArgsBuilder, orch_signature: list):
+    """Pre-upload orchestration IN tensors for multi-round L2 SceneTest reuse.
+
+    Called only when ``rounds > 1``. Each nonempty IN is ``worker.malloc`` +
+    ``worker.copy_to`` once before the round loop; subsequent rounds pass the
+    device tensor while retaining the caller buffer as its host-orchestration
+    view. OUT/INOUT stay on the host-staging path.
+
+    Returns:
+        pinned: name → device ``Tensor`` for each IN
+        buffers: device ``Buffer`` handles to ``worker.free`` after the case
+    """
+    from simpler.task_interface import ArgDirection  # noqa: PLC0415
+
+    from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
+
+    pinned: dict[str, Any] = {}
+    buffers: list[Any] = []
+    tensor_idx = 0
+    try:
+        for spec in test_args.specs:
+            if not isinstance(spec, TensorArg):
+                continue
+            if tensor_idx >= len(orch_signature):
+                raise ValueError(
+                    f"TensorArg '{spec.name}' at index {tensor_idx} has no matching entry in "
+                    f"orchestration signature (length {len(orch_signature)}). "
+                    f"Update CALLABLE['orchestration']['signature'] to match generate_args()."
+                )
+            direction = orch_signature[tensor_idx]
+            tensor_idx += 1
+            if direction != ArgDirection.IN:
+                continue
+            host = spec.value
+            if host.device.type != "cpu":
+                raise ValueError(f"L2 round input '{spec.name}' must be a CPU tensor, got device={host.device}.")
+            if not host.is_contiguous():
+                raise ValueError(
+                    f"L2 round input '{spec.name}' must be contiguous; call tensor.contiguous() before passing it."
+                )
+            nbytes = int(host.numel()) * int(host.element_size())
+            if nbytes == 0:
+                continue
+            buf = worker.malloc(nbytes)
+            buffers.append(buf)
+            worker.copy_to(buf, host)
+            dtype = int(torch_dtype_to_datatype(host.dtype).value)
+            shapes = tuple(int(s) for s in host.shape)
+            pinned[spec.name] = buf.tensor(shapes, dtype)
+    except Exception:
+        for buf in buffers:
+            worker.free(buf)
+        raise
+    return pinned, buffers
+
+
+def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker, pinned_inputs=None):
     """Build TensorArg `TaskArgs` from `TaskArgsBuilder` for the L2 `Worker.run` path.
 
     An L2 leaf consumes its own args: `Worker.run(handle, args, cfg)` materializes each TensorArg to a
     local base in-process. Each tensor is named via ``worker.make_tensor_arg`` (a host tensor;
     at L2 there is no fork, so any host tensor resolves in-process); the direction tag is inert at L2
     but set for parity with the L3 path.
+
+    When ``pinned_inputs`` is provided, orchestration IN tensors use the
+    pre-uploaded device views instead of host staging. Their original host
+    addresses remain attached as host-only metadata for HBG orchestration.
 
     Returns:
         args: TaskArgs (TensorArg)
@@ -591,6 +651,7 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker)
 
     from simpler_setup.torch_interop import make_tensor_arg  # noqa: PLC0415
 
+    pinned_inputs = pinned_inputs or {}
     dir2tag = {
         ArgDirection.IN: TensorArgType.INPUT,
         ArgDirection.OUT: TensorArgType.OUTPUT_EXISTING,
@@ -608,7 +669,13 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker)
                     f"Update CALLABLE['orchestration']['signature'] to match generate_args()."
                 )
             direction = orch_signature[tensor_idx]
-            args.add_tensor(make_tensor_arg(worker, spec.value), dir2tag.get(direction, TensorArgType.INPUT))
+            if direction == ArgDirection.IN and spec.name in pinned_inputs:
+                tensor_arg = pinned_inputs[spec.name]
+            else:
+                tensor_arg = make_tensor_arg(worker, spec.value)
+            args.add_tensor(tensor_arg, dir2tag.get(direction, TensorArgType.INPUT))
+            if direction == ArgDirection.IN and spec.name in pinned_inputs:
+                args._set_host_view(tensor_idx, int(spec.value.data_ptr()))
             if direction in (ArgDirection.OUT, ArgDirection.INOUT):
                 output_names.append(spec.name)
             tensor_idx += 1
@@ -1755,54 +1822,60 @@ class SceneTestCase:
             handle = worker.register(callable_obj)
             type(self)._st_l2_handle = handle
 
-        # Build args
         test_args = self.generate_args(params)
-        chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker)
+        pinned_inputs: dict[str, Any] = {}
+        pinned_buffers: list[Any] = []
+        try:
+            if rounds > 1:
+                pinned_inputs, pinned_buffers = _pin_l2_round_inputs(worker, test_args, orch_sig)
+            chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker, pinned_inputs=pinned_inputs)
 
-        # Compute golden (unless skip_golden)
-        golden_args = None
-        if not skip_golden:
-            golden_args = test_args.clone()
-            with _golden_thread_cap():
-                self.compute_golden(golden_args, params)
-
-        _log_torch_backend_autoload_once()
-
-        # Save initial output tensor values for reset between rounds
-        initial_outputs = {}
-        if rounds > 1:
-            for name in output_names:
-                initial_outputs[name] = getattr(test_args, name).clone()
-
-        # Execute rounds. The platform emits `[STRACE]` host/device markers to
-        # stderr on every run; multi-round timing is obtained by teeing stderr
-        # to a file and parsing it offline with
-        # `python -m simpler_setup.tools.strace_timing <log> --rounds-table`
-        # (the scene test no longer captures/parses inline). See
-        # docs/dfx/l2-timing.md.
-        for round_idx in range(rounds):
-            if round_idx > 0:
-                for name, initial in initial_outputs.items():
-                    getattr(test_args, name).copy_(initial)
-
-            # Every diagnostic reaching this loop is already multi-round-safe:
-            # effective_diagnostic_options zeroes all of them when rounds > 1,
-            # so no per-round masking belongs here.
-            config = self._build_config(
-                config_dict,
-                enable_chip_swimlane=enable_chip_swimlane,
-                enable_dump_args=enable_dump_args,
-                enable_pmu=enable_pmu,
-                enable_dep_gen=enable_dep_gen,
-                enable_scope_stats=enable_scope_stats,
-                output_prefix=output_prefix,
-            )
-
-            with _temporary_env(self._resolve_env()):
-                worker.run(handle, chip_args, config=config)
-
+            golden_args = None
             if not skip_golden:
-                self.compare_outputs(test_args, golden_args, output_names, params)
+                golden_args = test_args.clone()
+                with _golden_thread_cap():
+                    self.compute_golden(golden_args, params)
+
+            _log_torch_backend_autoload_once()
+
+            # Save initial output tensor values for reset between rounds
+            initial_outputs = {}
+            if rounds > 1:
+                for name in output_names:
+                    initial_outputs[name] = getattr(test_args, name).clone()
+
+            # Execute rounds. The platform emits `[STRACE]` host/device markers to
+            # stderr on every run; multi-round timing is obtained by teeing stderr
+            # to a file and parsing it offline with
+            # `python -m simpler_setup.tools.strace_timing <log> --rounds-table`
+            # (the scene test no longer captures/parses inline). See
+            # docs/dfx/l2-timing.md.
+            for round_idx in range(rounds):
+                if round_idx > 0:
+                    for name, initial in initial_outputs.items():
+                        getattr(test_args, name).copy_(initial)
+
+                # Every diagnostic reaching this loop is already multi-round-safe:
+                # effective_diagnostic_options zeroes all of them when rounds > 1,
+                # so no per-round masking belongs here.
+                config = self._build_config(
+                    config_dict,
+                    enable_chip_swimlane=enable_chip_swimlane,
+                    enable_dump_args=enable_dump_args,
+                    enable_pmu=enable_pmu,
+                    enable_dep_gen=enable_dep_gen,
+                    enable_scope_stats=enable_scope_stats,
+                    output_prefix=output_prefix,
+                )
+
+                with _temporary_env(self._resolve_env()):
+                    worker.run(handle, chip_args, config=config)
+
+                if not skip_golden:
+                    self.compare_outputs(test_args, golden_args, output_names, params)
+        finally:
+            for buf in pinned_buffers:
+                worker.free(buf)
 
     def _run_and_validate_l3(  # noqa: PLR0913 -- threads CLI diagnostic flags + L3 ns context
         self,

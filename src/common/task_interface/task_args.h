@@ -193,5 +193,57 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 
 // L2 runtime ABI: fixed POD matching runtime.so byte-for-byte, and the sole ChipTensor-typed args
 // container — the materialized form a chip child decodes the L3->L2 Tensor blob into, just before
-// simpler_run.
-using ChipStorageTaskArgs = TaskArgsTpl<ChipTensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
+// simpler_run. host_views_ is host-process-only metadata: a nonzero entry gives host orchestration
+// a readable view of a device-memory tensor without changing the ChipTensor device ABI.
+struct ChipStorageTaskArgs {
+    ChipTensor tensors_[CHIP_MAX_TENSOR_ARGS];
+    uint64_t scalars_[CHIP_MAX_SCALAR_ARGS];
+    int32_t tensor_count_{0};
+    int32_t scalar_count_{0};
+    uint64_t host_views_[CHIP_MAX_TENSOR_ARGS]{};
+
+    void add_tensor(const ChipTensor &t) {
+        if (scalar_count_ > 0) throw std::logic_error("TaskArgs: cannot add tensor after scalar");
+        if (tensor_count_ >= CHIP_MAX_TENSOR_ARGS) throw std::out_of_range("TaskArgs: tensor capacity exceeded");
+        host_views_[tensor_count_] = 0;
+        tensors_[tensor_count_++] = t;
+    }
+
+    void add_scalar(uint64_t s) {
+        if (scalar_count_ >= CHIP_MAX_SCALAR_ARGS) throw std::out_of_range("TaskArgs: scalar capacity exceeded");
+        scalars_[scalar_count_++] = s;
+    }
+
+    const ChipTensor &tensor(int32_t i) const { return tensors_[i]; }
+    ChipTensor &tensor(int32_t i) { return tensors_[i]; }
+
+    uint64_t scalar(int32_t i) const { return scalars_[i]; }
+    uint64_t &scalar(int32_t i) { return scalars_[i]; }
+
+    const uint64_t *scalars() const { return scalars_; }
+    const ChipTensor *tensor_data() const { return tensors_; }
+    const uint64_t *scalar_data() const { return scalars_; }
+
+    int32_t tensor_count() const { return tensor_count_; }
+    int32_t scalar_count() const { return scalar_count_; }
+
+    void set_host_view(int32_t i, uint64_t addr) {
+        if (i < 0 || i >= tensor_count_) throw std::out_of_range("TaskArgs: host-view index out of range");
+        host_views_[i] = addr;
+    }
+
+    uint64_t host_view(int32_t i) const {
+        if (i < 0 || i >= tensor_count_) throw std::out_of_range("TaskArgs: host-view index out of range");
+        return host_views_[i];
+    }
+
+    void clear() {
+        tensor_count_ = 0;
+        scalar_count_ = 0;
+    }
+};
+
+static_assert(
+    std::is_trivially_copyable_v<ChipStorageTaskArgs> && std::is_standard_layout_v<ChipStorageTaskArgs>,
+    "ChipStorageTaskArgs crosses the runtime.so ABI as raw bytes"
+);
