@@ -54,13 +54,32 @@ PHASE_ORDER = (
     "host_view_close",
 )
 
-# The last segment of a bind, and so what closes one: the segments are not
-# contiguous in time, so timestamp order does not group them.
-BIND_CLOSING_PHASE = "arena_h2d"
-
 
 def parse_binds(path: str) -> list[dict[str, float]]:
-    """Group `bind phase=` lines into binds, in milliseconds."""
+    """Group `bind phase=` lines into binds, in milliseconds.
+
+    A bind emits every segment it has once, so a repeated segment name is the
+    first line of the next bind. Grouping on the repeat rather than on a named
+    closing segment survives a bind that omits a segment, a change to the
+    emission order, and a new segment being added; the segments are not
+    contiguous in time, so timestamp order does not group them.
+
+    This assumes each bind's burst reaches the log uninterrupted, and **nothing
+    enforces that**. Ranks write one stream through no lock, the line prefix
+    carries no pid, and its thread id is identical across ranks — measured as one
+    value over all 400 bind lines of a two-rank run — so there is no field to
+    group by instead.
+
+    It also assumes no bind omits a segment its successor emits *before* any they
+    share, which would put that segment in the earlier bind. `args` is emitted
+    unconditionally and first, so today nothing can precede a shared segment.
+
+    Both assumptions fail the same visible way — a bind whose segment set differs
+    from its neighbours' — which `warn_on_ragged_binds` names. That is why the
+    boundary stays free of any knowledge about segment order: an order constant
+    gone stale would split every bind at the same point, leaving the sets uniform
+    and the mis-grouping undetectable.
+    """
     binds: list[dict[str, float]] = []
     current: dict[str, float] = {}
     with open(path, encoding="utf-8", errors="replace") as handle:
@@ -69,10 +88,10 @@ def parse_binds(path: str) -> list[dict[str, float]]:
             if match is None:
                 continue
             phase, _start_ns, dur_ns = match.group(1), int(match.group(2)), int(match.group(3))
-            current[phase] = dur_ns / 1e6
-            if phase == BIND_CLOSING_PHASE:
+            if phase in current:
                 binds.append(current)
                 current = {}
+            current[phase] = dur_ns / 1e6
     if current:
         binds.append(current)
     # A group without `host_orch` is not a bind.
@@ -108,6 +127,26 @@ def parse_torch_autoload(path: str) -> list[str]:
 def spread(values: list[float]) -> tuple[float, float, float]:
     """Minimum, median and maximum. The median averages the two central values."""
     return min(values), statistics.median(values), max(values)
+
+
+def warn_on_ragged_binds(binds: list[dict[str, float]]) -> None:
+    """Report binds whose segment set differs from their neighbours'.
+
+    `parse_binds` assumes each bind's segments reach the log as an uninterrupted
+    burst, and nothing enforces that. A rank whose burst was split by another
+    rank's, and a truncated log, both leave a bind short of segments its
+    neighbours have; either way the rows below are not all describing the same
+    thing, so name it rather than print a clean table over it.
+    """
+    everywhere = {k for k in binds[0] if all(k in b for b in binds)}
+    ragged = sorted({k for b in binds for k in b} - everywhere)
+    if not ragged:
+        return
+    verb = "is" if len(ragged) == 1 else "are"
+    print(f"\n  WARNING: not every bind has the same segments; {', '.join(ragged)}")
+    print(f"  {verb} missing from some. A bind is grouped by its first repeated segment")
+    print("  name, so a rank whose burst was split by another rank's, and a truncated")
+    print("  log, both land here -- read the counts column before quoting a duration.")
 
 
 def main() -> int:
@@ -179,6 +218,8 @@ def main() -> int:
     if unknown:
         print(f"\n  phases this tool does not know about: {', '.join(unknown)}")
         print("  (add them to PHASE_ORDER, and to CONTROL_PLANE if a dispatch change can move them)")
+
+    warn_on_ragged_binds(warm)
 
     # The control-plane set is not fixed: a change can retire a phase outright, so
     # the total covers the phases this run has and names the ones absent from every

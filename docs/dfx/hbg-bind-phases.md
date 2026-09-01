@@ -47,9 +47,25 @@ predates the change still totals correctly, and names them under its `total` row
 as absent from every bind. The table above is what a current run emits: ten
 segments, three of them control plane.
 
-**The control plane is a sum of costs, not an interval.** `arena_h2d` runs
-*after* `host_view_close`, so the segments do not form one contiguous window.
-Sum the ones the bind has; do not subtract two timestamps.
+**The control plane is a sum of costs, not an interval.** Its three segments are
+not adjacent: `static_arena`, `shared_mem` and `gm_heap` run between
+`graph_upload` and `arena_h2d`, so the segments do not form one contiguous
+window. Sum the ones the bind has; do not subtract two timestamps.
+
+**A bind runs its segments in one order and prints them in another**, and the
+two are easy to confuse because only the second is visible in a log.
+
+| order | segments |
+| ----- | -------- |
+| **execution** — the sequence `runtime_maker.cpp` calls them in, and what `start_ns` shows | `args`, `arena_build`, `runtime_init`, `host_orch`, `graph_upload`, `static_arena`, `shared_mem`, `gm_heap`, `arena_h2d`, `host_view_close` |
+| **emission** — `HostPhaseKind` order, printed as one burst when the bind ends | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `arena_h2d`, `host_view_close` |
+
+The execution order is what puts `static_arena`, `shared_mem` and `gm_heap`
+between `graph_upload` and `arena_h2d`, which is why the control plane is a sum
+and not an interval. The emission order is what a line-by-line reader of the log
+sees; `host_view_close` is last in both, and `arena_h2d` second to last, so
+reading `arena_h2d` as the segment that closes a bind shifts every
+`host_view_close` into the following bind.
 
 ## Prerequisites
 
@@ -169,18 +185,18 @@ grep -oE 'bind phase=[a-z0-9_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_
 ```
 
 The character class has to admit digits. `[a-z_]+` matches no segment whose name
-carries one, so it silently drops every `arena_h2d` line — the bind-closing
-segment, the only H2D left, and the one that itemizes the whole upload. On a
-two-bind log that is 18 lines where 20 exist, with nothing to say a segment went
-missing.
+carries one, so it silently drops every `arena_h2d` line — the only H2D
+left, and the one that itemizes the whole upload. On a two-bind log that is 18
+lines where 20 exist, with nothing to say a segment went missing.
 
 Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
 own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=`,
 `submissions=` and `spilled=` on `graph_upload`, and `arena_h2d`'s itemized upload.
 Group the
-lines into binds — `arena_h2d` is the last segment of a bind, so it closes one —
-then sum the control-plane segments **within each bind** and take the minimum of
-those sums. Never sum
+lines into binds — a bind prints each segment it has once, so a segment name you
+have already seen is the first line of the next bind; do **not** close on
+`arena_h2d`, which is second to last — then sum the control-plane segments
+**within each bind** and take the minimum of those sums. Never sum
 minima taken across binds; that total belongs to no bind and can point the wrong
 way (see below).
 
