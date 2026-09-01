@@ -88,7 +88,9 @@ from simpler_setup.scene_test import (
     build_output_prefix,
     compile_chip_callable_spec,
     effective_diagnostic_options,
+    finalize_diagnostic_outputs,
     l3_compile_cache_key,
+    log_torch_backend_autoload_once,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -861,6 +863,7 @@ def run(  # noqa: PLR0913 -- one knob per CLI flag
             enable_scope_stats=diagnostics.scope_stats,
             output_prefix=output_prefix,
         )
+        log_torch_backend_autoload_once()
         for round_idx in range(rounds):
             print(f"[dsv4] round {round_idx + 1}/{rounds}", flush=True)
             keepalive: list = []
@@ -871,6 +874,14 @@ def run(  # noqa: PLR0913 -- one knob per CLI flag
             worker.run(task_orch)
     finally:
         worker.close()
+        if output_prefix:
+            finalize_diagnostic_outputs(
+                f"{CASE_LABEL}_{runtime}",
+                output_prefix,
+                callable_spec=spec,
+                dep_gen=diagnostics.dep_gen,
+                scope_stats=diagnostics.scope_stats,
+            )
     print("[dsv4] PASSED", flush=True)
     return 0
 

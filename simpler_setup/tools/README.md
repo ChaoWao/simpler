@@ -404,10 +404,19 @@ warm-up pass **per rank** rather than one in total; `--ranks` sets that directly
 and `--keep-first` keeps the cold passes. A run whose every pass is a rank's
 warm-up — `--rounds 1` — is refused rather than reported, since the one number it
 could print is the cold one. Three grouping rules are encoded rather than left to
-the caller, because each silently produces a wrong number: `arena_h2d` closes a
-pass (the segments are not contiguous in time, so timestamp order does not group
-them), the control-plane total is summed **within** a pass before any minimum is
-taken, and the first pass of each rank is warm-up.
+the caller, because each silently produces a wrong number: a repeated segment
+name opens the next pass (the segments are not contiguous in time, so timestamp
+order does not group them, and no single segment reliably closes a pass — reading
+`arena_h2d` as the closing one shifted every `host_view_close` by a pass), the
+control-plane total is summed **within** a pass before any minimum is taken, and
+the first pass of each rank is warm-up.
+
+Grouping on the repeat assumes each pass prints its segments as an uninterrupted
+burst. That holds on every log measured so far, but nothing enforces it: ranks
+share one stream and the line prefix carries no pid, and the thread id it does
+carry is identical across ranks. A burst split by another rank's is therefore
+reported as a pass whose segment set differs from its neighbours', which the
+non-uniform-segment warning names rather than passing off as a number.
 
 A run whose control plane is missing a phase entirely — a change can retire one —
 is still totalled, over the phases it has, with the absent ones named. A phase
