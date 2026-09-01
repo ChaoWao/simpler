@@ -64,7 +64,6 @@
 #include "common/host_span_scope.h"
 #include "host_log.h"
 #include "data_type.h"
-#include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
 #include "worker_bind.h"
 #include "task_args_wire.h"
@@ -2908,13 +2907,9 @@ NB_MODULE(_task_interface, m) {
                const std::string &aicore_path, const std::string &dispatcher_path, int device_id,
                std::optional<CallConfig> prewarm_config, bool enable_sdma, const std::string &sim_context_path,
                const std::string &sdma_warmup_path) {
-                // Translate the Python bool into a DmaWorkspaceKind bitmask so the
-                // platform-agnostic ChipWorker stays free of the enum. Empty mask
-                // when disabled leaves the Worker with no async-DMA provisioning.
-                uint32_t dma_workspace_mask = enable_sdma ? (uint32_t{1} << DMA_WORKSPACE_SDMA) : 0;
                 self.init(
                     host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id,
-                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, dma_workspace_mask, sim_context_path,
+                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, enable_sdma, sim_context_path,
                     sdma_warmup_path
                 );
             },

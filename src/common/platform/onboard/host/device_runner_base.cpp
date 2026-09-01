@@ -983,11 +983,35 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 bool DeviceRunnerBase::has_callable(int32_t callable_id) const { return callables_.count(callable_id) != 0; }
 
 int DeviceRunnerBase::provision_dma_workspace(
-    uint32_t required_mask, const void *sdma_warmup_binary, size_t sdma_warmup_size
+    bool enable_sdma, const void *sdma_warmup_binary, size_t sdma_warmup_size
 ) {
     const uint32_t supported = dma_workspace_supported_mask();
-    if ((required_mask & ~supported) != 0) {
-        LOG_ERROR("provision_dma_workspace: unsupported mask=0x%x (supported=0x%x)", required_mask, supported);
+    constexpr uint32_t kSdmaBit = uint32_t{1} << DMA_WORKSPACE_SDMA;
+    // Opting in on a device that cannot provide SDMA is a caller error, not a
+    // silent no-op: a Worker built for TPREFETCH_ASYNC must not reach its first
+    // run reading a zero workspace address.
+    if (enable_sdma && (supported & kSdmaBit) == 0) {
+        LOG_ERROR("provision_dma_workspace: SDMA requested where unsupported (supported=0x%x)", supported);
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    // Everything this device supports, minus what the caller declined. SDMA is
+    // the only declinable engine: its workspace cannot be obtained without also
+    // creating 48 CP-process STARS streams, which halves this Worker's
+    // post-fault reset budget, so a Worker that did not ask for it must not end
+    // up holding them. Every other supported engine carries no such cost and is
+    // provisioned unconditionally.
+    const uint32_t required_mask = enable_sdma ? supported : (supported & ~kSdmaBit);
+    // Dormant while one engine is supported, since required_mask is a subset of
+    // supported. It arms itself on the day dma_workspace_supported_mask() widens,
+    // which is the day the single-handle contract breaks — dma_workspace_release()
+    // casts the opaque handle back to the one provider type it can be, so a second
+    // engine would be released as the type of the first. A rejection here beats
+    // that silent type confusion.
+    if ((required_mask & (required_mask - 1)) != 0) {
+        LOG_ERROR(
+            "provision_dma_workspace: mask=0x%x names %d engines; one handle owns one provider", required_mask,
+            __builtin_popcount(required_mask)
+        );
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
     if (dma_workspace_handle_ != nullptr) {

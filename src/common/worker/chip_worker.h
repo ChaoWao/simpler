@@ -72,13 +72,15 @@ public:
     /// runtime-arena for its ring sizing right after the device comes up (the
     /// sizing is fork-constant, delivered by COW into init). A no-op for
     /// runtimes without a prebuilt arena.
-    /// `dma_workspace_mask` (a bitmask of DmaWorkspaceKind bits, 0 = none)
-    /// provisions those async-DMA workspaces once at init, so kernels can use
-    /// get_dma_workspace. Empty by default; a Worker that does not opt in creates
-    /// no SDMA streams. Provisioning fails fast (init throws) on a
-    /// platform/runtime that does not support a requested engine. The mask stays
-    /// a raw integer here so this platform-agnostic worker needs no platform
-    /// headers; the binding derives it from the DmaWorkspaceKind enum.
+    /// `enable_sdma` opts this Worker into the async-DMA (SDMA) workspace, so
+    /// kernels can use get_dma_workspace. Off by default; a Worker that does not
+    /// opt in creates no SDMA streams and its kernels read a zero address for
+    /// that engine. It names one engine rather than a set because SDMA is the
+    /// only one a caller can decline — every other supported engine is
+    /// provisioned unconditionally, and SDMA is conditional only because its
+    /// workspace is inseparable from 48 CP-process STARS streams whose
+    /// post-fault release CANN does not bound. Provisioning fails fast (init
+    /// throws) on a platform/runtime without SDMA support.
     /// `sdma_warmup_path`, when non-empty, is the vector-only ELF that walks the
     /// SDMA control path once per channel during that provisioning, moving the
     /// cold-start cost off the first TPREFETCH_ASYNC. Optional: an empty path (or
@@ -86,8 +88,7 @@ public:
     void init(
         const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
         const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config = nullptr,
-        uint32_t dma_workspace_mask = 0, const std::string &sim_context_path = "",
-        const std::string &sdma_warmup_path = ""
+        bool enable_sdma = false, const std::string &sim_context_path = "", const std::string &sdma_warmup_path = ""
     );
 
     /// Tear down everything: device resources and runtime library.
@@ -274,7 +275,7 @@ private:
     using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
-    using SimplerProvisionDmaWorkspaceFn = int (*)(void *, uint32_t, const void *, uint64_t);
+    using SimplerProvisionDmaWorkspaceFn = int (*)(void *, int, const void *, uint64_t);
     using FinalizeDeviceFn = int (*)(void *);
     using EnsureAclReadyFn = int (*)(void *, int);
     using CreateCommStreamFn = void *(*)(void *);

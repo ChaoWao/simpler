@@ -1151,12 +1151,12 @@ int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
 }
 
 int simpler_provision_dma_workspace(
-    DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
+    DeviceContextHandle ctx, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 ) {
     if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         return static_cast<DeviceRunnerBase *>(ctx)->provision_dma_workspace(
-            required_mask, sdma_warmup_binary, static_cast<size_t>(sdma_warmup_size)
+            enable_sdma != 0, sdma_warmup_binary, static_cast<size_t>(sdma_warmup_size)
         );
     } catch (...) {
         return PTO_RUNTIME_ERR_INTERNAL;

@@ -28,9 +28,13 @@ namespace {
 // Appended (never inserted) since the last revision: `sdma_warmup_path`, the
 // vector-only ELF used to warm the SDMA control path during init-time workspace
 // provisioning.
+// Retyped in place, not moved: the async-DMA parameter is `bool enable_sdma`
+// rather than a DmaWorkspaceKind bitmask. SDMA is the only engine a caller can
+// decline, so a set was never the question being asked; every other supported
+// engine is provisioned unconditionally.
 using ExpectedChipWorkerInit = void (ChipWorker::*)(
-    const std::string &, const std::string &, const std::string &, const std::string &, int, const CallConfig *,
-    uint32_t, const std::string &, const std::string &
+    const std::string &, const std::string &, const std::string &, const std::string &, int, const CallConfig *, bool,
+    const std::string &, const std::string &
 );
 static_assert(
     std::is_same_v<decltype(&ChipWorker::init), ExpectedChipWorkerInit>,
