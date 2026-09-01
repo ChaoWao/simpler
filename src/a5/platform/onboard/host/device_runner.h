@@ -103,10 +103,12 @@ public:
     // `DeviceRunnerBase`.
 
     /**
-     * a5 `dep_gen` enablement setter, overriding the base no-op. Captures
-     * orchestrator submit_task inputs for offline replay into deps.json.
+     * a5 `dep_gen` enablement setter, overriding the base no-op. Also arms the
+     * loaded runtime's host-side graph capture, which a host-orch runtime uses
+     * instead of the device collector. Defined in the .cpp so this header stays
+     * free of the runtime-provided capture symbols.
      */
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    void set_dep_gen_enabled(bool enable) override;
 
     /**
      * Cleanup all resources
