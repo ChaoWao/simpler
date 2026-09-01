@@ -507,9 +507,7 @@ static inline uint64_t rt_graph_function_id(Function function) {
 template <typename Invoke>
 static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const GraphTaskArgs &args, Invoke invoke) {
     debug_assert(!args.has_error && "Graph boundary GraphTaskArgs construction failed");
-    debug_assert(
-        args.tensor_count() <= static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS) && "Graph boundary exceeds the tensor limit"
-    );
+    debug_assert(args.tensor_count() <= GRAPH_MAX_TENSOR_ARGS && "Graph boundary exceeds the tensor limit");
     debug_assert(
         args.explicit_dep_count() == 0 && "Explicit dependencies crossing the Graph boundary are not supported"
     );

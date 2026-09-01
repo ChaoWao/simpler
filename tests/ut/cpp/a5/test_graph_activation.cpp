@@ -78,7 +78,7 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
     init_in_graph_task(tasks[1], 1, CHIP_TASK_PENDING);      // consumer of task 0
     tasks[0].slot.wake_list_head.store(WAKE_LIST_SENTINEL);  // its wake list already drained
 
-    std::vector<uint32_t> fanin_offsets{0, 0, 1};  // task 0 is a root; task 1 <- {0}
+    std::vector<int32_t> fanin_offsets{0, 0, 1};  // task 0 is a root; task 1 <- {0}
     std::vector<uint16_t> fanin_indices{0};
     GraphExecution exec{};
     exec.tasks = exec.task_storage = tasks.get();
@@ -103,7 +103,7 @@ TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPe
     init_in_graph_task(tasks[2], 2, CHIP_TASK_PENDING);    // consumer of task 0 (completed)
     init_in_graph_task(tasks[3], 3, CHIP_TASK_PENDING);    // consumer of task 1 (pending)
 
-    std::vector<uint32_t> fanin_offsets{0, 0, 0, 1, 2};  // task 2 <- {0}, task 3 <- {1}
+    std::vector<int32_t> fanin_offsets{0, 0, 0, 1, 2};  // task 2 <- {0}, task 3 <- {1}
     std::vector<uint16_t> fanin_indices{0, 1};
     GraphExecution exec{};
     exec.tasks = exec.task_storage = tasks.get();

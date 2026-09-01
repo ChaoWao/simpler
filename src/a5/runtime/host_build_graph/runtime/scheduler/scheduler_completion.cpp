@@ -191,8 +191,8 @@ void SchedulerContext::complete_slot_task(
         }
 #endif
         // 3S+1P: hand the finished task to the dedicated resolution (P) thread.
-        // P publishes completion_flags, drains the wake list, and advances the
-        // watermark — and owns completed_tasks_, so this scheduler thread neither
+        // P publishes completion_flags and drains the wake list — and owns
+        // completed_tasks_, so this scheduler thread neither
         // resolves nor bumps completed_this_turn. (The Resolve swimlane bar is
         // emitted by P, not here.)
         sp_queues_[thread_idx].push(&slot_state);

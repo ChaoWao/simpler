@@ -52,12 +52,19 @@ enum class TaskIdSpace : uint32_t { GLOBAL = 0, IN_GRAPH = 1 };
 // within that Graph. graph_execution.h asserts MAX_IN_GRAPH_TASKS fits the index.
 inline constexpr uint32_t IN_GRAPH_TASK_INDEX_BITS = 10;
 
-constexpr TaskId make_global_task(uint32_t local_id) {
-    return TaskId{(static_cast<uint64_t>(TaskIdSpace::GLOBAL) << 32) | static_cast<uint64_t>(local_id)};
+// A local id is signed throughout this runtime — it is a task-table index, and the
+// table, the completion flags and the fanin payload all address slots with int32_t.
+// The low field is therefore narrowed to uint32_t before it is widened into the raw
+// word, so a negative value cannot sign-extend over the id-space bits above it.
+constexpr TaskId make_global_task(int32_t local_id) {
+    return TaskId{
+        (static_cast<uint64_t>(TaskIdSpace::GLOBAL) << 32) | static_cast<uint64_t>(static_cast<uint32_t>(local_id))
+    };
 }
 
-constexpr TaskId make_in_graph_task(uint32_t graph_local_id, uint32_t task_index) {
-    const uint32_t packed = (graph_local_id << IN_GRAPH_TASK_INDEX_BITS) | task_index;
+constexpr TaskId make_in_graph_task(int32_t graph_local_id, int32_t task_index) {
+    const uint32_t packed =
+        (static_cast<uint32_t>(graph_local_id) << IN_GRAPH_TASK_INDEX_BITS) | static_cast<uint32_t>(task_index);
     return TaskId{(static_cast<uint64_t>(TaskIdSpace::IN_GRAPH) << 32) | static_cast<uint64_t>(packed)};
 }
 
@@ -70,7 +77,8 @@ constexpr bool is_global_task(TaskId id) { return task_id_space(id) == TaskIdSpa
 
 // The low 32 bits. A task-table local id for a GLOBAL task; the packed pair above
 // for an IN_GRAPH one, which is why callers that resolve a table slot must gate on
-// is_global_task() first.
-constexpr uint32_t task_local_id(TaskId id) { return static_cast<uint32_t>(id.raw & 0xFFFFFFFFu); }
+// is_global_task() first. Both fit int32_t: a table index is bounded by the run's
+// task capacity, and a packed pair by MAX_IN_GRAPH_TASKS above that same capacity.
+constexpr int32_t task_local_id(TaskId id) { return static_cast<int32_t>(id.raw & 0xFFFFFFFFu); }
 
 }  // namespace simpler::hbg

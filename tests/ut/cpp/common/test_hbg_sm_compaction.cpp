@@ -84,7 +84,7 @@ public:
         // the slot so the compaction can be checked element by element.
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
             ChipTaskStorage &entry = storage_[i];
-            entry.task.task_id = simpler::hbg::make_global_task(static_cast<uint32_t>(i));
+            entry.task.task_id = simpler::hbg::make_global_task(static_cast<int32_t>(i));
             entry.payload.tensor_count = TENSORS_PER_TASK;
             entry.payload.scalar_count = SCALARS_PER_TASK;
             entry.payload.fanin_count = FANIN_PER_TASK;
@@ -218,7 +218,7 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         const ChipTaskStorage &entry = compacted.storage[i];
-        EXPECT_EQ(simpler::hbg::task_local_id(entry.task.task_id), i) << "slot " << i;
+        EXPECT_EQ(simpler::hbg::task_local_id(entry.task.task_id), static_cast<int32_t>(i)) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
         EXPECT_EQ(entry.slot.in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;

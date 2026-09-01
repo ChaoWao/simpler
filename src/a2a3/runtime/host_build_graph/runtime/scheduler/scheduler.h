@@ -632,7 +632,7 @@ struct SchedulerState {
     // (route/re-register each waiter). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
-        const int32_t task_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot_state.to_descriptor().task_id));
+        const int32_t task_id = simpler::hbg::task_local_id(slot_state.to_descriptor().task_id);
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // completion mirror (task_state = COMPLETED)
@@ -892,10 +892,10 @@ struct SchedulerState {
     // Scheduler polling only chooses which already-wired producer a consumer
     // waits on at this instant; it never recomputes producer relationships.
     int32_t graph_first_unmet_producer(const GraphExecution &execution, const ChipTaskSlotState &consumer) const {
-        const uint32_t task_index = static_cast<uint32_t>(consumer.in_graph_task_index);
-        const uint32_t begin = execution.fanin_offsets[task_index];
-        const uint32_t end = execution.fanin_offsets[task_index + 1];
-        for (uint32_t edge = begin; edge < end; ++edge) {
+        const int32_t task_index = consumer.in_graph_task_index;
+        const int32_t begin = execution.fanin_offsets[task_index];
+        const int32_t end = execution.fanin_offsets[task_index + 1];
+        for (int32_t edge = begin; edge < end; ++edge) {
             const uint16_t producer_index = execution.fanin_indices[edge];
             const ChipTaskSlotState &producer = execution.task_at(producer_index).slot;
             if (producer.task_state.load(std::memory_order_acquire) != CHIP_TASK_COMPLETED) {
@@ -1072,13 +1072,8 @@ struct SchedulerState {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
-        const int32_t saved_task_index = slot_state.in_graph_task_index;
-        if (saved_task_index < 0) {
-            outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
-            return outcome;
-        }
-        const uint32_t task_index = static_cast<uint32_t>(saved_task_index);
-        if (task_index >= static_cast<uint32_t>(execution->task_count)) {
+        const int32_t task_index = slot_state.in_graph_task_index;
+        if (task_index < 0 || task_index >= execution->task_count) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
