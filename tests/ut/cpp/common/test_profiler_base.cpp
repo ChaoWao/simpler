@@ -283,3 +283,75 @@ TEST(ProfilerBaseTest, CollectorStaysAliveAfterArmedIdleTimeout) {
     collector.stop();
     EXPECT_EQ(collector.collected(), 2);
 }
+
+// quiesce() gives stop()'s drain guarantee without retiring the threads: on
+// return every published buffer has reached on_buffer_collected, and the
+// collector is still able to take more. This is what lets the collectors stay
+// resident across runs instead of being started and joined per run.
+TEST(ProfilerBaseTest, QuiesceDrainsWithoutRetiringThreads) {
+    constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS;
+
+    TestHeader header{};
+    uint64_t first[kThreads]{};
+    uint64_t second[kThreads]{};
+
+    TestCollector<PerThreadModule> collector;
+    collector.init(kThreads, &header);
+    collector.start(nullptr);
+
+    for (int q = 0; q < kThreads; q++) {
+        publish(collector, header, q, &first[q]);
+    }
+    collector.quiesce();
+    // No wait_for_collected here on purpose: quiesce() must have delivered
+    // everything by the time it returns, so polling for it would hide a
+    // handshake that reports too early.
+    EXPECT_EQ(collector.collected(), kThreads);
+
+    for (int q = 0; q < kThreads; q++) {
+        publish(collector, header, q, &second[q]);
+    }
+    collector.quiesce();
+    EXPECT_EQ(collector.collected(), 2 * kThreads);
+
+    collector.stop();
+    EXPECT_EQ(collector.collected(), 2 * kThreads);
+}
+
+// A subsystem that emitted nothing still has to complete the handshake. The
+// collector loop skips its idle bookkeeping for a shard that has never seen a
+// buffer, so an ack placed behind that guard would leave quiesce() waiting
+// forever on a silent run — a hang, not a wrong count.
+TEST(ProfilerBaseTest, QuiesceCompletesOnASilentCollector) {
+    TestHeader header{};
+    TestCollector<SingleShardModule> collector;
+    collector.init(2, &header);
+    collector.start(nullptr);
+
+    collector.quiesce();
+    EXPECT_EQ(collector.collected(), 0);
+
+    // Still live afterwards.
+    uint64_t buffer = 0;
+    publish(collector, header, 1, &buffer);
+    collector.quiesce();
+    EXPECT_EQ(collector.collected(), 1);
+
+    collector.stop();
+}
+
+// quiesce() before start() and after stop() are both no-ops rather than hangs:
+// there are no workers to answer the handshake in either state.
+TEST(ProfilerBaseTest, QuiesceIsANoOpWithoutRunningThreads) {
+    TestHeader header{};
+    TestCollector<SingleShardModule> collector;
+    collector.init(2, &header);
+
+    collector.quiesce();  // before start()
+
+    collector.start(nullptr);
+    collector.stop();
+
+    collector.quiesce();  // after stop()
+    EXPECT_EQ(collector.collected(), 0);
+}
