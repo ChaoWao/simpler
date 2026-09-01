@@ -116,6 +116,12 @@ written from the host via `set_tensor_data`, that reader must use `add_inout`
 (Option A) to register itself in the TensorMap — `add_dep` cannot substitute
 here.
 
+That guard is a `tensormap_and_ringbuffer` property. `host_build_graph` has no
+host-side WAR guard to be visible to: its orchestration runs to completion before
+the device starts, and `set_tensor_data` rejects any tensor with a producer
+outright (see
+[`SCALAR_DATA_ACCESS.md`](../src/a5/runtime/host_build_graph/docs/SCALAR_DATA_ACCESS.md)).
+
 ## Recommendation
 
 Prefer **Option B (`add_dep`)**. It is precise (one edge, no side effects on

@@ -39,6 +39,9 @@ CASES = {
     "unbound_owner_read": 2,
     "unbound_owner_write": 3,
     "in_graph_task_dependency": 4,
+    "read_task_output": 5,
+    "write_task_produced_tensor": 6,
+    "read_alloc_tensors_output": 7,
 }
 
 

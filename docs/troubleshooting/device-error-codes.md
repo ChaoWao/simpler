@@ -99,7 +99,7 @@ layer to go looking in, which is what these columns are for.
 | 5 | INVALID_ARGS | orchestration |
 | 6 | *(retired — reported as 4)* | — |
 | 7 | REQUIRE_SYNC_START_INVALID | orchestration |
-| 8 | TENSOR_WAIT_TIMEOUT | kernel / orchestration |
+| 8 | TENSOR_WAIT_TIMEOUT | kernel / orchestration (T&R only) |
 | 9 | EXPLICIT_ORCH_FATAL | orchestration (deliberate) |
 | 10 | SCOPE_TASKS_OVERFLOW | runtime-internal |
 | 11 | TENSORMAP_OVERFLOW | runtime-internal / extreme scale |

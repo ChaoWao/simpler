@@ -19,8 +19,7 @@
  *    IN_GRAPH one when every producer in its Graph's fanin wire has reached
  *    task_state == COMPLETED (that table has no flag bytes); a producer publishes
  *    completion + drains its wake list on finish
- * 3. Publishing task_state (PENDING -> COMPLETED) and advancing the
- *    completed_watermark (consumer-retirement signal)
+ * 3. Publishing completion (task_state PENDING -> COMPLETED, completion_flags byte)
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
@@ -628,17 +627,15 @@ struct SchedulerState {
         }
     }
 
-    // Producer completion under polling: publish the host-visible task_state
-    // mirror + the device-visible completion_flags byte, drain the wake list
-    // (route/re-register each waiter), then CAS-advance the monotonic
-    // completed_watermark (load-bearing: the host wait_for_consumers gates on
-    // watermark >= producer.last_consumer_local_id). Whole-graph-resident hbg
+    // Producer completion under polling: publish the task_state completion
+    // mirror + the device-visible completion_flags byte, then drain the wake list
+    // (route/re-register each waiter). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
         const int32_t task_id = static_cast<int32_t>(simpler::hbg::task_local_id(slot_state.to_descriptor().task_id));
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
-        slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
+        slot_state.mark_completed();  // completion mirror (task_state = COMPLETED)
         tasks.set_completion_flag(task_id);
 
         ChipTaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
@@ -657,21 +654,10 @@ struct SchedulerState {
             }
             waiter = next;
         }
-
-        // completed_watermark = highest id such that every task in [0, watermark]
-        // has its completion_flags byte set. The host wait_for_consumers gates on
-        // watermark >= producer.last_consumer_local_id, so the walk must extend to
-        // the full contiguous completed prefix — NOT cap at task_id. Capping at task_id
-        // makes the final value order-dependent: a low-id task completing after a
-        // higher one would leave the watermark stuck below the true prefix, hanging
-        // any wait_for_consumers whose last_consumer sits in the gap.
-        tasks.update_completed_watermark();
     }
 
     // Polling: there is no ready-claim CAS (a producer routes each waiter exactly
     // once via the wake-list drain) and no per-producer consumer/scope refcount.
-    // Consumer retirement is observed by the host through completed_watermark >=
-    // producer.last_consumer_local_id, not by bumping a producer refcount.
 
     // Early-dispatch release. If the now-ready task was pre-staged
     // (gated on a core), ring its DATA_MAIN_BASE high-32 doorbell RIGHT HERE in
@@ -1155,9 +1141,9 @@ struct SchedulerState {
         int thread_idx
 #endif
     ) {
-        // Polling completion: publish the host-visible task_state mirror + the
-        // device-visible completion_flags byte, drain the wake list (route or
-        // re-register each waiter), and advance the watermark. Replaces the
+        // Polling completion: publish the task_state completion mirror + the
+        // device-visible completion_flags byte and drain the wake list (route or
+        // re-register each waiter). Replaces the
         // fanout-list walk + fanin_refcount decrements of the wiring model.
         on_mixed_task_complete(slot_state);
 #if SIMPLER_SCHED_PROFILING
@@ -1171,10 +1157,10 @@ struct SchedulerState {
     }
 
     // on_task_release is gone under polling. It existed to bump each producer's
-    // fanout_refcount so the host wait_for_consumers could observe consumer
-    // retirement; that signal is now the completed_watermark advanced by
-    // on_mixed_task_complete. There is likewise no self CONSUMED flip (host-orch
-    // never reclaimed slots on device).
+    // fanout_refcount so a host-side consumer wait could observe consumer
+    // retirement; no such wait exists — orchestration rejects scalar access to a
+    // tensor with a producer instead. There is likewise no self CONSUMED flip
+    // (host-orch never reclaimed slots on device).
 
     // === Cold-path API (defined in scheduler.cpp) ===
 

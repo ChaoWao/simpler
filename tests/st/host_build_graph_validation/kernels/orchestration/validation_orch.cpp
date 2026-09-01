@@ -46,6 +46,44 @@ simpler::hbg::Tensor tensor_with_unbound_owner(const simpler::hbg::Tensor &exter
     return forged;
 }
 
+// A submitted task's output names that task as its creator, so scalar access to
+// it during orchestration reaches a producer that has not run.
+void read_output_of_submitted_task() {
+    uint32_t shape[1] = {1};
+    TensorCreateInfo ci(shape, 1, DataType::INT32);
+
+    CoreTaskArgs args;
+    args.add_output(ci);
+    args.launch_spec.set_block_num(1);
+    TaskOutputTensors outs = rt_submit_aiv_task(FUNC_NOOP_AIV0, args);
+
+    uint32_t index[1] = {0};
+    (void)get_tensor_data<int32_t>(outs.get_ref(0), 1, index);
+}
+
+// An external tensor a task writes carries no owner but does gain a TensorMap
+// producer entry — the second way a producer reaches a tensor.
+void write_external_tensor_a_task_produces(const simpler::hbg::Tensor &external) {
+    CoreTaskArgs args;
+    args.add_inout(external);
+    args.launch_spec.set_block_num(1);
+    rt_submit_aiv_task(FUNC_NOOP_AIV0, args);
+
+    uint32_t index[1] = {0};
+    set_tensor_data<int32_t>(external, 1, index, 7);
+}
+
+// A runtime allocation completes on the host, yet its buffer holds no
+// initialized content, so its creator rejects scalar access like any other.
+void read_alloc_tensors_output() {
+    uint32_t shape[1] = {1};
+    TensorCreateInfo ci(shape, 1, DataType::INT32);
+    TaskOutputTensors outs = alloc_tensors(ci);
+
+    uint32_t index[1] = {0};
+    (void)get_tensor_data<int32_t>(outs.get_ref(0), 1, index);
+}
+
 // An IN_GRAPH id names storage inside one Graph task's body, not a task-table slot,
 // so it can never be a fanin producer. Declaring one as an explicit dependency is
 // the caller error append_fanin_or_fail rejects.
@@ -86,6 +124,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         return;
     case 4:
         submit_task_depending_on_in_graph_task();
+        return;
+    case 5:
+        read_output_of_submitted_task();
+        return;
+    case 6:
+        write_external_tensor_a_task_produces(external);
+        return;
+    case 7:
+        read_alloc_tensors_output();
         return;
     default:
         rt_report_fatal(

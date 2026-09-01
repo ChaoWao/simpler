@@ -814,7 +814,7 @@ int32_t run_host_orchestration(
     host_phase_trace_note_submitted(static_cast<uint64_t>(total_tasks));
 
     // The count travels inside the header the restack copies wholesale, which is
-    // what lets the device bound its completed_watermark walk without a second
+    // what lets the device bound its slot walks without a second
     // carrier. Written after the range check above, so the value the device reads
     // is one the segments are actually pitched to.
     reinterpret_cast<SharedMemoryHeader *>(host_sm)->tasks.total_tasks = total_tasks;

@@ -62,11 +62,16 @@ exist) before reading. See the "Device logs" section of
 
 ## Code 8, specifically
 
-The tensor-data wait defaults to 15 s (`TENSOR_DATA_TIMEOUT_MS`,
-frequency-scaled). It means either the producer never completed, or a consumer never
+Only `tensormap_and_ringbuffer` raises this code. Its tensor-data wait defaults to
+15 s (`TENSOR_DATA_TIMEOUT_MS`, frequency-scaled). It means either the producer
+never completed, or a consumer never
 released its fanout reference. Check for a hung producer first (that is S1 above),
 then verify the consumer really declares the dependency and exits. If the kernel is
 merely slow, raising the timeout will prove it.
+
+`host_build_graph` has no such wait: its orchestration finishes before the device
+starts, so `get_tensor_data` / `set_tensor_data` reject a tensor with a producer
+with `INVALID_ARGS` (code 5) instead of waiting.
 
 ## If the fault line is an addressing error, not a stall
 
