@@ -396,13 +396,15 @@ public:
     bool has_callable(int32_t callable_id) const;
 
     /**
-     * Provision the async-DMA workspaces named in `required_mask` once at Worker
-     * init and latch their device addresses into the resident KernelArgs so every
-     * subsequent run carries them (AICPU injects them into GlobalContext via
-     * get_dma_workspace). Called only for a Worker created with SDMA enabled;
-     * `required_mask` bits outside dma_workspace_supported_mask() are rejected, so
-     * a platform/runtime without SDMA fails fast. The provider handle is released
-     * by finalize_common().
+     * Provision this device's async-DMA workspaces once at Worker init and latch
+     * their device addresses into the resident KernelArgs so every subsequent run
+     * carries them (AICPU injects them into GlobalContext via get_dma_workspace).
+     * Provisions every engine dma_workspace_supported_mask() names, except SDMA
+     * unless `enable_sdma` is set — SDMA is declinable because its workspace
+     * cannot be obtained without also creating 48 CP-process STARS streams, which
+     * halves this Worker's post-fault reset budget. `enable_sdma` on a
+     * platform/runtime without SDMA is rejected, so such a Worker fails fast. The
+     * provider handle is released by finalize_common().
      *
      * `sdma_warmup_binary` / `sdma_warmup_size`, when non-empty, are handed to
      * launch_sdma_warmup_kernel() once the workspace is live. An absent or
@@ -411,9 +413,8 @@ public:
      *
      * @return 0 on success, negative on unsupported/failed provisioning.
      */
-    int provision_dma_workspace(
-        uint32_t required_mask, const void *sdma_warmup_binary = nullptr, size_t sdma_warmup_size = 0
-    );
+    int
+    provision_dma_workspace(bool enable_sdma, const void *sdma_warmup_binary = nullptr, size_t sdma_warmup_size = 0);
 
     /**
      * Content-derived stable identity for a registered callable: the

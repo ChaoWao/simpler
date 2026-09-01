@@ -164,7 +164,7 @@ ChipWorker::~ChipWorker() { finalize(); }
 
 void ChipWorker::init(
     const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
-    const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, uint32_t dma_workspace_mask,
+    const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, bool enable_sdma,
     const std::string &sim_context_path, const std::string &sdma_warmup_path
 ) {
     if (finalized_) {
@@ -439,7 +439,7 @@ void ChipWorker::init(
     // addresses are latched into the resident KernelArgs so every run carries
     // them. On failure, roll the whole Worker back through finalize() so no
     // half-provisioned state leaks, then surface the error.
-    if (dma_workspace_mask != 0) {
+    if (enable_sdma) {
         // The warmup ELF rides provisioning because it needs the workspace it
         // warms. Absent on arches that build no such ELF and on tests driving
         // _ChipWorker.init directly; the platform then skips the warmup and the
@@ -458,13 +458,11 @@ void ChipWorker::init(
             }
         }
         const uint8_t *warmup_ptr = warmup_bytes.empty() ? nullptr : warmup_bytes.data();
-        int prov_rc =
-            simpler_provision_dma_workspace_fn_(device_ctx_, dma_workspace_mask, warmup_ptr, warmup_bytes.size());
+        int prov_rc = simpler_provision_dma_workspace_fn_(device_ctx_, 1, warmup_ptr, warmup_bytes.size());
         if (prov_rc != 0) {
             finalize();
             throw std::runtime_error(
-                "async-DMA workspace provisioning (mask=" + std::to_string(dma_workspace_mask) + ") failed with code " +
-                std::to_string(prov_rc)
+                "async-DMA (SDMA) workspace provisioning failed with code " + std::to_string(prov_rc)
             );
         }
     }

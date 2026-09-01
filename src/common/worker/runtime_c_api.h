@@ -496,12 +496,22 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx);
 size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
 
 /**
- * Provision the async-DMA workspaces named in `required_mask` (a bitmask of
- * DmaWorkspaceKind bits) once at Worker init, latching their device addresses
- * into the resident KernelArgs so every subsequent run carries them. Called only
- * for a Worker created with SDMA enabled. Bits unsupported by this
- * platform/runtime are rejected, so a Worker opting into SDMA on sim / a5 / hbg
- * fails fast. Returns 0 on success, negative on unsupported/failed provisioning.
+ * Provision this device's async-DMA workspaces once at Worker init, latching
+ * their device addresses into the resident KernelArgs so every subsequent run
+ * carries them. Every engine the platform supports is provisioned except SDMA,
+ * which is provisioned only when `enable_sdma` is non-zero.
+ *
+ * SDMA is the one engine a caller can decline, and the parameter is a flag
+ * rather than an engine set for that reason. Its workspace cannot be obtained
+ * without also creating 48 CP-process STARS streams, and a Worker holding those
+ * gets a single device-reset attempt after an AICore fault instead of three, so
+ * defaulting it on would put every Worker in that population. Selecting among
+ * provisioned engines is the kernel's job, through get_dma_workspace(args,
+ * kind); a kind this device did not provision reads back 0.
+ *
+ * `enable_sdma` on a platform/runtime without SDMA support is rejected, so a
+ * Worker opting in on sim / a5 / hbg fails fast. Returns 0 on success, negative
+ * on unsupported/failed provisioning.
  *
  * `sdma_warmup_binary` / `sdma_warmup_size` carry the vector-only ELF that walks
  * the SDMA control path once per channel against the workspace just provisioned,
@@ -511,7 +521,7 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
  * or sync fails does fail provisioning, because that card is then poisoned.
  */
 int simpler_provision_dma_workspace(
-    DeviceContextHandle ctx, uint32_t required_mask, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
+    DeviceContextHandle ctx, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 );
 
 #ifdef __cplusplus

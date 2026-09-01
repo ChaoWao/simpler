@@ -107,6 +107,12 @@ uint32_t dma_workspace_channel_count(void);
  * dma_workspace_release(). Bits outside dma_workspace_supported_mask() are
  * rejected, so provisioning fails fast on a platform/runtime without SDMA.
  *
+ * At most one bit may be set. A single opaque handle cannot own two providers,
+ * and dma_workspace_release() recovers the concrete type by casting it, so a
+ * second engine would be released as the type of the first. Provisioning more
+ * than one engine per call needs a per-kind handle on both sides of this seam;
+ * until then callers get a rejection rather than that silent type confusion.
+ *
  * @return 0 on success, non-zero on invalid/unsupported input or provisioning
  *         failure.
  */
