@@ -55,9 +55,10 @@ int get_scheduler_timeout_ms();
  * kind (see DmaWorkspaceKind). Published by simpler_aicpu_init (from
  * InitArgs.dma_workspace_addr[]) into a resident-SO array; the scheduler
  * copies each slot into every core's GlobalContext, so kernels read it via
- * get_dma_workspace(args, kind). 0 means no callable has provisioned that
- * engine. A callable that declares the engine is rejected before launch if the
- * platform cannot provide a non-zero address. Out-of-range kinds are ignored.
+ * get_dma_workspace(args, kind). 0 means this Worker did not provision that
+ * engine — the platform does not support it, or the Worker declined it. A
+ * kernel that reads 0 is responsible for its own fallback; nothing rejects it
+ * before launch. Out-of-range kinds are ignored.
  */
 void set_dma_workspace_addr(int kind, unsigned long long addr);
 
