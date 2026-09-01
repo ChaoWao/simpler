@@ -11,22 +11,34 @@
 /**
  * Async-DMA engine workspace kinds.
  *
- * The runtime provisions a per-device scratch workspace for each async-DMA
- * engine it supports and injects the device addresses into every core's
- * GlobalContext, so kernels obtain them via get_dma_workspace(args, kind)
- * without threading them as user args. One slot per engine, indexed by this
- * enum; DMA_WORKSPACE_KIND_COUNT sizes the injected array end to end
- * (InitArgs, the resident AICPU config, and GlobalContext).
+ * The runtime provisions a per-device scratch workspace and injects the device
+ * addresses into every core's GlobalContext, so kernels obtain them via
+ * get_dma_workspace(args, kind) without threading them as user args. Selecting
+ * an engine is the kernel's decision, not the runtime's: every provisioned
+ * address is injected, and a kind the runtime did not provision reads back 0.
+ * One slot per engine, indexed by this enum; DMA_WORKSPACE_KIND_COUNT sizes the
+ * injected array end to end (InitArgs, the resident AICPU config, and
+ * GlobalContext).
  *
  * simpler-owned and deliberately independent of pto-isa's comm::DmaEngine —
  * the kernel maps this kind to the pto-isa engine tag at the call boundary.
  * Shared by host (provisioning + InitArgs) and device (scheduler + kernels),
  * so it carries no dependencies beyond the enum itself.
  *
+ * A Worker provisions an engine only when it both requested that engine and the
+ * device supports it (dma_workspace_supported_mask()), so an unrequested or
+ * unsupported kind stays 0. SDMA is the only engine anyone declines today, and
+ * the only one worth declining: provisioning it is inseparable from holding 48
+ * CP-process STARS streams whose post-fault release CANN bounds neither with a
+ * completion fence nor with a portable timeout — see
+ * docs/investigations/2026-07-a2a3-sdma-fault-teardown.md. A Worker declines it
+ * by leaving `enable_sdma` off, which is the default.
+ *
  * Current support matrix: SDMA is available only on a2a3 onboard with the
  * tensormap_and_ringbuffer runtime. URMA is reserved for the future a5
  * per-domain provider. Host-build-graph, simulation, a5, and builds without
- * the a2a3 PTO-SDMA provider reject non-empty requirements at registration.
+ * the a2a3 PTO-SDMA provider reject a request for SDMA during Worker
+ * initialization, when the workspace would be provisioned.
  */
 
 #ifndef PLATFORM_COMMON_DMA_WORKSPACE_H_

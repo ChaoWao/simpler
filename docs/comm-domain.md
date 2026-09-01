@@ -237,6 +237,19 @@ the resident `KernelArgs`, and injects it into every run's kernel
 SDMA streams and its kernels read a zero workspace address. The workspace is
 released at Worker finalize by ordinary stream/manager teardown.
 
+**`enable_sdma` is a defect quarantine, not a capability switch, and it has an
+exit condition.** Selecting an engine already belongs to the kernel, which reads
+whichever addresses were injected; the runtime would otherwise provision every
+engine the platform supports. SDMA is the exception because
+`SdmaWorkspaceManager::Init()` is indivisible — the 16 KB workspace *is* the
+descriptor table for 48 CP-process STARS streams, so there is no way to have the
+address without holding the streams — and a Worker holding those streams gets a
+single device-reset attempt instead of three after an AICore fault. Defaulting it
+on would therefore put every ordinary Worker in that population, which is exactly
+the regression [the investigation](investigations/2026-07-a2a3-sdma-fault-teardown.md)
+records. The flag disappears once CANN bounds the final CP-process stream release,
+or once pto-isa offers an `Init()` that separates the workspace from the streams.
+
 Provisioning also warms the SDMA control path once, in the same call: a
 vector-only AICore ELF (`sdma_warmup_kernel.o`, staged per arch under
 `build/lib/<arch>/sdma_warmup/`) walks every channel so the first
@@ -260,7 +273,7 @@ and issue #1425. `enable_sdma` is currently honored only by the a2a3 onboard
 `tensormap_and_ringbuffer` runtime; host-build-graph, simulation, a5, and
 provider-disabled builds fail Worker init fast when it is set. A5 provisions
 its communication-context SDMA workspace by default; this is separate from
-the callable-declared workspace mechanism controlled by `enable_sdma`.
+the Worker-level workspace mechanism controlled by `enable_sdma`.
 
 ---
 
