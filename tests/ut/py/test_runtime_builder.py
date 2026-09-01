@@ -694,7 +694,7 @@ class TestAbbrevStamp:
 
 
 class TestBuildCacheStamp:
-    """Test cmake cache stamp composition (runtime HEAD + pto-isa commit)."""
+    """Test cmake cache stamp composition (runtime HEAD + pto-isa/CANN inputs)."""
 
     def _make_builder(self, platform):
         from simpler_setup.platform_info import parse_platform  # noqa: PLC0415
@@ -714,7 +714,7 @@ class TestBuildCacheStamp:
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
         builder = self._make_builder("a2a3")
-        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
+        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha:ascend-home="
 
     def test_a5_default_folds_in_pto_isa_commit(self, monkeypatch):
         """a5 default SDMA workspace folds the pto-isa pin into the cache stamp."""
@@ -726,7 +726,7 @@ class TestBuildCacheStamp:
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
         builder = self._make_builder("a5")
-        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
+        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha:ascend-home="
 
     def test_non_a2a3_onboard_uses_pure_runtime_sha(self, monkeypatch):
         """Other arch/variant ignores pto-isa → stamp keyed on runtime HEAD only."""
