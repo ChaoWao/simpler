@@ -87,8 +87,8 @@ device lock for the whole job (see
 | Path | `examples/a2a3/host_build_graph/qwen3_14b_decode/` | `examples/a2a3/host_build_graph/deepseek_v4_flash_decode/` |
 | Entry point | standalone `main.py`, which owns its L2 `Worker` | standalone `main.py`, which owns its L3 `Worker` |
 | Devices | 1 | 2 (EP2/TP2) |
-| Host tasks | 47 | 1131 |
-| Graph replays | 40, of a 277-task Definition | 20, of a 743-task Definition |
+| Host tasks (`host_orch tasks=`) | 47 | 129 |
+| Graph submissions (`graph_upload submissions=`/`defs=`) | 40, of 1 Definition | 86, of 8 Definitions |
 | Graph boundary | 26 tensors | 118 tensors, 31 scalars |
 | First-run compile | seconds | **minutes** (369 kernel sources + an 11.6k-line orchestration) |
 | Parameters | device memory; valid fixture streamed once before all rounds | child memory, and `--skip-golden` leaves it uninitialized |
@@ -96,6 +96,13 @@ device lock for the whole job (see
 
 The entry point decides how a case's output is captured, which is what the recipe
 below has to work around.
+
+**The two count rows name the markers they come from, because they are properties
+of the cases and the cases get edited.** They read 47 / 129 tasks and 40 / 86
+submissions on `4d31f482`; they previously read 1131 tasks and 20 replays for
+DeepSeek-V4, from before its orchestration moved most task submission onto the
+recording threads. Re-read them from a current log rather than trusting this
+table — a bind's `host_orch` and `graph_upload` lines carry both.
 
 ## Recipe A — stable numbers, many rounds
 
