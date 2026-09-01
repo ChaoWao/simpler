@@ -26,6 +26,7 @@
 #include <future>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -132,19 +133,20 @@ malloc_result(int32_t worker_id, uint64_t buffer_id, uint64_t generation, int32_
 // case when a transport constructor throws before or during connect — the
 // thread parks in accept() forever and stop_and_join() would hang. Polling in
 // short slices bounds that. A connection already pending always wins over
-// `stop`, because poll() runs before the flag is read: ClosedPeerWrite... calls
-// stop_and_join() immediately after a successful connect and still needs that
-// connection accepted and RST.
+// `stop`, because poll() runs before the flag is read, so teardown still reaps
+// a connection queued before the stop request.
 //
 // Returns the accepted fd, or -1 on stop / error / the hard cap.
+constexpr int SERVER_POLL_SLICE_MS = 20;
+constexpr int SERVER_MAX_SLICES = 500;
+constexpr auto SERVER_ACCEPT_TIMEOUT = std::chrono::milliseconds(SERVER_POLL_SLICE_MS * SERVER_MAX_SLICES);
+
 int accept_until_stop(int listener, std::atomic<bool> &stop) {
-    constexpr int POLL_SLICE_MS = 20;
-    constexpr int MAX_SLICES = 500;  // 10s cap, so a wedged test cannot hang the suite
-    for (int i = 0; i < MAX_SLICES; ++i) {
+    for (int i = 0; i < SERVER_MAX_SLICES; ++i) {
         struct pollfd pfd{};
         pfd.fd = listener;
         pfd.events = POLLIN;
-        int ready = ::poll(&pfd, 1, POLL_SLICE_MS);
+        int ready = ::poll(&pfd, 1, SERVER_POLL_SLICE_MS);
         if (ready > 0) return ::accept(listener, nullptr, nullptr);
         if (ready < 0 && errno != EINTR) return -1;
         if (stop.load(std::memory_order_acquire)) return -1;
@@ -152,7 +154,12 @@ int accept_until_stop(int listener, std::atomic<bool> &stop) {
     return -1;
 }
 
-uint16_t start_closing_server(std::thread &server_thread, std::atomic<bool> &stop) {
+// Accept one connection and keep it open until `close_now` requests an RST or
+// `stop` requests graceful teardown. `accepted` is the caller's barrier that
+// the server owns the connected socket.
+uint16_t start_closing_server(
+    std::thread &server_thread, std::atomic<bool> &stop, std::atomic<bool> &accepted, std::atomic<bool> &close_now
+) {
     int listener = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listener < 0) throw std::runtime_error(std::string("socket failed: ") + std::strerror(errno));
     int one = 1;
@@ -178,18 +185,36 @@ uint16_t start_closing_server(std::thread &server_thread, std::atomic<bool> &sto
         ::close(listener);
         throw std::runtime_error(std::string("getsockname failed: ") + std::strerror(err));
     }
-    server_thread = std::thread([listener, &stop]() {
+    server_thread = std::thread([listener, &stop, &accepted, &close_now]() {
         int fd = accept_until_stop(listener, stop);
         if (fd >= 0) {
-            struct linger rst{};
-            rst.l_onoff = 1;
-            rst.l_linger = 0;
-            (void)::setsockopt(fd, SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+            accepted.store(true, std::memory_order_release);
+            // The caller releases this gate only after its transport constructor
+            // returns. An earlier RST can become the nonblocking connect's
+            // SO_ERROR and bypass the error-path assertions that need a live
+            // transport.
+            while (!close_now.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (close_now.load(std::memory_order_acquire)) {
+                struct linger rst{};
+                rst.l_onoff = 1;
+                rst.l_linger = 0;
+                (void)::setsockopt(fd, SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+            }
             ::close(fd);
         }
         ::close(listener);
     });
     return ntohs(addr.sin_port);
+}
+
+bool wait_until_server_accepted(std::atomic<bool> &accepted) {
+    auto deadline = std::chrono::steady_clock::now() + SERVER_ACCEPT_TIMEOUT;
+    while (!accepted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return accepted.load(std::memory_order_acquire);
 }
 
 int make_loopback_listener(uint16_t &port_out) {
@@ -650,12 +675,18 @@ TEST(RemoteEndpoint, RemoteBufferControlsRejectOutOfRangeSlices) {
 }
 
 TEST(RemoteSocketTransport, ClosedPeerWriteDoesNotRaiseSigpipe) {
+    std::atomic<bool> accepted{false};
+    std::atomic<bool> close_now{false};
     ScopedServerThread server;
-    uint16_t port = start_closing_server(server.thread(), server.stop_flag());
+    uint16_t port = start_closing_server(server.thread(), server.stop_flag(), accepted, close_now);
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, 1.0, 1.0);
+    ASSERT_TRUE(wait_until_server_accepted(accepted));
+    close_now.store(true, std::memory_order_release);
     server.stop_and_join();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
+    // Linux loopback delivers the SO_LINGER RST from close() synchronously, so
+    // joining the server puts the peer error on the client socket before this
+    // write.
     ScopedSigpipeCounter sigpipe_counter;
     std::vector<uint8_t> frame(4096, 0x5A);
     bool saw_error = false;
@@ -668,7 +699,7 @@ TEST(RemoteSocketTransport, ClosedPeerWriteDoesNotRaiseSigpipe) {
         }
     }
 
-    EXPECT_TRUE(saw_error);
+    EXPECT_TRUE(saw_error) << "peer RST did not land before the write";
     EXPECT_EQ(g_sigpipe_count, 0);
     transport.shutdown();
 }
@@ -813,11 +844,14 @@ TEST(RemoteSocketTransport, ProgressPollResumesAfterPartialHeader) {
 }
 
 TEST(RemoteSocketTransport, ProgressErrorClearsActiveCommand) {
+    std::atomic<bool> accepted{false};
+    std::atomic<bool> close_now{false};
     ScopedServerThread server;
-    uint16_t port = start_closing_server(server.thread(), server.stop_flag());
+    uint16_t port = start_closing_server(server.thread(), server.stop_flag(), accepted, close_now);
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 1.0);
+    ASSERT_TRUE(wait_until_server_accepted(accepted));
+    close_now.store(true, std::memory_order_release);
     server.stop_and_join();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     remote_l3::FrameHeader header;
     header.frame_type = remote_l3::FrameType::TASK;
@@ -829,14 +863,18 @@ TEST(RemoteSocketTransport, ProgressErrorClearsActiveCommand) {
 
     std::vector<uint8_t> reply;
     bool saw_error = false;
-    for (int i = 0; i < 3 && !saw_error; ++i) {
+    std::string error_message;
+    for (int i = 0; i < 2000 && !saw_error; ++i) {
         try {
-            (void)transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply);
-        } catch (const std::runtime_error &) {
+            if (transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } catch (const std::runtime_error &error) {
             saw_error = true;
+            error_message = error.what();
         }
     }
-    ASSERT_TRUE(saw_error);
+    ASSERT_TRUE(saw_error) << "peer RST did not produce a progress I/O error";
+    EXPECT_EQ(error_message.find("timed out"), std::string::npos);
     EXPECT_NO_THROW(transport.submit_progress_frame(frame));
     transport.shutdown();
 }
