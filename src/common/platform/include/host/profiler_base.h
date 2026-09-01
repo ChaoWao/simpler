@@ -129,12 +129,17 @@
  *   3. ... device execution ...
  *   4. stop() — atomically:
  *        a) flips mgmt_running_, joins the mgmt thread(s); the drain thread's
- *           final-drain pass pushes the last L1→L2 entries before exiting.
+ *           final-drain pass pushes the last device-ring entries into the host
+ *           ready queue shard(s) before exiting.
  *        b) execution_complete_ is set; each collector loop sees it on its
  *           next idle tick, drains its host ready queue shard, and exits.
  *        c) collector thread(s) joined.
- *      Caller is then guaranteed L1 and L2 are both empty and all collected
- *      data has been delivered to Derived::on_buffer_collected.
+ *      Caller is then guaranteed the device-side ring and the host ready queue
+ *      shard(s) are both empty and all collected data has been delivered to
+ *      Derived::on_buffer_collected.
+ *
+ *      quiesce() gives that same guarantee without (a)'s and (c)'s joins, so
+ *      the threads survive it — see its own comment.
  *
  * SVM vs host-shadow paths (chosen at runtime by the collector's MemoryOps)
  * -------------------------------------------------------------------------
@@ -854,8 +859,8 @@ public:
      * init() aborted before set_memory_context, or finalize() has cleared
      * the context) this is a no-op.
      *
-     * Order matters: mgmt is started before collectors because mgmt is the
-     * only writer to L2 (the ready queues) and collectors are the consumers. The
+     * Order matters: mgmt is started before collectors because mgmt is the only
+     * writer to the host ready queue shards and collectors are the consumers. The
      * register slot defaults to identity on the SVM path (copy_to_device_
      * is null) or to a host-shadow malloc lambda on the non-SVM path
      * (copy_to_device_ installed) — so BufferPoolManager always has a
@@ -925,6 +930,16 @@ public:
         manager_.set_memory_context(std::move(ops), shm_dev_, shm_host_, shm_size_, device_id_);
 
         execution_complete_.store(false, std::memory_order_release);
+        // Reset the quiescence handshake so a restarted collector cannot see a
+        // previous run's acks. Safe to do unsynchronized: the std::thread
+        // constructors below are the synchronization point for the workers that
+        // read these.
+        drain_quiesce_epoch_.store(0, std::memory_order_relaxed);
+        collect_quiesce_epoch_.store(0, std::memory_order_relaxed);
+        for (int i = 0; i < Manager::kMaxCollectorShards; i++) {
+            drain_acked_[i].store(0, std::memory_order_relaxed);
+            collect_acked_[i].store(0, std::memory_order_relaxed);
+        }
         {
             DataHeader *header = Module::header_from_shm(manager_.shared_mem_host());
             (void)ProfilerAlgorithms<Module>::proactive_replenish(manager_, header);
@@ -967,16 +982,45 @@ public:
     }
 
     /**
+     * Drain to a quiescent point without retiring the threads. On return the
+     * device-side ring and the host ready queue shard(s) are empty and
+     * Derived::on_buffer_collected has been called for every entry that was in
+     * either — the same guarantee stop() gives, minus the thread teardown.
+     *
+     * Precondition: the device-side producers have stopped. A drain worker
+     * reports its shard quiescent after one full sweep that found nothing, so a
+     * producer still writing could push a record in behind that report.
+     * Callers already satisfy this — the run is drained before teardown.
+     *
+     * Idempotent, and a no-op before start() or after stop(). Like stop(), it
+     * waits without a deadline: a wedged worker hangs the caller here exactly
+     * as it would hang the join in stop().
+     */
+    void quiesce() {
+        if (collector_threads_.empty()) return;
+        const int n = shard_count_;
+
+        // Phase one: mgmt sweeps the device-side ring into the host shards.
+        const uint64_t epoch = drain_quiesce_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        wait_for_epoch(drain_acked_, n, epoch);
+
+        // Phase two: only now can a collector's "my shard is empty" mean the
+        // pipeline is empty rather than that mgmt has not pushed yet.
+        collect_quiesce_epoch_.store(epoch, std::memory_order_release);
+        wait_for_epoch(collect_acked_, n, epoch);
+    }
+
+    /**
      * Stop the drain/replenish mgmt threads, drain whatever the drain side
      * pushes during its final pass, and join the collector. Idempotent. Caller
-     * is guaranteed on return that mgmt's L1 ringbuffer and the host-side
-     * ready queue shard(s) are empty and Derived::on_buffer_collected has been
-     * called for every entry that was in either queue. Framework-owned buffers
-     * are NOT freed here — Derived's finalize() must do that.
+     * is guaranteed on return that mgmt's device-side ringbuffer and the
+     * host-side ready queue shard(s) are empty and Derived::on_buffer_collected
+     * has been called for every entry that was in either queue. Framework-owned
+     * buffers are NOT freed here — Derived's finalize() must do that.
      *
      * Order matters: stop+join mgmt first so its final-drain pass is fully
-     * landed in L2 BEFORE we tell poll to exit. Otherwise mgmt's last batch
-     * has no consumer.
+     * landed in the host shards BEFORE we tell poll to exit. Otherwise mgmt's
+     * last batch has no consumer.
      */
     void stop() {
         mgmt_running_.store(false, std::memory_order_release);
@@ -1121,6 +1165,17 @@ protected:
     }
 
 private:
+    // Teardown-path wait, so a sleep is permitted here: no task's latency
+    // passes through it (codestyle.md rule 5 exempts teardown).
+    template <typename Acks>
+    static void wait_for_epoch(const Acks &acks, int n, uint64_t epoch) {
+        for (int i = 0; i < n; i++) {
+            while (acks[i].load(std::memory_order_acquire) != epoch) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+        }
+    }
+
     void mgmt_drain_loop(int queue_start, int queue_stride) {
         DataHeader *header = Module::header_from_shm(manager_.shared_mem_host());
         using Alg = ProfilerAlgorithms<Module>;
@@ -1138,6 +1193,17 @@ private:
             }
             if (found_any) {
                 idle_busy_polls = 0;
+            }
+
+            // A full sweep that found nothing means this worker's slice of the
+            // device-side queues is empty. With producers stopped (quiesce()'s
+            // precondition) nothing can arrive behind this report, so it is the
+            // quiescent condition for phase one.
+            if (!found_any) {
+                const uint64_t requested = drain_quiesce_epoch_.load(std::memory_order_acquire);
+                if (drain_acked_[queue_start].load(std::memory_order_relaxed) != requested) {
+                    drain_acked_[queue_start].store(requested, std::memory_order_release);
+                }
             }
 
             if (!found_any) {
@@ -1216,6 +1282,22 @@ private:
                 }
                 break;
             }
+            // Phase two of the quiescence handshake. wait_pop_ready timed out,
+            // so this shard is empty; mgmt has already reported its own sweep
+            // done for this epoch, so nothing further can arrive. Placed above
+            // the has_seen_buffer guard below: a shard that never received a
+            // buffer is a valid run shape and still has to report, or quiesce()
+            // would wait on it forever.
+            {
+                const uint64_t requested = collect_quiesce_epoch_.load(std::memory_order_acquire);
+                if (collect_acked_[shard_index].load(std::memory_order_relaxed) != requested) {
+                    while (manager_.try_pop_ready(info, shard_index)) {
+                        consume(info, shard_index);
+                        has_seen_buffer = true;
+                    }
+                    collect_acked_[shard_index].store(requested, std::memory_order_release);
+                }
+            }
             // A shard that has never seen a buffer is a valid run shape at any
             // shard count — a subsystem can legitimately emit nothing for a
             // whole run. execution_complete_ above is the exit path for that
@@ -1256,6 +1338,19 @@ private:
     std::vector<std::thread> mgmt_drain_threads_;
     std::thread mgmt_replenish_thread_;
     std::atomic<bool> mgmt_running_{false};
+
+    // Two-phase quiescence handshake. Each phase is a monotonic epoch the
+    // caller publishes and every worker of that phase echoes back once it has
+    // reached the quiescent condition for its own shard.
+    //
+    // The phases are ordered, not concurrent: a collector that reported its
+    // shard empty before mgmt finished its sweep would be reporting on a queue
+    // mgmt is still about to push into. So collect_quiesce_epoch_ is published
+    // only after every drain ack for that epoch has landed.
+    std::atomic<uint64_t> drain_quiesce_epoch_{0};
+    std::atomic<uint64_t> collect_quiesce_epoch_{0};
+    std::array<std::atomic<uint64_t>, Manager::kMaxCollectorShards> drain_acked_{};
+    std::array<std::atomic<uint64_t>, Manager::kMaxCollectorShards> collect_acked_{};
 };
 
 }  // namespace profiling_common
