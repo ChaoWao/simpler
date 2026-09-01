@@ -5860,6 +5860,192 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         worker._worker = cast(Any, object())
         return worker
 
+    def test_a5_comm_arena_reuses_and_coalesces_released_slices(self):
+        worker = self._worker()
+        worker._config = {"platform": "a5"}
+        arena_size = 4096
+        worker._initialize_comm_arena(arena_size)
+
+        first = worker._reserve_comm_arena(10, 300)
+        second = worker._reserve_comm_arena(11, 300)
+        assert first == worker_mod._A5_COMM_ARENA_RESERVED
+        assert second == first + 512
+
+        worker._release_comm_arena(10)
+        assert worker._reserve_comm_arena(12, 256) == first
+        worker._release_comm_arena(11)
+        worker._release_comm_arena(12)
+        assert worker._comm_arena_free == [
+            (
+                worker_mod._A5_COMM_ARENA_RESERVED,
+                arena_size - worker_mod._A5_COMM_ARENA_RESERVED,
+            )
+        ]
+
+    def test_a5_comm_base_uses_the_backend_reported_arena_size(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"platform": "a5", "device_ids": [0, 1]}
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        arena_size = 8192
+
+        def control_comm_init(chip_idx, request_name):
+            request = SharedMemory(name=request_name)
+            request_buf = request.buf
+            assert request_buf is not None
+            try:
+                rank, nranks, requested_size = worker_mod._COMM_INIT_HEADER.unpack_from(request_buf, 0)
+                assert (rank, nranks, requested_size) == (chip_idx, 2, 0)
+                worker_mod._COMM_INIT_HEADER.pack_into(request_buf, 0, rank, nranks, arena_size)
+            finally:
+                request_buf.release()
+                request.close()
+
+        worker._worker = cast(Any, SimpleNamespace(control_comm_init=control_comm_init))
+
+        worker._ensure_comm_base()
+
+        assert worker._comm_base_ready
+        assert worker._comm_arena_size == arena_size
+        assert worker._comm_arena_free == [
+            (
+                worker_mod._A5_COMM_ARENA_RESERVED,
+                arena_size - worker_mod._A5_COMM_ARENA_RESERVED,
+            )
+        ]
+
+    def test_a5_comm_init_child_reports_comm_get_window_size(self):
+        rootinfo_path = "/tmp/comm-rootinfo"
+        path_bytes = rootinfo_path.encode() + b"\x00"
+        request = SharedMemory(create=True, size=worker_mod._COMM_INIT_HEADER.size + len(path_bytes))
+        request_buf = request.buf
+        assert request_buf is not None
+        worker_mod._COMM_INIT_HEADER.pack_into(request_buf, 0, 1, 2, 0)
+        path_start = worker_mod._COMM_INIT_HEADER.size
+        request_buf[path_start : path_start + len(path_bytes)] = path_bytes
+        mailbox = memoryview(bytearray(worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES))
+        encoded_name = request.name.encode()
+        mailbox[worker_mod._OFF_ARGS : worker_mod._OFF_ARGS + len(encoded_name)] = encoded_name
+        calls = []
+        chip_worker = SimpleNamespace(
+            comm_init=lambda rank, nranks, path: calls.append(("init", rank, nranks, path)) or 17,
+            comm_alloc_windows=lambda handle, size: calls.append(("alloc", handle, size)) or 23,
+            comm_get_window_size=lambda handle: calls.append(("size", handle)) or 8192,
+        )
+
+        try:
+            worker_mod._handle_ctrl_comm_init(cast(Any, chip_worker), mailbox, "a5")
+
+            assert worker_mod._COMM_INIT_HEADER.unpack_from(request_buf, 0) == (1, 2, 8192)
+            assert calls == [("init", 1, 2, rootinfo_path), ("alloc", 17, 0), ("size", 17)]
+            assert chip_worker._comm_base_handle_cached == 17
+            assert chip_worker._comm_base_windows_ready is True
+        finally:
+            mailbox.release()
+            request_buf.release()
+            request.close()
+            request.unlink()
+
+    def test_a5_comm_base_forwards_the_configured_arena_size(self, monkeypatch):
+        worker = self._worker()
+        requested = 1 << 20
+        worker._config = {"platform": "a5", "device_ids": [0, 1], "comm_arena_size": requested}
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        granted = requested + 4096  # the backend rounds up to VMM granularity
+        seen: list[int] = []
+
+        def control_comm_init(chip_idx, request_name):
+            request = SharedMemory(name=request_name)
+            request_buf = request.buf
+            assert request_buf is not None
+            try:
+                rank, nranks, requested_size = worker_mod._COMM_INIT_HEADER.unpack_from(request_buf, 0)
+                seen.append(int(requested_size))
+                worker_mod._COMM_INIT_HEADER.pack_into(request_buf, 0, rank, nranks, granted)
+            finally:
+                request_buf.release()
+                request.close()
+
+        worker._worker = cast(Any, SimpleNamespace(control_comm_init=control_comm_init))
+
+        worker._ensure_comm_base()
+
+        assert seen == [requested, requested]
+        # The allocator sizes itself from what the backend granted, not from
+        # what was asked for.
+        assert worker._comm_arena_size == granted
+
+    def test_a5_comm_base_rejects_a_negative_arena_size(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"platform": "a5", "device_ids": [0], "comm_arena_size": -1}
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        worker._worker = cast(Any, SimpleNamespace(control_comm_init=lambda *_a: None))
+
+        with pytest.raises(ValueError, match="comm_arena_size must be non-negative"):
+            worker._ensure_comm_base()
+
+    def test_a5_comm_init_child_forwards_the_requested_arena_size(self):
+        rootinfo_path = "/tmp/comm-rootinfo"
+        path_bytes = rootinfo_path.encode() + b"\x00"
+        request = SharedMemory(create=True, size=worker_mod._COMM_INIT_HEADER.size + len(path_bytes))
+        request_buf = request.buf
+        assert request_buf is not None
+        worker_mod._COMM_INIT_HEADER.pack_into(request_buf, 0, 1, 2, 4096)
+        path_start = worker_mod._COMM_INIT_HEADER.size
+        request_buf[path_start : path_start + len(path_bytes)] = path_bytes
+        mailbox = memoryview(bytearray(worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES))
+        encoded_name = request.name.encode()
+        mailbox[worker_mod._OFF_ARGS : worker_mod._OFF_ARGS + len(encoded_name)] = encoded_name
+        calls = []
+        chip_worker = SimpleNamespace(
+            comm_init=lambda rank, nranks, path: calls.append(("init", rank, nranks, path)) or 17,
+            comm_alloc_windows=lambda handle, size: calls.append(("alloc", handle, size)) or 23,
+            comm_get_window_size=lambda handle: calls.append(("size", handle)) or 8192,
+        )
+
+        try:
+            worker_mod._handle_ctrl_comm_init(cast(Any, chip_worker), mailbox, "a5")
+
+            assert ("alloc", 17, 4096) in calls
+            # The reply carries what the backend granted, not the request.
+            assert worker_mod._COMM_INIT_HEADER.unpack_from(request_buf, 0) == (1, 2, 8192)
+        finally:
+            mailbox.release()
+            request_buf.release()
+            request.close()
+            request.unlink()
+
+    def test_a5_arena_exhaustion_names_the_size_knob(self):
+        worker = self._worker()
+        worker._config = {"platform": "a5"}
+        worker._initialize_comm_arena(4096)
+
+        with pytest.raises(MemoryError, match=r"comm_arena_size"):
+            worker._reserve_comm_arena(1, 1 << 20)
+
+    def test_non_a5_domain_does_not_consume_the_a5_arena(self):
+        worker = self._worker()
+        worker._config = {"platform": "a2a3"}
+
+        assert worker._reserve_comm_arena(10, 4096) == 0
+        assert worker._comm_arena_allocations == {}
+
+    def test_a5_precommit_failure_returns_its_arena_slice(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"platform": "a5", "device_ids": [0]}
+        worker._initialize_comm_arena(8192)
+        worker._building_run_resources = worker_mod._RunResources()
+        monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+
+        def fail_staging(*_args, **_kwargs):
+            raise RuntimeError("staging failed")
+
+        monkeypatch.setattr(worker_mod, "_run_with_owned_shared_memory", fail_staging)
+
+        with pytest.raises(RuntimeError, match="staging failed"):
+            worker._allocate_domain(name="d", workers=(0,), window_size=4096, buffers=[])
+
+        assert worker._comm_arena_allocations == {}
+
     def test_a_partial_domain_allocation_keeps_its_original_release_ranks(self, monkeypatch):
         """Two chips of three committed a window and no handle exists.
 
@@ -5935,8 +6121,8 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         try:
             req_buf = cast(Any, request.buf)
             worker_mod._DOMAIN_REQ_HEADER.pack_into(
-                req_buf, 0, 7, 1, 0, 64, 1
-            )  # allocation_id, rank_count, domain_rank, window_size, buffer_count
+                req_buf, 0, 7, 1, 0, 0, 64, 1
+            )  # allocation_id, rank_count, domain_rank, window_offset, window_size, buffer_count
             # One buffer larger than the window: the carve raises after the
             # collective has already committed.
             struct.pack_into("<Q", req_buf, worker_mod._DOMAIN_REQ_HEADER.size, 4096)
@@ -5945,7 +6131,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             cw = cast(Any, SimpleNamespace(_impl=SimpleNamespace()))
 
             def committed(*args):
-                ctypes.c_uint64.from_address(args[5]).value = 1
+                ctypes.c_uint64.from_address(args[6]).value = 1
                 return 0xC7, 0xB000
 
             cw._impl.comm_alloc_domain_windows = committed
@@ -5976,11 +6162,11 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         reply = SharedMemory(create=True, size=worker_mod._DOMAIN_REPLY_HEADER.size)
         try:
             req_buf = cast(Any, request.buf)
-            worker_mod._DOMAIN_REQ_HEADER.pack_into(req_buf, 0, 7, 1, 0, 64, 0)
+            worker_mod._DOMAIN_REQ_HEADER.pack_into(req_buf, 0, 7, 1, 0, 0, 64, 0)
             struct.pack_into("<I", req_buf, worker_mod._DOMAIN_REQ_HEADER.size, 0)
 
             def committed_then_failed(*args):
-                commit_address = args[5]
+                commit_address = args[6]
                 ctypes.c_uint64.from_address(commit_address).value = 1
                 raise MemoryError("tuple conversion failed")
 

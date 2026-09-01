@@ -49,10 +49,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[2]);
 
-    // A null workspace means the host runtime was not built with the URMA
-    // backend; self-skip rather than dereferencing it.
     if (comm_ctx == nullptr || comm_ctx->rankNum != 2 || comm_ctx->rankId >= comm_ctx->rankNum ||
-        comm_ctx->workSpace == 0 || comm_ctx->windowsIn[comm_ctx->rankId] == 0) {
+        comm_ctx->urmaWorkSpace == 0 || comm_ctx->windowsIn[comm_ctx->rankId] == 0) {
         pipe_barrier(PIPE_ALL);
         return;
     }
@@ -60,9 +58,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ float *local_input = tensor_data<float>(input_tensor);
     __gm__ float *local_out = tensor_data<float>(out_tensor);
     uint32_t peer_rank = 1u - comm_ctx->rankId;
+    uint32_t urma_peer_rank = comm_ctx->urmaRankMap[peer_rank];
     uint64_t input_offset = reinterpret_cast<uint64_t>(local_input) - comm_ctx->windowsIn[comm_ctx->rankId];
+    uint64_t registered_input_offset = comm_ctx->urmaWindowOffset + input_offset;
     __gm__ float *remote_input = pto2::urma_backend::peer_mr_ptr<float>(
-        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer_rank, input_offset
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->urmaWorkSpace), urma_peer_rank, registered_input_offset
     );
 
     using FlatShape = Shape<1, 1, 1, 1, kElems>;
@@ -75,6 +75,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     AsyncCtx async_ctx = get_async_ctx(args);
     (void)send_request_entry(
         async_ctx,
-        UrmaTget(local_global, remote_global, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer_rank)
+        UrmaTget(
+            local_global, remote_global, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->urmaWorkSpace), urma_peer_rank
+        )
     );
 }

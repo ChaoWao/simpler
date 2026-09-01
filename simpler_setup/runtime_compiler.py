@@ -180,8 +180,8 @@ class RuntimeCompiler:
         """Initialize toolchains for real a2a3 hardware."""
         env_manager.ensure("ASCEND_HOME_PATH")
         # a2a3 onboard host_runtime hard-depends on pto-isa headers + CANN-9.0
-        # aclnn syms (cf. src/a2a3/platform/onboard/host/CMakeLists.txt
-        # SIMPLER_ENABLE_PTO_SDMA_WORKSPACE marker). Resolve the pinned managed
+        # aclnn syms (cf. src/a2a3/platform/onboard/host/CMakeLists.txt).
+        # Resolve the pinned managed
         # checkout once; RuntimeBuilder passes it to CMake as -DPTO_ISA_ROOT=
         # (#1403 — do not smuggle via os.environ).
         from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
@@ -219,9 +219,10 @@ class RuntimeCompiler:
     def _init_a5(self):
         """Initialize toolchains for real a5 hardware."""
         env_manager.ensure("ASCEND_HOME_PATH")
-        # a5 onboard always embeds the PTO-ISA SDMA workspace. Use the pinned
-        # managed checkout so build metadata and load-time validation match
-        # the headers compiled into host_runtime (#1351, #1403).
+        # a5 onboard always embeds the PTO-ISA SDMA and URMA workspaces. Use
+        # the pinned managed checkout so build metadata and load-time
+        # validation match the headers compiled into host_runtime (#1351,
+        # #1403).
         from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
 
         self.pto_isa_root = ensure_pto_isa_root(verbose=True)

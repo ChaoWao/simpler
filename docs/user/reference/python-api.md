@@ -39,6 +39,7 @@ into `**config` and validated later. The recognized keys:
 | `device_ids` | L3+ | one chip child process per entry |
 | `num_sub_workers` | L3+ | host-side Python callables to fork |
 | `enable_sdma` | a2a3 | provisions the SDMA workspace; defaults to `False` |
+| `comm_arena_size` | a5 | bytes of the communicator-lifetime arena every communication domain is sliced from; `0` (default) takes the backend's 200 MiB. This is the ceiling on all live domains combined |
 | `heap_ring_size` | all | heap ring sizing |
 | `remote_heap_ring_size`, `remote_session_timeout_s` | L4 | remote-session sizing and timeout |
 

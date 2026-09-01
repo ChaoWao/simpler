@@ -213,21 +213,59 @@ symmetric window is realized:
 
 | Aspect | Sim | HCCL (onboard) |
 | ------ | --- | -------------- |
-| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3: Fabric V2 handle exchange (`ACL_MEM_SHARE_HANDLE_TYPE_FABRIC`), falling back to VMM + shareable-handle IPC where Fabric is unsupported. a5: VMM shareable handles only. Cross-card P2P via `aclrtDeviceEnablePeerAccess` on both |
+| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3: Fabric V2 handle exchange (`ACL_MEM_SHARE_HANDLE_TYPE_FABRIC`), falling back to VMM + shareable-handle IPC where Fabric is unsupported. a5: slices of one per-rank VMM arena registered for the communicator lifetime, 200 MiB unless `Worker(comm_arena_size=…)` says otherwise. Cross-card P2P via `aclrtDeviceEnablePeerAccess` on both |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
-| Window init | window zeroed before the subset barrier (`memset`) | window zeroed before the handle is announced (`aclrtMemset`) |
-| Async-DMA workspace | n/a | a2a3: opt-in per Worker (`enable_sdma`); a5: SDMA by default, URMA as an opt-in alternative |
+| Window init | window zeroed before the subset barrier (`memset`) | a2a3: window zeroed before the handle is announced. a5: the base arena is registered and mapped during communicator init; every newly assigned or reused slice is zeroed at domain allocation before that domain is returned to the caller |
+| Async-DMA workspace | n/a | a2a3: opt-in per Worker (`enable_sdma`); a5: communicator-scoped SDMA and URMA workspaces are inherited by derived contexts, whose rank map supports arbitrary subsets/reorderings. Either may be absent — see below |
 
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
 
-The wipe happens before the window becomes reachable by any peer — before the
-shareable handle is announced on HCCL, before the `ready_count` barrier on sim.
-A peer that clears the subset barrier can return, launch its kernel and store a
-barrier signal into this rank's window immediately; a wipe issued after that
-point can erase a signal the owner has not yet waited on, and the owner then
-waits on it forever. The rank skew that opens that window grows with host load,
-so the resulting hang shows up only under a loaded box.
+### A5: arena size and transport availability
+
+The A5 arena is allocated once per communicator and every domain is a slice of
+it, so **`comm_arena_size` is the ceiling on all live domains combined**, not a
+per-domain limit. A request that no free run can satisfy raises `MemoryError`
+rather than falling back to a private allocation. The default is 200 MiB; pass
+`Worker(comm_arena_size=<bytes>)` to change it. The backend rounds the request
+up to VMM granularity and reports the granted size back, which is what the
+slice allocator uses.
+
+Neither async transport is required for a domain. SDMA and URMA are each
+provisioned best-effort at `comm_alloc_windows`, and a transport that fails to
+initialize simply leaves its `CommContext` pair (`sdmaWorkSpace` /
+`urmaWorkSpace`) zero; the kernels guard on that and self-skip. A communicator
+that came up SDMA-only still hands out windows normally.
+
+A self-skipping kernel moves no data, so this degrades availability of a
+transport, never correctness of a workload: anything that depended on the
+transfer sees unwritten output and fails its own verification. The a5
+`sdma_async_completion_demo` and `urma_deferred_completion_demo` both fail
+their goldens on a skipped transfer rather than passing vacuously, which is
+what makes a green run of either one evidence that its engine ran.
+
+URMA's outcome is agreed across ranks rather than decided per rank: the
+`base_urma_ready` rendezvous carries each rank's result and every rank takes
+the AND. A rank whose own registration succeeded while a peer's failed
+therefore publishes a zero `urmaWorkSpace` too, because issuing an RDMA against
+a peer that holds no registration is worse than not issuing one. That rank
+still keeps its workspace manager alive, since `Finalize` must run after
+`HcclCommDestroy` either way.
+
+On sim and a2a3, the wipe happens before the window becomes reachable by any
+peer — before the `ready_count` barrier on sim and before the shareable handle
+is announced on a2a3 HCCL. A5 is different: its base arena is already
+registered and peer-mapped when each rank clears a slice, both on the slice's
+first assignment and after reuse. The base arena itself is not published as a
+domain. Safety comes from the parent waiting for every member's allocation RPC
+(including that clear) to complete before it publishes the
+`CommDomainHandle`; no task can access the slice during either wipe.
+
+Once a domain is published, a peer can launch its kernel and store a barrier
+signal into this rank's window immediately. A wipe issued after that point can
+erase a signal the owner has not yet waited on, and the owner then waits on it
+forever. The rank skew that opens that window grows with host load, so the
+resulting hang shows up only under a loaded box.
 
 On a2a3, async-DMA resources are a Worker-level opt-in, not a
 communication-domain property. Construct the Worker with `enable_sdma=True` and

@@ -220,8 +220,8 @@ values yield `SIMPLER_ERROR_ASYNC_COMPLETION_INVALID`.
 | Engine | a2a3 | a5 | Status |
 | ------ | ---- | -- | ------ |
 | COUNTER (default) | registered | registered | **Shipped** — `tests/st/worker/comm_domain/async_notify` runs onboard on both architectures; `tests/st/worker/comm_domain/deferred_notify` runs in sim on both and onboard on a2a3, through the `st-onboard-*` / `st-sim-*` jobs in `ci.yml`. Routed by `CASES[*]["platforms"]`, no `skipif` |
-| SDMA | build macro forced ON; runtime opt-in | `option(... OFF)` | a2a3 **Shipped** (the "SDMA pytest (a2a3)" step in `ci.yml`); a5 not built |
-| URMA | absent | full implementation | **Gated** — see below |
+| SDMA | build macro forced ON; runtime opt-in | built and provisioned with communication contexts | a2a3 **Shipped** (the "SDMA pytest (a2a3)" step in `ci.yml`); a5 demo runs in the ordinary A5 sweep |
+| URMA | absent | built and provisioned with communication contexts, best-effort | A5-only; exercised by `urma_deferred_completion_demo` without a build or environment gate. A rank set where registration fails runs SDMA-only, and that demo fails its golden rather than skipping — so a green run is evidence URMA moved data |
 | ROCE, CCU | enum only | enum only | **Name only** |
 
 **a2a3 SDMA is opt-in at runtime**, not "always on": the provider is always
@@ -235,23 +235,33 @@ without, traced to a single 300,000 ms remote TRS event timeout
 ([investigations/2026-07-a2a3-sdma-fault-teardown.md](investigations/2026-07-a2a3-sdma-fault-teardown.md),
 issue #1425).
 
-**a5 URMA is real code that cannot execute.** The scheduler walks `UrmaCqCtx`
+**a5 SDMA and URMA coexist in one communication context.** The scheduler walks `UrmaCqCtx`
 CQEs checking the owner bit, advances the tail and rings the doorbell
 (`src/a5/.../backend/urma/urma_completion_scheduler.h:133-215`); the kernel
-submits `TGET_ASYNC`/`TPUT_ASYNC<DmaEngine::URMA>` with 256 MB chunking. Both
-sit behind `PTO_URMA_SUPPORTED`, which is **defined nowhere in this repo and
-nowhere in the installed CANN pto headers**, so the `#else` branch returns
-`SIMPLER_ERROR_ASYNC_COMPLETION_INVALID` immediately. The host overlay macro is
-fully wired, so turning it on does not help — the device path stays unreachable.
-a5's SDMA and URMA overlays are mutually exclusive by CMake `FATAL_ERROR`
-because `CommContext` exposes a single `workSpace` pair
-(`src/a5/platform/onboard/host/CMakeLists.txt:49-53`).
+submits `TGET_ASYNC`/`TPUT_ASYNC<DmaEngine::URMA>` with 256 MB chunking. The
+pinned PTO-ISA defines `PTO_URMA_SUPPORTED` for DAV_3510. The host provisions
+the process-global SDMA workspace and communicator-scoped URMA workspace before
+uploading `CommContext`; the leading `sdmaWorkSpace` pair carries SDMA,
+and the appended `urmaWorkSpace` pair carries URMA. A derived context also
+carries `urmaWindowOffset`, translating its domain-local window offsets back
+to the registered base MR. URMA metadata is indexed by communicator rank, and
+derived contexts map domain-local ranks onto those communicator ranks. Dynamic
+domains are slices of the registered arena, so sequential and concurrent
+domains do not create extra HCCL memory registrations or channels. Engine-specific kernels run
+from the same default build without an environment selector. Both workspaces
+are best-effort: a transport that fails to initialize leaves its `CommContext`
+pair zero and its kernels self-skip, and the domain is handed out regardless.
+URMA additionally agrees that outcome across ranks through the
+`base_urma_ready` rendezvous, so no rank issues an RDMA against a peer that
+holds no registration.
 
-**HCCL is bootstrap, not data movement.** The complete set of functions called
-is `HcclGetRootInfo`, `HcclCommInitRootInfo`, `HcclBarrier`, `HcclCommDestroy`.
-There is no `HcclAllReduce` / `AllGather` / `Send` / `Recv` anywhere; every
-shipped collective is a hand-written AIV kernel that computes a peer pointer
-from the symmetric window
+**HCCL is control-plane setup, not collective data movement.** Communicator
+lifecycle uses `HcclGetRootInfo`, `HcclCommInitRootInfo`, `HcclBarrier`, and
+`HcclCommDestroy`; A5 URMA setup additionally uses `HcclCommMemReg`,
+`HcclRankGraphGetLinks`, and `HcclChannelAcquire` to register memory and create
+transport channels. There is no `HcclAllReduce` / `AllGather` / `Send` / `Recv`
+in the collective data path; every shipped collective is a hand-written AIV
+kernel that computes a peer pointer from the symmetric window
 (`tests/st/worker/collectives/allreduce/kernels/aiv/allreduce_ring_kernel.cpp:59-61`).
 
 **Fabric is undocumented.** a2a3 prefers `alloc_windows_via_fabric()` with
@@ -261,10 +271,10 @@ only when Fabric is unsupported
 occurrences of "fabric". No `.md` in the repo describes Fabric as a
 memory-sharing mechanism.
 
-One ABI fact constrains portability: the AICore→AICPU completion struct
-diverged — `DeferredCompletionEntry` is 24 bytes on a2a3 and 32 on a5, the extra
-8 being the `backend_cookie` URMA's poll needs. A URMA-on-a2a3 port must widen a
-struct that is currently frozen by `static_assert`.
+The AICore→AICPU completion ABI is currently aligned:
+`DeferredCompletionEntry` is 32 bytes on both a2a3 and a5, and both carry
+`backend_cookie`. A2/A3 does not currently register or implement the URMA
+completion backend despite sharing this ABI field.
 
 ## Open questions
 
@@ -273,8 +283,9 @@ Unresolved after this survey, in rough order of how much they block:
 1. **What are `ASYNC_ENGINE_ROCE` and `ASYNC_ENGINE_CCU` for?** No design doc,
    investigation entry, or code comment says whether they are reserved slots or
    leftovers from a dropped design.
-2. **Has a5 URMA ever run on silicon?** No CI run, test artifact, or
-   investigation attests to it.
+2. **How broad is a5 URMA coverage?** The two-rank deferred-completion demo has
+   passed bring-up on A5 and is selected by the ordinary A5 sweep after this
+   change, but there is no retained multi-topology or long-running artifact.
 3. **Which CANN mitigation closed issue #822, and is Path B usable on CANN
    9.0.0?** The doc says "CANN-side mitigation landed" without naming it, and
    nobody re-ran the repro.
@@ -282,9 +293,7 @@ Unresolved after this survey, in rough order of how much they block:
    one-process-per-`(arch, runtime)` ChipWorker model rests on it, but it is
    asserted only from CANN source paths that are not vendored here and no
    in-repo probe detects it.
-5. **Where would `PTO_URMA_SUPPORTED` ever be defined?** Not in this repo, not
-   in the installed CANN pto headers.
-6. **Which platforms lack Fabric support?** Stated only as a code comment, never
+5. **Which platforms lack Fabric support?** Stated only as a code comment, never
    enumerated, and a5's divergence to the V1 handle route is undocumented.
 
 ## Documentation drift found while compiling this survey
