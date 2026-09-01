@@ -50,7 +50,7 @@
 #include "host_build_graph/dep_compute.h"
 #include "graph_execution.h"
 #include "graph_host_state.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/tensormap.h"
@@ -1282,7 +1282,7 @@ static void next_fanin_seen_epoch(OrchestratorState *orch) {
 // established that the producer is a GLOBAL task whose local id is a valid table
 // entry.
 static bool fanin_mark_seen(OrchestratorState &orch, TaskId producer_task_id) {
-    const int32_t prod_local = simpler::hbg::task_local_id(producer_task_id);
+    const int32_t prod_local = producer_task_id.local_id();
     if (prod_local < 0) {
         return false;
     }
@@ -1314,13 +1314,12 @@ append_fanin_or_fail(OrchestratorState &orch, TaskId producer_task_id, int32_t *
     // The table lookup lives here, after this check, rather than at the three call
     // sites: that keeps the id-space invariant in one place and makes it impossible
     // for a caller to form the out-of-bounds slot reference before reaching it.
-    if (!simpler::hbg::is_global_task(producer_task_id)) {
+    if (!producer_task_id.is_global()) {
         orch.report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
             "producer task %#llx is in id space %u, not GLOBAL; host_build_graph resolves every fanin edge against "
             "its one task table",
-            static_cast<unsigned long long>(producer_task_id.raw),
-            static_cast<unsigned int>(simpler::hbg::task_id_space(producer_task_id))
+            static_cast<unsigned long long>(producer_task_id.raw), static_cast<unsigned int>(producer_task_id.space())
         );
         return false;
     }
@@ -1329,7 +1328,7 @@ append_fanin_or_fail(OrchestratorState &orch, TaskId producer_task_id, int32_t *
     // unclaimed — or out-of-range — slot. Only ids handed back by a previous submit
     // are valid here, and those are below active_count() because hbg mints them in
     // order and never recycles one.
-    const int32_t prod_local = simpler::hbg::task_local_id(producer_task_id);
+    const int32_t prod_local = producer_task_id.local_id();
     if (prod_local < 0 || prod_local >= orch.task_allocator.active_count()) {
         orch.report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
@@ -1410,7 +1409,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = simpler::hbg::make_global_task(out->alloc_result.task_id);
+    out->task_id = TaskId::make_global(out->alloc_result.task_id);
     ChipTaskStorage &storage = orch->sm_header->tasks.storage_at(out->alloc_result.task_id);
     out->slot_state = &storage.slot;
     out->task = &storage.task;
@@ -1980,7 +1979,7 @@ bool graph_submit_outer(
         orch_mark_fatal(orch, SIMPLER_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
-    const TaskId task_id = simpler::hbg::make_global_task(allocation.task_id);
+    const TaskId task_id = TaskId::make_global(allocation.task_id);
     SharedMemoryTaskHeader &tasks = orch->sm_header->tasks;
     ChipTaskStorage &storage = tasks.storage_at(allocation.task_id);
     TaskDescriptor &task = storage.task;
@@ -2154,7 +2153,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
     // around says which of the two kinds of thing it names without any arithmetic:
     // an IN_GRAPH id is a task of this body, indexed by its low field; a GLOBAL id is
     // a task submitted before the Graph, which nothing in the body may depend on.
-    const TaskId task_id = simpler::hbg::make_in_graph_task(GRAPH_RECORD_NO_OWNING_GRAPH, task_index);
+    const TaskId task_id = TaskId::make_in_graph(GRAPH_RECORD_NO_OWNING_GRAPH, task_index);
     result.set_task_id(task_id);
 
     if (task_index >= MAX_IN_GRAPH_TASKS || args.has_error) {
@@ -2347,7 +2346,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
         const bool manual_scope = recording.in_manual_scope();
         if (!recording.storage_ready || task_index >= MAX_IN_GRAPH_TASKS) {
             // An over-cap body is already abandoned, and its task ids have run past
-            // the index field make_in_graph_task packs them into, so registering one
+            // the low field TaskId::make_in_graph packs them into, so registering one
             // would key the map outside its task chains.
             recording.unsupported = true;
         } else if (recording.tensor_map.free_entries() < count_registrable_outputs(dep_inputs, manual_scope)) {
@@ -2365,8 +2364,8 @@ TaskOutputTensors graph_record_submit_in_graph_task(
                 // was submitted through the ordinary path against this same boundary, so
                 // its own fanin already orders the whole body behind that task and the
                 // Definition carries no edge of its own.
-                if (simpler::hbg::is_global_task(producer)) return true;
-                const int32_t producer_index = simpler::hbg::task_local_id(producer);
+                if (producer.is_global()) return true;
+                const int32_t producer_index = producer.local_id();
                 if (producer_index < task_index) {
                     add_fanin(producer_index);
                 }
@@ -2382,7 +2381,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
             recording.unsupported = true;
             continue;
         }
-        if (simpler::hbg::is_global_task(dep)) {
+        if (dep.is_global()) {
             // Only the outer shell can order the body behind a pre-Graph task, and it
             // does so through its boundary args -- so a dep no boundary tensor carries
             // has no edge in the Definition and the body cannot be recorded.
@@ -2395,7 +2394,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
             if (!represented_by_boundary) recording.unsupported = true;
             continue;
         }
-        const int32_t dep_index = simpler::hbg::task_local_id(dep);
+        const int32_t dep_index = dep.local_id();
         if (dep_index >= task_index) {
             // A task of this body that is not yet recorded: the Definition's edges are
             // acyclic by construction, so a forward reference cannot be expressed.
@@ -2967,7 +2966,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // every consumer register_wakes on a producer that never runs on device and
         // the run hangs.
         SharedMemoryTaskHeader &done_tasks = orch->sm_header->tasks;
-        int32_t done_local = simpler::hbg::task_local_id(prepared.task_id);
+        int32_t done_local = prepared.task_id.local_id();
         done_tasks.set_completion_flag(done_local);
     }
     orch->inline_completed_tasks++;

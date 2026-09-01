@@ -61,7 +61,7 @@ protected:
     static void init_in_graph_task(ChipTaskStorage &task, int32_t task_index, ChipTaskState state) {
         memset(&task, 0, sizeof(ChipTaskStorage));
         task.slot.task_state.store(state);
-        task.slot.in_graph_task_index = task_index;
+        task.slot.in_graph_local_id = task_index;
         task.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         task.slot.task_kind = TaskKind::KERNEL;
         task.slot.total_required_subtasks = 1;
@@ -134,7 +134,7 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
     auto complete_in_state = [&](GraphExecutionState state) {
         auto task = std::make_unique<ChipTaskStorage[]>(1);
         memset(task.get(), 0, sizeof(ChipTaskStorage));
-        task[0].slot.in_graph_task_index = 0;
+        task[0].slot.in_graph_local_id = 0;
         task[0].slot.total_required_subtasks = 1;
 
         GraphExecution exec{};
@@ -171,7 +171,7 @@ TEST_F(GraphActivationTest, CompleteTaskTakesTheOrdinaryPathForTheOuterGraphTask
     // A whole storage entry, not a bare slot state: a slot reaches its descriptor by
     // ChipTaskStorage's layout, so one on its own would resolve outside itself.
     ChipTaskStorage outer{};
-    outer.task.task_id = simpler::hbg::make_global_task(0);
+    outer.task.task_id = TaskId::make_global(0);
 
     ChipTaskSlotState &slot = outer.slot;
     slot.task_kind = TaskKind::GRAPH;

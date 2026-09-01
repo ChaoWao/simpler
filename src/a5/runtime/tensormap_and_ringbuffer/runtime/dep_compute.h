@@ -48,7 +48,7 @@
 
 #include <cstdint>
 
-#include "task_id.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 #include "tensormap.h"
 #include "types.h"  // TensorRef
 #include "tensor.h"

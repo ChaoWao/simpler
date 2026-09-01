@@ -36,7 +36,7 @@
 #include "dispatch_payload.h"
 #include "aicore_completion_mailbox.h"
 #include "submit_types.h"
-#include "task_id.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 #include "types.h"
 
 // Spin-wait hint for AICPU threads.  On real hardware the AICPU has dedicated
@@ -217,7 +217,7 @@ struct DepListEntry {
  */
 struct TaskDescriptor {
     // Mixed-task identification (encodes ring_id in upper 32 bits)
-    TaskId task_id;  // raw: (ring_id << 32) | local_id, see task_id_encoding.h
+    TaskId task_id;  // raw: (ring_id << 32) | local_id, see task_id.h
 
     // Per-slot kernel IDs (INVALID_KERNEL_ID = inactive)
     int32_t kernel_id[SUBTASK_SLOT_COUNT];

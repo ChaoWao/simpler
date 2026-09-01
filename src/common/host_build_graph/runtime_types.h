@@ -46,7 +46,7 @@
 #include "common/args_dump_task_metadata.h"
 #include "host_build_graph/self_relative_ptr.h"
 #include "host_build_graph/submit_types.h"
-#include "task_id.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/types.h"
 
 // Spin-wait hint for AICPU threads.  On real hardware the AICPU has dedicated
@@ -238,7 +238,7 @@ struct TaskPayload;        // Forward declaration (defined below)
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
 struct alignas(64) TaskDescriptor {
-    // Task identity. See src/common/host_build_graph/task_id_encoding.h: the
+    // Task identity. See src/common/host_build_graph/task_id.h: the
     // upper 32 bits are this runtime's id space, not a ring index.
     TaskId task_id;
 
@@ -601,9 +601,10 @@ struct alignas(64) ChipTaskSlotState {
     void *graph_context{nullptr};
 
     // Graph-only scheduling metadata, paired with graph_context above. Readiness
-    // uses the shared intrusive wake-list fields; this index identifies the task in
-    // the saved fanin CSR. Ordinary tasks leave both Graph fields -1/null.
-    int32_t in_graph_task_index{-1};
+    // uses the shared intrusive wake-list fields; this local id identifies the task
+    // in the saved fanin CSR, and is the same value TaskId::make_in_graph packs into
+    // the low field. Ordinary tasks leave both Graph fields -1/null.
+    int32_t in_graph_local_id{-1};
 
     std::atomic<int16_t> completed_subtasks{0};  // Each core completion increments by 1
     int16_t total_required_subtasks{0};          // = logical_block_num * popcount(active_mask)
@@ -680,7 +681,7 @@ struct alignas(64) ChipTaskSlotState {
         any_subtask_deferred.store(false, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
-        in_graph_task_index = -1;
+        in_graph_local_id = -1;
         graph_context = nullptr;
         task_kind = TaskKind::KERNEL;
         // Note: active_mask and task_attrs are per-submit-constant fields

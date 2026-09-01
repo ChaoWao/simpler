@@ -18,14 +18,14 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/runtime_types.h"
 #include "tensor.h"
 
 inline constexpr int32_t MAX_IN_GRAPH_TASKS = 1024;
 static_assert(
-    MAX_IN_GRAPH_TASKS <= (1 << simpler::hbg::IN_GRAPH_TASK_INDEX_BITS),
-    "an in-graph task index must fit the low field of an IN_GRAPH task id"
+    MAX_IN_GRAPH_TASKS <= (1 << TaskId::IN_GRAPH_LOCAL_ID_BITS),
+    "an in-graph local id must fit the low field of an IN_GRAPH task id"
 );
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
 

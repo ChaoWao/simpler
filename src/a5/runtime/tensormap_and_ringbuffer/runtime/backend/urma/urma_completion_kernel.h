@@ -262,7 +262,7 @@ inline __aicore__ AsyncCtx get_async_ctx(__gm__ int64_t *args) {
 }
 
 inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const CompletionToken &token) {
-    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
+    if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         return false;
     }
 
@@ -304,7 +304,7 @@ template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ bool register_urma_async_event(
     AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
 ) {
-    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
+    if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         (void)event.Wait(session);
         return true;
     }

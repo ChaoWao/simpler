@@ -32,7 +32,7 @@
 #include "dep_compute.h"
 #include "runtime_types.h"
 #include "shared_memory.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 #include "tensormap.h"
 #include "types.h"
 #include "tensor.h"
@@ -353,10 +353,8 @@ static bool append_fanin_or_fail(
     // explicit) always wins, independent of the order they are reached in.
     prod_state->lock_fanout();
     ChipTaskState pstate = prod_state->task_state.load(std::memory_order_acquire);
-    bool gone =
-        prod_state->task == nullptr ||
-        simpler::tmr::task_local_id(prod_state->task->task_id) != simpler::tmr::task_local_id(producer_task_id) ||
-        pstate == CHIP_TASK_CONSUMED;
+    bool gone = prod_state->task == nullptr || prod_state->task->task_id.local_id() != producer_task_id.local_id() ||
+                pstate == CHIP_TASK_CONSUMED;
     bool already_seen = !gone && fanin_builder->mark_seen(prod_ring, prod_slot);
     bool claim = !gone && !already_seen;
     int32_t fanout_now = -1;
@@ -382,8 +380,7 @@ static bool append_fanin_or_fail(
     if (fanout_now == CHIP_DEP_DEGREE_DEBUG_THRESHOLD + 1) {
         LOG_DEBUG(
             "dense dependency: task ring=%u id=%u fanout>%d [orch submit]",
-            static_cast<unsigned>(simpler::tmr::task_ring(producer_task_id)),
-            simpler::tmr::task_local_id(producer_task_id), CHIP_DEP_DEGREE_DEBUG_THRESHOLD
+            static_cast<unsigned>(producer_task_id.ring()), producer_task_id.local_id(), CHIP_DEP_DEGREE_DEBUG_THRESHOLD
         );
     }
     // Stale/consumed producer: no edge at all.
@@ -614,7 +611,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->task_id = simpler::tmr::make_task_id(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
+    out->task_id = TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->rings[ring_id].get_slot_state_by_slot(out->alloc_result.slot);
     out->task = &orch->sm_header->rings[ring_id].task_descriptors[out->alloc_result.slot];
     out->payload = &orch->sm_header->rings[ring_id].task_payloads[out->alloc_result.slot];
@@ -897,7 +894,7 @@ static TaskOutputTensors submit_task_common(
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
-    uint8_t ring_id = simpler::tmr::task_ring(prepared.task_id);
+    uint8_t ring_id = prepared.task_id.ring();
     SchedulerState *sched = orch->scheduler;
     ChipRingFlowControl &fc = orch->sm_header->rings[ring_id].fc;
     TaskId task_id = prepared.task_id;
@@ -970,9 +967,9 @@ static TaskOutputTensors submit_task_common(
             );
             return result;
         }
-        uint8_t dep_ring_id = simpler::tmr::task_ring(dep_task_id);
+        uint8_t dep_ring_id = dep_task_id.ring();
         SharedMemoryRingHeader &dep_ring = orch->sm_header->rings[dep_ring_id];
-        int32_t dep_local_task_id = static_cast<int32_t>(simpler::tmr::task_local_id(dep_task_id));
+        int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local_id());
         int32_t dep_last_task_alive = dep_ring.fc.last_task_alive.load(std::memory_order_acquire);
         if (dep_local_task_id < dep_last_task_alive) {
             continue;
@@ -994,10 +991,9 @@ static TaskOutputTensors submit_task_common(
     };
 
     auto runtime_emit = [&](TaskId producer_task_id, DepFlags kind) -> bool {
-        uint8_t prod_ring = simpler::tmr::task_ring(producer_task_id);
+        uint8_t prod_ring = producer_task_id.ring();
         SharedMemoryRingHeader &producer_ring = orch->sm_header->rings[prod_ring];
-        int32_t prod_slot =
-            producer_ring.get_slot_by_task_id(static_cast<int32_t>(simpler::tmr::task_local_id(producer_task_id)));
+        int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local_id()));
         ChipTaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
         return append_fanin_or_fail(
             orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder, ring_id, kind
@@ -1057,9 +1053,8 @@ static TaskOutputTensors submit_task_common(
     // THRESHOLD because the count lands at its final total here.
     if (fanin_builder.count > CHIP_DEP_DEGREE_DEBUG_THRESHOLD) {
         LOG_DEBUG(
-            "dense dependency: task ring=%u id=%u fanin>%d [orch submit]",
-            static_cast<unsigned>(simpler::tmr::task_ring(task_id)), simpler::tmr::task_local_id(task_id),
-            CHIP_DEP_DEGREE_DEBUG_THRESHOLD
+            "dense dependency: task ring=%u id=%u fanin>%d [orch submit]", static_cast<unsigned>(task_id.ring()),
+            task_id.local_id(), CHIP_DEP_DEGREE_DEBUG_THRESHOLD
         );
     }
     payload.fanin_spill_start = fanin_builder.spill_start;
@@ -1330,7 +1325,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     payload.init(args, outputs, prepared.alloc_result, layout);
     payload.fanin_actual_count = 0;
     payload.fanin_spill_start = 0;
-    payload.fanin_spill_pool = &orch->rings[simpler::tmr::task_ring(prepared.task_id)].fanin_pool;
+    payload.fanin_spill_pool = &orch->rings[prepared.task_id.ring()].fanin_pool;
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 
     if (prepared.slot_state != nullptr) {

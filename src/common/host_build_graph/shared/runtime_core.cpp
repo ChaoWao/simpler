@@ -30,7 +30,7 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_build_graph/host_tensor_access.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 // simpler::hbg::Tensor-byte access for a caller that can load a device address directly.
 // The AICPU build compiles this translation unit and links these; the host
@@ -189,7 +189,7 @@ static bool require_no_producer(RuntimeContext *rt, const simpler::hbg::Tensor &
         "tensor is produced by task %#llx (id space %u); host_build_graph finishes orchestration before the "
         "device starts, so a submitted kernel has not written this buffer and a runtime allocation is "
         "uninitialized -- pass the value as an orchestration argument, or have a task write it",
-        static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(simpler::hbg::task_id_space(producer))
+        static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(producer.space())
     );
     return false;
 }

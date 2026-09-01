@@ -28,7 +28,7 @@
 #include "host_build_graph/shared_memory.h"
 #include "task_interface/assert_compat.h"
 #include "utils/device_arena.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 class HbgGraphSubmitFailureTest : public ::testing::Test {
 protected:
@@ -108,7 +108,7 @@ TEST_F(HbgGraphSubmitFailureTest, InFlightGraphInvocationsReserveHeapOnlyAtCommi
     EXPECT_FALSE(second.recording);
     EXPECT_FALSE(second.execute_block);
     ASSERT_TRUE(second.task_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_local_id(second.task_id), simpler::hbg::task_local_id(first.task_id) + 1);
+    EXPECT_EQ(second.task_id.local_id(), first.task_id.local_id() + 1);
     EXPECT_EQ(orch.task_allocator.heap_top(), 0u);
     EXPECT_EQ(graph_host_upload_count(*graph_state), 2u);
 
@@ -239,8 +239,8 @@ TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShe
     EXPECT_FALSE(third.execute_block);
     ASSERT_TRUE(second.task_id.is_valid());
     ASSERT_TRUE(third.task_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_local_id(second.task_id), simpler::hbg::task_local_id(first.task_id) + 1);
-    EXPECT_EQ(simpler::hbg::task_local_id(third.task_id), simpler::hbg::task_local_id(first.task_id) + 2);
+    EXPECT_EQ(second.task_id.local_id(), first.task_id.local_id() + 1);
+    EXPECT_EQ(third.task_id.local_id(), first.task_id.local_id() + 2);
     EXPECT_EQ(orch.task_allocator.heap_top(), 0u) << "no shell may take heap before commit";
 
     orch.graph_commit();
@@ -511,7 +511,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
 
     EXPECT_FALSE(replay.execute_block);
     ASSERT_TRUE(replay.task_id.is_valid());
-    EXPECT_EQ(simpler::hbg::task_local_id(replay.task_id), allocator.capacity() - 1);
+    EXPECT_EQ(replay.task_id.local_id(), allocator.capacity() - 1);
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(allocator.active_count(), allocator.capacity());
     EXPECT_EQ(orch.fatal_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
@@ -819,7 +819,7 @@ TEST_F(HbgGraphSubmitFailureTest, AnOrdinaryAllocationInterleavesWithADeferredSh
     EXPECT_GT(orch.task_allocator.heap_top(), heap_after_ordinary)
         << "the shell's block sits above the ordinary task's, not before it";
     SharedMemoryTaskHeader &tasks = sm_handle->header->tasks;
-    const int32_t shell_slot = simpler::hbg::task_local_id(graph.task_id);
+    const int32_t shell_slot = graph.task_id.local_id();
     const TaskDescriptor *shell = &tasks.storage_at(shell_slot).task;
     ASSERT_NE(shell, nullptr);
     ASSERT_NE(shell->packed_buffer_base, nullptr);
@@ -979,7 +979,7 @@ TEST_F(HbgGraphSubmitFailureTest, AHiddenAllocTaskLeavesItsDispatchPredicateDefi
     ASSERT_TRUE(outputs.task_id().is_valid());
     ASSERT_FALSE(orch.is_fatal());
 
-    const int32_t slot = simpler::hbg::task_local_id(outputs.task_id());
+    const int32_t slot = outputs.task_id().local_id();
     ASSERT_LT(slot, kPoisonedSlots) << "the submitted slot must be one this test poisoned";
     EXPECT_EQ(storage[slot].payload.predicate.op, PredicateOp::NONE);
     EXPECT_EQ(storage[slot].payload.predicate.addr, 0u);

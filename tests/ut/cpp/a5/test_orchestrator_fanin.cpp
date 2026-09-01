@@ -18,7 +18,7 @@
 #include "utils/device_arena.h"
 #include "orchestrator.h"
 #include "shared_memory.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 
 class OrchestratorFaninTest : public ::testing::Test {
 protected:
@@ -94,13 +94,9 @@ TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     ASSERT_TRUE(consumer.task_id().is_valid());
 
     auto &producer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(producer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(producer.task_id())
-        );
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local_id());
     auto &consumer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(consumer.task_id())
-        );
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local_id());
 
     ASSERT_NE(consumer_slot.payload, nullptr);
     EXPECT_EQ(consumer_slot.payload->fanin_actual_count, 1);
@@ -130,9 +126,7 @@ TEST_F(OrchestratorFaninTest, ExplicitWaitDepProducesWaitOnlyEdge) {
     ASSERT_TRUE(consumer.task_id().is_valid());
 
     auto &consumer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(consumer.task_id())
-        );
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local_id());
     ASSERT_NE(consumer_slot.payload, nullptr);
     ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT);
@@ -155,13 +149,9 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
     ASSERT_TRUE(consumer.task_id().is_valid());
 
     auto &producer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(producer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(producer.task_id())
-        );
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local_id());
     auto &consumer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(consumer.task_id())
-        );
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local_id());
     ASSERT_NE(consumer_slot.payload, nullptr);
     ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
     EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
@@ -200,17 +190,13 @@ TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
     ASSERT_TRUE(consumer.task_id().is_valid());
 
     auto &consumer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(consumer.task_id())
-        );
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local_id());
     ASSERT_NE(consumer_slot.payload, nullptr);
     TaskPayload *payload = consumer_slot.payload;
     EXPECT_EQ(payload->fanin_actual_count, kProducers);  // duplicate folded, not 66
 
     TaskId dup = producers.back().task_id();
-    auto &dup_slot = sm_handle->header->rings[simpler::tmr::task_ring(dup)].get_slot_state_by_task_id(
-        simpler::tmr::task_local_id(dup)
-    );
+    auto &dup_slot = sm_handle->header->rings[dup.ring()].get_slot_state_by_task_id(dup.local_id());
     EXPECT_EQ(dup_slot.fanout_count, FANOUT_SCOPE_BIT + 1);  // one pin, not two
 
     // The first spilled edge is the duplicated producer; its flags OR-folded to
@@ -231,9 +217,7 @@ TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
     TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
     ASSERT_TRUE(producer.task_id().is_valid());
     auto &producer_slot =
-        sm_handle->header->rings[simpler::tmr::task_ring(producer.task_id())].get_slot_state_by_task_id(
-            simpler::tmr::task_local_id(producer.task_id())
-        );
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local_id());
     // COMPLETED but not consumed (the open scope still pins it): the consumer takes
     // the all-completed fast path.
     producer_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
@@ -264,8 +248,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     ASSERT_TRUE(first.task_id().is_valid());
 
     auto &ring = sm_handle->header->rings[1];
-    auto &first_slot =
-        ring.get_slot_state_by_task_id(static_cast<int32_t>(simpler::tmr::task_local_id(first.task_id())));
+    auto &first_slot = ring.get_slot_state_by_task_id(static_cast<int32_t>(first.task_id().local_id()));
     orch.end_scope();
     first_slot.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     sched.check_and_handle_consumed(first_slot);

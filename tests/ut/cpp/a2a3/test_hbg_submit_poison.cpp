@@ -34,7 +34,7 @@
 #include "utils/device_arena.h"
 #include "host_build_graph/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 namespace {
 
@@ -140,7 +140,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         const ChipTaskSlotState &st = entry.slot;
 
         // Descriptor: the task id is written to this exact local id.
-        EXPECT_EQ(simpler::hbg::task_local_id(desc.task_id), local);
+        EXPECT_EQ(desc.task_id.local_id(), local);
         // task_state is written at submit (reset_for_reuse skips it): PENDING for a
         // dispatchable task, COMPLETED for a pre-completed hidden-alloc. Either way a
         // real enum, never poison.
@@ -164,7 +164,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     }
 
     // Field-specific coverage on the real task: tensors, scalar, packed output buffer.
-    const ChipTaskStorage &root_entry = tasks.storage_at(simpler::hbg::task_local_id(root.task_id()));
+    const ChipTaskStorage &root_entry = tasks.storage_at(root.task_id().local_id());
     const TaskDescriptor &root_desc = root_entry.task;
     const TaskPayload &root_pl = root_entry.payload;
     EXPECT_EQ(root_pl.tensor_count, 1);
@@ -177,9 +177,9 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     EXPECT_EQ(root_desc.kernel_id[static_cast<int>(SubtaskSlot::AIV0)], 0);
 
     // The consumer's fanin is written: two duplicate deps dedupe to one.
-    const TaskPayload &cons_pl = tasks.storage_at(simpler::hbg::task_local_id(consumer.task_id())).payload;
+    const TaskPayload &cons_pl = tasks.storage_at(consumer.task_id().local_id()).payload;
     EXPECT_EQ(cons_pl.fanin_count, 1);
-    EXPECT_EQ(cons_pl.fanin_data()[0], simpler::hbg::task_local_id(root.task_id()));
+    EXPECT_EQ(cons_pl.fanin_data()[0], root.task_id().local_id());
 }
 
 TEST_F(HbgSubmitPoisonTest, InvalidDispatchPredicateIsRejectedBeforeTaskAllocation) {

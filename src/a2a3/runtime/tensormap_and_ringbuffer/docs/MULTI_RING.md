@@ -27,14 +27,14 @@ Task IDs are widened from 32-bit to 64-bit to carry the ring identity:
 task_id.raw = (ring_id << 32) | local_id
 ```
 
-`TaskId` itself is an opaque 64-bit handle; this runtime's encoding of it lives in
-`src/common/tensormap_and_ringbuffer/task_id_encoding.h`:
+`TaskId` is this runtime's own type, declared with its encoding in
+`src/common/tensormap_and_ringbuffer/task_id.h`:
 
 | API | Purpose |
 | --- | ------- |
-| `simpler::tmr::make_task_id(ring_id, local_id)` | Compose a 64-bit task ID (`TaskId`) |
-| `simpler::tmr::task_ring(task_id)` | Extract `ring_id` (bits 63-32) |
-| `simpler::tmr::task_local_id(task_id)` | Extract `local_id` (bits 31-0) |
+| `TaskId::make(ring_id, local_id)` | Compose a 64-bit task ID (`TaskId`) |
+| `task_id.ring()` | Extract `ring_id` (bits 63-32) |
+| `task_id.local_id()` | Extract `local_id` (bits 31-0) |
 | `task_id.raw` | Access the packed 64-bit encoding |
 
 Type changes:
@@ -159,8 +159,8 @@ Entry validity checks and `cleanup_retired` operate per-ring:
 
 ```cpp
 bool entry_valid(const ChipTensorMapEntry& e) {
-    int32_t ring = simpler::tmr::task_ring(e.producer_task_id);
-    int32_t local = simpler::tmr::task_local_id(e.producer_task_id);
+    int32_t ring = e.producer_task_id.ring();
+    int32_t local = e.producer_task_id.local_id();
     return local >= last_task_alives[ring];
 }
 ```

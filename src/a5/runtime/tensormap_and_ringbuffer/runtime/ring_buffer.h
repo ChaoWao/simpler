@@ -39,7 +39,7 @@
 #include <type_traits>
 
 #include "runtime_types.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 #include "shared_memory.h"
 #include "aicpu/device_time.h"       // get_sys_cnt_aicpu (deadlock wall-clock backstop)
 #include "common/platform_config.h"  // PLATFORM_PROF_SYS_CNT_FREQ (deadlock wall-clock)
@@ -71,7 +71,7 @@ constexpr uint32_t ring_mask_bit(int32_t ring_id) {
 inline bool
 reclaim_head_matches_open_task(int32_t head_task_id, uint8_t ring_id, const ChipTaskSlotState *oldest_open_task) {
     return oldest_open_task != nullptr && oldest_open_task->task != nullptr &&
-           oldest_open_task->task->task_id == simpler::tmr::make_task_id(ring_id, static_cast<uint32_t>(head_task_id));
+           oldest_open_task->task->task_id == TaskId::make(ring_id, static_cast<uint32_t>(head_task_id));
 }
 
 class ReclaimPublicationRequest {

@@ -16,7 +16,7 @@
 #include <new>
 
 #include "graph_cache.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 namespace {
 
@@ -405,8 +405,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         TaskPayload &payload = storage->payload;
         ChipTaskSlotState &slot = storage->slot;
 
-        task.task_id =
-            simpler::hbg::make_in_graph_task(simpler::hbg::task_local_id(outer_slot.to_descriptor().task_id), i);
+        task.task_id = TaskId::make_in_graph(outer_slot.to_descriptor().task_id.local_id(), i);
         const InGraphTaskDefinition &source = tasks[i];
         const uint64_t task_offset = in_graph_task_offsets[i];
         const uint64_t output_bytes = CHIP_ALIGN_UP(static_cast<uint64_t>(source.total_output_size), CHIP_ALIGN_SIZE);
@@ -421,7 +420,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
         slot.task_attrs = TaskAttrs(source.task_attrs);
         slot.total_required_subtasks = source.total_required_subtasks;
         slot.logical_block_num = source.logical_block_num;
-        slot.in_graph_task_index = i;
+        slot.in_graph_local_id = i;
         // A task in a Graph body is an ordinary leaf, classified by the same rule as
         // one submitted outside a Graph. Its membership is carried by graph_context.
         slot.task_kind = slot.active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;

@@ -32,7 +32,7 @@
 #include "orchestrator.h"
 #include "utils/device_arena.h"
 #include "scheduler/scheduler.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 
 // =============================================================================
 // Fixture: sets up runtime state with shared memory and provides helpers
@@ -125,7 +125,7 @@ TEST(ReclaimHeadMatchTest, ComparesExactRingAndLocalTaskId) {
     TaskDescriptor descriptor{};
     ChipTaskSlotState slot{};
     slot.task = &descriptor;
-    descriptor.task_id = simpler::tmr::make_task_id(0, 16);
+    descriptor.task_id = TaskId::make(0, 16);
 
     EXPECT_FALSE(reclaim_head_matches_open_task(0, 0, &slot));
     EXPECT_TRUE(reclaim_head_matches_open_task(16, 0, &slot));

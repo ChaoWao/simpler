@@ -82,7 +82,7 @@
 #include <stdint.h>
 
 #include "aicore_completion_mailbox_types.h"
-#include "task_id.h"
+#include "host_build_graph/task_id.h"
 
 #ifndef __gm__
 #define __gm__
