@@ -165,6 +165,43 @@ runs):
 Filenames are fixed (no per-file timestamp) — the directory is the
 per-task uniqueness boundary.
 
+For L3 runs, each forked ChipWorker writes below its own `rankN/dN` directory.
+The filenames above are fixed, so N children sharing one `output_prefix` would
+overwrite each other — the separation therefore covers **every** diagnostic that
+writes below `output_prefix`, not just the swimlane:
+
+```text
+<output_prefix>/
+├── rank0/d0/
+│   ├── chip_swimlane_records.json    # --enable-chip-swimlane
+│   ├── dispatch_identity.json        # always, whenever any diagnostic is on
+│   ├── deps.json                     # --enable-dep-gen
+│   └── scope_stats/                  # --enable-scope-stats
+├── rank1/d0/
+│   └── ...
+└── l3_swimlane.json                  # cross-Rank trace (added by converter)
+```
+
+Here `rankN` is the logical ChipWorker index and `dN` is that worker's local
+capture index. It is a storage-order suffix, not a globally comparable dispatch
+ID. `dispatch_identity.json` records the parent scheduler identity: `run_id`,
+`task_slot`, `group_index`, and `group_size`, plus the endpoint-local dispatch
+and pipeline diagnostics. All members submitted through one
+`submit_next_level_group` share `(run_id, task_slot)` and have distinct
+`group_index` values. Individually submitted tasks do not share that identity;
+the current postprocessor therefore retains local-capture-index pairing for
+them and requires symmetric `dN` sets.
+
+Automatic merging is limited to one same-host L3 Worker. NETWORK1/L4 is
+rejected until the layout also carries a node namespace. Every Rank must expose
+the same complete set of local capture indexes; the postprocessor refuses
+asymmetric sets instead of guessing pairings.
+
+Cross-Rank merging needs `--enable-chip-swimlane 4` on every Rank, because the
+Host/Device clock anchors that level 4 collects are what put the Ranks on a
+common timeline. A lower level still captures per Rank; the postprocessor then
+converts each `rankN/dN` capture on its own relative timeline and says so.
+
 `chip_swimlane_records.json` carries the raw records. **There are two
 layers to be aware of:**
 
@@ -338,11 +375,74 @@ python -m simpler_setup.tools.swimlane_converter \
 # Custom output path
 python -m simpler_setup.tools.swimlane_converter \
     outputs/<case>_<ts>/chip_swimlane_records.json -o my_trace.json
+
+# Same-host L3: merge rankN/d0 captures onto one CLOCK_MONOTONIC timeline
+python -m simpler_setup.tools.swimlane_converter \
+    build_output/<case>/dfx_outputs --dispatch d0
+
+# Prefer the parent group identity when Rank-local dN suffixes differ
+python -m simpler_setup.tools.swimlane_converter \
+    build_output/<case>/dfx_outputs --dispatch-id 17:5
 ```
 
-The output is `outputs/<case>_<ts>/merged_swimlane.json` (or your
-`-o` override). Open <https://ui.perfetto.dev/> and drag the file
-in. The trace contains:
+For directory input, the default output is `dfx_outputs/l3_swimlane.json`.
+Every Rank must be a level-4 capture under
+`rankN/<dispatch>/`, with successful clock anchors and the same
+`metadata.host_clock_domain_id`. The converter preserves real Rank start skew,
+adds Rank-specific PID/name/flow namespaces, and reports clock uncertainty and
+anchor-group observer overhead in trace metadata.
+
+For new group captures, `--dispatch-id RUN_ID:TASK_SLOT` selects the common
+parent DAG node and resolves each Rank's actual `dN` path through
+`dispatch_identity.json`. SceneTest does this automatically. `--dispatch dN`
+remains the compatibility selector for old captures and for independently
+submitted per-Rank tasks; it fails if available sidecars show that the selected
+paths belong to different parent groups.
+
+Host-orchestrated level-4 runs retain their existing clock anchors. For
+Device/AICPU orchestration, anchors are additionally enabled only when the
+ChipWorker marks the capture with `CallConfig.capture_clock_anchors`, which it
+does for an L3 chip-swimlane capture, at the common launch boundary before
+collectors and kernels start. Both modes sample again after AICPU/AICore
+execution completes. Existing single-card Device/AICPU level-4 captures
+therefore keep their prior relative timeline and do not pay the new anchor cost.
+
+`capture_clock_anchors` says only *what the runtime does* — sample the two
+clocks — never why. Rank, group and merge are concepts of the layer above: the
+platform runner that reads this flag has no notion of a Rank, and no runtime or
+platform code parses the `rankN/dN` path. The two are deliberately separate
+switches, because the directory is artifact separation that every diagnostic
+needs while the anchors are consumed only by the swimlane reader. An L3 run with
+`--enable-dep-gen` alone therefore gets its own `rankN/dN` directory and pays no
+anchor cost.
+
+**The opening anchor sits at a different point in each runtime**, because each
+takes it at the earliest point preceding every device timestamp it records:
+
+| Runtime | Opening anchor | Calibrated interval covers |
+| ------- | -------------- | -------------------------- |
+| `host_build_graph` | before Host orchestration (`host_phase_pool_arm`) | bind, H2D, and execution |
+| `tensormap_and_ringbuffer` | before kernel launch (`start_shared_collectors_for_run`) | execution only |
+
+Both close on `post_device_execution`. So the two runtimes' calibrated intervals
+are not comparable in length, and a `host_build_graph` interpolation spans work
+a `tensormap_and_ringbuffer` one does not. This does not affect
+`max_uncertainty_ns`, which depends only on each anchor group's own sampling
+RTT. The serialized position name `pre_host_orchestration` predates the
+Device/AICPU case — read it as "start of the calibrated interval", not as a
+claim about Host orchestration.
+
+The default output depends on which input form was used, and `-o` overrides
+either:
+
+| Input | Default output |
+| ----- | -------------- |
+| a records file | `outputs/<case>_<ts>/merged_swimlane.json` |
+| a `dfx_outputs` directory | `<dfx_outputs>/l3_swimlane.json` |
+
+Open <https://ui.perfetto.dev/> and drag the file in. Both forms produce the
+same lane structure — the directory form repeats it once per Rank under the
+`rankN / <view>` process names. The trace contains:
 
 - **Orchestrator** (pid=1) — per-submit `orch_submit` envelope
   blocks (level >= 4).

@@ -22,6 +22,7 @@
 
 #include <array>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <cinttypes>
 #include <cstdlib>
@@ -46,6 +47,16 @@
 // the source of truth).
 
 namespace {
+
+std::string linux_boot_clock_domain_id() {
+    std::ifstream boot_id_file("/proc/sys/kernel/random/boot_id");
+    std::string boot_id;
+    if (!(boot_id_file >> boot_id) || boot_id.empty()) return {};
+    for (unsigned char ch : boot_id) {
+        if (!std::isalnum(ch) && ch != '-') return {};
+    }
+    return "linux-boot-id:" + boot_id;
+}
 
 int owner_recycled_shard_for_core(int core_index, int thread_count) {
     int cluster_index = core_index / PLATFORM_CORES_PER_BLOCKDIM;
@@ -1044,7 +1055,26 @@ int ChipSwimlaneCollector::export_swimlane_json() {
             outfile << "\"record_count_mismatch\"}";
         }
     }
+    if (host_phase_records_present_ || clock_correlation_session_.started()) {
+        const std::string host_clock_domain_id = linux_boot_clock_domain_id();
+        if (!host_clock_domain_id.empty()) {
+            outfile << ",\n    \"host_clock_domain_id\": \"" << host_clock_domain_id << "\"";
+        }
+    }
     if (clock_correlation_session_.started()) {
+        uint64_t host_timeline_origin_ns = 0;
+        for (const auto &sample : clock_correlation_session_.samples()) {
+            if (sample.position != simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin || !sample.valid()) {
+                continue;
+            }
+            const uint64_t midpoint = sample.host_before_ns + (sample.host_after_ns - sample.host_before_ns) / 2;
+            if (host_timeline_origin_ns == 0 || midpoint < host_timeline_origin_ns) {
+                host_timeline_origin_ns = midpoint;
+            }
+        }
+        if (host_timeline_origin_ns != 0) {
+            outfile << ",\n    \"host_timeline_origin_ns\": " << host_timeline_origin_ns;
+        }
         outfile << ",\n    \"clock_anchors\": {";
         outfile << "\n      \"provider\": \"" << clock_correlation_session_.provider_name() << "\",";
         outfile << "\n      \"device_timestamp_unit\": \"syscnt_cycles\",";

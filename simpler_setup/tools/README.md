@@ -156,7 +156,33 @@ python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimla
 # Reuse a deps.json captured in an earlier dep_gen run (different output dir)
 python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimlane_records.json \
     --deps-json outputs/<case>_<earlier_ts>/deps.json
+
+# Merge one same-host L3 dispatch laid out as rankN/d0/chip_swimlane_records.json
+python -m simpler_setup.tools.swimlane_converter build_output/<case>/dfx_outputs \
+    --dispatch d0 -o build_output/<case>/dfx_outputs/l3_swimlane.json
+
+# Merge one parent group dispatch even when its members use different dN paths
+python -m simpler_setup.tools.swimlane_converter build_output/<case>/dfx_outputs \
+    --dispatch-id 17:5 -o build_output/<case>/dfx_outputs/l3_swimlane.json
 ```
+
+Directory mode requires level-4 captures with successful Host/Device clock
+anchors and the same non-empty `metadata.host_clock_domain_id`. New captures
+derive that ID from the Linux boot ID; older captures remain supported in
+single-file mode. Every Rank loads its own sibling `deps.json` and unique
+`name_map*.json`, so the single-file override options are intentionally rejected
+in directory mode.
+
+L3 SceneTest runs create `rank<chip-worker>/d<local-capture>/` automatically and
+invoke this directory mode after the case. Each new capture also contains
+`dispatch_identity.json`. Members of one `submit_next_level_group` are paired by
+their common `(run_id, task_slot)` even if their local `dN` suffixes differ; the
+trace metadata records `dispatch_pairing: parent_dispatch_identity`. Old
+captures and individually submitted per-Rank tasks fall back to symmetric `dN`
+pairing and record `dispatch_pairing: local_capture_index`. A `dN` selector whose
+sidecars identify different parent groups is rejected instead of producing a
+plausible but incorrectly paired trace. This layout is scoped to one same-host
+L3 Worker; NETWORK1/L4 needs an additional node namespace.
 
 > Dependency arrows in the Perfetto trace come from `deps.json` (dep_gen
 > replay). The device hot path no longer records fanout, so the typical
@@ -196,13 +222,19 @@ SPMD tasks are present.
 
 | Option | Short | Description |
 | ------ | ----- | ----------- |
-| `input` | | Input JSON file (chip_swimlane_records_*.json). If omitted, the latest file in outputs/ is used |
-| `--output` | `-o` | Output JSON file (default: outputs/merged_swimlane_`<timestamp>`.json) |
-| `--kernel-config` | `-k` | Path to kernel_config.py, used for function name mapping |
-| `--func-names` | | Path to name_map*.json (SceneTest format) for function name mapping |
-| `--deps-json` | | Path to a dep_gen `deps.json` (defaults to sibling of input). Without one, no dependency arrows are drawn. |
+| `input` | | Input JSON file (chip_swimlane_records_*.json), **or** a `dfx_outputs` directory containing `rank*/dN/` for directory mode. If omitted, the latest file in outputs/ is used |
+| `--output` | `-o` | Output JSON file (default: `merged_swimlane.json` beside a file input, `l3_swimlane.json` inside a directory input) |
+| `--dispatch` | | Directory mode only: local capture directory to merge across Ranks, e.g. `d0`. Mutually exclusive with `--dispatch-id` |
+| `--dispatch-id` | | Directory mode only: parent dispatch identity to merge, formatted `RUN_ID:TASK_SLOT`. Resolves each Rank's own `dN` through `dispatch_identity.json`. Mutually exclusive with `--dispatch` |
+| `--kernel-config` | `-k` | Path to kernel_config.py, used for function name mapping. Rejected in directory mode |
+| `--func-names` | | Path to name_map*.json (SceneTest format) for function name mapping. Rejected in directory mode |
+| `--deps-json` | | Path to a dep_gen `deps.json` (defaults to sibling of input). Without one, no dependency arrows are drawn. Rejected in directory mode |
 | `--overhead` | | Add the 8-line Overhead Analysis counter group (needs `deps.json`). See [sched-overhead-model](../../docs/dfx/sched-overhead-model.md). |
 | `--verbose` | `-v` | Enable verbose output |
+
+Directory mode auto-loads each Rank's own sibling `name_map*.json` and
+`deps.json`, which is why the three global override options above are rejected
+there rather than silently applied to every Rank.
 
 ### Outputs
 
@@ -212,7 +244,8 @@ The tool produces three kinds of output:
 
 A Chrome Trace Event format JSON file that can be visualized in Perfetto:
 
-- File location: `outputs/merged_swimlane_<timestamp>.json`
+- File location: `merged_swimlane.json` beside the input records file, or
+  `l3_swimlane.json` inside the input `dfx_outputs` directory
 - Open <https://ui.perfetto.dev/> and drag-and-drop the file to visualize
 
 #### 2. Task Statistics

@@ -50,6 +50,10 @@ def test_alignment_selects_minimum_rtt_and_interpolates_offset_with_integer_math
         "post_device_execution": 1,
     }
     assert alignment.max_uncertainty_ns == 20
+    assert alignment.metadata()["anchor_group_duration_ns"] == {
+        "pre_host_orchestration": 200,
+        "post_device_execution": 400,
+    }
     assert alignment.map_cycles_to_host_ns(100) == 1_000
     assert alignment.map_cycles_to_host_ns(2_100) == 3_050
     assert alignment.map_cycles_to_host_ns(4_100) == 5_100

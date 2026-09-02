@@ -319,13 +319,14 @@ _OFF_ERROR = 4
 _OFF_CALLABLE = 8
 _OFF_CONFIG = 16
 # Packed CallConfig wire layout — must match call_config.h byte for byte:
-# 6 int32 (aicpu_thread_num, enable_chip_swimlane, enable_dump_args,
-# enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
-# overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
-# ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
-# travels separately via ChipWorker.init(log_level) — not on per-task wire.
+# 7 int32 (aicpu_thread_num, enable_chip_swimlane, enable_dump_args,
+# enable_pmu, enable_dep_gen, enable_scope_stats, capture_clock_anchors) + uint64
+# ring sizing overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT:
+# ring_task_window, ring_heap, ring_dep_pool) + 1024-byte NUL-terminated
+# output_prefix. Log config travels separately via ChipWorker.init(log_level) —
+# not on per-task wire.
 _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
-_CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
+_CFG_FMT = struct.Struct("=iiiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
 # Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
@@ -357,14 +358,17 @@ _OFF_FRAME_RUN_ID = _OFF_ACCEPTED - 32
 _OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
 _OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
 _OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
-_TASK_PROTOCOL_VERSION = 3
+_OFF_FRAME_TASK_SLOT = _OFF_ACCEPTED - 48
+_OFF_FRAME_GROUP_INDEX = _OFF_ACCEPTED - 56
+_OFF_FRAME_GROUP_SIZE = _OFF_ACCEPTED - 64
+_TASK_PROTOCOL_VERSION = 4
 # Mirrors MAILBOX_OFF_SHUTDOWN / MAILBOX_SHUTDOWN_REQUESTED: termination is a
 # sticky one-way word on the control frame, not a MailboxState. _OFF_STATE has
 # three writers (parent CONTROL_REQUEST, child CONTROL_DONE, C++
 # return-to-IDLE), any of which overwrites a _SHUTDOWN store; only a
 # terminating parent writes this word, 0 -> 1, and nothing clears it. The word
 # is reserved on every frame so a task-args blob can never reach it.
-_OFF_SHUTDOWN = _OFF_FRAME_PROTOCOL - 8
+_OFF_SHUTDOWN = _OFF_ACCEPTED - 72
 _SHUTDOWN_REQUESTED = 1
 _MAILBOX_ARGS_CAPACITY = _OFF_SHUTDOWN - _OFF_TASK_ARGS_BLOB
 _OFF_CONTROL_CALLABLE_HASH = _OFF_ARGS + 32
@@ -1980,6 +1984,74 @@ def _read_task_digest(buf) -> bytes:
     return bytes(buf[_OFF_TASK_CALLABLE_HASH : _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES])
 
 
+def _read_task_frame_identity(buf: memoryview) -> tuple[int, int, int, int, int, int, int, int]:
+    """Read the versioned parent-run identity from one task-frame trailer."""
+    return (
+        struct.unpack_from("=Q", buf, _OFF_FRAME_PROTOCOL)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_RUN_ID)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_SLOT_ID)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_GENERATION)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_DISPATCH_ID)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_TASK_SLOT)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_GROUP_INDEX)[0],
+        struct.unpack_from("=Q", buf, _OFF_FRAME_GROUP_SIZE)[0],
+    )
+
+
+def _config_diagnostics_any(cfg: CallConfig) -> bool:
+    """Mirror of `CallConfig::diagnostics_any()`, which nanobind does not bind."""
+    return bool(
+        cfg.enable_chip_swimlane
+        or cfg.enable_dump_args
+        or cfg.enable_pmu
+        or cfg.enable_dep_gen
+        or cfg.enable_scope_stats
+    )
+
+
+def _write_dispatch_identity_sidecar(
+    output_prefix: str,
+    *,
+    frame_identity: tuple[int, int, int, int, int, int, int, int],
+    chip_rank: int,
+    capture_index: int,
+    callable_digest: bytes,
+) -> None:
+    """Write parent-DAG identity beside one Rank-local diagnostic artifact."""
+    protocol, run_id, pipeline_slot, generation, endpoint_dispatch_id, task_slot, group_index, group_size = (
+        frame_identity
+    )
+    if (
+        protocol != _TASK_PROTOCOL_VERSION
+        or run_id == 0
+        or generation == 0
+        or endpoint_dispatch_id == 0
+        or group_size == 0
+        or group_index >= group_size
+    ):
+        raise RuntimeError(f"invalid diagnostic task frame identity {frame_identity}")
+    os.makedirs(output_prefix, exist_ok=True)
+    path = os.path.join(output_prefix, "dispatch_identity.json")
+    temporary_path = f"{path}.{os.getpid()}.tmp"
+    payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "task_slot": task_slot,
+        "group_index": group_index,
+        "group_size": group_size,
+        "chip_rank": chip_rank,
+        "local_capture_index": capture_index,
+        "endpoint_dispatch_id": endpoint_dispatch_id,
+        "pipeline_slot": pipeline_slot,
+        "pipeline_generation": generation,
+        "callable_digest": callable_digest.hex(),
+    }
+    with open(temporary_path, "w") as file:
+        json.dump(payload, file, indent=2)
+        file.write("\n")
+    os.replace(temporary_path, path)
+
+
 def _format_digest(digest: bytes) -> str:
     return "sha256:" + digest.hex()
 
@@ -2801,6 +2873,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     on_task_done_success=None,
     prepared: set[int] | None = None,
     task_frame_count: int = 1,
+    chip_rank: int | None = None,
 ) -> None:
     """Chip-process handlers for `_run_mailbox_loop`.
 
@@ -2836,16 +2909,48 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         )
     )
     global_domain_store = _L2GlobalDomainStore()
+    diagnostic_capture_index = 0
+
+    def read_task_config(
+        task_buf: memoryview,
+        frame_identity: tuple[int, int, int, int, int, int, int, int],
+        callable_digest: bytes,
+    ) -> CallConfig:
+        nonlocal diagnostic_capture_index
+        capture_index = diagnostic_capture_index
+        cfg = _read_config_from_mailbox(
+            task_buf,
+            chip_rank=chip_rank,
+            capture_index=capture_index,
+        )
+        # Same gate as the rankN/dN redirect in _read_config_from_mailbox: a loop
+        # with no Rank identity writes at the case root, and a sidecar naming a
+        # Rank it does not have would be a lie.
+        if chip_rank is None or not (_config_diagnostics_any(cfg) and cfg.output_prefix):
+            return cfg
+        _write_dispatch_identity_sidecar(
+            cfg.output_prefix,
+            frame_identity=frame_identity,
+            chip_rank=chip_rank,
+            capture_index=capture_index,
+            callable_digest=callable_digest,
+        )
+        diagnostic_capture_index += 1
+        return cfg
 
     def handle_task(task_buf) -> tuple[int, str]:
         task_addr = ctypes.addressof(ctypes.c_char.from_buffer(task_buf))
         digest = _read_task_digest(task_buf)
+        frame_identity = _read_task_frame_identity(task_buf)
         cid = identity_table.get(digest)
-        cfg = _read_config_from_mailbox(task_buf)
 
         code = 0
         msg = ""
         try:
+            # Inside the try because it writes the diagnostic sidecar: a full or
+            # read-only output_prefix must surface as this task's error, not as
+            # an exception that leaves the loop before TASK_DONE is published.
+            cfg = read_task_config(task_buf, frame_identity, digest)
             if cid is None:
                 raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
             # Run only consumes a prepared slot — it never lazily
@@ -3049,7 +3154,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             index: int
             frame_buf: memoryview
             frame_addr: int
-            identity: tuple[int, int, int, int, int]
+            identity: tuple[int, int, int, int, int, int, int, int]
             cid: int
             config: CallConfig
             activated: bool
@@ -3057,15 +3162,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             launched_published: bool = False
 
         staged_frames: dict[int, _StagedFrame] = {}
-
-        def read_identity(frame_buf: memoryview) -> tuple[int, int, int, int, int]:
-            return (
-                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_PROTOCOL)[0],
-                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_RUN_ID)[0],
-                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_SLOT_ID)[0],
-                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_GENERATION)[0],
-                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_DISPATCH_ID)[0],
-            )
 
         def task_frame_references_digest(digest: bytes) -> bool:
             live_states = (_TASK_READY, _PREPARE_READY, _ACTIVATE, _FRAME_STAGED, _TASK_LAUNCHED)
@@ -3084,8 +3180,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             frame_buf = frame_bufs[index]
             frame_addr = frame_addrs[index]
             try:
-                identity = read_identity(frame_buf)
-                protocol, run_id, slot_id, generation, dispatch_id = identity
+                identity = _read_task_frame_identity(frame_buf)
+                protocol, run_id, slot_id, generation, dispatch_id, _task_slot, _group_index, _group_size = identity
                 pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
                     frame_buf, _OFF_PIPELINE_LEASE
                 )
@@ -3118,7 +3214,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     frame_addr=frame_addr,
                     identity=identity,
                     cid=int(cid),
-                    config=_read_config_from_mailbox(frame_buf),
+                    config=read_task_config(frame_buf, identity, digest),
                     activated=initial_state in (_TASK_READY, _ACTIVATE),
                 )
             except Exception as e:  # noqa: BLE001
@@ -3127,7 +3223,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 return None
 
         def submit_frame(frame: _StagedFrame) -> None:
-            _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
+            _protocol, run_id, slot_id, generation, dispatch_id, _task_slot, _group_index, _group_size = frame.identity
             # The frame carries the wire blob; the runtime reads the chip POD. The bytes decode
             # once into the wire TaskArgs, whose tensors resolve to local bases (map-once, cached
             # by canonical identity) and rebuild at those bases, as the non-pipelined task path
@@ -3190,7 +3286,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                 new_frames.append(staged)
                         continue
                     if frame_state == _ACTIVATE and not staged.activated:
-                        if read_identity(staged.frame_buf) != staged.identity:
+                        if _read_task_frame_identity(staged.frame_buf) != staged.identity:
                             stale_message = f"chip_process dev={device_id}: stale activation identity"
                             try:
                                 staged.chip_run.abandon()
@@ -3309,6 +3405,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     runtime: str = "",
     prewarm_config=None,
     enable_sdma: bool = False,
+    chip_rank: int | None = None,
 ) -> None:
     """Runs in forked child process. Loads host_runtime.so in own address space.
 
@@ -3386,12 +3483,18 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
             chip_runtime=runtime,
             prepared=prepared,
             task_frame_count=_local_task_frame_count(platform, runtime, int(cw.pipeline_depth)),
+            chip_rank=chip_rank,
         )
     finally:
         cw.finalize()
 
 
-def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
+def _read_config_from_mailbox(
+    buf: memoryview,
+    *,
+    chip_rank: int | None = None,
+    capture_index: int | None = None,
+) -> CallConfig:
     """Reconstruct a CallConfig from the unified mailbox layout."""
     (
         aicpu_tn,
@@ -3400,6 +3503,7 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
         pmu,
         dep_gen,
         scope_stats,
+        _capture_clock_anchors,
         *ring_values,
         prefix_bytes,
     ) = _CFG_FMT.unpack_from(buf, _OFF_CONFIG)
@@ -3418,9 +3522,22 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     cfg.runtime_env.ring_dep_pool = ring_dep_pool
     # NUL-terminated C string in a 1024-byte field.
     cfg.output_prefix = prefix_bytes.split(b"\x00", 1)[0].decode("utf-8")
-    # A forked chip child owns its own log file under the same directory.
+    # Keep per-process host logs at the case root. Profiling artifacts are
+    # routed below, after the log directory has been configured, so changing
+    # capture directories does not add log-directory churn to every dispatch.
     if cfg.output_prefix:
         _native_set_host_log_directory(cfg.output_prefix)
+    if cfg.output_prefix and chip_rank is not None and capture_index is not None and _config_diagnostics_any(cfg):
+        # Every diagnostic below output_prefix uses a fixed filename, so N
+        # ChipWorker children sharing one prefix overwrite each other's
+        # artifacts. rankN/dN is the storage convention that separates them, and
+        # it is read only by the offline tools: no runtime or platform code
+        # parses this path, or knows that a Rank is what produced it.
+        cfg.output_prefix = os.path.join(cfg.output_prefix, f"rank{chip_rank}", f"d{capture_index}")
+        # Only the swimlane reader places its records against a Host timeline,
+        # so it alone needs both clocks anchored; the other diagnostics get the
+        # directory separation without paying for the anchors.
+        cfg.capture_clock_anchors = bool(cfg.enable_chip_swimlane)
     return cfg
 
 
@@ -7966,6 +8083,7 @@ class Worker:
                             runtime=str(self._config["runtime"]),
                             prewarm_config=self._prewarm_config,
                             enable_sdma=bool(self._config.get("enable_sdma", False)),
+                            chip_rank=idx,
                         )
                     except BaseException as e:  # noqa: BLE001
                         import traceback as _tb  # noqa: PLC0415

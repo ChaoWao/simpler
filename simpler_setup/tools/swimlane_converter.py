@@ -29,6 +29,7 @@ import argparse
 import bisect
 import importlib.util
 import json
+import re
 import sys
 import traceback
 from collections import defaultdict
@@ -224,8 +225,15 @@ def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR091
     return instances
 
 
-def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
-    """Read performance data from a swimlane JSON file.
+def read_perf_data(filepath, *, timeline_origin_ns=None):
+    """Read and decode performance data from a swimlane JSON file."""
+    with open(filepath) as file:
+        data = json.load(file)
+    return _decode_perf_data(data, timeline_origin_ns=timeline_origin_ns)
+
+
+def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR0915
+    """Decode performance data from an already-loaded swimlane document.
 
     Host dumps raw cycle-domain per-stream records plus metadata; this
     function does the AICore↔AICPU join. Schema:
@@ -256,6 +264,10 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     software-tunable). Archived v2 JSON without this column still parses;
     the field is exposed as 0 for those.
 
+    ``timeline_origin_ns`` optionally supplies a Host CLOCK_MONOTONIC origin
+    shared by several same-host Rank files. The default preserves the existing
+    single-file origin.
+
     Returns a dict shaped for `generate_chrome_trace_json`,
     `print_task_statistics`, and `sched_overhead_analysis`: `tasks`,
     `aicpu_scheduler_phases`, `aicpu_orchestrator_phases`,
@@ -279,9 +291,6 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     Raises:
         ValueError: If the JSON is malformed.
     """
-    with open(filepath) as f:
-        data = json.load(f)
-
     level = int(data.get("chip_swimlane_level"))
     if level not in [1, 2, 3, 4]:
         raise ValueError(f"Unsupported chip_swimlane_level: {level} (expected 1, 2, 3, or 4)")
@@ -304,6 +313,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         or bool(host_orch_phases_raw)
         or isinstance(raw_host_capture, dict)
     )
+    clock_anchor_mode = isinstance(metadata.get("clock_anchors"), dict)
     if orch_phases_raw and host_mode:
         raise ValueError("both AICPU and host orchestrator phases are present; clock-domain source is ambiguous")
 
@@ -352,9 +362,12 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         for pr in thread_records
         for field in ("start_host_ns", "end_host_ns")
     ]
-    host_origin_ns = int(metadata.get("host_orchestration_origin_ns") or 0)
-    if host_timestamps and host_origin_ns == 0:
-        host_origin_ns = min(host_timestamps)
+    source_host_origin_ns = int(
+        metadata.get("host_orchestration_origin_ns") or metadata.get("host_timeline_origin_ns") or 0
+    )
+    if host_timestamps and source_host_origin_ns == 0:
+        source_host_origin_ns = min(host_timestamps)
+    host_origin_ns = source_host_origin_ns
     host_composite_end_us = (max(host_timestamps) - host_origin_ns) / 1000.0 if host_timestamps else 0.0
 
     # AICore lookup keyed by (core_id, reg_task_id). Two dispatches of the
@@ -424,7 +437,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                 device_timestamps.extend((int(phase.get("start_cycles", 0)), int(phase.get("end_cycles", 0))))
 
     clock_alignment = None
-    if host_mode:
+    if host_mode or clock_anchor_mode:
         clock_alignment = build_clock_alignment(
             metadata.get("clock_anchors"),
             clock_freq_hz,
@@ -433,6 +446,14 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         )
         if host_origin_ns == 0 and clock_alignment.start is not None:
             host_origin_ns = clock_alignment.start.host_mid_ns
+
+    source_host_origin_ns = host_origin_ns
+    if timeline_origin_ns is not None:
+        if clock_alignment is None or clock_alignment.status != "calibrated":
+            raise ValueError("a shared timeline origin requires calibrated Host/Device clock anchors")
+        host_origin_ns = int(timeline_origin_ns)
+        if host_origin_ns <= 0:
+            raise ValueError(f"invalid shared timeline origin: {host_origin_ns}")
 
     cycles_to_us_factor = 1_000_000.0 / float(clock_freq_hz)
 
@@ -622,7 +643,12 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             "host_capture": host_capture,
             "host_records_complete": host_capture_complete,
             "cross_domain_latency_available": calibrated and host_capture_complete,
+            "source_timeline_origin_ns": source_host_origin_ns,
+            "timeline_origin_ns": host_origin_ns,
         }
+        host_clock_domain_id = metadata.get("host_clock_domain_id")
+        if host_clock_domain_id:
+            out["timeline_metadata"]["host_clock_domain_id"] = str(host_clock_domain_id)
         if not calibrated:
             out["timeline_metadata"].update(
                 {
@@ -634,6 +660,22 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             out["aicpu_orchestrator_phases"] = host_orchestrator_phases
         else:
             out["timeline_metadata"]["host_records_missing"] = True
+    elif clock_anchor_mode:
+        if clock_alignment is None:
+            raise RuntimeError("clock anchors are missing their alignment result")
+        calibrated = clock_alignment.status == "calibrated"
+        out["timeline_metadata"] = {
+            "layout": "clock_aligned" if calibrated else "device_relative",
+            "trace_status": "complete" if calibrated else "partial",
+            "clock_alignment": clock_alignment.metadata(),
+            "host_records_complete": False,
+            "cross_domain_latency_available": False,
+            "source_timeline_origin_ns": source_host_origin_ns,
+            "timeline_origin_ns": host_origin_ns,
+        }
+        host_clock_domain_id = metadata.get("host_clock_domain_id")
+        if host_clock_domain_id:
+            out["timeline_metadata"]["host_clock_domain_id"] = str(host_clock_domain_id)
     if core_to_thread:
         out["core_to_thread"] = core_to_thread
     return out
@@ -2804,11 +2846,13 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     trace = {"traceEvents": events}
     if timeline_metadata:
         trace["metadata"] = timeline_metadata
-    with open(output_path, "w") as f:
-        json.dump(trace, f, indent=2)
+    if output_path is not None:
+        with open(output_path, "w") as f:
+            json.dump(trace, f, indent=2)
 
-    if verbose:
+    if verbose and output_path is not None:
         print(f"JSON written to: {output_path}")
+    return trace
 
 
 def _build_parser():
@@ -2823,14 +2867,22 @@ Examples:
   %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json \
       -k examples/host_build_graph/paged_attention/kernels/kernel_config.py
   %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json -v
+  %(prog)s build_output/<case>/dfx_outputs --dispatch d0
         """,
     )
     parser.add_argument(
         "input",
         nargs="?",
-        help="Input JSON file (.json). If not specified, uses the latest chip_swimlane_records_*.json in outputs/",
+        help=(
+            "Input JSON file, or a dfx_outputs directory containing rank*/dN/. "
+            "If omitted, uses the latest chip_swimlane_records_*.json in outputs/."
+        ),
     )
-    parser.add_argument("-o", "--output", help="Output JSON file (default: <input_dir>/merged_swimlane.json)")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output JSON file (default: merged_swimlane.json for a file, l3_swimlane.json for a directory)",
+    )
     parser.add_argument(
         "-k",
         "--kernel-config",
@@ -2851,6 +2903,14 @@ Examples:
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "--dispatch",
+        help="Local capture directory to merge for directory input, for example d0",
+    )
+    parser.add_argument(
+        "--dispatch-id",
+        help="Parent dispatch identity to merge for directory input, formatted as RUN_ID:TASK_SLOT",
+    )
     parser.add_argument(
         "--overhead",
         action="store_true",
@@ -2886,6 +2946,9 @@ def _resolve_output_path(args, input_path):
     """Determine output path from args or derive from input directory name."""
     if args.output:
         return Path(args.output)
+
+    if input_path.is_dir():
+        return input_path / "l3_swimlane.json"
 
     # Default: write merged_swimlane.json next to the input. The parent
     # directory name (e.g. outputs/<case>_<ts>/) already disambiguates runs.
@@ -2980,6 +3043,431 @@ def _load_func_names(args, input_path):
     return {}, None
 
 
+_RANK_DIR_PATTERN = re.compile(r"rank([0-9]+)")
+_DISPATCH_DIR_PATTERN = re.compile(r"d[0-9]+")
+_DISPATCH_ID_PATTERN = re.compile(r"([0-9]+):([0-9]+)")
+_RANK_PID_STRIDE = 100
+
+
+def _l3_rank_dirs(root):
+    root = Path(root)
+    rank_dirs = sorted(path for path in root.glob("rank*") if path.is_dir())
+    if not rank_dirs:
+        raise ValueError(f"no rankN directories found under {root}")
+
+    discovered = []
+    seen_ranks = set()
+    for rank_dir in rank_dirs:
+        match = _RANK_DIR_PATTERN.fullmatch(rank_dir.name)
+        if match is None:
+            raise ValueError(f"invalid Rank directory name: {rank_dir.name} (expected rankN)")
+        rank = int(match.group(1))
+        if rank in seen_ranks:
+            raise ValueError(f"duplicate Rank number {rank} under {root}")
+        seen_ranks.add(rank)
+        discovered.append((rank, rank_dir))
+    return sorted(discovered)
+
+
+def _load_dispatch_identity(capture_dir):
+    path = Path(capture_dir) / "dispatch_identity.json"
+    if not path.is_file():
+        return None
+    with path.open() as file:
+        identity = json.load(file)
+    if (
+        not isinstance(identity, dict)
+        or isinstance(identity.get("schema_version"), bool)
+        or identity.get("schema_version") != 1
+    ):
+        raise ValueError(f"unsupported dispatch identity schema: {path}")
+
+    integer_fields = (
+        "run_id",
+        "task_slot",
+        "group_index",
+        "group_size",
+        "chip_rank",
+        "local_capture_index",
+        "endpoint_dispatch_id",
+        "pipeline_slot",
+        "pipeline_generation",
+    )
+    for field in integer_fields:
+        value = identity.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"dispatch identity {field} must be an integer: {path}")
+    if identity["run_id"] <= 0 or identity["task_slot"] < 0:
+        raise ValueError(f"dispatch identity has an invalid parent key: {path}")
+    if identity["endpoint_dispatch_id"] <= 0 or identity["pipeline_slot"] < 0 or identity["pipeline_generation"] <= 0:
+        raise ValueError(f"dispatch identity has invalid endpoint diagnostics: {path}")
+    if identity["group_size"] <= 0 or not 0 <= identity["group_index"] < identity["group_size"]:
+        raise ValueError(f"dispatch identity has invalid group membership: {path}")
+    if not re.fullmatch(r"[0-9a-f]{64}", identity.get("callable_digest", "")):
+        raise ValueError(f"dispatch identity has an invalid callable digest: {path}")
+
+    rank_match = _RANK_DIR_PATTERN.fullmatch(Path(capture_dir).parent.name)
+    dispatch_match = _DISPATCH_DIR_PATTERN.fullmatch(Path(capture_dir).name)
+    if rank_match is None or dispatch_match is None:
+        raise ValueError(f"dispatch identity is not below rankN/dN: {path}")
+    path_rank = int(rank_match.group(1))
+    path_capture_index = int(Path(capture_dir).name.removeprefix("d"))
+    if identity["chip_rank"] != path_rank or identity["local_capture_index"] != path_capture_index:
+        raise ValueError(f"dispatch identity disagrees with its rankN/dN path: {path}")
+    return identity
+
+
+def _validate_parent_dispatch_group(discovered, expected_key):
+    if not discovered:
+        raise ValueError(f"no Rank captures found for parent dispatch {expected_key[0]}:{expected_key[1]}")
+    identities = [identity for _, _, identity in discovered]
+    group_sizes = {identity["group_size"] for identity in identities}
+    callable_digests = {identity.get("callable_digest") for identity in identities}
+    if len(group_sizes) != 1 or len(callable_digests) != 1:
+        raise ValueError(f"inconsistent metadata for parent dispatch {expected_key[0]}:{expected_key[1]}")
+    group_size = next(iter(group_sizes))
+    if group_size <= 1:
+        raise ValueError(
+            f"parent dispatch {expected_key[0]}:{expected_key[1]} is an individual submission; pair it by dN"
+        )
+    ranks = [rank for rank, _, _ in discovered]
+    if len(set(ranks)) != len(ranks):
+        duplicates = sorted({rank for rank in ranks if ranks.count(rank) > 1})
+        raise ValueError(
+            f"parent dispatch {expected_key[0]}:{expected_key[1]} has several captures on the same "
+            f"Rank {duplicates}; one Rank contributes at most one capture to a group"
+        )
+    group_indexes = [identity["group_index"] for identity in identities]
+    if len(discovered) != group_size or sorted(group_indexes) != list(range(group_size)):
+        raise ValueError(
+            f"incomplete parent dispatch {expected_key[0]}:{expected_key[1]}: "
+            f"expected group indexes 0..{group_size - 1}, found {sorted(group_indexes)}"
+        )
+    return {
+        "dispatch_pairing": "parent_dispatch_identity",
+        "dispatch_identity": {
+            "run_id": expected_key[0],
+            "task_slot": expected_key[1],
+            "group_size": group_size,
+            "callable_digest": next(iter(callable_digests)),
+        },
+    }
+
+
+def _discover_l3_parent_dispatch_inputs(rank_dirs, dispatch_identity):
+    match = _DISPATCH_ID_PATTERN.fullmatch(dispatch_identity)
+    if match is None:
+        raise ValueError("--dispatch-id must use RUN_ID:TASK_SLOT (for example, 17:5)")
+    expected_key = (int(match.group(1)), int(match.group(2)))
+    discovered = []
+    for rank, rank_dir in rank_dirs:
+        for capture_dir in sorted(
+            (path for path in rank_dir.glob("d*") if path.is_dir()),
+            key=lambda path: int(path.name.removeprefix("d"))
+            if _DISPATCH_DIR_PATTERN.fullmatch(path.name)
+            else sys.maxsize,
+        ):
+            if not (capture_dir / "chip_swimlane_records.json").is_file():
+                continue
+            identity = _load_dispatch_identity(capture_dir)
+            if identity is None:
+                continue
+            if (identity["run_id"], identity["task_slot"]) == expected_key:
+                discovered.append((rank, capture_dir / "chip_swimlane_records.json", identity))
+    pairing = _validate_parent_dispatch_group(discovered, expected_key)
+    return [(rank, records_path) for rank, records_path, _ in sorted(discovered)], pairing
+
+
+def _discover_l3_local_capture_inputs(rank_dirs, dispatch):
+    if not _DISPATCH_DIR_PATTERN.fullmatch(dispatch or ""):
+        raise ValueError("--dispatch must name dN (for example, --dispatch d0)")
+
+    # One list of (rank, records_path, identity) triples rather than two parallel
+    # lists: the identity belongs to the capture it was read from, and a pairing
+    # that depends on two lists staying index-aligned is the failure this
+    # function exists to prevent.
+    captures = []
+    for rank, rank_dir in rank_dirs:
+        records_path = rank_dir / dispatch / "chip_swimlane_records.json"
+        if not records_path.is_file():
+            raise ValueError(f"rank{rank} is missing {dispatch}/chip_swimlane_records.json")
+        captures.append((rank, records_path, _load_dispatch_identity(records_path.parent)))
+
+    present_count = sum(identity is not None for _, _, identity in captures)
+    if present_count not in (0, len(captures)):
+        raise ValueError(f"{dispatch} has dispatch identity metadata for only {present_count}/{len(captures)} Ranks")
+    pairing = {"dispatch_pairing": "local_capture_index"}
+    if present_count:
+        group_keys = {(identity["run_id"], identity["task_slot"]) for _, _, identity in captures}
+        has_group = any(identity["group_size"] > 1 for _, _, identity in captures)
+        if has_group:
+            if len(group_keys) != 1:
+                raise ValueError(
+                    f"{dispatch} refers to different parent dispatches across Ranks; use --dispatch-id RUN_ID:TASK_SLOT"
+                )
+            pairing = _validate_parent_dispatch_group(captures, next(iter(group_keys)))
+        else:
+            pairing["dispatch_identity_status"] = "individual_submissions"
+    return sorted((rank, records_path) for rank, records_path, _ in captures), pairing
+
+
+def _discover_l3_rank_inputs(root, dispatch, dispatch_identity=None):
+    if bool(dispatch) == bool(dispatch_identity):
+        raise ValueError("directory input requires exactly one of --dispatch dN or --dispatch-id RUN_ID:TASK_SLOT")
+    rank_dirs = _l3_rank_dirs(root)
+    if dispatch_identity:
+        return _discover_l3_parent_dispatch_inputs(rank_dirs, dispatch_identity)
+    return _discover_l3_local_capture_inputs(rank_dirs, dispatch)
+
+
+def discover_l3_conversion_targets(root):
+    """Discover safe automatic conversion units below one L3 output root.
+
+    Public because the SceneTest postprocessor needs the same units this
+    module's directory mode would pick, one CLI invocation per unit.
+
+    Raises ValueError only when nothing below ``root`` can be paired safely. A
+    remainder that cannot be paired by dN downgrades to a stderr warning while
+    the parent-identity targets are still returned.
+    """
+    captures_by_rank = {}
+    parent_groups = defaultdict(list)
+    for rank, rank_dir in _l3_rank_dirs(root):
+        captures = []
+        for capture_dir in sorted(
+            (path for path in rank_dir.glob("d*") if path.is_dir()),
+            key=lambda path: int(path.name.removeprefix("d"))
+            if _DISPATCH_DIR_PATTERN.fullmatch(path.name)
+            else sys.maxsize,
+        ):
+            if not _DISPATCH_DIR_PATTERN.fullmatch(capture_dir.name):
+                raise ValueError(f"invalid capture directory name: {capture_dir} (expected dN)")
+            records_path = capture_dir / "chip_swimlane_records.json"
+            if not records_path.is_file():
+                continue
+            identity = _load_dispatch_identity(capture_dir)
+            capture = (rank, records_path, identity)
+            captures.append(capture)
+            if identity is not None and identity["group_size"] > 1:
+                parent_groups[(identity["run_id"], identity["task_slot"])].append(capture)
+        captures_by_rank[rank] = captures
+
+    targets = []
+    semantically_paired_paths = set()
+    for parent_key, captures in sorted(parent_groups.items()):
+        pairing = _validate_parent_dispatch_group(captures, parent_key)
+        paths = [records_path for _, records_path, _ in sorted(captures)]
+        semantically_paired_paths.update(paths)
+        targets.append(
+            {
+                "dispatch": None,
+                "dispatch_id": f"{parent_key[0]}:{parent_key[1]}",
+                "output_stem": f"l3_swimlane_run{parent_key[0]}_task{parent_key[1]}",
+                "capture_dirs": [path.parent for path in paths],
+                "pairing": pairing,
+            }
+        )
+
+    fallback_sets = []
+    for rank, captures in sorted(captures_by_rank.items()):
+        fallback_sets.append(
+            (
+                rank,
+                {
+                    records_path.parent.name: records_path.parent
+                    for _, records_path, _ in captures
+                    if records_path not in semantically_paired_paths
+                },
+            )
+        )
+    if fallback_sets:
+        expected = set(fallback_sets[0][1])
+        if any(set(captures) != expected for _, captures in fallback_sets[1:]):
+            # Only the dN-paired remainder is unsafe here. A parent-identity
+            # target is paired by (run_id, task_slot) and is unaffected by what
+            # the leftover dN sets look like, so dropping those too would
+            # discard exactly the pairings this identity exists to make.
+            detail = ", ".join(f"rank{rank}={sorted(captures)}" for rank, captures in fallback_sets)
+            message = f"refusing to pair asymmetric local capture indexes under {root}: {detail}"
+            if not targets:
+                raise ValueError(message)
+            print(f"Warning: {message}", file=sys.stderr)
+            return targets
+        for dispatch in sorted(expected, key=lambda name: int(name.removeprefix("d"))):
+            targets.append(
+                {
+                    "dispatch": dispatch,
+                    "dispatch_id": None,
+                    "output_stem": f"l3_swimlane_{dispatch}",
+                    "capture_dirs": [captures[dispatch] for _, captures in fallback_sets],
+                    "pairing": {"dispatch_pairing": "local_capture_index"},
+                }
+            )
+    return targets
+
+
+def _validate_l3_rank_data(rank, records_path, data):
+    if data.get("chip_swimlane_level") != 4:
+        raise ValueError(f"rank{rank} must use chip_swimlane_level 4: {records_path}")
+    timeline = data.get("timeline_metadata") or {}
+    alignment = timeline.get("clock_alignment") or {}
+    if alignment.get("status") != "calibrated":
+        reason = alignment.get("reason", "unknown")
+        raise ValueError(f"rank{rank} clock calibration failed ({reason}): {records_path}")
+    clock_domain = timeline.get("host_clock_domain_id")
+    if not clock_domain:
+        raise ValueError(
+            f"rank{rank} is missing metadata.host_clock_domain_id; old captures remain usable only in single-file mode"
+        )
+    origin_ns = int(timeline.get("source_timeline_origin_ns") or 0)
+    if origin_ns <= 0:
+        raise ValueError(f"rank{rank} has no valid Host timeline origin: {records_path}")
+    return str(clock_domain), origin_ns
+
+
+def _load_rank_local_artifacts(records_path):
+    name_map_path = _find_sibling_name_map(records_path)
+    if name_map_path is None:
+        func_names, orchestrator_name = {}, None
+    else:
+        func_names, orchestrator_name = load_func_names_json(name_map_path)
+
+    deps_path = records_path.parent / "deps.json"
+    return {
+        "dispatch_identity": _load_dispatch_identity(records_path.parent),
+        "func_names": func_names,
+        "orchestrator_name": orchestrator_name,
+        "deps_path": deps_path,
+        "deps_edges": load_deps_json(deps_path),
+        "deps_kernel_map": load_deps_kernel_map(deps_path),
+        "deps_block_map": load_deps_block_map(deps_path),
+    }
+
+
+def _namespace_rank_trace(trace, rank):
+    pid_base = rank * _RANK_PID_STRIDE
+    for event in trace.get("traceEvents", []):
+        if "pid" in event:
+            # Every single-Rank view pid must fit inside one stride, or two Ranks
+            # land on the same namespaced pid and their lanes silently merge.
+            base_pid = int(event["pid"])
+            if not 0 <= base_pid < _RANK_PID_STRIDE:
+                raise ValueError(f"single-Rank view pid {base_pid} does not fit the per-Rank stride {_RANK_PID_STRIDE}")
+            event["pid"] = pid_base + base_pid
+        if event.get("ph") == "M" and event.get("name") == "process_name":
+            name = event.get("args", {}).get("name")
+            if name:
+                event["args"]["name"] = f"rank{rank} / {name}"
+        elif event.get("ph") == "M" and event.get("name") == "process_sort_index":
+            sort_index = int(event.get("args", {}).get("sort_index", 0))
+            event["args"]["sort_index"] = pid_base + sort_index
+        for id_field in ("id", "bind_id"):
+            if id_field in event:
+                event[id_field] = f"r{rank}:{event[id_field]}"
+        # Perfetto treats every counter arg as a separate numeric series. Rank
+        # identity is already encoded in the PID, so adding it to ``ph: C``
+        # would create a bogus constant counter alongside the real values.
+        if event.get("ph") not in ("M", "C"):
+            event.setdefault("args", {})["rank"] = rank
+    return trace
+
+
+def _generate_l3_trace(args, root):  # noqa: PLR0912
+    if args.func_names or args.kernel_config or args.deps_json:
+        raise ValueError("directory input auto-loads per-Rank name/dependency files; global overrides are not allowed")
+
+    rank_inputs, pairing_metadata = _discover_l3_rank_inputs(root, args.dispatch, args.dispatch_id)
+    raw_inputs = {}
+    clock_domains = set()
+    origins = []
+    for rank, records_path in rank_inputs:
+        with records_path.open() as f:
+            raw_inputs[rank] = json.load(f)
+        data = _decode_perf_data(raw_inputs[rank])
+        clock_domain, origin_ns = _validate_l3_rank_data(rank, records_path, data)
+        clock_domains.add(clock_domain)
+        origins.append(origin_ns)
+    if len(clock_domains) != 1:
+        raise ValueError(f"Rank inputs use different Host clock domains: {sorted(clock_domains)}")
+
+    global_origin_ns = min(origins)
+    all_events = []
+    rank_metadata = []
+    pre_group_durations = []
+    for rank, records_path in rank_inputs:
+        data = _decode_perf_data(raw_inputs[rank], timeline_origin_ns=global_origin_ns)
+        artifacts = _load_rank_local_artifacts(records_path)
+        dispatch_identity = artifacts["dispatch_identity"]
+        trace = generate_chrome_trace_json(
+            data["tasks"],
+            None,
+            artifacts["func_names"],
+            args.verbose,
+            orchestrator_name=artifacts["orchestrator_name"],
+            scheduler_phases=data.get("aicpu_scheduler_phases"),
+            orchestrator_phases=data.get("aicpu_orchestrator_phases"),
+            orchestrator_source=data.get("orchestrator_source"),
+            timeline_metadata=data.get("timeline_metadata"),
+            core_to_thread=data.get("core_to_thread"),
+            host_device_uploads=data.get("host_device_uploads"),
+            deps_edges=artifacts["deps_edges"],
+            deps_kernel_map=artifacts["deps_kernel_map"],
+            deps_block_map=artifacts["deps_block_map"],
+            emit_overhead=args.overhead,
+        )
+        _namespace_rank_trace(trace, rank)
+        all_events.extend(trace["traceEvents"])
+
+        timeline = data["timeline_metadata"]
+        alignment = timeline["clock_alignment"]
+        durations = alignment.get("anchor_group_duration_ns") or {}
+        pre_duration = durations.get("pre_host_orchestration")
+        if pre_duration is not None:
+            pre_group_durations.append(int(pre_duration))
+        rank_metadata.append(
+            {
+                "rank": rank,
+                "input": str(records_path),
+                "trace_status": timeline["trace_status"],
+                "source_timeline_origin_ns": timeline["source_timeline_origin_ns"],
+                "clock_alignment": alignment,
+                "host_capture": timeline.get("host_capture"),
+                "dispatch_identity": dispatch_identity,
+            }
+        )
+
+    # Worst case for an interval read between two Ranks: each end carries its
+    # own Rank's alignment error, so the two largest bound any pair. null means
+    # the bound is unknown — fewer than two Ranks reported one — never that the
+    # comparison is exact.
+    uncertainties = sorted(
+        int(rank["clock_alignment"]["max_uncertainty_ns"])
+        for rank in rank_metadata
+        if rank["clock_alignment"].get("max_uncertainty_ns") is not None
+    )
+    metadata = {
+        "layout": "same_host_multi_rank",
+        "dispatch": args.dispatch,
+        "dispatch_id": args.dispatch_id,
+        "host_clock_domain_id": next(iter(clock_domains)),
+        "global_origin_ns": global_origin_ns,
+        "rank_count": len(rank_metadata),
+        **pairing_metadata,
+        "trace_status": "partial" if any(rank["trace_status"] != "complete" for rank in rank_metadata) else "complete",
+        "ranks": rank_metadata,
+        "cross_rank_uncertainty_ns": sum(uncertainties[-2:]) if len(uncertainties) >= 2 else None,
+        "pre_anchor_group_duration_spread_ns": (
+            max(pre_group_durations) - min(pre_group_durations) if len(pre_group_durations) >= 2 else 0
+        ),
+        "pre_anchor_group_duration_max_ns": max(pre_group_durations) if pre_group_durations else None,
+    }
+    output_path = _resolve_output_path(args, Path(root))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as f:
+        json.dump({"traceEvents": all_events, "metadata": metadata}, f, indent=2)
+    return output_path, rank_metadata
+
+
 def main():
     args = _build_parser().parse_args()
 
@@ -2988,6 +3476,16 @@ def main():
         return 1
 
     try:
+        if input_path.is_dir():
+            output_path, rank_metadata = _generate_l3_trace(args, input_path)
+            print("\n✓ Multi-Rank conversion complete")
+            print(f"  Input:  {input_path}")
+            print(f"  Ranks:  {', '.join('rank' + str(item['rank']) for item in rank_metadata)}")
+            print(f"  Output: {output_path}")
+            print(f"\nTo visualize: Open https://ui.perfetto.dev/ and drag in {output_path}")
+            return 0
+        if args.dispatch or args.dispatch_id:
+            raise ValueError("--dispatch and --dispatch-id are only valid when input is a dfx_outputs directory")
         if args.verbose:
             print(f"Reading performance data from: {input_path}")
         data = read_perf_data(input_path)

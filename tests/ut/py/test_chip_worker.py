@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for CallConfig and ChipWorker state machine."""
 
+import json
 import threading
 
 import pytest
@@ -383,6 +384,7 @@ class TestMailboxConfigRoundtrip:
             cfg.enable_pmu,
             int(cfg.enable_dep_gen),
             int(cfg.enable_scope_stats),
+            int(cfg.capture_clock_anchors),
             *cfg.runtime_env.ring_task_window,
             *cfg.runtime_env.ring_heap,
             *cfg.runtime_env.ring_dep_pool,
@@ -400,3 +402,82 @@ class TestMailboxConfigRoundtrip:
         assert decoded.runtime_env.ring_heap == [1024, 2048, 4096, 8192]
         assert decoded.runtime_env.ring_dep_pool == [64, 128, 256, 512]
         assert decoded.output_prefix == "/tmp/out"
+        assert decoded.capture_clock_anchors is False
+
+        ranked = _read_config_from_mailbox(memoryview(buf), chip_rank=2, capture_index=7)
+        assert ranked.output_prefix == "/tmp/out/rank2/d7"
+        assert ranked.capture_clock_anchors is True
+
+    def test_rank_directory_covers_every_diagnostic_but_anchors_stay_swimlane_only(self):
+        # rankN/dN separates one ChipWorker child's artifacts from its siblings',
+        # which every diagnostic needs; capture_clock_anchors only turns on the
+        # Host/Device clock anchors, which only the swimlane reader consumes.
+        from simpler.worker import (  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+            _CFG_FMT,
+            _OFF_CONFIG,
+            _read_config_from_mailbox,
+        )
+
+        def decode(**flags):
+            cfg = CallConfig()
+            cfg.output_prefix = "/tmp/out"
+            for name, value in flags.items():
+                setattr(cfg, name, value)
+            buf = bytearray(_OFF_CONFIG + _CFG_FMT.size)
+            _CFG_FMT.pack_into(
+                buf,
+                _OFF_CONFIG,
+                cfg.aicpu_thread_num,
+                cfg.enable_chip_swimlane,
+                int(cfg.enable_dump_args),
+                cfg.enable_pmu,
+                int(cfg.enable_dep_gen),
+                int(cfg.enable_scope_stats),
+                int(cfg.capture_clock_anchors),
+                *cfg.runtime_env.ring_task_window,
+                *cfg.runtime_env.ring_heap,
+                *cfg.runtime_env.ring_dep_pool,
+                cfg.output_prefix.encode(),
+            )
+            return _read_config_from_mailbox(memoryview(buf), chip_rank=1, capture_index=0)
+
+        dep_gen_only = decode(enable_dep_gen=True)
+        assert dep_gen_only.output_prefix == "/tmp/out/rank1/d0"
+        assert dep_gen_only.capture_clock_anchors is False
+
+        swimlane = decode(enable_chip_swimlane=4)
+        assert swimlane.output_prefix == "/tmp/out/rank1/d0"
+        assert swimlane.capture_clock_anchors is True
+
+        # No diagnostic at all: nothing is written below output_prefix, so the
+        # child leaves the case root alone.
+        assert decode().output_prefix == "/tmp/out"
+
+    def test_dispatch_identity_sidecar_uses_parent_dag_slot(self, tmp_path):
+        from simpler.worker import (  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+            _TASK_PROTOCOL_VERSION,
+            _write_dispatch_identity_sidecar,
+        )
+
+        _write_dispatch_identity_sidecar(
+            str(tmp_path),
+            frame_identity=(_TASK_PROTOCOL_VERSION, 17, 1, 23, 41, 5, 2, 4),
+            chip_rank=2,
+            capture_index=7,
+            callable_digest=b"\xab" * 32,
+        )
+
+        identity = json.loads((tmp_path / "dispatch_identity.json").read_text())
+        assert identity == {
+            "schema_version": 1,
+            "run_id": 17,
+            "task_slot": 5,
+            "group_index": 2,
+            "group_size": 4,
+            "chip_rank": 2,
+            "local_capture_index": 7,
+            "endpoint_dispatch_id": 41,
+            "pipeline_slot": 1,
+            "pipeline_generation": 23,
+            "callable_digest": "ab" * 32,
+        }

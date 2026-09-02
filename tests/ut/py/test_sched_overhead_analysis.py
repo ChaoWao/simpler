@@ -8,10 +8,13 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for sched_overhead_analysis: overhead model, aicore switch, Head/Tail OH."""
 
+import os
+
 from simpler_setup.tools.sched_overhead_analysis import (
     _scheduler_phases_for_report,
     _summarize_scheduler_loops,
     aicore_switch_stats,
+    auto_select_chip_swimlane_records_json,
     build_task_graph,
     compute_critical_path,
     compute_head_tail,
@@ -375,3 +378,23 @@ def test_scheduler_phase_report_suppresses_absent_runtime_phases():
     }
 
     assert _scheduler_phases_for_report(threads) == ["complete", "async_poll", "dispatch", "resolve", "idle"]
+
+
+def test_auto_select_reaches_both_the_l2_and_the_l3_capture_depths(tmp_path, monkeypatch):
+    # An L2 case writes its records at outputs/<case>/, an L3 case writes one
+    # per chip below outputs/<case>/rankN/dN/ — two levels deeper. A depth-fixed
+    # glob resolves only one of them and calls the other run "no records".
+    outputs = tmp_path / "outputs"
+    l2_records = outputs / "case_l2" / "chip_swimlane_records.json"
+    l3_records = outputs / "case_l3" / "rank1" / "d0" / "chip_swimlane_records.json"
+    for path in (l2_records, l3_records):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    monkeypatch.chdir(tmp_path)
+
+    os.utime(l2_records, (1_000, 1_000))
+    os.utime(l3_records, (2_000, 2_000))
+    assert auto_select_chip_swimlane_records_json() == l3_records
+
+    os.utime(l2_records, (3_000, 3_000))
+    assert auto_select_chip_swimlane_records_json() == l2_records

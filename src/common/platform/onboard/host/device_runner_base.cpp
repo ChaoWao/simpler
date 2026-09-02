@@ -1277,6 +1277,7 @@ void DeviceRunnerBase::apply_call_config(const CallConfig &config) {
     // without dep_gen falls through to the base no-op.
     set_dep_gen_enabled(config.enable_dep_gen != 0);
     set_scope_stats_enabled(config.enable_scope_stats != 0);
+    capture_clock_anchors_ = config.capture_clock_anchors != 0;
     set_output_prefix(config.output_prefix);
 }
 
@@ -1299,8 +1300,14 @@ HostPhaseRecordPool *DeviceRunnerBase::host_phase_pool_arm(bool producer_wants_r
     }
     if (!swimlane_wants_records) return pool;
 
-    // Only the chip-swimlane reader places these records against device
-    // timestamps, so only it needs the two clocks anchored.
+    begin_clock_correlation_session_if_needed();
+    return pool;
+}
+
+void DeviceRunnerBase::begin_clock_correlation_session_if_needed() noexcept {
+    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES || chip_swimlane_collector_.clock_correlation_active()) {
+        return;
+    }
     try {
         clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
         chip_swimlane_collector_.begin_clock_correlation_session(
@@ -1321,7 +1328,6 @@ HostPhaseRecordPool *DeviceRunnerBase::host_phase_pool_arm(bool producer_wants_r
             chip_swimlane_collector_.finish_clock_correlation_session();
         }
     }
-    return pool;
 }
 
 void DeviceRunnerBase::publish_host_phase_records_to_swimlane() {
@@ -1883,6 +1889,7 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
         return create_thread(std::move(fn));
     };
     if (enable_chip_swimlane_) {
+        if (capture_clock_anchors_) begin_clock_correlation_session_if_needed();
         chip_swimlane_collector_.start(thread_factory);
     }
     if (enable_dump_args_) {
