@@ -33,8 +33,8 @@
  * Control surface, called from the device runner (same host_runtime.so):
  *   set_enabled() / active() / emit()
  *
- * The runtime translation unit links weak no-op fallbacks (orchestrator.cpp)
- * so the AICPU build, which has no host graph, resolves without this .cpp.
+ * Every runtime build links this .cpp. A unit test that takes the orchestrator
+ * without it resolves to the no-ops in tests/ut/cpp/stubs/hbg_orch_stubs.cpp.
  *
  * The graph lives in thread-local state, so capture is lock-free and two
  * prepared contexts on different threads cannot overwrite one another. Emit

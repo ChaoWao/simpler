@@ -935,10 +935,12 @@ int32_t run_host_orchestration(
         ~static_cast<uintptr_t>(CHIP_ALIGN_SIZE - 1)
     );
 
-    // The copied zone carries no host address: the orchestrator is host-only and
-    // no device code may reach host memory through the image. Its work is done, so
-    // the pointer goes early rather than at the guard's scope exit.
+    // The copied zone carries no host address: the orchestrator and the ops table are
+    // both host-only, and no device code may reach host memory through the image.
+    // Their work is done, so the pointers go early rather than at the guard's scope
+    // exit.
     rt->orchestrator = nullptr;
+    rt->ops = nullptr;
     std::memcpy(upload_base, static_cast<const char *>(host_arena.base()) + layout.off_copied_begin, copied_bytes);
     const uint64_t compacted = sm_layout::compact_live_image(
         static_cast<const char *>(host_sm), task_capacity, bind_usage, heap_rebase, upload_base + copied_bytes

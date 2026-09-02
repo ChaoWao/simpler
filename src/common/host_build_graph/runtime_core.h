@@ -39,6 +39,7 @@
 #include "utils/device_arena.h"
 #include "host_build_graph/runtime_types.h"
 #include "graph_cache.h"
+#include "host_build_graph/runtime_ops.h"
 #include "host_build_graph/submit_types.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_allocator.h"
@@ -60,67 +61,7 @@ enum RuntimeMode {
     MODE_GRAPH_ONLY = 2  // Build graph only, no execution
 };
 
-/**
- * Function-pointer ops table for runtime operations.
- *
- * The orchestration .so calls runtime functions through this table
- * (via orchestration_api.h inline wrappers), so it has zero link
- * dependencies on runtime .cpp files.
- */
-typedef struct RuntimeContext RuntimeContext;  // forward declare for ops signatures
 class HostTensorAccessor;
-
-struct RuntimeOps {
-    TaskOutputTensors (*submit_task)(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
-    void (*scope_begin)(RuntimeContext *rt);
-    void (*scope_end)(RuntimeContext *rt);
-    void (*orchestration_done)(RuntimeContext *rt);
-    bool (*is_fatal)(RuntimeContext *rt);
-    void (*report_fatal)(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...);
-
-    // Logging (populated by runtime, called by orchestration)
-    void (*log_error)(const char *func, const char *fmt, ...);
-    void (*log_warn)(const char *func, const char *fmt, ...);
-    void (*log_timing)(const char *func, const char *fmt, ...);
-    void (*log_info)(const char *func, const char *fmt, ...);
-    void (*log_debug)(const char *func, const char *fmt, ...);
-
-    // Cross-layer data access (orchestration reads/writes tensor values via runtime)
-    // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(
-        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]
-    );
-    void (*set_tensor_data)(
-        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
-    );
-    TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
-    TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
-
-    // This-run core geometry latched by the host bind: MIX clusters
-    // (one AIC each) and standalone AIV cores.
-    int32_t (*available_cluster_count)(RuntimeContext *rt);
-    int32_t (*available_aiv_count)(RuntimeContext *rt);
-    GraphScopeResult (*graph_begin)(RuntimeContext *rt, uint64_t graph_key, const GraphTaskArgs &args);
-    bool (*graph_prepare)(RuntimeContext *rt, void *recording_handle, const GraphTaskArgs &args);
-    void (*graph_abort)(RuntimeContext *rt, void *recording_handle);
-    bool (*graph_end)(RuntimeContext *rt);
-    void (*graph_commit)(RuntimeContext *rt);
-    // Record one orchestration-side phase on the calling thread. The submission
-    // segments this carries are measured in the orchestration .so, which reaches the
-    // runtime only through this table. Always present in the struct so the layout does
-    // not move with SIMPLER_DFX; nullptr when off.
-    void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
-    // Queue one Graph body for asynchronous recording, and drain every queued one.
-    // `job` is a `std::function<void(GraphTaskArgs &)> *` the pool moves out of --
-    // whether or not it queues it, since start() takes the callable before it checks
-    // capacity -- so the caller must not invoke it afterwards. Nothing is owned across
-    // the boundary either way: the caller's std::function destructs normally, empty or
-    // not, and rt_graph_submit's fallback re-runs its own copy of the body. The pool is
-    // runtime-owned (host/graph_recorder_pool.h) and the AICPU build links a refusing
-    // fallback, which is what makes the device path record synchronously.
-    bool (*graph_record_start)(RuntimeContext *rt, const GraphTaskArgs &args, void *job);
-    void (*graph_record_wait)(RuntimeContext *rt);
-};
 
 /**
  * Layout descriptor for the prebuilt runtime arena. Holds all sub-region
@@ -179,7 +120,9 @@ struct RuntimeArenaLayout {
  * In simulated mode, runs in single process with shared address space.
  */
 struct RuntimeContext {
-    // Ops table (first field — used by orchestration .so via function pointers)
+    // Ops table (first field — used by orchestration .so via function pointers).
+    // Host-only, like the orchestrator below: the bind clears it before the copied
+    // zone is uploaded, so no device code may call through it.
     const RuntimeOps *ops;
     ScopeMode pending_scope_mode;
 
@@ -278,16 +221,15 @@ RuntimeContext *runtime_init_data_from_layout(
 void runtime_wire_arena_pointers(DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeContext *rt);
 
 /**
- * AICPU-only Phase 4 — install the ops table, the one field the host could not
- * know at prebuilt-image build time (s_runtime_ops is a device-side file-local
- * global, so the host cannot resolve its device address). Call once per boot
- * after runtime_wire_arena_pointers.
+ * Install the ops table on the context the orchestration .so calls through.
+ * Host-only: the bind installs it before running orchestration and clears the
+ * field again before the context travels to the device.
  */
 void runtime_bind_ops(RuntimeContext *rt);
 
-// Backing the two graph_record_* ops. Weak fallbacks live in runtime_core.cpp so the
-// AICPU build links a refusing start and a no-op wait; the host build overrides both in
-// host/graph_recorder_pool.cpp, where the pool is.
+// Backing the two graph_record_* ops, defined in host/graph_recorder_pool.cpp where
+// the pool lives. The table naming them is host-only, so there is no device-side
+// fallback.
 bool graph_record_start_impl(RuntimeContext *rt, const GraphTaskArgs &args, void *job);
 void graph_record_wait_impl(RuntimeContext *rt);
 

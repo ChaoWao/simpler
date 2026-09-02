@@ -48,8 +48,8 @@
 #include <utility>
 #include <vector>
 
-// Deliberately no runtime_core.h: it declares the real RuntimeOps while
-// orchestration_api.h declares a partial one, so a translation unit that sees both fails
+// Deliberately no runtime_core.h: it defines the full RuntimeContext while
+// orchestration_api.h defines a partial one, so a translation unit that sees both fails
 // to compile. Only the ops implementations in graph_recorder_pool.cpp need it.
 #include "graph_host_state.h"        // GRAPH_MAX_DEFINITIONS
 #include "host_build_graph/types.h"  // GraphTaskArgs, GRAPH_MAX_{TENSOR,SCALAR}_ARGS

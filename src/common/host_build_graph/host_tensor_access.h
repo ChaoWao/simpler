@@ -47,11 +47,9 @@
  * `HostTensorAccessor` bounds the window and releases its mappings on every
  * exit path.
  *
- * The read/write pair carries weak fallbacks in the runtime translation unit
- * (`shared/runtime_core.cpp`) that dereference `dev_addr` directly,
- * so the AICPU build — which compiles this path but never runs an
- * orchestrator — resolves without this .cpp. libhost_runtime.so links the
- * strong definitions from `host/host_tensor_access.cpp`.
+ * `host/host_tensor_access.cpp` holds the only definitions of the read/write
+ * pair, and libhost_runtime.so links them. Nothing in the AICPU build reaches
+ * either: every caller is host-side.
  */
 
 #pragma once
@@ -80,10 +78,8 @@ struct HostApi;  // common/host_api.h — fwd-declared so this header stays out 
  * A null `api` makes every `add` fail, so a registered region always implies a
  * usable `api`; `write`'s mirror push-back relies on that and does not re-check.
  *
- * The state lives behind `Impl` because this header is also compiled by the
- * AICPU build (through `shared/runtime_core.cpp`, which resolves the
- * weak read/write fallbacks below), and that build has no `<vector>`. Keep the
- * standard containers in `host/host_tensor_access.cpp`.
+ * The state lives behind `Impl` so this header pulls in no standard containers;
+ * they stay in `host/host_tensor_access.cpp`.
  */
 class HostTensorAccessor {
 public:

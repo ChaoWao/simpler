@@ -14,9 +14,9 @@
 #include <utility>
 
 #include "graph_host_state.h"
-// The ops implementations below need the real RuntimeOps/RuntimeContext, which is why the
+// The ops implementations below need the full RuntimeContext, which is why the
 // header does not include this: a translation unit cannot see both it and
-// orchestration_api.h's partial declaration.
+// orchestration_api.h's partial definition.
 #include "host_build_graph/runtime_core.h"
 
 GraphAsyncRecordingState &graph_recorder_pool() {
@@ -26,9 +26,8 @@ GraphAsyncRecordingState &graph_recorder_pool() {
 
 bool graph_recorder_prewarm() { return graph_recorder_pool().prewarm(); }
 
-// Strong overrides of the weak fallbacks in runtime_core.cpp, which the AICPU build
-// links instead: there is no recorder pool on device, and its fallback refuses so the
-// caller records synchronously.
+// The only definitions of the two graph_record_* ops. The table that names them is
+// host-only, so nothing on the device resolves either.
 //
 // `job` points to the caller's std::function. The pool moves the closure out of it
 // whether or not it queues it -- start() takes the callable before it checks capacity --

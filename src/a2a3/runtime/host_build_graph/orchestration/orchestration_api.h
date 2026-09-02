@@ -48,6 +48,7 @@
 #include "common/host_phase_kind.h"             // HostPhaseKind, for the phase records below
 #include "host_build_graph/graph_cache.h"       // Graph Execution key and result helpers
 #include "host_build_graph/graph_host_state.h"  // GRAPH_MAX_DEFINITIONS
+#include "host_build_graph/runtime_ops.h"       // RuntimeOps, RuntimeContext forward declaration
 #include "host_build_graph/runtime_types.h"     // SIMPLER_ERROR_*
 #include "host_build_graph/submit_types.h"      // MixedKernels, INVALID_KERNEL_ID, subtask slots
 #include "types.h"                              // Arg, TaskOutputTensors, TensorArgType
@@ -63,76 +64,8 @@
 // build ChipTensors through the same controlled path.
 
 // =============================================================================
-// Ops Table and Opaque Runtime
+// Opaque Runtime
 // =============================================================================
-
-/**
- * Forward declaration — the orchestration sees RuntimeContext as a partial
- * struct whose first field is the ops pointer.  The full definition
- * lives in runtime_core.h (used only by runtime .cpp files).
- */
-typedef struct RuntimeContext RuntimeContext;
-
-/**
- * Function-pointer table for runtime operations.
- * Populated by the runtime; called by orchestration through inline wrappers.
- */
-typedef struct RuntimeOps {
-    TaskOutputTensors (*submit_task)(RuntimeContext *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
-    void (*scope_begin)(RuntimeContext *rt);
-    void (*scope_end)(RuntimeContext *rt);
-    void (*orchestration_done)(RuntimeContext *rt);
-    bool (*is_fatal)(RuntimeContext *rt);
-    void (*report_fatal)(RuntimeContext *rt, int32_t error_code, const char *func, const char *fmt, ...);
-
-    // Logging (populated by runtime, called by orchestration)
-    void (*log_error)(const char *func, const char *fmt, ...);
-    void (*log_warn)(const char *func, const char *fmt, ...);
-    void (*log_timing)(const char *func, const char *fmt, ...);
-    void (*log_info)(const char *func, const char *fmt, ...);
-    void (*log_debug)(const char *func, const char *fmt, ...);
-
-    // Cross-layer data access (orchestration reads/writes tensor values via runtime)
-    // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(
-        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]
-    );
-    void (*set_tensor_data)(
-        RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
-    );
-    TaskOutputTensors (*alloc_tensors)(RuntimeContext *rt, const CoreTaskArgs &args);
-    TaskOutputTensors (*submit_dummy_task)(RuntimeContext *rt, const CoreTaskArgs &args);
-
-    // This-run core geometry latched by the host bind: MIX clusters
-    // (one AIC each) and standalone AIV cores.
-    int32_t (*available_cluster_count)(RuntimeContext *rt);
-    int32_t (*available_aiv_count)(RuntimeContext *rt);
-    GraphScopeResult (*graph_begin)(RuntimeContext *rt, uint64_t graph_key, const GraphTaskArgs &args);
-    bool (*graph_prepare)(RuntimeContext *rt, void *recording_handle, const GraphTaskArgs &args);
-    void (*graph_abort)(RuntimeContext *rt, void *recording_handle);
-    bool (*graph_end)(RuntimeContext *rt);
-    void (*graph_commit)(RuntimeContext *rt);
-
-    // Record one orchestration-side phase. The submission segments this carries are
-    // measured here and invisible to the runtime, which sees only what it is called
-    // for. Always present to keep ops-table layout stable across SIMPLER_DFX
-    // settings; nullptr when DFX is off.
-    //
-    // This struct is declared twice — here and in the runtime's runtime_core.h — and
-    // the two must stay in lockstep field for field, since the runtime fills the table
-    // and this .so calls through it.
-    void (*record_orch_phase)(uint32_t kind, uint64_t start_ns, uint64_t end_ns, uint64_t detail);
-    // Queue one Graph body for asynchronous recording, and drain every queued one.
-    // `job` is a `std::function<void(GraphTaskArgs &)> *` the pool moves out of --
-    // whether or not it queues it, since start() takes the callable before it checks
-    // capacity -- so the caller must not invoke it afterwards. Nothing is owned across
-    // the boundary either way: the caller's std::function destructs normally, empty or
-    // not, and rt_graph_submit's fallback re-runs its own copy of the body. The pool is
-    // runtime-owned (host/graph_recorder_pool.h) and the AICPU build links a refusing
-    // fallback, which is what makes the device path record synchronously.
-    bool (*graph_record_start)(RuntimeContext *rt, const GraphTaskArgs &args, void *job);
-    void (*graph_record_wait)(RuntimeContext *rt);
-} RuntimeOps;
 
 /**
  * Partial RuntimeContext definition for orchestration.
