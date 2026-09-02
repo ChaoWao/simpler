@@ -49,10 +49,10 @@
 
 #include <memory>
 
-#include "host_build_graph/common.h"
+#include "assert_compat.h"
 #include "host_build_graph/task_id.h"
+#include "host_build_graph/tensor_create_info.h"
 #include "profiling_config.h"
-#include "host_build_graph/runtime_types.h"
 #include "tensor.h"
 
 // Overlap geometry types. Relocated here from tensor.h: they are used only by

@@ -8,47 +8,26 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include <unistd.h>
-
 #include <atomic>
-#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#ifdef __linux__
-#include <sys/mman.h>
-#endif
 
-#include "aicpu/device_time.h"
 #include "aicpu/device_phase_aicpu.h"
-#include "callable_protocol.h"
-#include "dispatch_payload.h"
 #include "runtime.h"
 #include "spin_hint.h"
 
 // Runtime headers (full struct definition for create/destroy + SIMPLER_SCOPE)
 #include "host_build_graph/runtime_core.h"
-#include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 
-// Performance profiling headers
-#include "aicpu/chip_swimlane_collector_aicpu.h"
-#include "aicpu/args_dump_aicpu.h"
-#include "common/chip_swimlane_profiling.h"
 #include "common/unified_log.h"
 
 // Register-based communication
 #include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/platform_regs.h"
-#include "common/platform_config.h"
 #include "utils/thread_completion_gate.h"
-
-// Core type definitions
-#include "common/core_type.h"
-
-// CoreCallable for resolved dispatch address
-#include "callable.h"
 
 // Scheduler data structures (CoreExecState, CoreTracker, etc.)
 #include "scheduler/scheduler_types.h"

@@ -13,9 +13,7 @@
 
 #include <algorithm>
 #include <cstring>
-#include <new>
 
-#include "graph_cache.h"
 #include "host_build_graph/task_id.h"
 
 namespace {

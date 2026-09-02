@@ -8,13 +8,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
+#include "assert_compat.h"
 #include "host_build_graph/common.h"
 
 #ifdef __linux__
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <execinfo.h>
-#include <unistd.h>
 
 #include <array>
 #include <cstring>

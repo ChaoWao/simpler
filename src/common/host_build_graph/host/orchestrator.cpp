@@ -43,8 +43,8 @@
 #include <utility>
 #include <vector>
 
+#include "assert_compat.h"
 #include "common/host_phase_kind.h"
-#include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_build_graph/dep_gen_host_graph.h"
 #include "host_build_graph/dep_compute.h"
@@ -52,6 +52,7 @@
 #include "graph_execution.h"
 #include "graph_host_state.h"
 #include "host_build_graph/task_id.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/tensormap.h"

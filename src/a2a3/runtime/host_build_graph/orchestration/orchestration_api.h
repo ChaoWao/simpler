@@ -30,30 +30,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <array>
-#include <algorithm>
-#include <condition_variable>
 #include <cstring>
 #include <ctime>
 #include <functional>
-#include <mutex>
-#include <thread>
 #include <tuple>
 #include <type_traits>
-#include <utility>
-#include <vector>
 
 // Type headers needed by orchestration
-#include "host_build_graph/common.h"            // framework_bind_runtime / framework_current_runtime
-#include "common/host_phase_kind.h"             // HostPhaseKind, for the phase records below
-#include "host_build_graph/graph_cache.h"       // Graph Execution key and result helpers
-#include "host_build_graph/graph_host_state.h"  // GRAPH_MAX_DEFINITIONS
-#include "host_build_graph/runtime_ops.h"       // RuntimeOps, RuntimeContext forward declaration
-#include "host_build_graph/runtime_types.h"     // SIMPLER_ERROR_*
-#include "host_build_graph/submit_types.h"      // MixedKernels, INVALID_KERNEL_ID, subtask slots
-#include "types.h"                              // Arg, TaskOutputTensors, TensorArgType
-#include "task_args.h"                          // ChipStorageTaskArgs, simpler::hbg::Tensor
-#include "tensor.h"                             // simpler::hbg::Tensor, TensorCreateInfo
+#include "assert_compat.h"                    // debug_assert
+#include "host_build_graph/common.h"          // framework_bind_runtime / framework_current_runtime
+#include "common/host_phase_kind.h"           // HostPhaseKind, for the phase records below
+#include "host_build_graph/graph_cache.h"     // Graph Execution key and result helpers
+#include "host_build_graph/runtime_ops.h"     // RuntimeOps, RuntimeContext forward declaration
+#include "host_build_graph/runtime_status.h"  // SIMPLER_ERROR_*
+#include "host_build_graph/submit_types.h"    // MixedKernels, INVALID_KERNEL_ID, subtask slots
+#include "types.h"                            // Arg, TaskOutputTensors, TensorArgType
+#include "tensor.h"                           // simpler::hbg::Tensor, TensorCreateInfo
 
 // =============================================================================
 // simpler::hbg::Tensor Factory Helpers

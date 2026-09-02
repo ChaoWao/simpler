@@ -13,6 +13,7 @@
 #include <cinttypes>
 #include <cstdio>
 
+#include "assert_compat.h"
 #include "common/unified_log.h"
 #include "aicpu/device_time.h"
 #include "aicpu/chip_swimlane_collector_aicpu.h"
@@ -22,6 +23,7 @@
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_core.h"
 #include "host_build_graph/shared_memory.h"
 #include "runtime.h"

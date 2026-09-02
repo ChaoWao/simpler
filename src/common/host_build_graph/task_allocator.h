@@ -20,13 +20,12 @@
 
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <inttypes.h>
-#include <type_traits>
 
+#include "assert_compat.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
-#include "host_build_graph/shared_memory.h"
 #include "common/unified_log.h"
 
 // =============================================================================

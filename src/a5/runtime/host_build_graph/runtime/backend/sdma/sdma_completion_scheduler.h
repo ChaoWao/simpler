@@ -11,11 +11,8 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 
-#include "aicpu/platform_regs.h"
-#include "aicore_completion_mailbox.h"
 #include "host_build_graph/completion_token.h"
 #include "host_build_graph/runtime_status.h"
 

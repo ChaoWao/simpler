@@ -11,15 +11,7 @@
 
 #pragma once
 
-#include <stdio.h>
 #include <stdlib.h>
-
-// Assertion macros (always_assert / debug_assert), AssertionError, and the
-// MAYBE_UNINITIALIZED diagnostics live in the shared header so the unified
-// simpler::hbg::Tensor (src/common/task_interface/tensor.h) can use them without depending
-// on this runtime-specific header. assert_impl / get_stacktrace are defined in
-// orchestration/common.cpp for runtime targets.
-#include "assert_compat.h"
 
 // Framework-internal TLS bridge. The executor binds the current thread's
 // runtime before invoking the orchestration entry, so orchestration helpers can
