@@ -306,8 +306,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
 
         if (boot_ok) {
-            runtime_bind_ops(rt);
-
             sched_ctx_.bind_runtime(rt);
 
             // Latch the host-built task count (on_graph_attached sets total_tasks_)

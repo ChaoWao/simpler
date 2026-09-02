@@ -10,11 +10,11 @@
  */
 
 /**
- * host_build_graph runtime implementation
+ * host_build_graph orchestration ops table
  *
- * Implements the unified runtime API that combines orchestrator and scheduler.
- *
- * Based on: docs/RUNTIME_LOGIC.md
+ * The runtime entries the orchestration .so reaches through RuntimeContext::ops,
+ * and the table itself. host_build_graph orchestrates on the host, so the AICPU
+ * target compiles none of this and no device code reads the ops field.
  */
 
 #include "host_build_graph/host_phase_trace.h"
@@ -23,60 +23,10 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <time.h>
 
-#include "aicpu/device_time.h"
-#include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_build_graph/host_tensor_access.h"
 #include "host_build_graph/task_id.h"
-
-// simpler::hbg::Tensor-byte access for a caller that can load a device address directly.
-// The AICPU build compiles this translation unit and links these; the host
-// build overrides them with host/host_tensor_access.cpp, where a device
-// address is not loadable in general. Visibility is hidden so the host .so
-// does not export them into the global dynamic symbol table (same pattern as
-// get_sys_cnt_aicpu above and the dep_gen stubs in orchestrator.cpp).
-__attribute__((weak, visibility("hidden"))) bool
-host_tensor_read(HostTensorAccessor *, uint64_t dev_addr, void *dst, uint64_t bytes) {
-    memcpy(dst, reinterpret_cast<const void *>(dev_addr), bytes);
-    return true;
-}
-
-__attribute__((weak, visibility("hidden"))) bool
-host_tensor_write(HostTensorAccessor *, uint64_t dev_addr, const void *src, uint64_t bytes) {
-    memcpy(reinterpret_cast<void *>(dev_addr), src, bytes);
-    return true;
-}
-
-// No recorder pool exists on device, so refuse and let the caller record the body
-// inline. Refusing leaves the caller's job untouched, which is the contract the ops
-// table documents. The host build overrides both with host/graph_recorder_pool.cpp;
-// visibility is hidden for the same reason as host_tensor_read above.
-__attribute__((weak, visibility("hidden"))) bool
-graph_record_start_impl(RuntimeContext *, const GraphTaskArgs &, void *) {
-    return false;
-}
-
-__attribute__((weak, visibility("hidden"))) void graph_record_wait_impl(RuntimeContext *) {}
-
-// Host fallback for the host-orchestration path. The AICPU cycle counter is a
-// device register unavailable on the host, so return a monotonic wall-clock
-// scaled to that counter's cycle units (PLATFORM_PROF_SYS_CNT_FREQ). Any
-// cycle-denominated deadline evaluated during host orchestration then fires at
-// its intended wall-clock; a constant 0 would make it a no-op and spin forever.
-// The AICPU build links the strong device counter from device_time.cpp; hidden
-// visibility keeps this off the global dynamic symbol table.
-__attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    // Scale sec and nsec separately (divisor is the constant 1e9): avoids a
-    // div-by-zero when PLATFORM_PROF_SYS_CNT_FREQ >= 1 GHz and the truncation
-    // error a `1e9 / FREQ` divisor would introduce for non-dividing frequencies.
-    return static_cast<uint64_t>(ts.tv_sec) * PLATFORM_PROF_SYS_CNT_FREQ +
-           static_cast<uint64_t>(ts.tv_nsec) * PLATFORM_PROF_SYS_CNT_FREQ / 1000000000ull;
-}
 
 // =============================================================================
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
@@ -288,13 +238,14 @@ static const RuntimeOps s_runtime_ops = {
 };
 
 // =============================================================================
-// Runtime Lifecycle (AICPU-only fixup)
+// Runtime Lifecycle
 // =============================================================================
 //
 // Layout / init_data / wire / destroy live in
 // host_build_graph/shared/runtime_init.cpp so the host build can pre-populate the
-// prebuilt arena image. The piece below — wiring the ops table — depends on the
-// device-side s_runtime_ops global, so it remains in the AICPU build.
+// prebuilt arena image. Binding the ops table is host-only: the bind installs it
+// for the orchestration .so and clears the field again before the RuntimeContext
+// travels, so the device never receives a host address here.
 
 void runtime_bind_ops(RuntimeContext *rt) { rt->ops = &s_runtime_ops; }
 

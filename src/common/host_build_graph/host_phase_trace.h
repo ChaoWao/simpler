@@ -90,9 +90,8 @@ uint64_t host_phase_now_ns();
 /**
  * Append one record and fold it into its kind's counters.
  *
- * `kind` is a HostPhaseKind; it is passed as a plain integer because the
- * orchestrator core declares a weak fallback for this function and is also
- * compiled for the AICPU, where the platform's host headers are absent.
+ * `kind` is a HostPhaseKind, passed as a plain integer so this header needs no
+ * dependency beyond <stdint.h>.
  *
  * A record is an **interval**: this kind's operation, from when it started to
  * when it ended. `payload` says which one — a task id, a Graph key, the

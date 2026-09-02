@@ -877,17 +877,21 @@ set(HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_gra
 set(A5_HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime)
 # The out-of-line members every hbg target that drives a real Runtime or
 # orchestrator has to link. Both architectures compile the same translation units
-# (src/common/host_build_graph/shared), so one list serves the a2a3 and a5 targets
-# alike; only the arch-specific headers they include differ.
+# (src/common/host_build_graph), so one list serves the a2a3 and a5 targets
+# alike; only the arch-specific headers they include differ. The host/ vs shared/
+# split there names which runtime targets compile a file; these tests build
+# host-side, so they draw from both.
 set(HBG_SHARED_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/shared)
+set(HBG_HOST_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host)
 set(HBG_SHARED_RUNTIME_SOURCES
     ${HBG_SHARED_DIR}/shared_memory.cpp
-    ${HBG_SHARED_DIR}/tensormap.cpp
+    ${HBG_HOST_DIR}/tensormap.cpp
     ${HBG_SHARED_DIR}/runtime_init.cpp
     ${HBG_SHARED_DIR}/runtime.cpp
 )
 set(HBG_ORCH_SHARED_SOURCES
-    ${HBG_SHARED_DIR}/orchestrator.cpp
+    ${HBG_HOST_DIR}/orchestrator.cpp
+    ${CMAKE_SOURCE_DIR}/stubs/hbg_orch_stubs.cpp
     ${HBG_SHARED_RUNTIME_SOURCES}
 )
 add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_hbg_task_allocator.cpp)
@@ -1024,7 +1028,7 @@ target_sources(test_a5_graph_activation PRIVATE
 # ChipTensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE
-    ${HBG_SHARED_DIR}/tensormap.cpp
+    ${HBG_HOST_DIR}/tensormap.cpp
 )
 target_sources(test_hbg_dep_gen_host_graph PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph/host/dep_gen_host_graph.cpp

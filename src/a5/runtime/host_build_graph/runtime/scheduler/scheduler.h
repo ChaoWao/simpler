@@ -46,7 +46,7 @@
 #include "host_build_graph/shared_memory.h"
 #include "scheduler_graph.h"
 
-#include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
+#include "aicpu/device_time.h"  // get_sys_cnt_aicpu (used by early-dispatch doorbell timing too)
 
 // scheduler_graph.h states the storage layout as literals, because the AICore .o
 // that reads it cannot include runtime_types.h. This translation unit sees both,

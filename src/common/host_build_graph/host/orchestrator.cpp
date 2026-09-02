@@ -48,6 +48,7 @@
 #include "common/unified_log.h"
 #include "host_build_graph/dep_gen_host_graph.h"
 #include "host_build_graph/dep_compute.h"
+#include "host_build_graph/host_phase_trace.h"
 #include "graph_execution.h"
 #include "graph_host_state.h"
 #include "host_build_graph/task_id.h"
@@ -60,19 +61,6 @@
 #if SIMPLER_DFX
 #include "aicpu/args_dump_aicpu.h"
 #endif
-
-// Weak fallbacks: host/dep_gen_host_graph.cpp provides the strong symbols in the
-// HOST build, where the orchestrator runs and the graph is captured. The AICPU
-// build has no host graph and links these no-op stubs so the runtime translation
-// unit is self-contained. Visibility is hidden so the HOST .so doesn't export
-// them into the global dynamic symbol table where they'd shadow the strong
-// symbols (same pattern as get_sys_cnt_aicpu / chip_swimlane_aicpu_record_orch_phase
-// below).
-__attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_enabled() { return false; }
-__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_begin_task(
-    uint64_t, bool, bool, const int32_t[3], int32_t, int32_t, const TensorRef *, const TensorArgType *
-) {}
-__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {}
 
 // Raises the two edge kinds compute_task_fanin can discover, for the capture
 // instantiation. Shared by the ordinary submit path and the outer GRAPH task so
@@ -87,23 +75,6 @@ struct DepGraphAnnotate {
         dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
     }
 };
-__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit_edge(uint64_t) {}
-__attribute__((weak, visibility("hidden"))) void
-dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const simpler::hbg::Tensor &) {}
-__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t, int32_t, const simpler::hbg::Tensor &, const ChipTensorMapEntry &, OverlapStatus
-) {}
-
-// AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
-// route_ready_once path transitively ODR-uses the early-dispatch doorbell inline
-// (scheduler.h ring_one_doorbell), but no core is gated during host
-// graph-build, so the doorbell never fires and this weak host fallback only
-// satisfies the linker. The AICPU build links the strong definition from
-// platform/.../platform_regs.cpp; hidden so the HOST .so does not shadow it.
-__attribute__((weak, visibility("hidden"))) volatile uint32_t *get_reg_ptr(uint64_t, RegId) {
-    static volatile uint32_t sink = 0;
-    return &sink;
-}
 
 // =============================================================================
 // Orchestrator Profiling (compile-time toggle)
@@ -111,32 +82,6 @@ __attribute__((weak, visibility("hidden"))) volatile uint32_t *get_reg_ptr(uint6
 #if SIMPLER_ORCH_PROFILING
 #include "aicpu/device_time.h"
 #include "aicpu/chip_swimlane_collector_aicpu.h"
-// Weak fallback for builds that don't link device_time.cpp (e.g. host).
-// The strong symbol from platform/.../device_time.cpp wins in the AICPU build.
-//
-// IMPORTANT: visibility("hidden") is required to prevent the HOST .so from
-// exporting this weak fallback into the global dynamic symbol table via
-// RTLD_GLOBAL. Without it, when the AICPU .so is loaded and its PLT entry
-// for get_sys_cnt_aicpu is resolved, the dynamic linker finds the HOST .so's
-// weak definition first (already in global table) and uses it — returning 0.
-// With hidden visibility, the HOST .so does not export this symbol globally,
-// so the AICPU .so's PLT resolves to its own strong definition from
-// device_time.cpp.
-__attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
-    // Host fallback: monotonic wall-clock in AICPU cycle units so the host-orch
-    // deadlock/timeout backstops fire at their intended wall-clock (see the
-    // detailed rationale on the same fallback in runtime_core.cpp).
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    // Scale sec and nsec separately (divisor is the constant 1e9): avoids a
-    // div-by-zero when PLATFORM_PROF_SYS_CNT_FREQ >= 1 GHz and the truncation
-    // error a `1e9 / FREQ` divisor would introduce for non-dividing frequencies.
-    return static_cast<uint64_t>(ts.tv_sec) * PLATFORM_PROF_SYS_CNT_FREQ +
-           static_cast<uint64_t>(ts.tv_nsec) * PLATFORM_PROF_SYS_CNT_FREQ / 1000000000ull;
-}
-// Weak fallback for builds that don't link chip_swimlane_collector_aicpu.cpp.
-// The strong symbol from the AICPU build wins when profiling is available.
-// Also hidden to prevent HOST .so from polluting the global symbol table.
 // Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
 static uint64_t g_orch_alloc_cycle = 0;   // unified task+heap alloc
 static uint64_t g_orch_args_cycle = 0;    // param copy
@@ -163,18 +108,6 @@ uint64_t g_orch_args_atomic_count = 0;
 #elif SIMPLER_DFX
 #include "aicpu/device_time.h"
 #include "aicpu/chip_swimlane_collector_aicpu.h"
-__attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
-    // Host fallback: monotonic wall-clock in AICPU cycle units so the host-orch
-    // deadlock/timeout backstops fire at their intended wall-clock (see the
-    // detailed rationale on the same fallback in runtime_core.cpp).
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    // Scale sec and nsec separately (divisor is the constant 1e9): avoids a
-    // div-by-zero when PLATFORM_PROF_SYS_CNT_FREQ >= 1 GHz and the truncation
-    // error a `1e9 / FREQ` divisor would introduce for non-dividing frequencies.
-    return static_cast<uint64_t>(ts.tv_sec) * PLATFORM_PROF_SYS_CNT_FREQ +
-           static_cast<uint64_t>(ts.tv_nsec) * PLATFORM_PROF_SYS_CNT_FREQ / 1000000000ull;
-}
 // submit_idx tags a record with its position in the orchestration's submit order.
 static uint32_t g_orch_submit_idx = 0;
 // The per-sub-step accumulators exist only in an ORCH_PROFILING build, so at this
@@ -185,19 +118,6 @@ static uint32_t g_orch_submit_idx = 0;
 #define CYCLE_COUNT_START()
 #define CYCLE_COUNT_LAP(acc)
 #endif
-
-// Host phase record sink. The host build links a strong definition that folds the
-// record into its kind's counters and appends it to the platform's record pool;
-// every other build keeps this no-op. Kind values are HostPhaseKind, passed as a
-// plain integer because this file is also compiled for the AICPU, where the
-// platform's host headers are absent.
-__attribute__((weak, visibility("hidden"))) void host_phase_record(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t) {}
-
-// Host monotonic clock shared with the `[STRACE]` span tree, so a record nests
-// under chip.run.bind.host_orch without any clock conversion. The host build
-// links the strong definition in host_phase_trace.cpp; this fallback keeps
-// non-host builds linking, where the recorder above is a no-op anyway.
-__attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { return 0; }
 
 #if SIMPLER_DFX
 // Only the host orchestrator reaches these sites, so this file names only the Orch*
@@ -285,6 +205,50 @@ void OrchestratorState::report_fatal(int32_t error_code, const char *func, const
     va_start(args, fmt);
     orch_report_fatal_v(orch, error_code, func, fmt, args);
     va_end(args);
+}
+
+bool OrchestratorState::init(
+    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler_arg
+) {
+    // Reset in place rather than by move-assignment: fatal_code is a std::atomic,
+    // which is neither copy- nor move-assignable, and a re-init has to clear every
+    // field the previous pass left behind (the pool cursors below rely on it).
+    this->~OrchestratorState();
+    auto *orch = new (static_cast<void *>(this)) OrchestratorState{};
+
+    always_assert(max_tasks > 0);
+
+    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
+    orch->scheduler = scheduler_arg;
+
+    orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, &orch->fatal_code);
+
+    // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
+    // so it holds for whichever SM this orchestrator was pointed at. The cursors
+    // reset with the rest of the state above.
+    auto *sm_bytes = static_cast<char *>(sm_base);
+    const auto pools = sm_layout::segment_offsets(sm_layout::mirror_extents(max_tasks));
+    orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
+    orch->tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(sm_bytes + pools.tensor_pool);
+    orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
+
+    // Polling: no fanin-spill pool — producer ids are inline on the payload.
+    const auto slots = static_cast<size_t>(max_tasks);
+    orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[slots]);
+    if (orch->fanin_seen_epoch == nullptr) {
+        LOG_ERROR("Orchestrator scratch allocation failed (max_tasks=%" PRIu64 ")", max_tasks);
+        return false;
+    }
+    memset(orch->fanin_seen_epoch.get(), 0, slots * sizeof(uint32_t));
+
+    if (!orch->tensor_map.init_default(static_cast<int32_t>(max_tasks))) {
+        return false;
+    }
+
+    orch->scope_stack_top = -1;
+    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
+
+    return true;
 }
 
 enum class GraphRecordedTensorSource : uint8_t {

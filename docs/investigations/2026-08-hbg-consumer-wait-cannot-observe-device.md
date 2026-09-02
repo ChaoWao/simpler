@@ -6,6 +6,10 @@
 reading 1 below: the wait is gone and scalar access rejects a tensor with a
 producer outright.
 
+Paths below name the tree as it stood then. `shared/runtime_core.cpp` and
+`shared/orchestrator.cpp` now sit under `host/`, and neither still holds the wait
+or the `last_consumer_local_id` seeding described here.
+
 ## The defect
 
 `wait_for_tensor_ready()` in `src/common/host_build_graph/shared/runtime_core.cpp`

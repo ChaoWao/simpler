@@ -45,7 +45,7 @@
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 
-#include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
+#include "aicpu/device_time.h"  // get_sys_cnt_aicpu (used by early-dispatch doorbell timing too)
 #if SIMPLER_SCHED_PROFILING
 #define SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
 #define SCHED_CYCLE_LAP(acc)        \

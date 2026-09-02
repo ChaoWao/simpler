@@ -14,20 +14,15 @@
  * Lives under host_build_graph/shared/ so it is included in both the
  * host_runtime.so build (host pre-populates the prebuilt arena image) and the
  * aicpu_runtime build (AICPU runs wire_arena_pointers + destroy after attach).
- * The device-only parts of runtime_core.cpp / orchestrator.cpp / scheduler.cpp
- * (ops table, scope/submit/dispatch business logic, profiling) stay in their
- * original files and the aicpu build only.
+ * The scheduler's own dispatch logic stays in scheduler.cpp and the aicpu build;
+ * the ops table and the orchestrator are host-only and live under host/.
  */
 
-#include <new>
 #include <stdlib.h>
 #include <string.h>
 
-#include "host_build_graph/orchestrator.h"
 #include "host_build_graph/runtime_core.h"
-#include "host_build_graph/task_allocator.h"
 #include "host_build_graph/shared_memory.h"
-#include "host_build_graph/tensormap.h"
 #include "scheduler/scheduler.h"
 
 // =============================================================================
@@ -197,54 +192,6 @@ void SchedulerState::destroy() {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
     }
     ready_queue_destroy(&sched->early_sync_start_queue);
-}
-
-// =============================================================================
-// Orchestrator
-// =============================================================================
-
-bool OrchestratorState::init(
-    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler_arg
-) {
-    // Reset in place rather than by move-assignment: fatal_code is a std::atomic,
-    // which is neither copy- nor move-assignable, and a re-init has to clear every
-    // field the previous pass left behind (the pool cursors below rely on it).
-    this->~OrchestratorState();
-    auto *orch = new (static_cast<void *>(this)) OrchestratorState{};
-
-    always_assert(max_tasks > 0);
-
-    orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
-    orch->scheduler = scheduler_arg;
-
-    orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, &orch->fatal_code);
-
-    // The mirror's argument pools. Offset arithmetic on the same base as sm_header,
-    // so it holds for whichever SM this orchestrator was pointed at. The cursors
-    // reset with the rest of the state above.
-    auto *sm_bytes = static_cast<char *>(sm_base);
-    const auto pools = sm_layout::segment_offsets(sm_layout::mirror_extents(max_tasks));
-    orch->fanin_pool = reinterpret_cast<int32_t *>(sm_bytes + pools.fanin_pool);
-    orch->tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(sm_bytes + pools.tensor_pool);
-    orch->scalar_pool = reinterpret_cast<uint64_t *>(sm_bytes + pools.scalar_pool);
-
-    // Polling: no fanin-spill pool — producer ids are inline on the payload.
-    const auto slots = static_cast<size_t>(max_tasks);
-    orch->fanin_seen_epoch.reset(new (std::nothrow) uint32_t[slots]);
-    if (orch->fanin_seen_epoch == nullptr) {
-        LOG_ERROR("Orchestrator scratch allocation failed (max_tasks=%" PRIu64 ")", max_tasks);
-        return false;
-    }
-    memset(orch->fanin_seen_epoch.get(), 0, slots * sizeof(uint32_t));
-
-    if (!orch->tensor_map.init_default(static_cast<int32_t>(max_tasks))) {
-        return false;
-    }
-
-    orch->scope_stack_top = -1;
-    orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
-
-    return true;
 }
 
 // =============================================================================
