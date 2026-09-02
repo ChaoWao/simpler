@@ -75,8 +75,8 @@ PmuCollector::~PmuCollector() { stop(); }
 // ---------------------------------------------------------------------------
 
 int PmuCollector::init(
-    int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type,
-    const PmuAllocCallback &alloc_cb, PmuRegisterCallback register_cb, const PmuFreeCallback &free_cb, int device_id
+    int num_cores, int num_threads, const PmuAllocCallback &alloc_cb, PmuRegisterCallback register_cb,
+    const PmuFreeCallback &free_cb, int device_id
 ) {
     if (num_cores <= 0 || num_threads <= 0 || alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR("PmuCollector::init: invalid arguments");
@@ -100,8 +100,6 @@ int PmuCollector::init(
 
     num_cores_ = num_cores;
     num_threads_ = num_threads;
-    event_type_ = event_type;
-    csv_path_ = csv_path;
 
     reset_collector_shards();
     if (csv_file_.is_open()) {
@@ -143,7 +141,7 @@ int PmuCollector::init(
 
     std::memset(shm_host_local, 0, shm_size);
     PmuDataHeader *hdr = get_pmu_header(shm_host_local);
-    hdr->event_type = static_cast<uint32_t>(event_type);
+    hdr->event_type = static_cast<uint32_t>(event_type_);
     hdr->num_cores = static_cast<uint32_t>(num_cores);
 
     // ---- Allocate the per-core ring-address table for AICore. The ring
@@ -214,7 +212,7 @@ int PmuCollector::init(
     // ---- Build CSV header string (file is opened lazily on first record) ----
     {
         std::string header = "thread_id,core_id,task_id,func_id,core_type,pmu_total_cycles";
-        const PmuEventConfig *evt = pmu_resolve_event_config_a5(event_type);
+        const PmuEventConfig *evt = pmu_resolve_event_config_a5(event_type_);
         if (evt == nullptr) {
             evt = &PMU_EVENTS_A5_PIPE_UTIL;
         }

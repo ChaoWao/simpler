@@ -840,9 +840,9 @@ void DeviceRunner::finalize_collectors() {
 }
 
 int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
+    chip_swimlane_collector_.set_run_output(output_prefix_, chip_swimlane_level_);
     int rc = chip_swimlane_collector_.initialize(
-        num_aicore, aicpu_thread_num, device_id, chip_swimlane_level_, prof_alloc_cb,
-        /*register_cb=*/nullptr, prof_free_cb, output_prefix_
+        num_aicore, aicpu_thread_num, device_id, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb
     );
     if (rc == 0) {
         kernel_args_.chip_swimlane_data_base =
@@ -856,10 +856,9 @@ int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int d
 int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
     int num_dump_threads = runtime.get_aicpu_thread_num();
 
-    int rc = dump_collector_.initialize(
-        num_dump_threads, device_id, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, output_prefix_,
-        dump_args_level_
-    );
+    dump_collector_.set_run_output(output_prefix_, dump_args_level_);
+    int rc =
+        dump_collector_.initialize(num_dump_threads, device_id, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb);
     if (rc != 0) {
         return rc;
     }
@@ -871,9 +870,9 @@ int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
 int DeviceRunner::init_pmu(
     int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int /*device_id*/
 ) {
+    pmu_collector_.set_run_output(csv_path, event_type);
     int rc = pmu_collector_.init(
-        num_cores, num_threads, csv_path, event_type, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb,
-        /*device_id=*/-1
+        num_cores, num_threads, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, /*device_id=*/-1
     );
     if (rc == 0) {
         kernel_args_.pmu_data_base = reinterpret_cast<uint64_t>(pmu_collector_.get_pmu_shm_device_ptr());

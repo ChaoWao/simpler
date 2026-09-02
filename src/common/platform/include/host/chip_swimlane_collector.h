@@ -379,11 +379,25 @@ public:
      *                                 upstream.
      * @return 0 on success, error code on failure
      */
+    // Allocates the device-side resources.
+    //
+    // num_aicore defines the shared-memory layout: every pool array after the
+    // first starts at an offset computed from it, and the AICPU side computes
+    // the same offsets from its own worker count. The two must agree, so this
+    // takes the run's dimension rather than a platform maximum.
+    //
+    // Per-run configuration (artifact prefix, level) is bound separately by
+    // set_run_output(), which must be called before initialize(): the level
+    // reaches the device header and selects the orch phase pool here.
     int initialize(
-        int num_aicore, int aicpu_thread_num, int device_id, ChipSwimlaneLevel chip_swimlane_level,
-        const ChipSwimlaneAllocCallback &alloc_cb, ChipSwimlaneRegisterCallback register_cb,
-        const ChipSwimlaneFreeCallback &free_cb, const std::string &output_prefix
+        int num_aicore, int aicpu_thread_num, int device_id, const ChipSwimlaneAllocCallback &alloc_cb,
+        ChipSwimlaneRegisterCallback register_cb, const ChipSwimlaneFreeCallback &free_cb
     );
+
+    void set_run_output(const std::string &output_prefix, ChipSwimlaneLevel chip_swimlane_level) {
+        output_prefix_ = output_prefix;
+        chip_swimlane_level_ = chip_swimlane_level;
+    }
 
     /**
      * Per-buffer callback invoked by ProfilerBase's poll loop. Dispatches on

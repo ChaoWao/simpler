@@ -1151,9 +1151,9 @@ int DeviceRunner::init_chip_swimlane(
         return mem_alloc_.free(dev_ptr);
     };
 
-    int rc = chip_swimlane_collector_.initialize(
-        num_aicore, aicpu_thread_num, device_id, chip_swimlane_level_, alloc_cb, register_cb, free_cb, output_prefix_
-    );
+    chip_swimlane_collector_.set_run_output(output_prefix_, chip_swimlane_level_);
+    int rc =
+        chip_swimlane_collector_.initialize(num_aicore, aicpu_thread_num, device_id, alloc_cb, register_cb, free_cb);
     if (rc != 0) {
         return rc;
     }
@@ -1189,9 +1189,8 @@ int DeviceRunner::init_args_dump(Runtime &runtime, int device_id, KernelArgsHelp
         return mem_alloc_.free(dev_ptr);
     };
 
-    int rc = dump_collector_.initialize(
-        num_dump_threads, device_id, alloc_cb, register_cb, free_cb, output_prefix_, dump_args_level_
-    );
+    dump_collector_.set_run_output(output_prefix_, dump_args_level_);
+    int rc = dump_collector_.initialize(num_dump_threads, device_id, alloc_cb, register_cb, free_cb);
     if (rc != 0) {
         return rc;
     }
@@ -1225,8 +1224,8 @@ int DeviceRunner::init_pmu(
         return mem_alloc_.free(dev_ptr);
     };
 
-    int rc =
-        pmu_collector_.init(num_cores, num_threads, csv_path, event_type, alloc_cb, register_cb, free_cb, device_id);
+    pmu_collector_.set_run_output(csv_path, event_type);
+    int rc = pmu_collector_.init(num_cores, num_threads, alloc_cb, register_cb, free_cb, device_id);
     if (rc != 0) {
         return rc;
     }
