@@ -630,7 +630,7 @@ int32_t run_host_orchestration(
     // actually needs, and compact_live_image moves every address the orchestrator
     // wrote onto the real base before the image travels.
     if (!orchestrator.init(
-            host_sm, reinterpret_cast<void *>(HEAP_VIRTUAL_BASE), HEAP_VIRTUAL_CAPACITY, task_capacity, rt->scheduler
+            host_sm, reinterpret_cast<void *>(HEAP_VIRTUAL_BASE), HEAP_VIRTUAL_CAPACITY, task_capacity
         )) {
         LOG_ERROR("host-orch: orchestrator init against host SM failed");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -716,14 +716,12 @@ int32_t run_host_orchestration(
     {
         const OrchProfilingData prof = orchestrator_get_profiling();
         const std::pair<const char *, uint64_t> steps[] = {
-            {"alloc", prof.alloc_cycle},   {"args", prof.args_cycle},   {"lookup", prof.lookup_cycle},
-            {"insert", prof.insert_cycle}, {"fanin", prof.fanin_cycle},
+            {"alloc", prof.alloc_ns},   {"args", prof.args_ns},   {"lookup", prof.lookup_ns},
+            {"insert", prof.insert_ns}, {"fanin", prof.fanin_ns},
         };
         for (const auto &step : steps) {
             if (step.second == 0) continue;
-            LOG_TIMING(
-                "host-orch step=%s cycles=%" PRIu64 " submits=%" PRId64, step.first, step.second, prof.submit_count
-            );
+            LOG_TIMING("host-orch step=%s ns=%" PRIu64 " submits=%" PRId64, step.first, step.second, prof.submit_count);
         }
     }
 #endif

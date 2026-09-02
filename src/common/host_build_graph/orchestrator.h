@@ -36,7 +36,6 @@
 #include "graph_cache.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/submit_types.h"
-#include "scheduler/scheduler.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/tensormap.h"
 #include "host_build_graph/types.h"
@@ -78,11 +77,6 @@ struct OrchestratorState {
     // per-scope task list to walk at scope end.
     int32_t scope_stack_top{-1};  // Current top of stack (-1 = no scope open)
     int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
-
-    // === SCHEDULER REFERENCE ===
-    // Note: In simulated mode, orchestrator and scheduler share address space
-    // In real mode, they communicate via shared memory only
-    SchedulerState *scheduler;  // For simulated mode only
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -155,7 +149,7 @@ struct OrchestratorState {
     //
     // Returns false when an allocation fails; the caller then has no hazard map
     // and must not orchestrate.
-    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler);
+    bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks);
 
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(ScopeMode mode = ScopeMode::AUTO);
@@ -190,14 +184,14 @@ static_assert(
 
 #if SIMPLER_ORCH_PROFILING
 struct OrchProfilingData {
-    uint64_t alloc_cycle;  // Combined task slot + heap allocation
-    uint64_t args_cycle;
-    uint64_t lookup_cycle;
-    uint64_t insert_cycle;
-    uint64_t fanin_cycle;
+    uint64_t alloc_ns;  // Combined task slot + heap allocation
+    uint64_t args_ns;
+    uint64_t lookup_ns;
+    uint64_t insert_ns;
+    uint64_t fanin_ns;
     int64_t submit_count;
     // Wait time tracking for blocking phases
-    uint64_t fanin_wait_cycle;  // Legacy (wiring): fanout_lock wait; polling has no such lock
+    uint64_t fanin_wait_ns;  // Legacy (wiring): fanout_lock wait; polling has no such lock
     // Atomic operation counts per phase
     uint64_t args_atomic_count;
 };
