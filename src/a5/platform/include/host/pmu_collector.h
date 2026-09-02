@@ -225,10 +225,20 @@ public:
      * @param device_id                         Device ID (for register_cb)
      * @return 0 on success, non-zero on failure
      */
+    // Allocates the device-side resources.
+    //
+    // Per-run configuration (CSV destination, event selection) is bound
+    // separately by set_run_output(), which must be called before init() so the
+    // event type reaches the device header and the CSV header string.
     int init(
-        int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type,
-        const PmuAllocCallback &alloc_cb, PmuRegisterCallback register_cb, const PmuFreeCallback &free_cb, int device_id
+        int num_cores, int num_threads, const PmuAllocCallback &alloc_cb, PmuRegisterCallback register_cb,
+        const PmuFreeCallback &free_cb, int device_id
     );
+
+    void set_run_output(const std::string &csv_path, PmuEventType event_type) {
+        csv_path_ = csv_path;
+        event_type_ = event_type;
+    }
 
     void start(const profiling_common::ThreadFactory &thread_factory);
 

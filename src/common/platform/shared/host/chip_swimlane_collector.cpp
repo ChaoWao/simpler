@@ -84,12 +84,21 @@ ChipSwimlaneCollector::~ChipSwimlaneCollector() {
 }
 
 int ChipSwimlaneCollector::initialize(
-    int num_aicore, int aicpu_thread_num, int device_id, ChipSwimlaneLevel chip_swimlane_level,
-    const ChipSwimlaneAllocCallback &alloc_cb, ChipSwimlaneRegisterCallback register_cb,
-    const ChipSwimlaneFreeCallback &free_cb, const std::string &output_prefix
+    int num_aicore, int aicpu_thread_num, int device_id, const ChipSwimlaneAllocCallback &alloc_cb,
+    ChipSwimlaneRegisterCallback register_cb, const ChipSwimlaneFreeCallback &free_cb
 ) {
     if (shm_host_ != nullptr) {
         LOG_ERROR("ChipSwimlaneCollector already initialized");
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    if (num_aicore <= 0 || num_aicore > PLATFORM_MAX_CORES) {
+        LOG_ERROR("Invalid number of AICores: %d (max=%d)", num_aicore, PLATFORM_MAX_CORES);
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    if (aicpu_thread_num <= 0 || aicpu_thread_num > PLATFORM_MAX_AICPU_THREADS) {
+        LOG_ERROR(
+            "Invalid number of AICPU threads: %d (valid range: 1-%d)", aicpu_thread_num, PLATFORM_MAX_AICPU_THREADS
+        );
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
@@ -102,25 +111,12 @@ int ChipSwimlaneCollector::initialize(
 
     LOG_INFO("Initializing performance profiling");
 
-    if (num_aicore <= 0 || num_aicore > PLATFORM_MAX_CORES) {
-        LOG_ERROR("Invalid number of AICores: %d (max=%d)", num_aicore, PLATFORM_MAX_CORES);
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
-    if (aicpu_thread_num <= 0 || aicpu_thread_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR(
-            "Invalid number of AICPU threads: %d (valid range: 1-%d)", aicpu_thread_num, PLATFORM_MAX_AICPU_THREADS
-        );
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
-
     // Must precede the recycled-lane seeding below: push_recycled() folds its
     // shard argument modulo the manager's shard count.
     set_aicpu_thread_num(aicpu_thread_num);
 
     num_aicore_ = num_aicore;
     aicpu_thread_num_ = aicpu_thread_num;
-    chip_swimlane_level_ = chip_swimlane_level;
-    output_prefix_ = output_prefix;
     total_perf_collected_ = 0;
     total_sched_phase_collected_ = 0;
     total_orch_phase_collected_ = 0;

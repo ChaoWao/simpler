@@ -224,10 +224,26 @@ public:
      *                          before any dispatch.
      * @return 0 on success, error code on failure
      */
+    // Allocates the device-side resources: header, per-thread DumpBufferStates,
+    // DumpMetaBuffers and payload arenas.
+    //
+    // The per-run configuration (output prefix, level) is NOT taken here — it
+    // is bound separately via set_run_output(), which the caller must call
+    // before initialize().
     int initialize(
         int num_dump_threads, int device_id, const DumpAllocCallback &alloc_cb, DumpRegisterCallback register_cb,
-        const DumpFreeCallback &free_cb, const std::string &output_prefix, DumpArgsLevel dump_args_level
+        const DumpFreeCallback &free_cb
     );
+
+    // Per-run artifact configuration. Must be set before initialize(): the
+    // level is copied into DumpDataHeader there, so a later change would move
+    // only the host-side copy and leave the device on the previous one. The
+    // prefix is read when the writer thread starts lazily on the first
+    // collected buffer.
+    void set_run_output(const std::string &output_prefix, DumpArgsLevel dump_args_level) {
+        output_prefix_ = output_prefix;
+        dump_args_level_ = dump_args_level;
+    }
 
     void start(const profiling_common::ThreadFactory &thread_factory);
 

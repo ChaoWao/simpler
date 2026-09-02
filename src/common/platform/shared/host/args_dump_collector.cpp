@@ -91,7 +91,7 @@ void ArgsDumpCollector::merge_collector_shards() {
 
 int ArgsDumpCollector::initialize(
     int num_dump_threads, int device_id, const DumpAllocCallback &alloc_cb, DumpRegisterCallback register_cb,
-    const DumpFreeCallback &free_cb, const std::string &output_prefix, DumpArgsLevel dump_args_level
+    const DumpFreeCallback &free_cb
 ) {
     if (shm_host_ != nullptr) {
         LOG_ERROR("ArgsDumpCollector already initialized");
@@ -110,8 +110,6 @@ int ArgsDumpCollector::initialize(
     set_aicpu_thread_num(num_dump_threads);
 
     num_dump_threads_ = num_dump_threads;
-    output_prefix_ = output_prefix;
-    dump_args_level_ = dump_args_level;
     reset_collector_shards();
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
     total_truncated_count_.store(0, std::memory_order_relaxed);
@@ -151,7 +149,7 @@ int ArgsDumpCollector::initialize(
     header->magic = ARGS_DUMP_MAGIC;
     header->num_dump_threads = static_cast<uint32_t>(num_dump_threads);
     header->records_per_buffer = PLATFORM_DUMP_RECORDS_PER_BUFFER;
-    header->dump_args_level = static_cast<uint32_t>(dump_args_level);
+    header->dump_args_level = static_cast<uint32_t>(dump_args_level_);
 
     uint64_t arena_size = calc_dump_arena_size();
     header->arena_size_per_thread = arena_size;
