@@ -25,16 +25,13 @@
 
 #define SPIN_WAIT_HINT() ((void)0)
 
-// Wall-clock budget (ms) of no task progress before the dispatch loop aborts
-// with SIMPLER_ERROR_SCHEDULER_TIMEOUT. On real hardware this must sit *below* the
-// STARS AICore op-execution timeout (PLATFORM_OP_EXECUTE_TIMEOUT_US, 45 s)
-// so the AICPU detects the hang and flushes its diagnostics (args dump,
-// in-flight partial output) before STARS reaps the op and poisons the
-// context. Chain: this < op-exec < host stream-sync (platform_config.h). The
-// default 10 s scheduler budget covers the distributed-init / HCCL skew #897
-// sized at 5 s while still firing well before STARS. The runtime consumes it
-// as SCHEDULER_TIMEOUT_MS (see scheduler_types.h). Host may override this per
-// run via SIMPLER_SCHEDULER_TIMEOUT_MS after validating the timeout ordering.
-constexpr int32_t PLATFORM_SCHEDULER_TIMEOUT_MS = PLATFORM_ONBOARD_SCHEDULER_TIMEOUT_MS;
+// The no-progress budget PLATFORM_SCHEDULER_TIMEOUT_MS is not defined here: it
+// is one value across every platform variant and lives in platform_config.h,
+// which the host also reads for timeout-ordering validation. On real hardware
+// it must sit below the STARS AICore op-execution timeout
+// (PLATFORM_OP_EXECUTE_TIMEOUT_US, 45 s) so the AICPU detects the hang and
+// flushes its diagnostics (args dump, in-flight partial output) before STARS
+// reaps the op and poisons the context. Chain: scheduler < op-exec < host
+// stream-sync, all three in platform_config.h.
 
 #endif  // PLATFORM_A2A3_AICPU_SPIN_HINT_H_

@@ -21,7 +21,7 @@
 namespace {
 
 constexpr RuntimeTimeoutConfig kDefaults{
-    PLATFORM_OP_EXECUTE_TIMEOUT_US, PLATFORM_STREAM_SYNC_TIMEOUT_MS, PLATFORM_ONBOARD_SCHEDULER_TIMEOUT_MS
+    PLATFORM_OP_EXECUTE_TIMEOUT_US, PLATFORM_STREAM_SYNC_TIMEOUT_MS, PLATFORM_SCHEDULER_TIMEOUT_MS
 };
 constexpr RuntimeTimeoutConfig kCiTightTimeouts{3000000, 4000, 2000};
 
@@ -93,7 +93,7 @@ TEST(RuntimeTimeoutConfig, UnsetEnvKeepsDefaults) {
 
     EXPECT_EQ(cfg.op_execute_timeout_us, 45000000u);
     EXPECT_EQ(cfg.stream_sync_timeout_ms, 50000);
-    EXPECT_EQ(cfg.scheduler_timeout_ms, 10000);
+    EXPECT_EQ(cfg.scheduler_timeout_ms, 20000);
     EXPECT_EQ(validate_runtime_timeout_order(cfg), RuntimeTimeoutOrderStatus::OK);
 }
 

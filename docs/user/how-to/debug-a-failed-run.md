@@ -54,7 +54,7 @@ export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
 ### If it is merely slow, not stuck
 
 The timeouts are compile-time defaults — op-execute 45 s, stream-sync 50 s,
-scheduler 10 s — and all three are environment-overridable, with the ordering
+scheduler 20 s — and all three are environment-overridable, with the ordering
 between them validated at startup. Raising them is how you tell "genuinely
 hung" from "legitimately long":
 

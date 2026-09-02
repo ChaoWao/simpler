@@ -32,19 +32,6 @@
 #include "spin_hint.h"
 #endif
 
-// host_build_graph host-orch build: RuntimeContext embeds SchedulerState by
-// value, so this header is compiled into the host libhost_runtime.so. The AICPU
-// spin_hint.h that defines PLATFORM_SCHEDULER_TIMEOUT_MS is not on the host
-// include path; supply it here. The value only sizes an on-device scheduler
-// timeout and is never consumed host-side (the scheduler does not run on the
-// host). host_runtime_EXPORTS is CMake's auto-define for the host shared-lib
-// target, so the AICPU/AICore builds keep the real platform constant.
-#ifdef host_runtime_EXPORTS
-constexpr int32_t HBG_LEGACY_SCHEDULER_TIMEOUT_MS = 2000;
-#else
-constexpr int32_t HBG_LEGACY_SCHEDULER_TIMEOUT_MS = PLATFORM_ONBOARD_SCHEDULER_TIMEOUT_MS;
-#endif
-
 // =============================================================================
 // Profiling macros (compile-time gated)
 // =============================================================================
@@ -89,12 +76,12 @@ constexpr int32_t FATAL_ERROR_CHECK_INTERVAL = 1024;  // Check for a latched sch
 // kills the slower-but-correct poller mid-poll — see the distributed
 // startup-skew scenario in issue #897.
 //
-// The budget is platform-defined (PLATFORM_SCHEDULER_TIMEOUT_MS in spin_hint.h).
-// Onboard keeps it below the STARS op-execute and host stream-sync budgets so
-// the AICPU can flush diagnostics before the host-visible timeout chain fires.
-// Sim has no STARS or ACL stream-sync timeout, but uses the same no-progress
-// watchdog shape. See spin_hint.h for the per-variant rationale.
-constexpr int32_t SCHEDULER_TIMEOUT_MS = HBG_LEGACY_SCHEDULER_TIMEOUT_MS;
+// The budget is platform-defined (PLATFORM_SCHEDULER_TIMEOUT_MS in
+// platform_config.h), one value across every platform variant. Onboard keeps it
+// below the STARS op-execute and host stream-sync budgets so the AICPU can flush
+// diagnostics before the host-visible timeout chain fires. Sim has no STARS or
+// ACL stream-sync timeout, but runs the same no-progress watchdog.
+constexpr int32_t SCHEDULER_TIMEOUT_MS = PLATFORM_SCHEDULER_TIMEOUT_MS;
 constexpr uint64_t SCHEDULER_TIMEOUT_CYCLES =
     static_cast<uint64_t>(SCHEDULER_TIMEOUT_MS) * (PLATFORM_PROF_SYS_CNT_FREQ / 1000);
 constexpr int32_t STALL_DUMP_READY_MAX = 8;
