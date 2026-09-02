@@ -914,7 +914,7 @@ on the timeout ordering — the three budgets are tuned so the **AICPU detects t
 hang first**, dumps, and only then the hardware/host timeouts fire:
 
 ```text
-SCHEDULER_TIMEOUT_MS (10 s, onboard)  <  PLATFORM_OP_EXECUTE_TIMEOUT_US (45 s)  <  PLATFORM_STREAM_SYNC_TIMEOUT_MS (50 s)
+SCHEDULER_TIMEOUT_MS (20 s)           <  PLATFORM_OP_EXECUTE_TIMEOUT_US (45 s)  <  PLATFORM_STREAM_SYNC_TIMEOUT_MS (50 s)
    AICPU declares hang,                   STARS reaps the AICore op              host stream sync gives up
    flushes + dumps in-flight              and poisons the context                and surfaces the error
 ```
@@ -936,7 +936,7 @@ the no-progress budget without onboard-only ordering limits. CI restores the
 old fast-fail values through these env vars: 2 s scheduler, 3 s op-execute,
 and 4 s stream-sync for onboard jobs; 5 s scheduler for sim jobs.
 
-- **Device-side graceful flush (primary).** At 10 s of no progress
+- **Device-side graceful flush (primary).** At 20 s of no progress
   the AICPU declares the hang, runs the end-of-loop flush, *and*
   dumps the **partial output** of every task still RUNNING on a core
   — written at the `after_completion` stage, reflecting current GM,
@@ -963,9 +963,9 @@ This ordering is load-bearing: if the timeouts were inverted (STARS
 reaping before the AICPU's budget, as in earlier versions), the
 device-side dump would never run on a real AICore hang and you would
 only recover what was already in the buffer. The chain lives in
-`spin_hint.h` (`PLATFORM_SCHEDULER_TIMEOUT_MS`, surfaced as
-`SCHEDULER_TIMEOUT_MS` — 10 s for onboard and sim defaults) and
-`platform_config.h` (`PLATFORM_OP_EXECUTE_TIMEOUT_US` /
+`platform_config.h`, which holds all three (`PLATFORM_SCHEDULER_TIMEOUT_MS`,
+surfaced as `SCHEDULER_TIMEOUT_MS` — 20 s, one value for onboard and sim,
+`PLATFORM_OP_EXECUTE_TIMEOUT_US` /
 `PLATFORM_STREAM_SYNC_TIMEOUT_MS`). The env overrides use those constants as
 their unset fallback and keep the `#897` distributed-skew trade-off.
 

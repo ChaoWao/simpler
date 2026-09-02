@@ -77,10 +77,17 @@ constexpr int PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH = 6;
 constexpr uint64_t PLATFORM_OP_EXECUTE_TIMEOUT_US = 45000000;  // 45s
 
 /**
- * Default onboard AICPU scheduler no-progress timeout (milliseconds).
- * Shared with host-side timeout ordering validation.
+ * Default AICPU scheduler no-progress timeout (milliseconds).
+ * One value for every platform variant: onboard and sim run the same
+ * no-progress watchdog, and a single constant keeps them from drifting.
+ * Must stay below PLATFORM_OP_EXECUTE_TIMEOUT_US so that onboard the AICPU
+ * declares the hang and flushes its diagnostics before STARS reaps the op.
+ * Sized to outlast a slow CPU-sim kernel on an oversubscribed host, where
+ * the AICPU scheduler threads share cores with the AICore threads.
+ * Shared with host-side timeout ordering validation. Overridden at runtime
+ * by SIMPLER_SCHEDULER_TIMEOUT_MS when that env var is valid.
  */
-constexpr int32_t PLATFORM_ONBOARD_SCHEDULER_TIMEOUT_MS = 10000;
+constexpr int32_t PLATFORM_SCHEDULER_TIMEOUT_MS = 20000;
 
 /**
  * Default host-side stream synchronization timeout (milliseconds).

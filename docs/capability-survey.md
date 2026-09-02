@@ -169,8 +169,8 @@ The a2a3 mirror of this ordering is self-documented as unverified on a2a3
 silicon.
 
 Three timeouts exist, and the constants are **defaults, not the operative
-values**: op-execute 45 s, stream-sync 50 s, scheduler 10 s
-(`src/a2a3/platform/include/common/platform_config.h:69,85,75`). All three are
+values**: op-execute 45 s, stream-sync 50 s, scheduler 20 s
+(`src/a2a3/platform/include/common/platform_config.h:77,100,90`). All three are
 env-overridable with ordering validation
 (`resolve_onboard_timeout_config`, `device_runner_base.cpp:66-110`;
 [troubleshooting/local-timeout-defaults.md](troubleshooting/local-timeout-defaults.md)),

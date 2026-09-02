@@ -19,11 +19,12 @@
  * especially on resource-constrained CI runners (e.g., 2 cores running 13+
  * threads).
  *
- * Two mitigations live here. The CPU hint (pause/yield) plus sched_yield() let
- * the OS scheduler give time slices to threads doing real work, and
- * PLATFORM_SCHEDULER_TIMEOUT_MS below keeps the no-progress budget generous so a
- * slow CPU-sim task (e.g. matmul-heavy kernels) making real progress is not
- * mistaken for a deadlock.
+ * The CPU hint (pause/yield) plus sched_yield() let the OS scheduler give time
+ * slices to threads doing real work. The companion mitigation is the
+ * no-progress budget PLATFORM_SCHEDULER_TIMEOUT_MS, which is sized to keep a
+ * slow CPU-sim task (e.g. matmul-heavy kernels) making real progress from being
+ * mistaken for a deadlock; it is one value across every platform variant and
+ * lives in platform_config.h.
  */
 
 #ifndef PLATFORM_A2A3SIM_AICPU_SPIN_HINT_H_
@@ -31,6 +32,8 @@
 
 #include <cstdint>
 #include <sched.h>
+
+#include "common/platform_config.h"
 
 #if defined(__aarch64__)
 #define SPIN_WAIT_HINT()                        \
@@ -47,15 +50,5 @@
 #else
 #define SPIN_WAIT_HINT() sched_yield()
 #endif
-
-// Wall-clock budget (ms) of no task progress before the dispatch loop aborts
-// with SIMPLER_ERROR_SCHEDULER_TIMEOUT. Unlike onboard there is no STARS
-// op-execution timeout to race here, so this keeps the full #897 distributed-init
-// / HCCL-skew headroom. A generous budget also avoids false timeouts when an
-// oversubscribed CPU-sim kernel (e.g. matmul-heavy) makes real but slow
-// progress; raise further if a slow kernel still false-times-out. The runtime
-// consumes it as SCHEDULER_TIMEOUT_MS (see scheduler_types.h). Host may
-// override this per run via SIMPLER_SCHEDULER_TIMEOUT_MS.
-constexpr int32_t PLATFORM_SCHEDULER_TIMEOUT_MS = 10000;
 
 #endif  // PLATFORM_A2A3SIM_AICPU_SPIN_HINT_H_

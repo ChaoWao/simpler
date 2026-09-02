@@ -1,9 +1,15 @@
 # Local Runtime Timeouts
 
 Local runs use production-friendly timeout defaults. Onboard platforms wait up
-to 10 s for AICPU scheduler no-progress, 45 s for STARS op-execute timeout,
-and 50 s for host stream synchronization. Sim platforms use a 10 s scheduler
-timeout and do not have STARS or ACL stream-sync timeouts.
+to 20 s for AICPU scheduler no-progress, 45 s for STARS op-execute timeout,
+and 50 s for host stream synchronization. Sim platforms use the same 20 s
+scheduler timeout and do not have STARS or ACL stream-sync timeouts.
+
+The scheduler budget is a single constant (`PLATFORM_SCHEDULER_TIMEOUT_MS` in
+each arch's `platform_config.h`) shared by onboard and sim, because both run
+the same no-progress watchdog. It is sized to outlast a slow CPU-sim kernel on
+an oversubscribed host while still firing well before the 45 s STARS op-execute
+timeout onboard.
 
 This means a real local hang can take much longer to surface than it does in
 CI. CI restores the old fast-fail values with environment overrides:
