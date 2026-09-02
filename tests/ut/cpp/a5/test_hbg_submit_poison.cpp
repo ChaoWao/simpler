@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "utils/device_arena.h"
+#include "scheduler/scheduler.h"
 #include "host_build_graph/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_id.h"
@@ -66,7 +67,7 @@ protected:
         // Same order the AICPU boots in: the slot arrays are not part of the
         // uploaded image, so nothing can push until they carry their ramp.
         sched.seed_queue_slots();
-        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, CHIP_DEFAULT_GRAPH_TASKS, &sched));
+        ASSERT_TRUE(orch.init(sm_handle->sm_base, gm_heap.data(), 4096, CHIP_DEFAULT_GRAPH_TASKS));
     }
 
     void TearDown() override {

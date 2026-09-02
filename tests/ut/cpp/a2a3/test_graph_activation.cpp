@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "utils/device_arena.h"
+#include "scheduler/scheduler.h"
 #include "host_build_graph/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
 

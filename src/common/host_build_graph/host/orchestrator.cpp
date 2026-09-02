@@ -58,10 +58,6 @@
 #include "host_build_graph/types.h"
 #include "tensor.h"
 
-#if SIMPLER_DFX
-#include "aicpu/args_dump_aicpu.h"
-#endif
-
 // Raises the two edge kinds compute_task_fanin can discover, for the capture
 // instantiation. Shared by the ordinary submit path and the outer GRAPH task so
 // both describe an edge the same way.
@@ -80,43 +76,49 @@ struct DepGraphAnnotate {
 // Orchestrator Profiling (compile-time toggle)
 // =============================================================================
 #if SIMPLER_ORCH_PROFILING
-#include "aicpu/device_time.h"
-#include "aicpu/chip_swimlane_collector_aicpu.h"
-// Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
-static uint64_t g_orch_alloc_cycle = 0;   // unified task+heap alloc
-static uint64_t g_orch_args_cycle = 0;    // param copy
-static uint64_t g_orch_lookup_cycle = 0;  // tensormap lookup + dep building
-static uint64_t g_orch_insert_cycle = 0;  // tensormap insert
-static uint64_t g_orch_fanin_cycle = 0;   // fanin list + early-return check
+// Accumulated nanoseconds per sub-step (only needed for ORCH_PROFILING export)
+static uint64_t g_orch_alloc_ns = 0;   // unified task+heap alloc
+static uint64_t g_orch_args_ns = 0;    // param copy
+static uint64_t g_orch_lookup_ns = 0;  // tensormap lookup + dep building
+static uint64_t g_orch_insert_ns = 0;  // tensormap insert
+static uint64_t g_orch_fanin_ns = 0;   // fanin list + early-return check
 static int64_t g_orch_submit_count = 0;
 static uint32_t g_orch_submit_idx = 0;
-uint64_t g_orch_fanin_wait_cycle = 0;
+uint64_t g_orch_fanin_wait_ns = 0;
 uint64_t g_orch_args_atomic_count = 0;
-// Cycle accumulation is unconditional under SIMPLER_ORCH_PROFILING (that's what
-// the flag is for) and feeds the per-sub-step `g_orch_*_cycle` cumulatives
-// printed in the cold-path log. Per-event records are a separate channel on a
-// separate clock — see ORCH_PHASE_END below.
-#define CYCLE_COUNT_START()                  \
-    uint64_t _t0 = get_sys_cnt_aicpu(), _t1; \
+
+// The orchestrator runs on the host, so its sub-steps are timed by the host's own
+// monotonic clock. Static, so the timing costs a call to clock_gettime and no
+// symbol resolution.
+static inline uint64_t orch_now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+}
+
+// Accumulation is unconditional under SIMPLER_ORCH_PROFILING (that's what the flag
+// is for) and feeds the per-sub-step `g_orch_*_ns` cumulatives printed in the
+// cold-path log. Per-event records are a separate channel on a separate clock —
+// see ORCH_PHASE_END below.
+#define ORCH_STEP_START()              \
+    uint64_t _t0 = orch_now_ns(), _t1; \
     (void)_t1
-#define CYCLE_COUNT_LAP(acc)       \
-    do {                           \
-        _t1 = get_sys_cnt_aicpu(); \
-        acc += (_t1 - _t0);        \
-        _t0 = _t1;                 \
+#define ORCH_STEP_LAP(acc)   \
+    do {                     \
+        _t1 = orch_now_ns(); \
+        acc += (_t1 - _t0);  \
+        _t0 = _t1;           \
     } while (0)
 #elif SIMPLER_DFX
-#include "aicpu/device_time.h"
-#include "aicpu/chip_swimlane_collector_aicpu.h"
 // submit_idx tags a record with its position in the orchestration's submit order.
 static uint32_t g_orch_submit_idx = 0;
 // The per-sub-step accumulators exist only in an ORCH_PROFILING build, so at this
 // level there is nothing to time.
-#define CYCLE_COUNT_START()
-#define CYCLE_COUNT_LAP(acc)
+#define ORCH_STEP_START()
+#define ORCH_STEP_LAP(acc)
 #else
-#define CYCLE_COUNT_START()
-#define CYCLE_COUNT_LAP(acc)
+#define ORCH_STEP_START()
+#define ORCH_STEP_LAP(acc)
 #endif
 
 #if SIMPLER_DFX
@@ -207,9 +209,7 @@ void OrchestratorState::report_fatal(int32_t error_code, const char *func, const
     va_end(args);
 }
 
-bool OrchestratorState::init(
-    void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks, SchedulerState *scheduler_arg
-) {
+bool OrchestratorState::init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks) {
     // Reset in place rather than by move-assignment: fatal_code is a std::atomic,
     // which is neither copy- nor move-assignable, and a re-init has to clear every
     // field the previous pass left behind (the pool cursors below rely on it).
@@ -219,7 +219,6 @@ bool OrchestratorState::init(
     always_assert(max_tasks > 0);
 
     orch->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_base);
-    orch->scheduler = scheduler_arg;
 
     orch->task_allocator.init(static_cast<int32_t>(max_tasks), gm_heap, heap_size, &orch->fatal_code);
 
@@ -1613,7 +1612,7 @@ static TaskOutputTensors submit_task_common(
     OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
-    CYCLE_COUNT_START();
+    ORCH_STEP_START();
     ORCH_PHASE_START();
     TaskOutputTensors result;
     DispatchPredicate resolved_predicate{};
@@ -1623,7 +1622,6 @@ static TaskOutputTensors submit_task_common(
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
         return result;
     }
-    SchedulerState *sched = orch->scheduler;
     TaskId task_id = prepared.task_id;
     TaskDescriptor &task = *prepared.task;
     TaskPayload &payload = *prepared.payload;
@@ -1655,7 +1653,7 @@ static TaskOutputTensors submit_task_common(
     int32_t *fanin_slots = payload.fanin_data();
     payload.fanin_count = 0;
 
-    CYCLE_COUNT_LAP(g_orch_alloc_cycle);
+    ORCH_STEP_LAP(g_orch_alloc_ns);
 
 #if SIMPLER_DFX
     if (layout.total_output_size > 0) {
@@ -1707,7 +1705,7 @@ static TaskOutputTensors submit_task_common(
         }
     }
 
-    CYCLE_COUNT_LAP(g_orch_lookup_cycle);
+    ORCH_STEP_LAP(g_orch_lookup_ns);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
     // Reserve pool capacity for this task's inserts before registering, so an
@@ -1719,7 +1717,7 @@ static TaskOutputTensors submit_task_common(
     }
     register_task_outputs(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
 
-    CYCLE_COUNT_LAP(g_orch_insert_cycle);
+    ORCH_STEP_LAP(g_orch_insert_ns);
 
     // === STEP 5: Batch-write to GM (single cache line burst) ===
     // Deferred from allocation phase to avoid scattered GM writes that get
@@ -1741,7 +1739,7 @@ static TaskOutputTensors submit_task_common(
     // Predicate validation runs before task allocation. Copy the resolved, bounded
     // operand address into the device payload only after the rest of the payload exists.
     payload.predicate = resolved_predicate;
-    CYCLE_COUNT_LAP(g_orch_args_cycle);
+    ORCH_STEP_LAP(g_orch_args_ns);
 
     // === STEP 6: close the fanin region (device boot classifies) ===
     // Polling + host-orch: append_fanin_or_fail already wrote each producer's local
@@ -1761,9 +1759,7 @@ static TaskOutputTensors submit_task_common(
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
     orch->fanin_pool_cursor += CHIP_ALIGN_UP(payload.fanin_count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
-    (void)sched;
-
-    CYCLE_COUNT_LAP(g_orch_fanin_cycle);
+    ORCH_STEP_LAP(g_orch_fanin_ns);
     ORCH_PHASE_END(HostPhaseKind::OrchSubmitTask, task_id.raw);
 
 #if SIMPLER_DFX
@@ -2717,7 +2713,6 @@ TaskOutputTensors OrchestratorState::submit_task(const MixedKernels &mixed_kerne
         orch_mark_fatal(orch, SIMPLER_ERROR_INVALID_ARGS);
         return TaskOutputTensors{};
     }
-    always_assert(orch->scheduler != nullptr);
     // === Validate submit inputs ===
     ActiveMask active_mask = mixed_kernels.to_active_mask();
     if (!static_cast<bool>(active_mask)) {
@@ -2805,7 +2800,6 @@ TaskOutputTensors OrchestratorState::submit_dummy_task(const CoreTaskArgs &args)
         orch_mark_fatal(orch, SIMPLER_ERROR_INVALID_ARGS);
         return TaskOutputTensors{};
     }
-    always_assert(orch->scheduler != nullptr);
 
     // Dummy tasks never dispatch to an AICore, so sync_start / has_predicate do
     // not apply; only the early-dispatch hint and timing tag carry over.
@@ -2851,7 +2845,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         }
     }
 
-    CYCLE_COUNT_START();
+    ORCH_STEP_START();
     ORCH_PHASE_START();
 
     if (args.has_error) {
@@ -2883,7 +2877,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     TaskDescriptor &task = *prepared.task;
     TaskPayload &payload = *prepared.payload;
 
-    CYCLE_COUNT_LAP(g_orch_alloc_cycle);
+    ORCH_STEP_LAP(g_orch_alloc_ns);
 
 #if SIMPLER_DFX
     if (layout.total_output_size > 0) {
@@ -2903,7 +2897,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     outputs.set_task_id(prepared.task_id);
     payload.init(args, outputs, prepared.alloc_result, layout);
     payload.fanin_count = 0;  // hidden-alloc tasks have no producer dependencies
-    CYCLE_COUNT_LAP(g_orch_args_cycle);
+    ORCH_STEP_LAP(g_orch_args_ns);
 
     if (prepared.slot_state != nullptr) {
         // Hidden alloc tasks complete inline in the orchestrator before any
@@ -2935,7 +2929,7 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     }
     orch->inline_completed_tasks++;
 
-    CYCLE_COUNT_LAP(g_orch_fanin_cycle);
+    ORCH_STEP_LAP(g_orch_fanin_ns);
     ORCH_PHASE_END(HostPhaseKind::OrchAllocTensors, prepared.task_id.raw);
 
 #if SIMPLER_DFX
@@ -2969,22 +2963,22 @@ void OrchestratorState::mark_done() {
 #if SIMPLER_ORCH_PROFILING
 OrchProfilingData orchestrator_get_profiling() {
     OrchProfilingData d;
-    d.alloc_cycle = g_orch_alloc_cycle;
-    d.args_cycle = g_orch_args_cycle;
-    d.lookup_cycle = g_orch_lookup_cycle;
-    d.insert_cycle = g_orch_insert_cycle;
-    d.fanin_cycle = g_orch_fanin_cycle;
+    d.alloc_ns = g_orch_alloc_ns;
+    d.args_ns = g_orch_args_ns;
+    d.lookup_ns = g_orch_lookup_ns;
+    d.insert_ns = g_orch_insert_ns;
+    d.fanin_ns = g_orch_fanin_ns;
     d.submit_count = g_orch_submit_count;
-    d.fanin_wait_cycle = g_orch_fanin_wait_cycle;
+    d.fanin_wait_ns = g_orch_fanin_wait_ns;
     d.args_atomic_count = g_orch_args_atomic_count;
 
     // Reset
-    g_orch_alloc_cycle = g_orch_args_cycle = 0;
-    g_orch_lookup_cycle = g_orch_insert_cycle = 0;
-    g_orch_fanin_cycle = 0;
+    g_orch_alloc_ns = g_orch_args_ns = 0;
+    g_orch_lookup_ns = g_orch_insert_ns = 0;
+    g_orch_fanin_ns = 0;
     g_orch_submit_count = 0;
     g_orch_submit_idx = 0;
-    g_orch_fanin_wait_cycle = 0;
+    g_orch_fanin_wait_ns = 0;
     g_orch_args_atomic_count = 0;
     return d;
 }
