@@ -6,6 +6,13 @@ This document describes the profiling macro hierarchy and logging control in the
 
 The runtime uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_chip_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
 
+> **A5 HBG scheduler selection.** Diagnostic flags never select the scheduler.
+> Ordinary DAGs remain on the resident AICore scheduler, while Graph replay
+> remains on its explicit legacy compatibility path. Until resident Resolver
+> profiling lands, chip-swimlane, PMU, and argument-dump collection for
+> ordinary DAGs is best-effort; artifacts may be absent or incomplete and must
+> not be used as evidence of Resolver scheduling behavior or as a profiling-on
+> performance baseline.
 > **host_build_graph (host-orch) note.** The profiling **macros** below
 > (`SIMPLER_DFX`, `SIMPLER_ORCH_PROFILING`, …) are shared with
 > `tensormap_and_ringbuffer`. But the orchestrator-timing **device-log lines**

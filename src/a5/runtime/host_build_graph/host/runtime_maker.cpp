@@ -45,7 +45,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -57,6 +59,8 @@
 #include "host_build_graph/common.h"
 #include "host_build_graph/dep_gen_host_graph.h"
 #include "host_build_graph/graph_execution.h"
+#include "scheduler/scheduler_graph.h"
+#include "scheduler/scheduler_types.h"
 #include "host_build_graph/host_tensor_access.h"
 #include "host_build_graph/graph_host_state.h"
 #include "host_build_graph/host_phase_trace.h"
@@ -76,6 +80,7 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_log.h"
+#include "host/platform_compile_info.h"
 #include "host/raii_scope_guard.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
@@ -351,6 +356,16 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
 
 namespace {
 
+struct SchedulerStateOwner {
+    void *allocation;
+    void *state_base;
+    uint64_t allocation_size;
+    AicoreSchedulerLayout layout;
+};
+
+std::mutex scheduler_state_owners_mutex;
+std::unordered_map<Runtime *, SchedulerStateOwner> scheduler_state_owners;
+
 // host_build_graph is host-orchestration-first: the HOST dlopens the
 // orchestration .so and runs it to completion. Every cross-task reference the
 // shared memory and arena carry is an offset or an index from its own block, so
@@ -589,6 +604,340 @@ struct GraphHostStateBinding {
 
     OrchestratorState &orchestrator;
 };
+
+void release_scheduler_state(Runtime *runtime, const HostApi *api) {
+    if (runtime == nullptr || api == nullptr) return;
+    SchedulerStateOwner owner{};
+    {
+        std::scoped_lock lock(scheduler_state_owners_mutex);
+        auto it = scheduler_state_owners.find(runtime);
+        if (it != scheduler_state_owners.end()) {
+            owner = it->second;
+            scheduler_state_owners.erase(it);
+        }
+    }
+    if (owner.allocation != nullptr) api->device_free(owner.allocation);
+    for (int32_t i = 0; i < runtime->get_worker_count(); ++i) {
+        runtime->workers[i].aicpu_ready = 0;
+        runtime->workers[i].task = 0;
+    }
+}
+
+void select_legacy_scheduler(Runtime *runtime, uint32_t mode) {
+    always_assert(
+        mode == SCHEDULER_RUNTIME_MODE_LEGACY_GRAPH || mode == SCHEDULER_RUNTIME_MODE_LEGACY_UNSUPPORTED_SHAPE
+    );
+    for (int32_t i = 0; i < runtime->get_worker_count(); ++i) {
+        runtime->workers[i].aicpu_ready = mode;
+        runtime->workers[i].task = 0;
+    }
+}
+
+bool create_scheduler_state(
+    Runtime *runtime, const HostApi *api, SharedMemoryHandle &host_sm_handle, int32_t total_tasks,
+    uint64_t task_window_size, const sm_layout::SegmentOffsets &device_segments
+) {
+    release_scheduler_state(runtime, api);
+    if (total_tasks < 0 || task_window_size == 0 || static_cast<uint64_t>(total_tasks) > task_window_size) {
+        LOG_ERROR(
+            "A5 HBG AICore scheduler: invalid graph size tasks=%d window=%" PRIu64, total_tasks, task_window_size
+        );
+        return false;
+    }
+    SchedulerGraphView host_graph{
+        reinterpret_cast<uint64_t>(host_sm_handle.header->tasks.task_storage),
+        0,
+        static_cast<uint64_t>(total_tasks),
+        task_window_size - 1,
+    };
+    for (int64_t task_id = 0; task_id < total_tasks; ++task_id) {
+        ChipTaskSlotState &slot = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_id);
+        if (slot.task_kind == TaskKind::GRAPH) {
+            select_legacy_scheduler(runtime, SCHEDULER_RUNTIME_MODE_LEGACY_GRAPH);
+            LOG_INFO("A5 HBG: retaining AICPU scheduling for a graph-execution run");
+            return true;
+        }
+    }
+    std::vector<int64_t> inline_completed_task_ids;
+    std::vector<SchedulerTaskMetadata> task_metadata(static_cast<size_t>(total_tasks));
+    uint64_t aic_task_count = 0;
+    uint64_t aiv_task_count = 0;
+    uint64_t executable_task_count = 0;
+    uint64_t executable_subtask_count = 0;
+    uint64_t gang_task_count = 0;
+    uint64_t aic_worker_demand = 0;
+    uint64_t aiv_worker_demand = 0;
+    int64_t legacy_shape_task_id = -1;
+    for (int64_t task_id = 0; task_id < total_tasks; ++task_id) {
+        ChipTaskSlotState &slot = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_id);
+        SchedulerTaskShape shape{};
+        SchedulerGraphResult status = scheduler_classify_task_shape(host_graph, task_id, &shape);
+        bool inline_dispatch_task = false;
+        if (status != SchedulerGraphResult::OK) {
+            bool inline_completed_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE &&
+                                         slot.active_mask.raw() == 0 && slot.logical_block_num == 1 &&
+                                         slot.total_required_subtasks == 0 &&
+                                         slot.task_state.load(std::memory_order_acquire) == CHIP_TASK_COMPLETED &&
+                                         slot.task_attrs.allow_early_resolve() &&
+                                         !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
+            if (inline_completed_task) {
+                inline_completed_task_ids.push_back(task_id);
+                continue;
+            }
+            inline_dispatch_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE && slot.active_mask.raw() == 0 &&
+                                   slot.logical_block_num == 1 && slot.total_required_subtasks == 0 &&
+                                   slot.task_state.load(std::memory_order_acquire) == CHIP_TASK_PENDING &&
+                                   !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
+            if (!inline_dispatch_task) {
+                LOG_ERROR(
+                    "A5 HBG AICore scheduler: invalid v0 task id=%" PRId64 " status=%" PRIu64, task_id,
+                    static_cast<uint64_t>(status)
+                );
+                return false;
+            }
+            shape.task_id = task_id;
+            shape.active_mask = SUBTASK_MASK_AIV0;
+        }
+        // Ordinary tasks retain the existing ChipTaskSlotState scheduling
+        // semantics. Only the legacy inline-dispatch fallback synthesizes its
+        // AIV0 execution shape because it has no active subtask in the slot.
+        const uint8_t classified_active_mask = shape.active_mask;
+        const ActiveMask metadata_active_mask =
+            inline_dispatch_task ? ActiveMask(classified_active_mask) : slot.active_mask;
+        const uint8_t active_mask = metadata_active_mask.core_mask();
+        const uint32_t active_subtasks = static_cast<uint32_t>(__builtin_popcount(active_mask));
+        if (slot.logical_block_num <= 0) {
+            LOG_ERROR(
+                "A5 HBG AICore scheduler: task id=%" PRId64 " has invalid block_num=%d", task_id, slot.logical_block_num
+            );
+            return false;
+        }
+        const uint32_t logical_block_num = static_cast<uint32_t>(slot.logical_block_num);
+        if (active_subtasks == 0 || logical_block_num > UINT16_MAX / active_subtasks) {
+            LOG_ERROR(
+                "A5 HBG AICore scheduler: task id=%" PRId64 " block/subtask product exceeds scheduler state capacity",
+                task_id
+            );
+            return false;
+        }
+        const uint32_t expected_subtasks = logical_block_num * active_subtasks;
+        if ((!inline_dispatch_task && (slot.active_mask.raw() != classified_active_mask ||
+                                       static_cast<uint32_t>(slot.total_required_subtasks) != expected_subtasks)) ||
+            expected_subtasks > UINT16_MAX || slot.task_state.load(std::memory_order_acquire) != CHIP_TASK_PENDING ||
+            (slot.task_attrs.has_predicate() && (active_subtasks != 1 || logical_block_num != 1))) {
+            LOG_ERROR(
+                "A5 HBG AICore scheduler: task id=%" PRId64
+                " has inconsistent shape/state or uses predicate/early-resolve",
+                task_id
+            );
+            return false;
+        }
+        for (uint32_t subtask_slot = 0; subtask_slot < 3; ++subtask_slot) {
+            if ((active_mask & (1U << subtask_slot)) == 0 || inline_dispatch_task) continue;
+            const int32_t kernel_id = shape.kernel_ids[subtask_slot];
+            if (kernel_id < 0 || kernel_id >= RUNTIME_MAX_FUNC_ID || runtime->get_function_bin_addr(kernel_id) == 0) {
+                LOG_ERROR(
+                    "A5 HBG AICore scheduler: task id=%" PRId64 " kernel id %d has no registered callable", task_id,
+                    kernel_id
+                );
+                return false;
+            }
+        }
+        __gm__ uint8_t *payload = scheduler_graph_payload(host_graph, task_id);
+        const auto *predicate =
+            reinterpret_cast<const SchedulerDispatchPredicate *>(payload + SCHEDULER_GRAPH_PREDICATE_OFFSET);
+        if (!scheduler_dispatch_predicate_metadata_valid(predicate->addr, predicate->elem_size, predicate->op)) {
+            LOG_ERROR("A5 HBG AICore scheduler: task id=%" PRId64 " has malformed predicate metadata", task_id);
+            return false;
+        }
+        int32_t fanin_count = *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
+        if (fanin_count < 0) {
+            LOG_ERROR("A5 HBG AICore scheduler: task id=%" PRId64 " has invalid fanin count %d", task_id, fanin_count);
+            return false;
+        }
+        if (slot.task_attrs.requires_sync_start() && logical_block_num == 1) {
+            LOG_ERROR("A5 HBG AICore scheduler: sync-start task id=%" PRId64 " must have block_num > 1", task_id);
+            return false;
+        }
+        if (!scheduler_resident_v0_task_shape_supported(
+                active_subtasks, logical_block_num, slot.task_attrs.requires_sync_start()
+            )) {
+            if (legacy_shape_task_id < 0) legacy_shape_task_id = task_id;
+        }
+        SchedulerTaskMetadata &metadata = task_metadata[static_cast<size_t>(task_id)];
+        for (uint32_t subtask_slot = 0; subtask_slot < 3; ++subtask_slot) {
+            metadata.kernel_ids[subtask_slot] = (active_mask & (1U << subtask_slot)) != 0 ?
+                                                    static_cast<uint16_t>(shape.kernel_ids[subtask_slot]) :
+                                                    UINT16_MAX;
+        }
+        metadata.active_mask = active_mask;
+        metadata.flags = scheduler_task_metadata_flags_from_submit_state(
+            metadata_active_mask, slot.task_attrs, slot.logical_block_num, fanin_count != 0, inline_dispatch_task
+        );
+        metadata.logical_block_num = static_cast<uint16_t>(logical_block_num);
+        metadata.total_required_subtasks = static_cast<uint16_t>(expected_subtasks);
+        metadata.timing_slot = slot.task_attrs.timing_slot();
+        if ((active_mask & 1U) != 0) {
+            ++aic_task_count;
+            aic_worker_demand = std::max<uint64_t>(aic_worker_demand, logical_block_num);
+        }
+        const uint32_t active_aiv_subtasks = active_subtasks - ((active_mask & 1U) != 0 ? 1U : 0U);
+        if (active_aiv_subtasks != 0) {
+            ++aiv_task_count;
+            aiv_worker_demand = std::max<uint64_t>(aiv_worker_demand, logical_block_num * active_aiv_subtasks);
+        }
+        if (scheduler_task_is_gang(metadata.flags)) ++gang_task_count;
+        executable_subtask_count += expected_subtasks;
+        ++executable_task_count;
+    }
+
+    if (executable_task_count + inline_completed_task_ids.size() != static_cast<uint64_t>(total_tasks)) {
+        LOG_ERROR("A5 HBG AICore scheduler: task metadata does not cover the graph");
+        return false;
+    }
+    if (legacy_shape_task_id >= 0) {
+        select_legacy_scheduler(runtime, SCHEDULER_RUNTIME_MODE_LEGACY_UNSUPPORTED_SHAPE);
+        LOG_INFO(
+            "A5 HBG: retaining AICPU scheduling for task id=%" PRId64 " with MIX, SPMD, or sync-start shape",
+            legacy_shape_task_id
+        );
+        return true;
+    }
+
+    AicoreSchedulerLayout layout{};
+    if (!scheduler_plan_layout(static_cast<uint64_t>(total_tasks), aic_task_count, aiv_task_count, &layout) ||
+        layout.total_size > std::numeric_limits<uint64_t>::max() - (SCHEDULER_STATE_ALIGNMENT - 1)) {
+        LOG_ERROR("A5 HBG AICore scheduler: scheduler state layout overflow");
+        return false;
+    }
+    layout.executable_task_count = executable_task_count;
+    layout.executable_subtask_count = executable_subtask_count;
+    layout.gang_task_count = gang_task_count;
+    layout.aic_worker_demand = aic_worker_demand;
+    layout.aiv_worker_demand = aiv_worker_demand;
+
+    const uint64_t allocation_size = layout.total_size + SCHEDULER_STATE_ALIGNMENT - 1;
+    void *allocation = api->device_malloc(static_cast<size_t>(allocation_size));
+    if (allocation == nullptr) {
+        LOG_ERROR("A5 HBG AICore scheduler: failed to allocate %" PRIu64 " scheduler state bytes", allocation_size);
+        return false;
+    }
+    const uintptr_t aligned_address = (reinterpret_cast<uintptr_t>(allocation) + SCHEDULER_STATE_ALIGNMENT - 1) &
+                                      ~(static_cast<uintptr_t>(SCHEDULER_STATE_ALIGNMENT) - 1);
+
+    std::vector<uint8_t> storage(static_cast<size_t>(allocation_size));
+    const uintptr_t host_aligned_address =
+        (reinterpret_cast<uintptr_t>(storage.data()) + SCHEDULER_STATE_ALIGNMENT - 1) &
+        ~(static_cast<uintptr_t>(SCHEDULER_STATE_ALIGNMENT) - 1);
+    void *host_base = reinterpret_cast<void *>(host_aligned_address);
+    if (!scheduler_init_data_from_layout(host_base, layout)) {
+        api->device_free(allocation);
+        LOG_ERROR("A5 HBG AICore scheduler: failed to initialize scheduler state");
+        return false;
+    }
+
+    auto *task_controls = scheduler_state_at<SchedulerTaskControl>(host_base, layout.task_controls_offset);
+    for (int64_t task_id : inline_completed_task_ids) {
+        task_controls[task_id].state = static_cast<int64_t>(SchedulerTaskState::DONE);
+        task_controls[task_id].wake_list_head = SCHEDULER_WAKE_LIST_CLOSED;
+    }
+    static_assert(
+        SCHEDULER_CALLABLE_CAPACITY == RUNTIME_MAX_FUNC_ID,
+        "scheduler state callable table must cover the runtime table"
+    );
+    auto *callable_addresses = scheduler_state_at<uint64_t>(host_base, layout.callable_addresses_offset);
+    const bool cpu_sim = std::strcmp(get_platform(), "a5sim") == 0;
+    for (uint32_t func_id = 0; func_id < SCHEDULER_CALLABLE_CAPACITY; ++func_id) {
+        const uint64_t callable_address = runtime->get_function_bin_addr(static_cast<int32_t>(func_id));
+        callable_addresses[func_id] =
+            callable_address == 0 ?
+                0 :
+                (cpu_sim ? reinterpret_cast<const CoreCallable *>(callable_address)->resolved_addr() :
+                           callable_address + CoreCallable::binary_data_offset());
+    }
+    auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(host_base, layout.task_metadata_offset);
+    std::copy(task_metadata.begin(), task_metadata.end(), metadata);
+
+    const uint64_t device_sm_address = reinterpret_cast<uint64_t>(runtime->get_gm_sm_ptr());
+    auto *run_control = scheduler_state_at<SchedulerRunControl>(host_base, layout.run_control_offset);
+    run_control->expected_task_count = static_cast<uint64_t>(total_tasks);
+    run_control->inline_completed_count = inline_completed_task_ids.size();
+    run_control->aic_task_count = aic_task_count;
+    run_control->aiv_task_count = aiv_task_count;
+    run_control->aic_worker_demand = aic_worker_demand;
+    run_control->aiv_worker_demand = aiv_worker_demand;
+    run_control->dispatch_payloads_offset = layout.dispatch_payloads_offset;
+    run_control->task_metadata_offset = layout.task_metadata_offset;
+    run_control->ready_inboxes_offset = layout.ready_inboxes_offset;
+    run_control->ready_directory_offset = layout.ready_directory_offset;
+    run_control->gang_coordinator_offset = layout.gang_coordinator_offset;
+    run_control->gang_cohorts_offset = layout.gang_cohorts_offset;
+    run_control->scheduler_timeout_cycles = SCHEDULER_TIMEOUT_CYCLES;
+    run_control->error_task_id = UINT64_MAX;
+    run_control->error_core_id = UINT64_MAX;
+    run_control->error_core_type = UINT64_MAX;
+    auto *gang_coordinator = scheduler_state_at<SchedulerGangCoordinator>(host_base, layout.gang_coordinator_offset);
+    gang_coordinator->gang_task_count = gang_task_count;
+
+    auto *contexts = scheduler_state_at<SchedulerWorkerContext>(host_base, layout.worker_contexts_offset);
+    int32_t aic_rank = 0;
+    int32_t aiv_rank = 0;
+    for (int32_t i = 0; i < runtime->get_worker_count(); ++i) {
+        SchedulerWorkerContext &context = contexts[i];
+        context.core_type = static_cast<int32_t>(runtime->workers[i].core_type);
+        context.physical_core_id = -1;
+        context.type_rank = context.core_type == static_cast<int32_t>(CoreType::AIC) ? aic_rank++ : aiv_rank++;
+        context.active = 0;
+        context.run_control_offset = layout.run_control_offset;
+        context.task_controls_offset = layout.task_controls_offset;
+        context.completion_inboxes_offset = layout.completion_inboxes_offset;
+        context.task_metadata_offset = layout.task_metadata_offset;
+        context.aicpu_lifecycle_traces_offset = layout.aicpu_lifecycle_traces_offset;
+        context.ready_inboxes_offset = layout.ready_inboxes_offset;
+        context.ready_owner_states_offset = layout.ready_owner_states_offset;
+        context.ready_directory_offset = layout.ready_directory_offset;
+        context.worker_contexts_offset = layout.worker_contexts_offset;
+        context.dispatch_slots_offset = layout.dispatch_slots_offset;
+        context.callable_addresses_offset = layout.callable_addresses_offset;
+        context.runtime_worker_count = static_cast<uint64_t>(runtime->get_worker_count());
+        context.bootstrap_done = 0;
+        context.gang_coordinator_offset = layout.gang_coordinator_offset;
+        context.gang_cohorts_offset = layout.gang_cohorts_offset;
+        context.gang_participants_offset = layout.gang_participants_offset;
+        context.gang_commands_offset = layout.gang_commands_offset;
+        context.graph_storage_address = device_sm_address + device_segments.storage;
+        context.graph_reserved_address = 0;
+        context.scheduler_state_base_address = aligned_address;
+        context.dispatch_payload_offset = layout.dispatch_payloads_offset + static_cast<uint64_t>(i) *
+                                                                                SCHEDULER_PENDING_SLOT_COUNT *
+                                                                                sizeof(DispatchPayload);
+        context.trace_cells_offset = layout.trace_cells_offset;
+        context.task_window_last_index = task_window_size - 1;
+        context.graph_task_count = static_cast<uint64_t>(total_tasks);
+        context.worker_index = static_cast<uint64_t>(i);
+    }
+
+    if (api->copy_to_device(
+            reinterpret_cast<void *>(aligned_address), host_base, static_cast<size_t>(layout.total_size)
+        ) != 0) {
+        api->device_free(allocation);
+        LOG_ERROR("A5 HBG AICore scheduler: failed to publish scheduler state");
+        return false;
+    }
+    for (int32_t i = 0; i < runtime->get_worker_count(); ++i) {
+        runtime->workers[i].aicpu_ready = SCHEDULER_RUNTIME_MODE_RESIDENT_PENDING;
+        runtime->workers[i].task =
+            aligned_address + layout.worker_contexts_offset + static_cast<uint64_t>(i) * sizeof(SchedulerWorkerContext);
+    }
+    {
+        std::scoped_lock lock(scheduler_state_owners_mutex);
+        scheduler_state_owners.emplace(
+            runtime, SchedulerStateOwner{allocation, reinterpret_cast<void *>(aligned_address), allocation_size, layout}
+        );
+    }
+    LOG_INFO("A5 HBG: selected resident AICore scheduling for %d tasks", total_tasks);
+    return true;
+}
 
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, RuntimeContext *rt,
@@ -944,6 +1293,11 @@ int32_t run_host_orchestration(
         static_cast<const char *>(host_sm), task_capacity, bind_usage, heap_rebase, upload_base + copied_bytes
     );
     always_assert(compacted == image_bytes);
+
+    const sm_layout::SegmentOffsets device_segments = sm_layout::segment_offsets(sm_layout::image_extents(bind_usage));
+    if (!create_scheduler_state(runtime, api, host_sm_handle, total_tasks, task_capacity, device_segments)) {
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
 
     const BindPhaseMark h2d_phase = bind_phase_begin();
     if (api->copy_to_device(arena_dev + layout.off_copied_begin, upload_base, upload_bytes) != 0) {
@@ -1438,6 +1792,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         }
     }
     LOG_INFO("Freed %d device allocations", tensor_pair_count);
+    release_scheduler_state(runtime, api);
 
     // The dispatch table is owned by bind_callable_to_runtime, which clears it
     // before replaying the active callable's addresses. The chip-callable device

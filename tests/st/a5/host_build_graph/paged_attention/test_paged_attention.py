@@ -68,16 +68,14 @@ class TestPagedAttentionHostBuildGraphA5(SceneTestCase):
 
     CASES = [
         {
-            # Marked manual for host_build_graph: this batch=256 case submits
-            # ~64K tasks, and host-orchestration populates the whole task graph
-            # before the device schedules — nothing is reclaimed mid-orchestration,
-            # so the table must hold the entire graph at once. That exceeds the
-            # default (16384 slots). Run it explicitly with a larger
-            # runtime_env.ring_task_window if needed; the GM heap needs no sizing,
-            # since it is committed to the size orchestration measured.
             "name": "Case1",
             "platforms": ["a5"],
             "manual": True,
+            "config": {
+                "runtime_env": {
+                    "ring_task_window": 131072,
+                }
+            },
             "params": {
                 "batch": 256,
                 "num_heads": 16,

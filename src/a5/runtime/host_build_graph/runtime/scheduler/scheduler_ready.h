@@ -151,10 +151,7 @@ scheduler_evaluate_task_predicate(const SchedulerGraphView &graph, int64_t task_
         reinterpret_cast<__gm__ SchedulerDispatchPredicate *>(payload + SCHEDULER_GRAPH_PREDICATE_OFFSET);
     scheduler_observe_cache_line(predicate);
     if (predicate->op == 0) return SchedulerPredicateResult::PASS;
-    if (predicate->op > 6 ||
-        (predicate->elem_size != 1 && predicate->elem_size != 2 && predicate->elem_size != 4 &&
-         predicate->elem_size != 8) ||
-        predicate->addr == 0 || (predicate->addr & (static_cast<uint64_t>(predicate->elem_size) - 1)) != 0)
+    if (!scheduler_dispatch_predicate_metadata_valid(predicate->addr, predicate->elem_size, predicate->op))
         return SchedulerPredicateResult::MALFORMED;
 
     __gm__ void *operand = reinterpret_cast<__gm__ void *>(predicate->addr);
@@ -311,7 +308,7 @@ inline __aicore__ void scheduler_record_error(
     if (graph != nullptr) {
         scheduler_gm_store(run_control->error_graph_task_count, graph->task_count);
         scheduler_gm_store(run_control->error_storage_address, graph->storage_address);
-        scheduler_gm_store(run_control->error_task_window_mask, graph->task_window_mask);
+        scheduler_gm_store(run_control->error_task_window_last_index, graph->task_window_last_index);
     }
     if (context != nullptr) {
         scheduler_gm_store(run_control->error_core_id, static_cast<uint64_t>(context->physical_core_id));

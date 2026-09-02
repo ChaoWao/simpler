@@ -9,34 +9,21 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cstdint>
-
-#include "orchestration_api.h"
-
-namespace {
-
-constexpr int kNoopKernel = 0;
-
-}  // namespace
+#include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
 extern "C" {
 
 __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &args) {
     (void)args;
-    return OrchestrationConfig{.expected_arg_count = 1};
+    return OrchestrationConfig{.expected_arg_count = 3};
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
-    const simpler::hbg::Tensor &input = args.tensor(0).ref();
-
-    CoreTaskArgs normal_args;
-    normal_args.add_inout(input);
-    normal_args.launch_spec.set_block_num(1);
-    const TaskId normal_task = rt_submit_aiv_task(kNoopKernel, normal_args).task_id();
-
-    CoreTaskArgs dummy_args;
-    dummy_args.set_dependencies(&normal_task, 1);
-    rt_submit_dummy_task(dummy_args);
+    CoreTaskArgs root;
+    root.add_input(args.tensor(0).ref());
+    root.add_input(args.tensor(1).ref());
+    root.add_inout(args.tensor(2).ref());
+    rt_submit_aiv_task(0, root);
 }
 
 }  // extern "C"
