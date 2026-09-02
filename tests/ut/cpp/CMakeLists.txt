@@ -963,6 +963,18 @@ target_sources(test_hbg_slot_claim PRIVATE
     ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+# Drives the real orchestrator submit path to pin the early-dispatch
+# qualification verdicts (ed_flags) and the sorted fanin rows.
+add_a2a3_hbg_runtime_test(test_hbg_ed_qualification common/test_hbg_ed_qualification.cpp)
+target_sources(test_hbg_ed_qualification PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
+add_a5_hbg_runtime_test(test_a5_hbg_ed_qualification common/test_hbg_ed_qualification.cpp)
+target_sources(test_a5_hbg_ed_qualification PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a2a3_hbg_runtime_test(test_hbg_graph_recording_bounds common/test_hbg_graph_recording_bounds.cpp)
 target_sources(test_hbg_graph_recording_bounds PRIVATE
     ${HBG_ORCH_SHARED_SOURCES}

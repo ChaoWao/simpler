@@ -191,7 +191,7 @@ void SchedulerContext::complete_slot_task(
         }
 #endif
         // 3S+1P: hand the finished task to the dedicated resolution (P) thread.
-        // P publishes completion_flags and drains the wake list — and owns
+        // P publishes progress_flags and drains the wake list — and owns
         // completed_tasks_, so this scheduler thread neither
         // resolves nor bumps completed_this_turn. (The Resolve swimlane bar is
         // emitted by P, not here.)
@@ -272,7 +272,7 @@ void SchedulerContext::check_running_cores_for_completion(
         // waiting for its doorbell — it physically cannot ACK/FIN yet, so
         // reading its COND (MMIO, and the core is hot-spinning on its own SPR)
         // every poll is pure waste that drags out the completion phase. The
-        // doorbell (try_early_dispatch_release) flips early_dispatch_state to DISPATCHED, at
+        // producer-release doorbell flips early_dispatch_state to DISPATCHED, at
         // which point the core becomes pollable again and its FIN is caught.
         // Cheap cacheable load; no MMIO. Pending slot is empty while gated.
         {
@@ -396,9 +396,7 @@ void SchedulerContext::check_running_cores_for_completion(
                 promote_pending_to_running(core);  // Case 2 or Case 3 (with pending)
                 if (sync_start_promote) {
                     promoted->to_payload().running_slot_count.fetch_add(1, std::memory_order_seq_cst);
-                    if (sched_->maybe_rendezvous_ring(*promoted)) {
-                        sched_->propagate_dispatch_fanin(*promoted);
-                    }
+                    sched_->maybe_rendezvous_ring(*promoted);
                 }
             } else {
                 clear_running_slot(core);  // Case 1 or Case 3 (no pending)
@@ -752,7 +750,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // attempt remains published while the gate is open; the next drain owner advances it
     // behind the -1 sentinel. Followers identify reopen by gate-open or attempt change.
     // `slot_state` is a local holding the fa_fused slot (not drain_state_), so it stays valid for
-    // the propagate below even if a new drain reuses pending_task after reopen.
+    // the rendezvous retry below even if a new drain reuses pending_task after reopen.
     std::atomic_thread_fence(std::memory_order_release);
     drain_state_.pending_task.store(nullptr, std::memory_order_release);
     drain_state_.drain_stage_go.store(0, std::memory_order_relaxed);
@@ -763,9 +761,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // ahead of drain completion and fail while running_slot_count is still incomplete. When
     // every block landed directly in a running slot, no pending promotion remains to retry it.
     if (gated) {
-        sched_->retry_sync_start_rendezvous_after_staging(*slot_state);
-    } else {
-        sched_->propagate_dispatch_fanin(*slot_state);
+        sched_->maybe_rendezvous_ring(*slot_state);
     }
     SchedulerState::finish_early_sync_drain(slot_state->to_payload());
 }

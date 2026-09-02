@@ -425,9 +425,9 @@ void SchedulerContext::dispatch_shape(
                 }
             }
 
-            // (Early-dispatch pre-staged tasks never reach this ready-pop: they are
-            // released by their doorbell in release_fanin_and_check_ready the
-            // instant their last producer completes — see try_early_dispatch_release.)
+            // (Early-dispatch pre-staged tasks never reach this ready-pop: the
+            // completion path rings their doorbell the instant their last
+            // producer completes, bypassing the ready queue.)
 
             if (slot_state->task_attrs.requires_sync_start()) {
                 if (is_pending) {
@@ -501,7 +501,6 @@ void SchedulerContext::dispatch_shape(
         flush_publish();
         for (int i = 0; i < published_n; i++) {
             sched_->record_published_blocks(*published_list[i], published_counts[i]);
-            sched_->propagate_dispatch_fanin(*published_list[i]);
         }
 #if SIMPLER_SCHED_PROFILING
         chip_swimlane.sched_dispatch_setup_cycle += (get_sys_cnt_aicpu() - t_setup_start);
@@ -708,19 +707,14 @@ int32_t SchedulerContext::stage_consumer_blocks(
         wmb();
     }
     sched_->record_published_blocks(*c, staged);
-    // Retry unconditionally after publication. The guards are cheap, and a
-    // pre-ring state read can become stale if release completes before this
-    // count update.
-    sched_->propagate_dispatch_fanin(*c);
     return staged;
 }
 
 // Early-dispatch analog of dispatch_shape: drain early_dispatch_queues[shape] and
 // pre-stage claimed block ranges onto this thread's `shape` cores for `phase`. IDLE
 // stages onto idle cores (RUNNING slot, gated); PENDING stages onto a running core's
-// gated pending slot. Candidates are pushed to the shape's queue EVENT-DRIVEN by
-// propagate_dispatch_fanin, so the shape is the queue index (no per-consumer
-// to_shape()). Returns the number of blocks staged.
+// gated pending slot. A candidate is queued under its own shape, so the shape is
+// the queue index (no per-consumer to_shape()). Returns the number of blocks staged.
 int32_t
 SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, CoreTracker::DispatchPhase phase) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -773,9 +767,9 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, ResourceShape shape, 
         int32_t freecores = bucket.has_value() ? bucket.count() : 0;
         if (freecores == 0) {  // no cores for this shape+phase — give this + the unprocessed rest back
             // A dropped candidate keeps its STAGING claim and is recovered by the
-            // producer release: try_early_dispatch_release rings whatever is staged
-            // and routes the unstaged remainder to the ready queue, because it
-            // returns on next_block_idx rather than on the claim state.
+            // producer release, which rings whatever is staged and routes the
+            // unstaged remainder to the ready queue: release decides on
+            // next_block_idx rather than on the claim state.
             if (!sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi))
                 LOG_DEBUG(
                     "[EARLY_DISPATCH] queue full on batch re-push, dropping %d candidate(s) to normal dispatch",
@@ -830,6 +824,33 @@ int32_t SchedulerContext::try_early_dispatch(
 
     int32_t total_staged = 0;
 
+    // Publish-list drain: rescan the waiters a producer's publish event
+    // detached. An all-published verdict claims the candidate and queues it
+    // for pre-staging. The batch bound keeps one huge-fanout chain from
+    // long-tailing a single idle pass; the remainder goes back to the queue.
+    ChipTaskSlotState *waiter = nullptr;
+    if (sched_->ed_publish_drain_queue.size() > 0 && sched_->ed_publish_drain_queue.pop_batch(&waiter, 1) == 1) {
+        int32_t processed = 0;
+        while (waiter != nullptr && processed < ED_PUBLISH_DRAIN_BATCH_MAX) {
+            ChipTaskSlotState *next = waiter->next_in_ed_publish_list;
+            const bool all_published = sched_->advance_ed_publish_scan(*waiter);
+#if SIMPLER_SCHED_PROFILING
+            sched_->ed_publish_stats.waiters_rescanned.fetch_add(1, std::memory_order_relaxed);
+            if (all_published) {
+                sched_->ed_publish_stats.candidates_ready.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                sched_->ed_publish_stats.rehangs.fetch_add(1, std::memory_order_relaxed);
+            }
+#endif
+            if (all_published) sched_->enqueue_early_dispatch_candidate(*waiter);
+            processed++;
+            waiter = next;
+        }
+        if (waiter != nullptr && !sched_->ed_publish_drain_queue.push(waiter)) {
+            sched_->ed_publish_drain_drops.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     // ===== Tier 0: sync_start cohorts (highest occupancy tier, all-or-nothing) =====
     // sync_start candidates park in their own shape-agnostic queue. They cannot ride
     // early_dispatch_shape's per-thread partial range-claim: a partial cohort would strand
@@ -860,7 +881,7 @@ int32_t SchedulerContext::try_early_dispatch(
                 c->to_payload().running_slot_count.store(
                     static_cast<int16_t>(staged.running_cores), std::memory_order_seq_cst
                 );
-                sched_->retry_sync_start_rendezvous_after_staging(*c);
+                sched_->maybe_rendezvous_ring(*c);
                 SchedulerState::finish_early_sync_drain(c->to_payload());
                 total_staged += staged.staged_blocks;
             } else if (enter_drain_mode(c, c->logical_block_num)) {
@@ -899,7 +920,7 @@ int32_t SchedulerContext::try_early_dispatch(
 // =============================================================================
 
 // P owns no AICore cores. It drains the per-S CompletedTaskQueues and runs
-// on_task_complete for every finished task: publish completion_flags, drain the
+// on_task_complete for every finished task: publish progress_flags, drain the
 // wake list (route/re-register waiters into the ready queues). As the sole
 // producer of the ready queues its enqueues never contend. P owns
 // completed_tasks_ and the terminal completed_ flip, so the S threads keep

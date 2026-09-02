@@ -77,14 +77,14 @@ protected:
         sm_arena.release();
     }
 
-    // Fill the task table (storage entries / completion_flags) with poison.
+    // Fill the task table (storage entries / progress_flags) with poison.
     // init_header wrote only the header, so this is the state the table
     // is in before any submit writes it — modelling the never-zeroed device SM.
     void poison_task_table() {
         auto &tasks = sm_handle->header->tasks;
         const size_t n = static_cast<size_t>(CHIP_DEFAULT_GRAPH_TASKS);
         std::memset(tasks.task_storage, POISON, n * sizeof(ChipTaskStorage));
-        std::memset(tasks.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
+        std::memset(tasks.progress_flags, POISON, n * sizeof(std::atomic<uint8_t>));
     }
 };
 
@@ -147,10 +147,14 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         // real enum, never poison.
         const ChipTaskState state = st.task_state.load(std::memory_order_relaxed);
         EXPECT_TRUE(state == CHIP_TASK_PENDING || state == CHIP_TASK_COMPLETED);
-        // Completion flag is written to a real 0/1 (pending vs pre-completed), not a
-        // poison byte (0xAA).
-        const uint8_t cflag = tasks.completion_flags[local].load(std::memory_order_relaxed);
-        EXPECT_LE(cflag, uint8_t{1});
+        // Completion flag is written to a real value (pending vs pre-completed),
+        // not a poison byte (0xAA).
+        const uint8_t cflag = tasks.progress_flags[local].load(std::memory_order_relaxed);
+        // 0 = pending; a pre-completed hidden alloc carries COMPLETED|PUBLISHED.
+        EXPECT_TRUE(
+            cflag == 0 ||
+            cflag == (SharedMemoryTaskHeader::TASK_FLAG_COMPLETED | SharedMemoryTaskHeader::TASK_FLAG_PUBLISHED)
+        );
         // Payload counts are real, not the poison bit pattern.
         EXPECT_GE(pl.fanin_count, 0);
         EXPECT_LE(pl.fanin_count, CHIP_MAX_FANIN);

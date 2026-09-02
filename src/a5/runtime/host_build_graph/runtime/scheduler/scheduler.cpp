@@ -108,4 +108,31 @@ void SchedulerState::print_queues() {
         (unsigned long long)sched->early_sync_start_queue.enqueue_pos.load(std::memory_order_relaxed),
         (unsigned long long)sched->early_sync_start_queue.max_occupancy.load(std::memory_order_relaxed)
     );
+    const uint64_t pub_drops = sched->ed_publish_drain_drops.load(std::memory_order_relaxed);
+    LOG_TIMING(
+        "QPROBE ed_pubdrain pushes=%llu maxocc=%llu cap=%llu drops=%llu",
+        (unsigned long long)sched->ed_publish_drain_queue.enqueue_pos.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_drain_queue.max_occupancy.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_drain_queue.capacity, (unsigned long long)pub_drops
+    );
+    if (pub_drops > 0) {
+        LOG_WARN(
+            "[EARLY_DISPATCH] publish-drain queue dropped %llu chain(s); those candidates fell back to normal "
+            "dispatch",
+            (unsigned long long)pub_drops
+        );
+    }
+#if SIMPLER_SCHED_PROFILING
+    LOG_TIMING(
+        "QPROBE ed_publist registered=%llu immediate=%llu seals=%llu detached=%llu rescanned=%llu rehangs=%llu "
+        "ready=%llu",
+        (unsigned long long)sched->ed_publish_stats.registered.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.immediate_at_intake.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.publish_seals.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.chains_detached.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.waiters_rescanned.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.rehangs.load(std::memory_order_relaxed),
+        (unsigned long long)sched->ed_publish_stats.candidates_ready.load(std::memory_order_relaxed)
+    );
+#endif
 }

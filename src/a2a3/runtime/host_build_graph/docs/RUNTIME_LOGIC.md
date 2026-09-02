@@ -126,7 +126,7 @@ scalar `rt_orchestration_done` publishes into the runtime header.
 **Why the scheduler state is device-written.** `SchedulerState` holds no
 per-run content: `sm_header` and the task-header pointer derive from a pooled SM base,
 queue capacities are compile-time constants, polling reserves no wiring or
-dependency pool (readiness comes from the task table's `completion_flags`, which
+dependency pool (readiness comes from the task table's `progress_flags`, which
 the task header owns), and it has no host-side entry point at all. So the host would
 only be writing an initialization pattern — 203,392 bytes
 of it, dominated by `AsyncWaitList::entries` — for the device to receive and never
@@ -181,7 +181,7 @@ past `total_tasks`. So the SM H2D shipped each run is bounded, not capacity-size
 the contract that keeps `bind` proportional to the workload.
 
 The header is zeroed on the host; `descriptors`, `payloads`, `slot_states` and
-`completion_flags` are each written per task at submit. Per-slot reset is
+`progress_flags` are each written per task at submit. Per-slot reset is
 init-on-write in `orch::prepare_task` as each slot is claimed — there is no
 table-wide reset. In the mirror those four live prefixes are a full reservation
 apart, so `compact_live_image` restacks them (plus the three argument pools) into
@@ -214,7 +214,7 @@ therefore also its slot index: ids run `0..capacity-1`, never wrap, and every
 segment is indexed by the id directly — there is no slot mask, so the capacity need
 not be a power of two.
 
-Completion is published per task, in `completion_flags[local_id]`, and reclaims
+Completion is published per task, in `progress_flags[local_id]`, and reclaims
 neither task slots nor heap.
 
 There is no post-run sweep that makes graph space reusable. Runtime destruction
@@ -299,9 +299,18 @@ producer transition and does not require periodic dependency polling.
 The dispatchable shapes are `AIC`, `AIV`, and `MIX`; dependency-only `DUMMY`
 tasks use a dedicated queue and complete without AICore dispatch.
 
-Early producer propagation is currently disabled in HBG. The shared scheduler
-retains early-staging code for parity with `tensormap_and_ringbuffer`, but HBG's
-boot classifier and wake lists are the active readiness path.
+Early dispatch is detected by the publish list, the wake list's dual keyed on
+publication instead of completion. The host qualifies candidates at submit
+(at least one producer, every producer flagged and none of them a Graph shell —
+a shell has no publication event — no dispatch predicate, dispatchable
+shape) and sorts
+a candidate's fanin row by ascending local id; a candidate hangs on its
+latest-submitted unpublished producer, the producer's publish event seals the
+chain (sentinel
+exchange) and hands the detached waiters to idle threads, and an all-published
+rescan verdict queues the candidate for pre-staging. Release rings the staged
+doorbells at the ready funnel (`push_ready_routed`), the moment readiness is
+decided. Completion readiness itself remains the boot classifier + wake lists.
 
 ## 7. Dispatch and Completion
 

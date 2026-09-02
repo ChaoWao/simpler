@@ -276,6 +276,15 @@ static_assert(offsetof(TaskDescriptor, packed_buffer_base) == 24, "packed_buffer
  * by bulk tensor and scalar data. Fanin is always inline: it is hard-capped at
  * CHIP_MAX_FANIN and there is no spill pool.
  */
+// Host early-dispatch verdicts for ChipTaskSlotState::ed_flags (bitmask).
+inline constexpr uint8_t ED_FLAG_CANDIDATE = 1u << 0;
+inline constexpr uint8_t ED_FLAG_TRACKED = 1u << 1;
+
+// Publish-list drain batch bound: waiters one Phase 4b pass rescans before
+// the remainder goes back to the pending-drain queue, so one huge-fanout
+// producer cannot make a single idle pass long-tailed.
+inline constexpr int32_t ED_PUBLISH_DRAIN_BATCH_MAX = 32;
+
 // Early-dispatch claim states for TaskPayload::early_dispatch_state.
 enum EarlyDispatchState : uint8_t {
     EARLY_DISPATCH_NONE = 0,       // not pre-staged
@@ -325,7 +334,7 @@ struct TaskPayload {
     //
     // fanin holds flat position-independent producer local task ids. A producer is
     // named by its local id alone, so no per-edge indirection is stored. Scanned by
-    // classify_fanin_state against the shared-memory completion_flags. Hard-capped at
+    // classify_fanin_state against the shared-memory progress_flags. Hard-capped at
     // CHIP_MAX_FANIN (no dep-pool spill). Unbound on an in-graph task, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<simpler::hbg::Tensor> tensors;
@@ -345,14 +354,6 @@ struct TaskPayload {
     // the completed mask stable for its single launch owner, whether staging is local
     // or uses the global drain fallback.
     alignas(64) std::atomic<uint64_t> staged_core_mask[EARLY_DISPATCH_CORE_MASK_WORDS]{};
-    // Early-dispatch CANDIDATE detection, event-driven and counted rather than
-    // polled: seeded to 0 at submit with the producers already complete, then a
-    // flagged producer bumps each consumer after all of its logical blocks are
-    // published (propagate_dispatch_fanin).
-    // dispatch_fanin == fanin_actual_count  <=>  every producer is
-    // flagged-and-fully-published or was
-    // pre-completed  =>  this task is an early-dispatch candidate (push early_dispatch_queues[shape]).
-    std::atomic<int32_t> dispatch_fanin{0};  // CONSUMER side: fully-published + pre-completed producers
     // Number of logical blocks whose payloads and MMIO tokens are published.
     // Claimed-but-unpublished blocks do not make a producer launch-visible. Its
     // seq_cst updates pair with early_dispatch_state to avoid losing the final
@@ -367,7 +368,6 @@ struct TaskPayload {
     // mask and a late stager rings only its remaining bits. A sync_start consumer
     // preserves the mask for rendezvous counting and its single launch pass.
     std::atomic<uint8_t> early_dispatch_state{0};
-    std::atomic<uint8_t> dispatch_propagated{0};  // PRODUCER side: once-guard for fanout propagation
     // The launch owner publishes COMPLETE only after all owned doorbells are
     // visible, keeping fanout private until every gated block has launched.
     std::atomic<uint8_t> early_dispatch_launch_state{EARLY_DISPATCH_LAUNCH_NONE};
@@ -497,18 +497,14 @@ struct TaskPayload {
         // prepare_task only allocates/binds. prefetch() warms this
         // line (cache line 1) so these writes land in warm cache.
         //
-        // early_dispatch_state / staged_core_mask / dispatch_fanin are all CONSUMER-side: a
-        // task whose own allow_early_resolve is false still has them touched when
-        // one of ITS producers is flagged (propagate_dispatch_fanin bumps
-        // dispatch_fanin and may CAS early_dispatch_state on any consumer, independent of the
-        // consumer's own hint). So they MUST be zeroed here unconditionally.
-        // Publication, propagation, and launch fields share this same
-        // per-submit lifetime and are reset here too.
+        // early_dispatch_state / staged_core_mask are CONSUMER-side: a task
+        // whose own allow_early_resolve is false can still have them touched
+        // by the release path, independent of the consumer's own hint. So they
+        // MUST be zeroed here unconditionally. Publication and launch fields
+        // share this same per-submit lifetime and are reset here too.
         early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
         for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_core_mask[w].store(0, std::memory_order_relaxed);
-        dispatch_fanin.store(0, std::memory_order_relaxed);
-        dispatch_propagated.store(0, std::memory_order_relaxed);
         published_block_count.store(0, std::memory_order_relaxed);
         early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
         running_slot_count.store(0, std::memory_order_relaxed);
@@ -563,7 +559,7 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  * belongs to, and both are load-bearing:
  *
  *   - A GLOBAL task holds a slot in the SM task table, so its readiness truth is
- *     `completion_flags[local_id]` — a byte-per-slot array, which is what lets a
+ *     `progress_flags[local_id]` — a byte-per-slot array, which is what lets a
  *     fanin scan read many producers out of one cache line. `task_state` is then
  *     a mirror, read only by the cold-path stall dump.
  *   - An IN_GRAPH task lives in its Graph's own storage and has no slot in that
@@ -582,6 +578,19 @@ struct alignas(64) ChipTaskSlotState {
     // WAKE_LIST_SENTINEL and routes every waiter. Reset to nullptr at init.
     std::atomic<ChipTaskSlotState *> wake_list_head{nullptr};
     ChipTaskSlotState *next_in_wake_list{nullptr};
+
+    // --- ED publish list: the early-dispatch dual of the wake list above ---
+    // An ED candidate whose fanin scan finds an unpublished producer registers
+    // on that producer's publish list (CAS push through
+    // next_in_ed_publish_list). When the producer's last logical block is
+    // published, the dispatch path exchanges ed_publish_list_head to
+    // ED_PUBLISH_LIST_SENTINEL — sealing the list forever — and hands the
+    // detached waiters to the pending-drain queue for an idle thread to
+    // rescan. A registration CAS that meets the sentinel knows the producer is
+    // published and advances its scan instead of hanging. Only candidates and
+    // their producers ever touch these.
+    std::atomic<ChipTaskSlotState *> ed_publish_list_head{nullptr};
+    ChipTaskSlotState *next_in_ed_publish_list{nullptr};
 
     // Graph membership, and which of the two Graph structs this points at is
     // decided by task_kind rather than by anything stored here:
@@ -617,7 +626,7 @@ struct alignas(64) ChipTaskSlotState {
     // Completion state. PENDING at submit; COMPLETED at whichever completion path
     // owns this slot. For an IN_GRAPH task this is the readiness truth the device
     // itself polls (graph_first_unmet_producer); for a GLOBAL task it mirrors
-    // completion_flags[slot], which is what the device reads instead. Also read by
+    // progress_flags[slot], which is what the device reads instead. Also read by
     // the cold-path stall dump.
     std::atomic<ChipTaskState> task_state;
 
@@ -636,9 +645,37 @@ struct alignas(64) ChipTaskSlotState {
     std::atomic<bool> any_subtask_deferred{false};
     TaskKind task_kind{TaskKind::KERNEL};
 
-    // Keeps the record at one cache line. Members run widest-first, so their sizes
-    // sum to exactly the bytes this leaves and the record carries no padding.
-    uint8_t reserved[23];
+    // Early-dispatch verdicts, decided by the host orchestrator once this task's
+    // fanin region is final (this slot is part of the host-built SM image).
+    // Plain-write on the single-threaded submit path, before the slot is
+    // scheduler-visible; the device only ever reads them.
+    //   ED_FLAG_CANDIDATE  every producer carries allow_early_resolve, no
+    //                      dispatch predicate, dispatchable shape, fanin >= 1
+    //   ED_FLAG_TRACKED    at least one candidate names this task as a producer,
+    //                      so its publication state must be recorded
+    uint8_t ed_flags{0};
+
+    // Publish-list scan cursor of an ED candidate: the fanin-row index this
+    // task is hung on in the publish list. The row is sorted and publish bits
+    // are monotonic, so indices above the cursor are known-published forever
+    // and every rescan resumes here — each row entry is loaded once per life.
+    uint8_t ed_publish_scan_cursor{0};
+
+    // Completion-chain scan cursor: the fanin-row index this task last hung at
+    // in the wake list. Completion bits are monotonic, so indices above the
+    // cursor stay completed forever and every reclassification resumes here
+    // instead of re-walking the row's completed tail. 0xFF = never hung; the
+    // scan start folds it to fanin_count - 1. The classifier owning this task
+    // is its only writer, so a plain byte suffices.
+    uint8_t wake_scan_cursor{0xFF};
+    // Both cursors store fanin-row indices in a byte; 0xFF is wake's never-hung
+    // sentinel. append_fanin_or_fail hard-caps rows at CHIP_MAX_FANIN with a
+    // named fatal, and this ties any future cap raise to the cursor width.
+    static_assert(CHIP_MAX_FANIN < 0xFF, "scan cursors are uint8_t and 0xFF is reserved");
+
+    // Keeps the record at one cache line. Members run widest-first up to the
+    // byte block above, so their sizes sum to exactly the bytes this leaves.
+    uint8_t reserved[4];
 
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
         int16_t current = next_block_idx.load(std::memory_order_relaxed);
@@ -658,8 +695,8 @@ struct alignas(64) ChipTaskSlotState {
     }
 
     // Publishes completion. For an IN_GRAPH task this store is the whole
-    // publication — that task has no completion_flags byte. For a GLOBAL task it
-    // accompanies the completion_flags[slot] store that on_mixed_task_complete
+    // publication — that task has no progress_flags byte. For a GLOBAL task it
+    // accompanies the progress_flags[slot] store that on_mixed_task_complete
     // makes, and is the copy the cold-path stall dump reads.
     void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
 
@@ -684,6 +721,14 @@ struct alignas(64) ChipTaskSlotState {
         in_graph_local_id = -1;
         graph_context = nullptr;
         task_kind = TaskKind::KERNEL;
+        // ED_FLAG_TRACKED is only ever set by a consumer submitted AFTER this
+        // slot was claimed (producers precede consumers), so clearing at claim
+        // time cannot race a tracker.
+        ed_flags = 0;
+        ed_publish_scan_cursor = 0;
+        wake_scan_cursor = 0xFF;
+        ed_publish_list_head.store(nullptr, std::memory_order_relaxed);
+        next_in_ed_publish_list = nullptr;
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // Payload early-dispatch/fanin fields are (re)initialized in
@@ -702,7 +747,10 @@ struct alignas(64) ChipTaskSlotState {
 static_assert(sizeof(ChipTaskSlotState) == 64);
 // Pins the widest-first order that leaves the record padding-free: every member
 // before `reserved` is naturally aligned where the one before it ends.
-static_assert(offsetof(ChipTaskSlotState, reserved) == 41, "ChipTaskSlotState grew interior padding");
+static_assert(
+    offsetof(ChipTaskSlotState, ed_publish_list_head) == 16, "the ED publish pair sits right after its wake-list twin"
+);
+static_assert(offsetof(ChipTaskSlotState, reserved) == 60, "ChipTaskSlotState grew interior padding");
 
 // =============================================================================
 // Per-Task Storage
@@ -809,3 +857,8 @@ inline const ChipTaskSlotState &TaskPayload::to_slot() const {
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.
 inline ChipTaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<ChipTaskSlotState *>(static_cast<uintptr_t>(0x1));
+
+// Publish-list analog: "owner already published; no more registrations". Set
+// once by the owner's publish event, never cleared within a run.
+inline ChipTaskSlotState *const ED_PUBLISH_LIST_SENTINEL =
+    reinterpret_cast<ChipTaskSlotState *>(static_cast<uintptr_t>(0x1));
