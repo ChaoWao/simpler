@@ -189,8 +189,8 @@ self._impl.init(host_path, aicpu_path, aicore_path, dispatcher_path,
 2. Load `libhost_runtime.so` with `RTLD_LOCAL`.
 3. Resolve the runtime's binder from its handle and pass the shared state before
    resolving or calling its regular C API.
-4. Call `simpler_init(...)` to configure CANN, attach the device, and take
-   ownership of executor binaries.
+4. Call `simpler_init(...)` to configure CANN, attach the device, take ownership
+   of executor binaries, and provision the async-DMA workspace.
 5. When the runtime later loads a generated host orchestration SO or sim
    AICore SO, resolve that SO's binder from its own handle and pass the same
    state before invoking its entry point.

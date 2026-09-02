@@ -34,11 +34,15 @@
  * docs/investigations/2026-07-a2a3-sdma-fault-teardown.md. A Worker declines it
  * by leaving `enable_sdma` off, which is the default.
  *
- * Current support matrix: SDMA is available only on a2a3 onboard with the
- * tensormap_and_ringbuffer runtime. URMA is reserved for the future a5
- * per-domain provider. Host-build-graph, simulation, a5, and builds without
- * the a2a3 PTO-SDMA provider reject a request for SDMA during Worker
- * initialization, when the workspace would be provisioned.
+ * Current support matrix: the a2a3 onboard PTO-SDMA provider is compiled into
+ * every a2a3 onboard host_runtime, so both runtimes there provision SDMA on
+ * request — the gate is the platform, not the runtime. Only
+ * tensormap_and_ringbuffer is exercised with it, so host-build-graph's path from
+ * a provisioned address to a kernel's get_dma_workspace is unverified rather
+ * than closed. URMA is reserved for the future a5 per-domain provider.
+ * Simulation, a5, and builds without the a2a3 PTO-SDMA provider reject a request
+ * for SDMA during Worker initialization, when the workspace would be
+ * provisioned.
  */
 
 #ifndef PLATFORM_COMMON_DMA_WORKSPACE_H_

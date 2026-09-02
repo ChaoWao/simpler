@@ -391,7 +391,7 @@ int finalize_device(DeviceContextHandle ctx) {
 int simpler_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *prewarm_config
+    const CallConfig *prewarm_config, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 ) {
     if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
 
@@ -430,16 +430,25 @@ int simpler_init(
             std::vector<uint8_t> dispatcher_vec(dispatcher_binary, dispatcher_binary + dispatcher_size);
             runner->set_dispatcher_binary(std::move(dispatcher_vec));
         }
+        // Recorded before the bring-up below, which provisions the workspace and
+        // publishes its addresses in the same one-shot simpler_aicpu_init launch.
+        const uint8_t *warmup_bytes = static_cast<const uint8_t *>(sdma_warmup_binary);
+        std::vector<uint8_t> warmup_vec;
+        if (warmup_bytes != NULL && sdma_warmup_size > 0) {
+            warmup_vec.assign(warmup_bytes, warmup_bytes + sdma_warmup_size);
+        }
+        runner->set_dma_workspace_request(enable_sdma != 0, std::move(warmup_vec));
     } catch (...) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     // Eagerly run the one-shot device setup: create persistent AICPU/AICore
-    // streams, upload the dispatcher + inner SO bundle, and resolve the per-
-    // symbol rtFuncHandle for per-task launch — so the first simpler_register_callable
-    // / simpler_run does not pay any of these costs. Streams live until
-    // finalize_device; the cached rtFuncHandle on LoadAicpuOp and the
-    // preinstall file both live until ~DeviceRunner.
+    // streams, upload the dispatcher + inner SO bundle, resolve the per-symbol
+    // rtFuncHandle for per-task launch, and provision + publish + warm the
+    // async-DMA workspaces — so the first simpler_register_callable / simpler_run
+    // does not pay any of these costs. Streams live until finalize_device; the
+    // cached rtFuncHandle on LoadAicpuOp and the preinstall file both live until
+    // ~DeviceRunner.
     try {
         rc = runner->ensure_device_initialized();
     } catch (...) {
@@ -1145,19 +1154,6 @@ int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
         info->free_bytes = static_cast<uint64_t>(free_bytes);
         info->total_bytes = static_cast<uint64_t>(total_bytes);
         return 0;
-    } catch (...) {
-        return PTO_RUNTIME_ERR_INTERNAL;
-    }
-}
-
-int simpler_provision_dma_workspace(
-    DeviceContextHandle ctx, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
-) {
-    if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
-    try {
-        return static_cast<DeviceRunnerBase *>(ctx)->provision_dma_workspace(
-            enable_sdma != 0, sdma_warmup_binary, static_cast<size_t>(sdma_warmup_size)
-        );
     } catch (...) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }

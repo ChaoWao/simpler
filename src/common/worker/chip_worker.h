@@ -79,12 +79,14 @@ public:
     /// only one a caller can decline — every other supported engine is
     /// provisioned unconditionally, and SDMA is conditional only because its
     /// workspace is inseparable from 48 CP-process STARS streams whose
-    /// post-fault release CANN does not bound. Provisioning fails fast (init
-    /// throws) on a platform/runtime without SDMA support.
+    /// post-fault release CANN does not bound. Provisioning rides simpler_init,
+    /// so a platform/runtime without SDMA support fails init (this throws) and
+    /// no Worker reaches a run with a zero address it expected to be live.
     /// `sdma_warmup_path`, when non-empty, is the vector-only ELF that walks the
-    /// SDMA control path once per channel during that provisioning, moving the
-    /// cold-start cost off the first TPREFETCH_ASYNC. Optional: an empty path (or
-    /// an arch that builds no such ELF) only costs that first-call latency.
+    /// SDMA control path once per channel once that workspace is live, moving
+    /// the cold-start cost off the first TPREFETCH_ASYNC. Read only when
+    /// `enable_sdma` is set; an empty path (or an arch that builds no such ELF)
+    /// only costs that first-call latency.
     void init(
         const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
         const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config = nullptr,
@@ -263,7 +265,8 @@ private:
     using GetDeviceMemoryInfoFn = decltype(&device_memory_info_ctx);
     // From host_runtime.so. Single platform-side init that does (a) thread
     // attach + device-id record, (b) executor binary takeover, (c) onboard
-    // CANN dlog sync. Reads the current log level off HostLogger itself.
+    // CANN dlog sync, (d) async-DMA workspace provisioning. Reads the current
+    // log level off HostLogger itself.
     using SimplerInitFn = decltype(&simpler_init);
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = decltype(&simpler_run);
@@ -275,7 +278,6 @@ private:
     using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
-    using SimplerProvisionDmaWorkspaceFn = int (*)(void *, int, const void *, uint64_t);
     using FinalizeDeviceFn = int (*)(void *);
     using EnsureAclReadyFn = int (*)(void *, int);
     using CreateCommStreamFn = void *(*)(void *);
@@ -338,7 +340,6 @@ private:
     GetAicpuDlopenCountFn get_aicpu_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_host_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_run_stream_set_create_count_fn_ = nullptr;
-    SimplerProvisionDmaWorkspaceFn simpler_provision_dma_workspace_fn_ = nullptr;
     FinalizeDeviceFn finalize_device_fn_ = nullptr;
     EnsureAclReadyFn ensure_acl_ready_fn_ = nullptr;
     CreateCommStreamFn create_comm_stream_fn_ = nullptr;

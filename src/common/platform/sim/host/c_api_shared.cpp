@@ -377,7 +377,7 @@ int finalize_device(DeviceContextHandle ctx) {
 int simpler_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *prewarm_config
+    const CallConfig *prewarm_config, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 ) {
     // Sim has no AICPU dispatcher (the simulator runs AICPU in-process). Accept
     // the parameters for ABI parity with the onboard implementation and ignore
@@ -385,8 +385,15 @@ int simpler_init(
     // and the dispatcher / preinstall load path on sim isn't taken anyway.
     (void)dispatcher_binary;
     (void)dispatcher_size;
+    // Simulation provides no async-DMA workspaces, so there is nothing for a
+    // warmup ELF to warm either.
+    (void)sdma_warmup_binary;
+    (void)sdma_warmup_size;
 
     if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
+    // Opting into SDMA fails here rather than at the first kernel read, so such
+    // a Worker cannot come up on sim at all.
+    if (enable_sdma != 0) return PTO_RUNTIME_ERR_UNSUPPORTED;
 
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
 
@@ -953,18 +960,6 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
 int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
     if (ctx == NULL || info == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     return PTO_RUNTIME_ERR_UNSUPPORTED;
-}
-
-int simpler_provision_dma_workspace(
-    DeviceContextHandle ctx, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
-) {
-    // Simulation provides no async-DMA workspaces; opting into SDMA fails fast
-    // so such a Worker cannot come up on sim. With no workspace there is
-    // likewise nothing for the warmup ELF to warm.
-    (void)ctx;
-    (void)sdma_warmup_binary;
-    (void)sdma_warmup_size;
-    return enable_sdma == 0 ? 0 : PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
 }  // extern "C"
