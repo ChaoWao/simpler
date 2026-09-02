@@ -26,7 +26,7 @@
 #include "graph_execution.h"
 #include "runtime_status/error_names.h"
 #include "scheduler/scheduler.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 namespace {
 
@@ -397,7 +397,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     // layout, so a bare slot state would resolve outside itself.
     ChipTaskStorage outer{};
     TaskDescriptor &outer_task = outer.task;
-    outer_task.task_id = simpler::hbg::make_global_task(7);
+    outer_task.task_id = TaskId::make_global(7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     ChipTaskSlotState &outer_slot = outer.slot;
@@ -420,7 +420,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
 
     graph_execution_mark_completed(*execution);
     execution->retired_tasks.store(2, std::memory_order_release);
-    outer_task.task_id = simpler::hbg::make_global_task(8);
+    outer_task.task_id = TaskId::make_global(8);
 
     // Poison every field the rebuild is responsible for restoring. A replay that
     // preserved any of them would leave the poison observable.
@@ -444,7 +444,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(storage.payload.scalar_data()[0], 99U);
     EXPECT_EQ(execution->task_at(1).payload.scalar_data()[0], 18U);
     EXPECT_EQ(storage.payload.tensor_data()[0].version, 0);
-    EXPECT_EQ(storage.task.task_id, simpler::hbg::make_in_graph_task(/*graph_local_id=*/8, /*task_index=*/0));
+    EXPECT_EQ(storage.task.task_id, TaskId::make_in_graph(/*graph_task_id=*/8, /*in_graph_local_id=*/0));
     EXPECT_EQ(storage.task.packed_buffer_base, heap.base());
     EXPECT_EQ(storage.payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(second_boundary.data()));
     EXPECT_EQ(execution->task_at(1).payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
@@ -473,7 +473,7 @@ TEST(GraphExecutionReplay, MaterializesBoundaryScalarPoolWiderThanTaskPayload) {
 
     ChipTaskStorage outer{};
     TaskDescriptor &outer_task = outer.task;
-    outer_task.task_id = simpler::hbg::make_global_task(7);
+    outer_task.task_id = TaskId::make_global(7);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     ChipTaskSlotState &outer_slot = outer.slot;
@@ -717,11 +717,11 @@ TEST(GraphExecutionProgress, InGraphTaskResolutionIsNotAHostCompletion) {
     execution.remaining_tasks.store(1, std::memory_order_relaxed);
     graph_execution_set_state(execution, GraphExecutionState::ACTIVE, std::memory_order_relaxed);
     task.slot.graph_context = &execution;
-    task.slot.in_graph_task_index = 0;
+    task.slot.in_graph_local_id = 0;
 
     AsyncWaitList wait_list{};
     wait_list.entries[0].slot_state = &task.slot;
-    wait_list.entries[0].task_token = simpler::hbg::make_global_task(1);
+    wait_list.entries[0].task_token = TaskId::make_global(1);
     wait_list.entries[0].normal_done = true;
     wait_list.count = 1;
 
@@ -749,7 +749,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
 
     ChipTaskStorage outer{};
     TaskDescriptor &outer_task = outer.task;
-    outer_task.task_id = simpler::hbg::make_global_task(5);
+    outer_task.task_id = TaskId::make_global(5);
     outer_task.packed_buffer_base = heap.base();
     outer_task.packed_buffer_end = heap.end();
     ChipTaskSlotState &outer_slot = outer.slot;

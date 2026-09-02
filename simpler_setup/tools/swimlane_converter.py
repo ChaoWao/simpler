@@ -134,8 +134,8 @@ def _decode_in_graph_task_id(task_id):
     """Decode Scheduler-owned in-graph task ids.
 
     ``host_build_graph`` puts a materialized in-graph task in id space 1 (IN_GRAPH) with
-    ``local=(graph_local_id << 10) | task_index``; the stream-visible outer Graph task
-    stays in space 0 (GLOBAL). See src/common/host_build_graph/task_id_encoding.h.
+    ``local=(graph_task_id << 10) | in_graph_local_id``; the stream-visible outer Graph task
+    stays in space 0 (GLOBAL). See src/common/host_build_graph/task_id.h.
     """
     tid = normalize_task_id_int(task_id)
     if tid is None or ((tid >> 32) & 0xFFFFFFFF) != 1:
@@ -1454,13 +1454,13 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     "args": {
                         "outer_task_id": instance["outer_task_id"],
                         "visible_in_graph_task_count": len(task_indices),
-                        "visible_in_graph_task_index_min": min(task_indices),
-                        "visible_in_graph_task_index_max": max(task_indices),
+                        "visible_in_graph_local_id_min": min(task_indices),
+                        "visible_in_graph_local_id_max": max(task_indices),
                         "prepare_slice_count": instance["prepare_slice_count"],
                         "prepare_duration_us": instance["prepare_duration_us"],
                         "execution_start_us": instance["execution_start_us"],
                         "execution_duration_us": instance["execution_end_us"] - instance["execution_start_us"],
-                        "synthetic_id_layout": "ring1:(outer_task_id << 10) | in_graph_task_index",
+                        "synthetic_id_layout": "ring1:(outer_task_id << 10) | in_graph_local_id",
                     },
                     "cat": "graph_execution",
                     "cname": "rail_animation",

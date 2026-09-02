@@ -13,6 +13,7 @@ Accept optional PR number (`123`, `#123`) to update a specific PR, or no input (
 
 1. [Setup](../../lib/github/setup.md) — authenticate and detect context (role, remotes, state)
 2. **Auto-detect cross-fork PR context**: If no PR number provided and on a `pr-*-work` branch, check upstream tracking to detect cross-fork push target:
+
    ```bash
    if [ -z "$PR_NUMBER" ]; then
      UPSTREAM=$(git rev-parse --abbrev-ref "@{upstream}" 2>/dev/null || echo "")
@@ -27,6 +28,7 @@ Accept optional PR number (`123`, `#123`) to update a specific PR, or no input (
      fi
    fi
    ```
+
 3. [Lookup PR](../../lib/github/lookup-pr.md) by PR number (if provided) or by upstream head branch (`$HEAD_BRANCH` with `--head "$UPSTREAM_REMOTE:$HEAD_BRANCH"` for cross-fork) or by local branch name to check for existing PR
 4. **If PR number provided:** Run [detect-permission](../../lib/github/detect-permission.md) to setup cross-fork push target
 
@@ -70,6 +72,7 @@ If already committed, skip.
 ### A3. Commit and Push
 
 Run [commit-and-push](../../lib/github/commit-and-push.md):
+
 1. Rebase onto `$BASE_REF`
 2. Ensure single valid commit (squash if needed)
 3. Push (first push with `--set-upstream`)
@@ -131,6 +134,7 @@ If already committed, skip.
 ### B2. Commit and Push
 
 Run [commit-and-push](../../lib/github/commit-and-push.md):
+
 1. Rebase onto `$BASE_REF`
 2. Ensure single valid commit (squash if needed)
 3. Push (update push with `--force-with-lease`)

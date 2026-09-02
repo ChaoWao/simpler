@@ -86,7 +86,7 @@
 
 #include "aicore_completion_mailbox_types.h"
 #include "common/dma_workspace.h"
-#include "task_id.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 
 #ifndef __gm__
 #define __gm__

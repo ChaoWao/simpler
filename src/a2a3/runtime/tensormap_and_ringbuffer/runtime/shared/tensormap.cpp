@@ -30,7 +30,7 @@
 
 #include "common.h"
 #include "common/unified_log.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 
 // =============================================================================
 // TensorMap Lookup Chain Length Statistics (compile-time toggle)
@@ -257,8 +257,8 @@ int32_t ChipTensorMap::valid_count() {
 }
 
 void ChipTensorMap::sync_tensormap(TaskId task_id, int32_t sm_last_task_alive) {
-    auto ring_id = simpler::tmr::task_ring(task_id);
-    auto local_id = simpler::tmr::task_local_id(task_id);
+    auto ring_id = task_id.ring();
+    auto local_id = task_id.local_id();
     sync_validity(ring_id, sm_last_task_alive);
 
     // Only attempt cleanup when last_task_alive has actually advanced;

@@ -40,7 +40,7 @@
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId for the early-dispatch doorbell
 #include "async_wait.h"
 #include "host_build_graph/graph_execution.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/task_allocator.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
@@ -643,7 +643,7 @@ struct SchedulerState {
     // (route/re-register each waiter). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
-        const int32_t task_id = simpler::hbg::task_local_id(slot_state.to_descriptor().task_id);
+        const int32_t task_id = slot_state.to_descriptor().task_id.local_id();
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // completion mirror (task_state = COMPLETED)
@@ -903,7 +903,7 @@ struct SchedulerState {
     // Scheduler polling only chooses which already-wired producer a consumer
     // waits on at this instant; it never recomputes producer relationships.
     int32_t graph_first_unmet_producer(const GraphExecution &execution, const ChipTaskSlotState &consumer) const {
-        const int32_t task_index = consumer.in_graph_task_index;
+        const int32_t task_index = consumer.in_graph_local_id;
         const int32_t begin = execution.fanin_offsets[task_index];
         const int32_t end = execution.fanin_offsets[task_index + 1];
         for (int32_t edge = begin; edge < end; ++edge) {
@@ -1083,7 +1083,7 @@ struct SchedulerState {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;
         }
-        const int32_t task_index = slot_state.in_graph_task_index;
+        const int32_t task_index = slot_state.in_graph_local_id;
         if (task_index < 0 || task_index >= execution->task_count) {
             outcome.error_code = SIMPLER_ERROR_INVALID_ARGS;
             return outcome;

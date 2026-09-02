@@ -299,7 +299,7 @@ TEST(SchedulerDispatchPayload, DisablesDeferredCompletionWithoutASlab) {
     ASSERT_EQ(
         scheduler_materialize_task_payload_resolved(graph.graph(), task, 0x1000, &payload), SchedulerGraphResult::OK
     );
-    EXPECT_TRUE(payload.local_context.async_ctx.task_token.is_invalid());
+    EXPECT_FALSE(payload.local_context.async_ctx.task_token.is_valid());
     EXPECT_EQ(payload.global_context.sub_block_id, 0);
 
     task.subtask_slot = 2;

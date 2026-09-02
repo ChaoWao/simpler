@@ -50,7 +50,7 @@
 #include <memory>
 
 #include "host_build_graph/common.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 #include "profiling_config.h"
 #include "host_build_graph/runtime_types.h"
 #include "tensor.h"
@@ -565,7 +565,7 @@ struct ChipTensorMap {
         g_insert_count++;
 #endif
         uint32_t bucket_index = hash(addr);
-        const int32_t task_slot = simpler::hbg::task_local_id(producer_task_id);
+        const int32_t task_slot = producer_task_id.local_id();
         // A producer's low id field is a task chain index directly, so the id space a
         // caller inserts under has to be the one this map was dimensioned for: a
         // whole-run map takes task capacity, a Graph recording's takes MAX_IN_GRAPH_TASKS.
@@ -606,7 +606,7 @@ struct ChipTensorMap {
         // Update predecessor's next pointer (O(1) via prev_in_task)
         if (entry.prev_in_task == nullptr) {
             // Entry is the head of its task chain, update task_entry_heads
-            int32_t local_id = simpler::hbg::task_local_id(entry.producer_task_id);
+            int32_t local_id = entry.producer_task_id.local_id();
             const int32_t task_slot = local_id;
             debug_assert(task_slot >= 0 && task_slot < max_tasks);
             task_entry_heads[task_slot] = entry.next_in_task;

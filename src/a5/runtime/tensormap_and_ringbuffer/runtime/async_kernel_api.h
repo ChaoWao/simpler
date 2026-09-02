@@ -67,7 +67,7 @@ inline __aicore__ void defer_flush_range(volatile __gm__ void *addr, uint32_t si
 }
 
 inline __aicore__ void defer_flush(AsyncCtx &ctx) {
-    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr) return;
+    if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr) return;
 #if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
     uint32_t count = *ctx.completion_count;
     if (count > ctx.completion_capacity) {
@@ -116,7 +116,7 @@ inline __aicore__ bool async_ctx_is_deferred(const AsyncCtx &ctx) { return ctx.t
 // SIMPLER_ERROR_ASYNC_WAIT_OVERFLOW in ctx.completion_error_code) or when ctx is
 // not currently a deferred context.
 inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const CompletionToken &token) {
-    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
+    if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         return false;
     }
 

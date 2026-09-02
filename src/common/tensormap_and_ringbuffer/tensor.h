@@ -26,7 +26,7 @@
 
 #include "assert_compat.h"
 #include "data_type.h"
-#include "task_id.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 #include "task_interface/arg_direction.h"
 #include "task_interface/tensor.h"
 

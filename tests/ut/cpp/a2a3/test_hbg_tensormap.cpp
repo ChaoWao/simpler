@@ -25,7 +25,7 @@
 #include <vector>
 
 #include "host_build_graph/tensormap.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 namespace {
 
@@ -70,9 +70,9 @@ protected:
 // inserts remain visible until dependency computation explicitly removes one.
 TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
     simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, simpler::hbg::make_global_task(0));
-    tmap.insert(t, simpler::hbg::make_global_task(1));
-    tmap.insert(t, simpler::hbg::make_global_task(2));
+    tmap.insert(t, TaskId::make_global(0));
+    tmap.insert(t, TaskId::make_global(1));
+    tmap.insert(t, TaskId::make_global(2));
     EXPECT_EQ(tmap.valid_count(), 3);
 
     TestLookupResult result;
@@ -82,9 +82,9 @@ TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
     for (const auto &e : result.entries) {
         producers.push_back(e.entry->producer_task_id);
     }
-    EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(0)), producers.end());
-    EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(1)), producers.end());
-    EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(2)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), TaskId::make_global(0)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), TaskId::make_global(1)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), TaskId::make_global(2)), producers.end());
 }
 
 // A local id is its own task chain index -- nothing masks with the chain count -- so
@@ -92,8 +92,8 @@ TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
 // dimensioned for reaches its own chain rather than folding onto a lower one.
 TEST_F(HbgTensorMapTest, DistinctLocalIdsGetDistinctTaskChains) {
     simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
-    tmap.insert(t, simpler::hbg::make_global_task(0));
-    tmap.insert(t, simpler::hbg::make_global_task(LAST_TASK));
+    tmap.insert(t, TaskId::make_global(0));
+    tmap.insert(t, TaskId::make_global(LAST_TASK));
 
     EXPECT_EQ(tmap.valid_count(), 2);
     TestLookupResult result;
@@ -103,25 +103,23 @@ TEST_F(HbgTensorMapTest, DistinctLocalIdsGetDistinctTaskChains) {
     for (const auto &e : result.entries) {
         producers.push_back(e.entry->producer_task_id);
     }
-    EXPECT_NE(std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(0)), producers.end());
-    EXPECT_NE(
-        std::find(producers.begin(), producers.end(), simpler::hbg::make_global_task(LAST_TASK)), producers.end()
-    );
+    EXPECT_NE(std::find(producers.begin(), producers.end(), TaskId::make_global(0)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), TaskId::make_global(LAST_TASK)), producers.end());
 
     // Each producer's chain head is its own entry, and LAST_TASK reaches the last
     // reserved chain rather than folding onto a lower one. Read the heads directly:
     // an entry count cannot tell one chain per producer from one shared chain.
     ASSERT_NE(tmap.task_entry_heads[0], nullptr);
     ASSERT_NE(tmap.task_entry_heads[LAST_TASK], nullptr);
-    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, simpler::hbg::make_global_task(0));
-    EXPECT_EQ(tmap.task_entry_heads[LAST_TASK]->producer_task_id, simpler::hbg::make_global_task(LAST_TASK));
+    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, TaskId::make_global(0));
+    EXPECT_EQ(tmap.task_entry_heads[LAST_TASK]->producer_task_id, TaskId::make_global(LAST_TASK));
 
     // Unlinking a chain's only entry empties that chain and leaves the other intact.
     tmap.remove_entry(*tmap.task_entry_heads[LAST_TASK]);
     EXPECT_EQ(tmap.valid_count(), 1);
     EXPECT_EQ(tmap.task_entry_heads[LAST_TASK], nullptr);
     ASSERT_NE(tmap.task_entry_heads[0], nullptr);
-    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, simpler::hbg::make_global_task(0));
+    EXPECT_EQ(tmap.task_entry_heads[0]->producer_task_id, TaskId::make_global(0));
 }
 
 // Without an explicit semantic removal, direct inserts consume one pool entry
@@ -133,7 +131,7 @@ TEST_F(HbgTensorMapTest, PoolOccupancyOnlyGrows) {
     EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
 
     for (int32_t i = 0; i < 8; i++) {
-        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), simpler::hbg::make_global_task(i));
+        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), TaskId::make_global(i));
         EXPECT_EQ(tmap.current_used(), i + 1);
         EXPECT_EQ(tmap.free_entries(), POOL_SIZE - (i + 1));
     }
@@ -146,9 +144,9 @@ TEST_F(HbgTensorMapTest, PoolOccupancyOnlyGrows) {
 TEST_F(HbgTensorMapTest, ResetLeavesTheMapAsFreshlyInitialized) {
     simpler::hbg::Tensor t = make_test_tensor(0x1000, 256);
     for (int32_t i = 0; i < 8; i++) {
-        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), simpler::hbg::make_global_task(i));
+        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), TaskId::make_global(i));
     }
-    tmap.insert(t, simpler::hbg::make_global_task(9));
+    tmap.insert(t, TaskId::make_global(9));
     ASSERT_EQ(tmap.current_used(), 9);
 
     tmap.reset();
@@ -163,12 +161,12 @@ TEST_F(HbgTensorMapTest, ResetLeavesTheMapAsFreshlyInitialized) {
 
     // And it is usable, not merely empty: the second body's producer is the only one a
     // lookup can reach.
-    tmap.insert(t, simpler::hbg::make_global_task(3));
+    tmap.insert(t, TaskId::make_global(3));
     EXPECT_EQ(tmap.current_used(), 1);
     TestLookupResult second_body;
     run_lookup(tmap, t, second_body);
     ASSERT_EQ(second_body.count, 1);
-    EXPECT_EQ(second_body.entries[0].entry->producer_task_id, simpler::hbg::make_global_task(3));
+    EXPECT_EQ(second_body.entries[0].entry->producer_task_id, TaskId::make_global(3));
 }
 
 // Reset is reachable any number of times, including on a map that was never inserted
@@ -182,11 +180,11 @@ TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
 
     // The last reserved chain is still a working chain after two resets.
     simpler::hbg::Tensor t = make_test_tensor(0x2000, 128);
-    tmap.insert(t, simpler::hbg::make_global_task(LAST_TASK));
+    tmap.insert(t, TaskId::make_global(LAST_TASK));
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, simpler::hbg::make_global_task(LAST_TASK));
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, TaskId::make_global(LAST_TASK));
 }
 
 // Filling the pool drives free_entries() to zero. No device-completion watermark
@@ -194,7 +192,7 @@ TEST_F(HbgTensorMapTest, ResetIsIdempotentAndKeepsReservedSizes) {
 // waiting for asynchronous reclaim that HBG does not have.
 TEST_F(HbgTensorMapTest, ExhaustedPoolStaysExhausted) {
     for (int32_t i = 0; i < POOL_SIZE; i++) {
-        tmap.insert(make_test_tensor(0x10000 + 0x100 * i, 64), simpler::hbg::make_global_task(i % MAX_TASKS));
+        tmap.insert(make_test_tensor(0x10000 + 0x100 * i, 64), TaskId::make_global(i % MAX_TASKS));
     }
     EXPECT_EQ(tmap.current_used(), POOL_SIZE);
     EXPECT_EQ(tmap.free_entries(), 0);

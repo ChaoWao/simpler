@@ -26,7 +26,7 @@
 
 #include "graph_execution.h"
 #include "host_build_graph/shared_memory.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 namespace {
 
@@ -84,7 +84,7 @@ public:
         // the slot so the compaction can be checked element by element.
         for (uint64_t i = 0; i < SUBMITTED; ++i) {
             ChipTaskStorage &entry = storage_[i];
-            entry.task.task_id = simpler::hbg::make_global_task(static_cast<int32_t>(i));
+            entry.task.task_id = TaskId::make_global(static_cast<int32_t>(i));
             entry.payload.tensor_count = TENSORS_PER_TASK;
             entry.payload.scalar_count = SCALARS_PER_TASK;
             entry.payload.fanin_count = FANIN_PER_TASK;
@@ -101,11 +101,11 @@ public:
             for (int32_t j = 0; j < FANIN_PER_TASK; ++j) {
                 entry.payload.fanin_data()[j] = static_cast<int32_t>(0x50 + i * 0x10 + j);
             }
-            entry.slot.in_graph_task_index = static_cast<int32_t>(200 + i);
+            entry.slot.in_graph_local_id = static_cast<int32_t>(200 + i);
             completion_flags()[i].store(static_cast<uint8_t>(i & 1), std::memory_order_relaxed);
         }
         // A slot past the submitted prefix, to prove it does not travel.
-        storage_[SUBMITTED].task.task_id = simpler::hbg::make_global_task(0xBEEF);
+        storage_[SUBMITTED].task.task_id = TaskId::make_global(0xBEEF);
     }
 
     // Overwrite the three fields that can hold a graph-heap address with ones out
@@ -218,10 +218,10 @@ TEST(HbgSmCompaction, CarriesEveryLiveSlotsContent) {
 
     for (uint64_t i = 0; i < SUBMITTED; ++i) {
         const ChipTaskStorage &entry = compacted.storage[i];
-        EXPECT_EQ(simpler::hbg::task_local_id(entry.task.task_id), static_cast<int32_t>(i)) << "slot " << i;
+        EXPECT_EQ(entry.task.task_id.local_id(), static_cast<int32_t>(i)) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_count, TENSORS_PER_TASK) << "slot " << i;
         EXPECT_EQ(entry.payload.tensor_data()[0].buffer.addr, 0x1000 + i * 0x10) << "slot " << i;
-        EXPECT_EQ(entry.slot.in_graph_task_index, static_cast<int32_t>(200 + i)) << "slot " << i;
+        EXPECT_EQ(entry.slot.in_graph_local_id, static_cast<int32_t>(200 + i)) << "slot " << i;
         EXPECT_EQ(compacted.completion_flags()[i].load(std::memory_order_relaxed), static_cast<uint8_t>(i & 1))
             << "slot " << i;
     }

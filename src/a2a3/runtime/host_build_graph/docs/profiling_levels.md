@@ -417,7 +417,7 @@ header just like on onboard.
 | 4 | + Orchestrator phases (full) |
 
 At level 1 the AICore record carries the full `task_token_raw`
-(a `TaskId::raw`; see `src/common/host_build_graph/task_id_encoding.h`), read straight from
+(a `TaskId::raw`; see `src/common/host_build_graph/task_id.h`), read straight from
 `LocalContext.async_ctx.task_token.raw` inside the AICore helper —
 already in cache from the dispatch payload, so no extra GM load.
 Identity fields the AICPU side used to write at level 1 (`func_id`,

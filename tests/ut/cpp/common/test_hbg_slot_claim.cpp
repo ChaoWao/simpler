@@ -27,7 +27,7 @@
 #include "host_build_graph/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
 #include "utils/device_arena.h"
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 class HbgSlotClaimTest : public ::testing::Test {
 protected:
@@ -88,7 +88,7 @@ protected:
         state.any_subtask_deferred.store(true, std::memory_order_relaxed);
         state.completed_subtasks.store(7, std::memory_order_relaxed);
         state.next_block_idx.store(3, std::memory_order_relaxed);
-        state.in_graph_task_index = 11;
+        state.in_graph_local_id = 11;
         sm_handle->header->tasks.completion_flags[slot].store(1, std::memory_order_relaxed);
     }
 
@@ -178,7 +178,7 @@ TEST_F(HbgSlotClaimTest, CachedGraphReplayClaimsAPoisonedSlot) {
     poison_slot(1);
     const GraphScopeResult replay = orch.graph_begin(0x51ADC1A2, boundary_args, 0x1736);
     ASSERT_TRUE(replay.task_id.is_valid());
-    ASSERT_EQ(simpler::hbg::task_local_id(replay.task_id), 1);
+    ASSERT_EQ(replay.task_id.local_id(), 1);
 
     expect_slot_pristine(1);
 }

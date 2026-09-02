@@ -14,7 +14,7 @@
 
 #include "orchestration_api.h"  // NOLINT(build/include_subdir)
 
-#include "host_build_graph/task_id_encoding.h"
+#include "host_build_graph/task_id.h"
 
 #define FUNC_NOOP_AIC 0
 #define FUNC_NOOP_AIV0 1
@@ -42,7 +42,7 @@ void submit_overflowing_mix_task() {
 
 simpler::hbg::Tensor tensor_with_unbound_owner(const simpler::hbg::Tensor &external) {
     simpler::hbg::Tensor forged = external;
-    forged.owner_task_id = simpler::hbg::make_global_task(17);
+    forged.owner_task_id = TaskId::make_global(17);
     return forged;
 }
 
@@ -88,7 +88,7 @@ void read_alloc_tensors_output() {
 // so it can never be a fanin producer. Declaring one as an explicit dependency is
 // the caller error append_fanin_or_fail rejects.
 void submit_task_depending_on_in_graph_task() {
-    const TaskId deps[1] = {simpler::hbg::make_in_graph_task(/*graph_local_id=*/1, /*task_index=*/0)};
+    const TaskId deps[1] = {TaskId::make_in_graph(/*graph_task_id=*/1, /*in_graph_local_id=*/0)};
     CoreTaskArgs args;
     args.launch_spec.set_block_num(1);
     args.set_dependencies(deps, 1);

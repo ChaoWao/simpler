@@ -16,7 +16,7 @@
 
 #include <type_traits>
 
-#include "task_id.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/types.h"
 
 struct GraphScopeResult {

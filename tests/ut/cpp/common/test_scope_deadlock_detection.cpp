@@ -15,7 +15,7 @@
 #include <string>
 
 #include "ring_buffer.h"
-#include "tensormap_and_ringbuffer/task_id_encoding.h"
+#include "tensormap_and_ringbuffer/task_id.h"
 
 // CMake compiles this source against both the a2a3 and a5 runtime objects.
 namespace {
@@ -26,7 +26,7 @@ constexpr int32_t POOL_CAPACITY = 8;
 void make_head_match_old_structural_predicate(
     ChipTaskSlotState &head, TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
 ) {
-    descriptor.task_id = simpler::tmr::make_task_id(ring_id, local_task_id);
+    descriptor.task_id = TaskId::make(ring_id, local_task_id);
     head.task = &descriptor;
     head.task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release);
     head.fanout_count = FANOUT_SCOPE_BIT;

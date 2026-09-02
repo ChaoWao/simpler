@@ -53,7 +53,7 @@
 
 #include <cstdint>
 
-#include "task_id.h"
+#include "host_build_graph/task_id.h"
 #include "host_build_graph/tensormap.h"
 #include "host_build_graph/types.h"  // TensorRef
 #include "tensor.h"

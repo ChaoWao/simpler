@@ -16,7 +16,7 @@
 
 #include "aicore_completion_mailbox_types.h"
 #include "host_build_graph/constants.h"
-#include "task_id.h"
+#include "host_build_graph/task_id.h"
 
 // AICPU-only MPSC ring used to convey deferred-completion observations from
 // FIN-handling scheduler threads to the dispatch thread. Producers push under
