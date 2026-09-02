@@ -29,8 +29,7 @@
  *                   simpler_finalize_run, simpler_run,
  *                   simpler_unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
- *                   get_run_stream_set_create_count,
- *                   simpler_provision_dma_workspace
+ *                   get_run_stream_set_create_count
  *   - pipeline:     get_pipeline_contract,
  *                   supports_concurrent_native_prepare_ctx,
  *                   get_arena_bank_gm_heap_base_ctx,
@@ -289,19 +288,48 @@ int copy_from_device_ctx(DeviceContextHandle ctx, void *host_ptr, const void *de
  *      simpler_run invocations reuse this resident pair — no binary bytes
  *      cross the C ABI on per-run paths.
  *
- *   4. When `prewarm_config` is non-null, build + upload + cache the prebuilt
+ *   4. Provision this device's async-DMA workspaces and latch their device
+ *      addresses into the resident AICPU globals, so every subsequent run
+ *      carries them (the scheduler prefills each core's GlobalContext from
+ *      there, and kernels read them through get_dma_workspace(args, kind); a
+ *      kind this device did not provision reads back 0). The addresses are
+ *      published by the same one-shot AICPU init launch that step 2's device
+ *      bring-up performs, so provisioning is ordered before it rather than
+ *      re-latching afterwards.
+ *
+ *      Every engine the platform supports is provisioned except SDMA, which is
+ *      provisioned only when `enable_sdma` is non-zero. SDMA is the one engine
+ *      a caller can decline, and the parameter is a flag rather than an engine
+ *      set for that reason: its workspace cannot be obtained without also
+ *      creating 48 CP-process STARS streams, and a Worker holding those gets a
+ *      single device-reset attempt after an AICore fault instead of three, so
+ *      defaulting it on would put every Worker in that population.
+ *      `enable_sdma` on a platform/runtime without SDMA support fails init, so
+ *      a Worker opting in on sim / a5 / hbg fails fast rather than reaching its
+ *      first run reading a zero workspace address.
+ *
+ *      `sdma_warmup_binary` / `sdma_warmup_size` carry the vector-only ELF that
+ *      walks the SDMA control path once per channel against the workspace just
+ *      provisioned, so the first TPREFETCH_ASYNC does not pay that cold start.
+ *      A null/empty buffer, or a warmup the platform cannot run, still
+ *      initializes successfully — the only cost is first-call latency. A warmup
+ *      whose device launch or sync fails does fail init, because that card is
+ *      then poisoned.
+ *
+ *   5. When `prewarm_config` is non-null, build + upload + cache the prebuilt
  *      runtime-arena for its `runtime_env` ring sizing (tensormap_and_ringbuffer;
  *      a no-op for runtimes without a prebuilt arena). The device is up by this
  *      point, so the first simpler_run with matching sizing skips the (~800ms)
  *      cold build. The sizing is fork-constant, so it rides init rather than a
  *      separate call. Only `prewarm_config->runtime_env` is read.
  *
- * Returns 0 on success, negative on attach or prewarm-build failure.
+ * Returns 0 on success, negative on attach, provisioning, or prewarm-build
+ * failure.
  */
 int simpler_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *prewarm_config
+    const CallConfig *prewarm_config, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
 );
 
 /**
@@ -494,35 +522,6 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx);
  * bootstrap pair.
  */
 size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
-
-/**
- * Provision this device's async-DMA workspaces once at Worker init, latching
- * their device addresses into the resident KernelArgs so every subsequent run
- * carries them. Every engine the platform supports is provisioned except SDMA,
- * which is provisioned only when `enable_sdma` is non-zero.
- *
- * SDMA is the one engine a caller can decline, and the parameter is a flag
- * rather than an engine set for that reason. Its workspace cannot be obtained
- * without also creating 48 CP-process STARS streams, and a Worker holding those
- * gets a single device-reset attempt after an AICore fault instead of three, so
- * defaulting it on would put every Worker in that population. Selecting among
- * provisioned engines is the kernel's job, through get_dma_workspace(args,
- * kind); a kind this device did not provision reads back 0.
- *
- * `enable_sdma` on a platform/runtime without SDMA support is rejected, so a
- * Worker opting in on sim / a5 / hbg fails fast. Returns 0 on success, negative
- * on unsupported/failed provisioning.
- *
- * `sdma_warmup_binary` / `sdma_warmup_size` carry the vector-only ELF that walks
- * the SDMA control path once per channel against the workspace just provisioned,
- * so the first TPREFETCH_ASYNC does not pay that cold start. A null/empty buffer,
- * or a warmup the platform cannot run, skips it and still provisions
- * successfully — the only cost is first-call latency. A warmup whose device launch
- * or sync fails does fail provisioning, because that card is then poisoned.
- */
-int simpler_provision_dma_workspace(
-    DeviceContextHandle ctx, int enable_sdma, const void *sdma_warmup_binary, uint64_t sdma_warmup_size
-);
 
 #ifdef __cplusplus
 }

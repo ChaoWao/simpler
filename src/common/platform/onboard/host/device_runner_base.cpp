@@ -549,7 +549,15 @@ int DeviceRunnerBase::ensure_device_initialized() {
     rc = ensure_binaries_loaded();
     if (rc != 0) return rc;
 
-    return ensure_aicpu_init_launched();
+    // Before the AICPU init launch: that launch is what publishes the workspace
+    // addresses, and it happens once.
+    rc = ensure_dma_workspace_provisioned();
+    if (rc != 0) return rc;
+
+    rc = ensure_aicpu_init_launched();
+    if (rc != 0) return rc;
+
+    return ensure_dma_workspace_warmed();
 }
 
 int DeviceRunnerBase::ensure_aicpu_init_launched() {
@@ -563,10 +571,10 @@ int DeviceRunnerBase::ensure_aicpu_init_launched() {
     // Per-device scheduler watchdog override, resolved once at attach into
     // timeout_config_. 0 -> the AICPU scheduler keeps its compile-time default.
     init_args.scheduler_timeout_ms = timeout_config_.scheduler_timeout_ms;
-    // Publish the provisioned async-DMA workspace addresses (all-zero until a
-    // Worker opts into SDMA). provision_dma_workspace() re-launches this entry to
-    // re-latch them; the AICPU SO stays resident, so the latest values survive
-    // every subsequent per-task launch.
+    // Publish the provisioned async-DMA workspace addresses (all-zero unless the
+    // Worker opted into SDMA). ensure_dma_workspace_provisioned() runs first, so
+    // this single launch carries them; the AICPU SO stays resident, and the
+    // values survive every subsequent per-task launch.
     for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
         init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
     }
@@ -982,16 +990,17 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 
 bool DeviceRunnerBase::has_callable(int32_t callable_id) const { return callables_.count(callable_id) != 0; }
 
-int DeviceRunnerBase::provision_dma_workspace(
-    bool enable_sdma, const void *sdma_warmup_binary, size_t sdma_warmup_size
-) {
+int DeviceRunnerBase::ensure_dma_workspace_provisioned() {
+    if (dma_workspace_handle_ != nullptr) {
+        return 0;
+    }
     const uint32_t supported = dma_workspace_supported_mask();
     constexpr uint32_t kSdmaBit = uint32_t{1} << DMA_WORKSPACE_SDMA;
     // Opting in on a device that cannot provide SDMA is a caller error, not a
     // silent no-op: a Worker built for TPREFETCH_ASYNC must not reach its first
     // run reading a zero workspace address.
-    if (enable_sdma && (supported & kSdmaBit) == 0) {
-        LOG_ERROR("provision_dma_workspace: SDMA requested where unsupported (supported=0x%x)", supported);
+    if (sdma_requested_ && (supported & kSdmaBit) == 0) {
+        LOG_ERROR("dma workspace: SDMA requested where unsupported (supported=0x%x)", supported);
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
     // Everything this device supports, minus what the caller declined. SDMA is
@@ -1000,7 +1009,10 @@ int DeviceRunnerBase::provision_dma_workspace(
     // post-fault reset budget, so a Worker that did not ask for it must not end
     // up holding them. Every other supported engine carries no such cost and is
     // provisioned unconditionally.
-    const uint32_t required_mask = enable_sdma ? supported : (supported & ~kSdmaBit);
+    const uint32_t required_mask = sdma_requested_ ? supported : (supported & ~kSdmaBit);
+    if (required_mask == 0) {
+        return 0;
+    }
     // Dormant while one engine is supported, since required_mask is a subset of
     // supported. It arms itself on the day dma_workspace_supported_mask() widens,
     // which is the day the single-handle contract breaks — dma_workspace_release()
@@ -1009,14 +1021,10 @@ int DeviceRunnerBase::provision_dma_workspace(
     // that silent type confusion.
     if ((required_mask & (required_mask - 1)) != 0) {
         LOG_ERROR(
-            "provision_dma_workspace: mask=0x%x names %d engines; one handle owns one provider", required_mask,
+            "dma workspace: mask=0x%x names %d engines; one handle owns one provider", required_mask,
             __builtin_popcount(required_mask)
         );
         return PTO_RUNTIME_ERR_UNSUPPORTED;
-    }
-    if (dma_workspace_handle_ != nullptr) {
-        LOG_ERROR("provision_dma_workspace: workspace already provisioned");
-        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind)
@@ -1026,41 +1034,34 @@ int DeviceRunnerBase::provision_dma_workspace(
     int rc =
         dma_workspace_provision(required_mask, dma_workspace_addr_, DMA_WORKSPACE_KIND_COUNT, &dma_workspace_handle_);
     if (rc != 0) {
-        LOG_ERROR("provision_dma_workspace: mask=0x%x failed: %d", required_mask, rc);
+        LOG_ERROR("dma workspace: mask=0x%x failed: %d", required_mask, rc);
         for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind)
             dma_workspace_addr_[kind] = 0;
         dma_workspace_handle_ = nullptr;
         return rc;
     }
+    return 0;
+}
 
-    // Re-latch the resident AICPU globals: simpler_aicpu_init publishes the
-    // provisioned addresses into g_dma_workspace_addr, which the scheduler
-    // prefills into every core's GlobalContext (get_dma_workspace). The AICPU SO
-    // stays dlopen'd, so the values survive every subsequent per-task launch.
-    aicpu_init_launched_ = false;
-    rc = ensure_aicpu_init_launched();
+int DeviceRunnerBase::ensure_dma_workspace_warmed() {
+    if (dma_workspace_handle_ == nullptr || sdma_warmed_) {
+        return 0;
+    }
+    // An unavailable warmup leaves init successful, because the only cost is
+    // first-call latency. A device error does not: the card the warmup just
+    // faulted on would otherwise reach the first run. No dma_workspace_release()
+    // on that path — launch_sdma_warmup_kernel() has marked the runner unusable,
+    // and per-resource release on a faulted card is exactly what finalize()'s
+    // fatal path exists to avoid. The workspace handle stays set so that path
+    // still sees an SDMA generation and applies its handoff delay.
+    const int rc = launch_sdma_warmup_kernel(sdma_warmup_binary_.data(), sdma_warmup_binary_.size());
     if (rc != 0) {
-        LOG_ERROR("provision_dma_workspace: re-latch of simpler_aicpu_init failed: %d", rc);
-        dma_workspace_release(dma_workspace_handle_);
-        dma_workspace_handle_ = nullptr;
-        for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind)
-            dma_workspace_addr_[kind] = 0;
+        LOG_ERROR("dma workspace: sdma warmup left the device unusable: %d", rc);
         return rc;
     }
-
-    // Deliberately after the re-latch: warming needs the live workspace. An
-    // unavailable warmup leaves provisioning successful, because the only cost is
-    // first-call latency. A device error does not: the card the warmup just faulted
-    // on would otherwise reach the first run. No dma_workspace_release() on that
-    // path — launch_sdma_warmup_kernel() has marked the runner unusable, and
-    // per-resource release on a faulted card is exactly what finalize()'s fatal
-    // path exists to avoid. The workspace handle stays set so that path still sees
-    // an SDMA generation and applies its handoff delay.
-    rc = launch_sdma_warmup_kernel(sdma_warmup_binary, sdma_warmup_size);
-    if (rc != 0) {
-        LOG_ERROR("provision_dma_workspace: sdma warmup left the device unusable: %d", rc);
-        return rc;
-    }
+    sdma_warmed_ = true;
+    sdma_warmup_binary_.clear();
+    sdma_warmup_binary_.shrink_to_fit();
     return 0;
 }
 
@@ -1460,6 +1461,7 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     // the SDMA warmup ELF's separate handle.
     aicore_bin_handle_ = nullptr;
     sdma_warmup_bin_handle_ = nullptr;
+    sdma_warmed_ = false;
     binaries_loaded_ = false;
     // The inner AICPU SO is unloaded with the binaries above, so its latched
     // globals are gone too — clear the one-shot guard so a reused runner

@@ -234,10 +234,17 @@ public:
      *      by the subclass `finalize()`).
      *   3. Bootstrap the dispatcher + register the inner AICPU SO via
      *      `ensure_binaries_loaded()`.
+     *   4. Provision the requested async-DMA workspaces via
+     *      `ensure_dma_workspace_provisioned()`.
+     *   5. Launch `simpler_aicpu_init` via `ensure_aicpu_init_launched()`,
+     *      which publishes step 4's addresses along with the other resident
+     *      invariants. Step 4 precedes it so that publication is one launch.
+     *   6. Warm the SDMA control path via `ensure_dma_workspace_warmed()`,
+     *      which needs both the live workspace and the AICore stream.
      *
-     * Called from `simpler_init` after executor + dispatcher bytes have
-     * been cached on the runner. Idempotent: subsequent calls
-     * short-circuit on `binaries_loaded_`.
+     * Called from `simpler_init` after executor + dispatcher bytes and the
+     * async-DMA request have been cached on the runner. Idempotent: each step
+     * short-circuits on its own guard.
      *
      * @return 0 on success, error code on failure.
      */
@@ -273,6 +280,27 @@ public:
      */
     void set_dispatcher_binary(std::vector<uint8_t> dispatcher_so_binary) {
         dispatcher_so_binary_ = std::move(dispatcher_so_binary);
+    }
+
+    /**
+     * Record this Worker's async-DMA request. Called by simpler_init before its
+     * `ensure_device_initialized()`, which is where the request is acted on —
+     * the workspace has to exist before the one-shot `simpler_aicpu_init` launch
+     * that publishes its addresses.
+     *
+     * `enable_sdma` opts into the SDMA workspace; every other engine
+     * `dma_workspace_supported_mask()` names is provisioned regardless. SDMA is
+     * declinable because its workspace cannot be obtained without also creating
+     * 48 CP-process STARS streams, which halves this Worker's post-fault reset
+     * budget. Opting in where SDMA is unsupported fails device init.
+     *
+     * `sdma_warmup_binary` is the vector-only ELF that walks the SDMA control
+     * path once per channel once the workspace is live. An empty buffer only
+     * costs first-call latency.
+     */
+    void set_dma_workspace_request(bool enable_sdma, std::vector<uint8_t> sdma_warmup_binary) {
+        sdma_requested_ = enable_sdma;
+        sdma_warmup_binary_ = std::move(sdma_warmup_binary);
     }
 
     /** The device id captured by simpler_init's `attach_current_thread` call. */
@@ -394,27 +422,6 @@ public:
      * calls without a matching `simpler_register_callable`.
      */
     bool has_callable(int32_t callable_id) const;
-
-    /**
-     * Provision this device's async-DMA workspaces once at Worker init and latch
-     * their device addresses into the resident KernelArgs so every subsequent run
-     * carries them (AICPU injects them into GlobalContext via get_dma_workspace).
-     * Provisions every engine dma_workspace_supported_mask() names, except SDMA
-     * unless `enable_sdma` is set — SDMA is declinable because its workspace
-     * cannot be obtained without also creating 48 CP-process STARS streams, which
-     * halves this Worker's post-fault reset budget. `enable_sdma` on a
-     * platform/runtime without SDMA is rejected, so such a Worker fails fast. The
-     * provider handle is released by finalize_common().
-     *
-     * `sdma_warmup_binary` / `sdma_warmup_size`, when non-empty, are handed to
-     * launch_sdma_warmup_kernel() once the workspace is live. An absent or
-     * unrunnable warmup does NOT fail provisioning; a warmup whose device launch or
-     * sync fails does, and leaves the runner marked unusable.
-     *
-     * @return 0 on success, negative on unsupported/failed provisioning.
-     */
-    int
-    provision_dma_workspace(bool enable_sdma, const void *sdma_warmup_binary = nullptr, size_t sdma_warmup_size = 0);
 
     /**
      * Content-derived stable identity for a registered callable: the
@@ -684,8 +691,9 @@ public:
 
     /**
      * Walk the SDMA control path once per channel, so the first TPREFETCH_ASYNC
-     * of a run does not pay it. Called from provision_dma_workspace() once the
-     * workspace is live, on `stream_aicore_`, and synchronized before returning.
+     * of a run does not pay it. Called from ensure_dma_workspace_warmed() once
+     * the workspace is live, on `stream_aicore_`, and synchronized before
+     * returning.
      *
      * `binary` is a vector-only ELF, registered separately from the executor
      * (`RT_DEV_BINARY_MAGIC_ELF_AIVEC`, its own handle) because the executor is a
@@ -809,13 +817,37 @@ protected:
 
     /**
      * Initial launch of `simpler_aicpu_init`, latching the invariants (orch
-     * device id, log config) into the resident AICPU SO globals. Idempotent via
-     * `aicpu_init_launched_`; called from
-     * `ensure_device_initialized()` after the binaries are loaded.
+     * device id, log config, provisioned async-DMA workspace addresses) into the
+     * resident AICPU SO globals. Idempotent via `aicpu_init_launched_`; called
+     * from `ensure_device_initialized()` after the binaries are loaded and the
+     * workspaces are provisioned, so one launch publishes everything.
      *
      * @return 0 on success, error code on failure.
      */
     int ensure_aicpu_init_launched();
+
+    /**
+     * Provision the async-DMA workspaces this Worker asked for (see
+     * `set_dma_workspace_request`) and record their device addresses in
+     * `dma_workspace_addr_`, ready for `ensure_aicpu_init_launched()` to
+     * publish. Idempotent: a runner that already holds a provider handle, and
+     * one whose request declined the only declinable engine on a device that
+     * supports nothing else, both no-op. The handle is released by
+     * `finalize_common()`, including on a later step's failure.
+     *
+     * @return 0 on success, negative on unsupported/failed provisioning.
+     */
+    int ensure_dma_workspace_provisioned();
+
+    /**
+     * Walk the SDMA control path once, after `ensure_aicpu_init_launched()` has
+     * published the workspace addresses. No-op without a provisioned workspace.
+     * One-shot via `sdma_warmed_`, which also releases the warmup ELF bytes.
+     *
+     * @return 0 on success or a skipped warmup, error code when the warmup
+     *         faulted the card.
+     */
+    int ensure_dma_workspace_warmed();
 
     /**
      * Query the maximum block_dim the stream can host.
@@ -1054,8 +1086,14 @@ protected:
     // DmaWorkspaceKind. Published into InitArgs by ensure_aicpu_init_launched()
     // so the resident AICPU SO latches them into g_dma_workspace_addr; the
     // scheduler prefills each core's GlobalContext from there. All-zero until a
-    // Worker opts into SDMA via provision_dma_workspace().
+    // Worker opts into SDMA via set_dma_workspace_request().
     uint64_t dma_workspace_addr_[DMA_WORKSPACE_KIND_COUNT]{};
+    // This Worker's async-DMA request, recorded by set_dma_workspace_request()
+    // before device bring-up. `sdma_warmup_binary_` is released once
+    // ensure_dma_workspace_warmed() has consumed it.
+    bool sdma_requested_{false};
+    bool sdma_warmed_{false};
+    std::vector<uint8_t> sdma_warmup_binary_;
     std::unordered_set<int32_t> aicpu_seen_callable_ids_;
     // Monotonic count of successful AICPU dlopens (incremented after prewarm
     // or first-run fallback succeeds; never decremented). Diverges from

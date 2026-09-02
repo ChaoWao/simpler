@@ -231,8 +231,6 @@ void ChipWorker::init(
         get_host_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_host_dlopen_count");
         get_run_stream_set_create_count_fn_ =
             load_symbol<GetAicpuDlopenCountFn>(handle, "get_run_stream_set_create_count");
-        simpler_provision_dma_workspace_fn_ =
-            load_symbol<SimplerProvisionDmaWorkspaceFn>(handle, "simpler_provision_dma_workspace");
         finalize_device_fn_ = load_symbol<FinalizeDeviceFn>(handle, "finalize_device");
         // ACL lifecycle + comm_* are part of the uniform host_runtime.so ABI.
         // Every platform runtime exports all of them — runtimes that do not
@@ -297,10 +295,11 @@ void ChipWorker::init(
 
     // One-shot platform-side init: attach the calling thread to `device_id`
     // (rtSetDevice on onboard, sim bind+acquire on sim), transfer ownership
-    // of the executor binaries to the DeviceRunner, and (onboard) sync CANN
-    // dlog from HostLogger. Subsequent device-ops re-attach their caller
-    // threads idempotently against the recorded device id; subsequent
-    // register_callable / run invocations reuse the cached binaries.
+    // of the executor binaries to the DeviceRunner, provision this Worker's
+    // async-DMA workspaces, and (onboard) sync CANN dlog from HostLogger.
+    // Subsequent device-ops re-attach their caller threads idempotently against
+    // the recorded device id; subsequent register_callable / run invocations
+    // reuse the cached binaries.
     //
     // read_binary_file may throw — defer the dlsym/dlclose rollback to the
     // catch block so the buffers and any partially-resolved handle are torn
@@ -319,12 +318,24 @@ void ChipWorker::init(
             dispatcher_bytes = read_binary_file(dispatcher_path);
         }
         const uint8_t *dispatcher_ptr = dispatcher_bytes.empty() ? nullptr : dispatcher_bytes.data();
+        // The warmup ELF rides simpler_init because it warms the workspace that
+        // init provisions. Absent on arches that build no such ELF and on tests
+        // driving _ChipWorker.init directly; the platform then skips the warmup
+        // and the first TPREFETCH_ASYNC pays the cold control path instead. Read
+        // only when the Worker opted in, so a stale path on a non-SDMA Worker is
+        // never touched.
+        std::vector<uint8_t> warmup_bytes;
+        if (enable_sdma && !sdma_warmup_path.empty()) {
+            warmup_bytes = read_binary_file(sdma_warmup_path);
+        }
+        const uint8_t *warmup_ptr = warmup_bytes.empty() ? nullptr : warmup_bytes.data();
         // `prewarm_config` (fork-constant, COW-delivered) rides simpler_init: the
         // platform builds + caches the prebuilt runtime-arena for its ring sizing
         // right after the device comes up. Null => no prewarm.
         init_rc = simpler_init_fn_(
             device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(), aicore_bytes.size(),
-            dispatcher_ptr, dispatcher_bytes.size(), prewarm_config
+            dispatcher_ptr, dispatcher_bytes.size(), prewarm_config, enable_sdma ? 1 : 0, warmup_ptr,
+            warmup_bytes.size()
         );
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
@@ -354,7 +365,6 @@ void ChipWorker::init(
         get_aicpu_dlopen_count_fn_ = nullptr;
         get_host_dlopen_count_fn_ = nullptr;
         get_run_stream_set_create_count_fn_ = nullptr;
-        simpler_provision_dma_workspace_fn_ = nullptr;
         finalize_device_fn_ = nullptr;
         ensure_acl_ready_fn_ = nullptr;
         create_comm_stream_fn_ = nullptr;
@@ -376,9 +386,16 @@ void ChipWorker::init(
     if (init_rc != 0) {
         // Symmetric teardown: drop the device context, clear all dlsym'd
         // function pointers, dlclose, and discard cached binaries so the
-        // ChipWorker is back to its zero-initialized state. Mirror finalize()
-        // exactly minus finalize_device_fn_ (we never reached the
-        // initialized_=true point, so device-side teardown is unnecessary).
+        // ChipWorker is back to its zero-initialized state.
+        //
+        // No finalize_device_fn_ call, even though simpler_init does real device
+        // work and may fail after it: destroy_device_context deletes the runner,
+        // and its destructor runs the platform's finalize() — including the
+        // fatal path that reclaims a card an SDMA warmup faulted. Calling
+        // finalize_device explicitly here would be worse than redundant on sim,
+        // where it releases whichever device *this thread* is bound to; a Worker
+        // that failed before attaching would tear down a sibling Worker's live
+        // sim context.
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
         create_device_context_fn_ = nullptr;
@@ -406,7 +423,6 @@ void ChipWorker::init(
         get_aicpu_dlopen_count_fn_ = nullptr;
         get_host_dlopen_count_fn_ = nullptr;
         get_run_stream_set_create_count_fn_ = nullptr;
-        simpler_provision_dma_workspace_fn_ = nullptr;
         finalize_device_fn_ = nullptr;
         ensure_acl_ready_fn_ = nullptr;
         create_comm_stream_fn_ = nullptr;
@@ -435,37 +451,6 @@ void ChipWorker::init(
     pipeline_contract_ = resolved_contract;
     initialized_ = true;
 
-    // Provision async-DMA workspaces (SDMA) once, now that the device is up. The
-    // addresses are latched into the resident KernelArgs so every run carries
-    // them. On failure, roll the whole Worker back through finalize() so no
-    // half-provisioned state leaks, then surface the error.
-    if (enable_sdma) {
-        // The warmup ELF rides provisioning because it needs the workspace it
-        // warms. Absent on arches that build no such ELF and on tests driving
-        // _ChipWorker.init directly; the platform then skips the warmup and the
-        // first TPREFETCH_ASYNC pays the cold control path instead.
-        std::vector<uint8_t> warmup_bytes;
-        if (!sdma_warmup_path.empty()) {
-            // initialized_ is already published above, so an escape from here must
-            // roll the Worker back exactly like the provisioning failure below;
-            // otherwise init() reports failure with the device context and host
-            // library still live.
-            try {
-                warmup_bytes = read_binary_file(sdma_warmup_path);
-            } catch (...) {
-                finalize();
-                throw;
-            }
-        }
-        const uint8_t *warmup_ptr = warmup_bytes.empty() ? nullptr : warmup_bytes.data();
-        int prov_rc = simpler_provision_dma_workspace_fn_(device_ctx_, 1, warmup_ptr, warmup_bytes.size());
-        if (prov_rc != 0) {
-            finalize();
-            throw std::runtime_error(
-                "async-DMA (SDMA) workspace provisioning failed with code " + std::to_string(prov_rc)
-            );
-        }
-    }
     run_lane_ = std::make_unique<ChipRunLane>(*this);
 }
 
@@ -528,7 +513,6 @@ void ChipWorker::finalize() {
     get_aicpu_dlopen_count_fn_ = nullptr;
     get_host_dlopen_count_fn_ = nullptr;
     get_run_stream_set_create_count_fn_ = nullptr;
-    simpler_provision_dma_workspace_fn_ = nullptr;
     finalize_device_fn_ = nullptr;
     ensure_acl_ready_fn_ = nullptr;
     create_comm_stream_fn_ = nullptr;
