@@ -9,12 +9,12 @@ Treat the source as authoritative when the two disagree, and fix this page in th
 same change.
 
 `Worker` is available from the package root; the remaining task and callable
-types live in `simpler.task_interface`. Both resolve on first access, so
-`import simpler` alone stays cheap and does not require the `_task_interface`
-extension.
+types live in `simpler.task_interface`, and the tracing helpers in
+`simpler.trace`. All of them resolve on first access, so `import simpler` alone
+stays cheap and does not require the `_task_interface` extension.
 
 ```python
-from simpler import Worker           # or: from simpler.worker import Worker
+from simpler import Worker, trace     # or: from simpler.worker import Worker
 from simpler.task_interface import (
     ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs,
     ChipTensor, CoreCallable, DataType, TaskArgs, TaskHandle,
@@ -146,6 +146,30 @@ takes a device pointer; `DataType` carries the element types.
 
 `validate()` runs at every submit/run entry point and throws if a diagnostic is
 on without `output_prefix`, or if a ring override breaks the ring's constraints.
+
+## `simpler.trace`
+
+Puts your own phases on the same host timeline the runtime's spans land on, on
+the same clock and in the same log. One producer, one span, one gate:
+
+| Name | Use |
+| ---- | --- |
+| `span(name, **attributes)` | A timed region, as a `with` block or a decorator. Emits even when the block raises, and does not swallow the exception. A marker is a span whose body does no work — there is no separate zero-duration call |
+| `producer(name)` | A `Producer` with the same `span` / `enabled`, for a library that wants its own name instead of the default `app` |
+| `enabled()` | Whether spans are being emitted right now — ask before building attributes that cost more than the span |
+
+```python
+from simpler import trace
+
+with trace.span("my_phase", batch=16, layer=3):
+    ...
+```
+
+Names are prefixed `ext.<producer>.`, so your spans can never be mistaken for
+the runtime's own. See
+[host trace markers](../../dfx/host-trace.md#emitting-your-own-spans-with-simplertrace)
+for what the namespace guarantees in each view, the cost of one attempt, and how
+to read the records back.
 
 ## `simpler_setup`
 
