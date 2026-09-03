@@ -181,10 +181,10 @@ bool graph_rebind_tensor(
 ) {
     GraphTensor rebound = tensor_template;
     if (!graph_tensor_wire_valid(rebound)) return false;
-    if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT)) {
+    if (ref.source_kind == static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_EXACT)) {
         if (ref.source_index >= execution.boundary_tensor_count || ref.packed_offset != 0) return false;
         rebound = execution.boundary_tensors[ref.source_index];
-    } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW)) {
+    } else if (ref.source_kind == static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_VIEW)) {
         if (ref.source_index >= execution.boundary_tensor_count) return false;
         const GraphTensor &boundary = execution.boundary_tensors[ref.source_index];
         if (ref.packed_offset > UINT64_MAX - boundary.start_offset) return false;
@@ -194,9 +194,9 @@ bool graph_rebind_tensor(
         rebound.start_offset = boundary.start_offset + ref.packed_offset;
         rebound.version = boundary.version;
         rebound.address_space = boundary.address_space;
-    } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||
-               ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT)) {
-        const bool own_output = ref.source == static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
+    } else if (ref.source_kind == static_cast<uint8_t>(GraphTensorSourceKind::INTERNAL) ||
+               ref.source_kind == static_cast<uint8_t>(GraphTensorSourceKind::OWN_OUTPUT)) {
+        const bool own_output = ref.source_kind == static_cast<uint8_t>(GraphTensorSourceKind::OWN_OUTPUT);
         const int32_t producer_index = own_output ? task_index : static_cast<int32_t>(ref.source_index);
         if (producer_index < 0 || producer_index > task_index || (own_output && ref.source_index != task_index) ||
             (!own_output && producer_index == task_index)) {
@@ -458,9 +458,9 @@ GraphMaterializeResult graph_execution_materialize_slice(
         for (int32_t j = 0; j < source.scalar_count; ++j) {
             const int32_t scalar_index = source.scalar_offset + j;
             const GraphScalarSourceRef &ref = scalar_sources[scalar_index];
-            if (ref.source == static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE)) {
+            if (ref.source_kind == static_cast<uint8_t>(GraphScalarSourceKind::STATIC_VALUE)) {
                 task_scalars[j] = definition_scalars[scalar_index];
-            } else if (ref.source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY)) {
+            } else if (ref.source_kind == static_cast<uint8_t>(GraphScalarSourceKind::BOUNDARY)) {
                 if (ref.source_index >= execution.boundary_scalar_count || execution.boundary_scalars == nullptr) {
                     execution.materialize_busy.store(0, std::memory_order_release);
                     return GraphMaterializeResult::INVALID;
@@ -489,8 +489,8 @@ GraphMaterializeResult graph_execution_materialize_slice(
             // yet to write, so the dispatch decision would read whatever the heap
             // last held. The recorder refuses it; so does the image reader.
             if (predicate_index >= definition.predicate_count ||
-                predicates[predicate_index].operand_source.source ==
-                    static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT) ||
+                predicates[predicate_index].operand_source.source_kind ==
+                    static_cast<uint8_t>(GraphTensorSourceKind::OWN_OUTPUT) ||
                 !graph_rebind_tensor(
                     execution, tasks, in_graph_task_offsets, predicates[predicate_index].operand,
                     predicates[predicate_index].operand_source, i, &operand

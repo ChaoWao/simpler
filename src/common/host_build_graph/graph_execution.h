@@ -29,7 +29,7 @@ static_assert(
 );
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
 
-enum class GraphTensorSource : uint8_t {
+enum class GraphTensorSourceKind : uint8_t {
     BOUNDARY_EXACT = 0,
     BOUNDARY_VIEW = 1,
     INTERNAL = 2,
@@ -60,22 +60,44 @@ struct GraphTensor {
 // Definition records are copied across the host-device boundary. Keep them
 // pointer-free, fixed-width and position-independent: every reference is an
 // offset from its owning header.
+//
+// How one recorded tensor argument is rebuilt for an execution: which object of
+// that execution supplies its storage, and where inside that object it starts.
+// `source_kind` decides what the other two fields mean, because each kind adds its
+// offset to a different field of the rebound tensor (graph_rebind_tensor):
+//
+//   source_kind     source_index indexes       packed_offset adds to     unit
+//   BOUNDARY_EXACT  the boundary tensors       nothing (must be zero)    --
+//   BOUNDARY_VIEW   the boundary tensors       rebound.start_offset      elements
+//   INTERNAL        the in-graph tasks         rebound.buffer_addr       bytes
+//   OWN_OUTPUT      the consuming task itself  rebound.buffer_addr       bytes
+//
+// The unit follows the field the offset lands in rather than being a choice. A
+// BOUNDARY kind keeps the boundary tensor's whole buffer, since that buffer is what
+// graph_tensor_wire_valid bounds the view against, so its offset has nowhere to go
+// but start_offset — which simpler::hbg::Tensor counts in elements. An INTERNAL
+// tensor instead owns the slice it names, so its offset moves the buffer itself.
+// An element offset is meaningful only while the consumer and the boundary tensor
+// share a dtype.
+//
+// OWN_OUTPUT carries a source_index equal to the consuming task's own index, which
+// replay checks rather than reads.
 struct GraphTensorSourceRef {
-    uint8_t source;
+    uint8_t source_kind;
     uint8_t reserved;
     uint16_t source_index;
     uint32_t reserved2;
     uint64_t packed_offset;
 };
 
-enum class GraphScalarSource : uint8_t {
+enum class GraphScalarSourceKind : uint8_t {
     STATIC_VALUE = 0,
     BOUNDARY = 1,
 };
 
 struct GraphScalarSourceRef {
     uint16_t source_index;
-    uint8_t source;
+    uint8_t source_kind;
     uint8_t reserved;
 };
 

@@ -124,6 +124,12 @@ inline constexpr uint64_t HEAP_VIRTUAL_BASE = 1ULL << 62;
 // keep below HEAP_VIRTUAL_BASE.
 inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
 
+// Whether an address was handed out by Graph recording rather than naming a
+// graph-heap block or a real device buffer. Exact because the three windows above
+// are disjoint: a recorded in-graph task's output is the only thing at or above
+// the base.
+inline constexpr bool is_graph_record_address(uint64_t addr) { return addr >= GRAPH_RECORD_VIRTUAL_BASE; }
+
 // Span of the graph-heap window: everything between the two virtual bases. This
 // is the bound orchestration allocates against, so a graph is limited by what
 // the device can commit afterwards rather than by a configured heap size.
