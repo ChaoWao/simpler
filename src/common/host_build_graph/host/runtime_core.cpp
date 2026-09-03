@@ -25,6 +25,7 @@
 #include <stdlib.h>
 
 #include "common/unified_log.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/host_tensor_access.h"
 #include "host_build_graph/task_id.h"
 

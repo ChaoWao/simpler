@@ -12,14 +12,13 @@
 #pragma once
 
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
 
-#include "aicpu/platform_regs.h"
 #include "backend/sdma/sdma_completion_scheduler.h"
-#include "intrinsic.h"
 #include "aicore_completion_mailbox.h"
+#include "aicore_completion_mailbox_types.h"
 #include "host_build_graph/completion_token.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 
 struct SchedulerState;

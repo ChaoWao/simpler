@@ -14,17 +14,18 @@
 #include <cinttypes>
 #include <limits>
 
-#include "host_build_graph/common.h"  // debug_assert
+#include "assert_compat.h"  // debug_assert
+#include "host_build_graph/common.h"
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
 #include "aicpu/device_time.h"
-#include "aicpu/platform_regs.h"
 #include "callable.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "host_build_graph/async_poll_phase_accumulator.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"

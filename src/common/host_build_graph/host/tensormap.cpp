@@ -27,12 +27,12 @@
 #include "host_build_graph/tensormap.h"
 
 #include <stdlib.h>
-#include <string.h>
 
 #include <new>
 
-#include "host_build_graph/common.h"
+#include "assert_compat.h"
 #include "common/unified_log.h"
+#include "host_build_graph/runtime_types.h"
 
 // =============================================================================
 // TensorMap Lookup Chain Length Statistics (compile-time toggle)

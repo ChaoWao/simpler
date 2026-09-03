@@ -34,19 +34,24 @@
 
 #include <atomic>
 
-#include "common/core_type.h"
 #include "common/memory_barrier.h"
 #include "utils/device_arena.h"
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId for the early-dispatch doorbell
 #include "async_wait.h"
 #include "host_build_graph/graph_execution.h"
 #include "host_build_graph/task_id.h"
-#include "host_build_graph/task_allocator.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 #include "scheduler_graph.h"
+// Defines the SIMPLER_*_PROFILING levels the conditionals below test. An #if on an
+// undefined macro evaluates to 0, so a profiling block reached through a transitive
+// include would switch itself off silently if that path ever went away.
+#include "profiling_config.h"
 
-#include "aicpu/device_time.h"  // get_sys_cnt_aicpu (used by early-dispatch doorbell timing too)
+#if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
+#include "aicpu/device_time.h"  // get_sys_cnt_aicpu, used only by the timed blocks below
+#endif
 
 // scheduler_graph.h states the storage layout as literals, because the AICore .o
 // that reads it cannot include runtime_types.h. This translation unit sees both,

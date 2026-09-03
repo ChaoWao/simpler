@@ -21,13 +21,19 @@
 #include <atomic>
 #include <array>
 #include <cstdlib>
-#include <functional>
 #include <mutex>
-#include <thread>
 
 #if defined(__linux__)
 #include <sys/syscall.h>
 #include <unistd.h>
+#endif
+
+// The thread-id fallback below runs only where SYS_gettid is unavailable, and it is
+// the sole user of these two. SYS_gettid comes from <sys/syscall.h>, so this test
+// has to follow that include.
+#if !(defined(__linux__) && defined(SYS_gettid))
+#include <functional>
+#include <thread>
 #endif
 
 #include "common/host_api.h"

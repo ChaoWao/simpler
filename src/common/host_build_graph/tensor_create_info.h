@@ -26,9 +26,9 @@
 #pragma once
 
 #include <cstring>
-#include <memory.h>
 #include <stdint.h>
 
+#include "assert_compat.h"
 #include "data_type.h"
 #include "tensor.h"
 

@@ -14,7 +14,6 @@
 #include <atomic>
 #include <cstdint>
 
-#include "aicore_completion_mailbox_types.h"
 #include "host_build_graph/constants.h"
 #include "host_build_graph/task_id.h"
 

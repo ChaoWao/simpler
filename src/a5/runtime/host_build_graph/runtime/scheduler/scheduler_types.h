@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "assert_compat.h"
 #include "common/core_type.h"
 #include "common/platform_config.h"
 #include "dispatch_payload.h"

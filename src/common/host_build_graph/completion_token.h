@@ -13,7 +13,6 @@
 
 #include <stdint.h>
 
-#include "aicore_completion_mailbox_types.h"
 #include "host_build_graph/runtime_status.h"
 
 // CompletionToken is the runtime-internal POD that backend submit handlers

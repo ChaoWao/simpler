@@ -31,9 +31,9 @@
 #include <memory>
 #include <type_traits>
 
-#include "common/chip_swimlane_profiling.h"
 #include "host_build_graph/task_allocator.h"
 #include "graph_cache.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/submit_types.h"
 #include "host_build_graph/shared_memory.h"

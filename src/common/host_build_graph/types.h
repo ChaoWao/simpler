@@ -37,6 +37,7 @@
 #include <arm_neon.h>
 #endif
 
+#include "assert_compat.h"
 #include "aicpu/dump_arg_selection.h"
 #include "common/device_phase.h"
 #include "data_type.h"

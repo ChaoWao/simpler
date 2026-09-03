@@ -15,7 +15,6 @@
 
 #pragma once
 
-#include <memory.h>
 #include <stdint.h>
 
 #include <algorithm>
@@ -27,7 +26,6 @@
 #include "assert_compat.h"
 #include "data_type.h"
 #include "host_build_graph/task_id.h"
-#include "task_interface/arg_direction.h"
 #include "task_interface/tensor.h"
 
 namespace simpler::hbg {

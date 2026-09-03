@@ -8,29 +8,21 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include <unistd.h>
-
 #include <atomic>
-#include <algorithm>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#ifdef __linux__
-#include <sys/mman.h>
-#endif
 
 #include "aicore_lifecycle.h"
 #include "aicore_scheduler_error.h"
 #include "aicore_scheduler_state.h"
 #include "aicpu/aicpu_device_config.h"
 #include "aicpu/cache_maintenance.h"
-#include "aicpu/args_dump_aicpu.h"
 #include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/device_time.h"
-#include "aicpu/pmu_collector_aicpu.h"
 #include "host_build_graph/runtime_status.h"
 #include "host_build_graph/shared_memory.h"
 #include "runtime.h"

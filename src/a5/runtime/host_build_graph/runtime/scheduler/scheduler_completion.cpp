@@ -10,14 +10,12 @@
  */
 #include "scheduler_context.h"
 
-#include <algorithm>
-
 #include "common/unified_log.h"
 #include "aicpu/device_time.h"
-#include "aicpu/platform_regs.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
+#include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_core.h"
 #include "runtime.h"
 #include "spin_hint.h"

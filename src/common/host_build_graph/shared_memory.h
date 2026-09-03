@@ -37,6 +37,7 @@
 
 #include <cstring>
 
+#include "assert_compat.h"
 #include "utils/device_arena.h"
 #include "graph_execution.h"
 #include "host_build_graph/runtime_types.h"

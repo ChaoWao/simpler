@@ -30,16 +30,12 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>   // for fprintf, printf
-#include <string.h>  // for memset
 
 #include <vector>
 
 #include "common/core_type.h"
-#include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
-#include "dispatch_payload.h"
 #include "task_args.h"
 #include "host_build_graph/entry_args.h"  // EntryArgsStorage
 

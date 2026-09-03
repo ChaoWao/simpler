@@ -13,7 +13,6 @@
 #include <functional>
 #include <utility>
 
-#include "graph_host_state.h"
 // The ops implementations below need the full RuntimeContext, which is why the
 // header does not include this: a translation unit cannot see both it and
 // orchestration_api.h's partial definition.

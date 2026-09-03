@@ -50,13 +50,12 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <unordered_map>
 #include <vector>
 
+#include "assert_compat.h"
 #include "host_build_graph/runtime_status.h"
-#include "host_build_graph/common.h"
 #include "host_build_graph/dep_gen_host_graph.h"
 #include "host_build_graph/graph_execution.h"
 #include "scheduler/scheduler_graph.h"
@@ -76,7 +75,7 @@
 #include "../../../../common/worker/runtime_c_api.h"
 #include "callable.h"
 #include "common/host_log_binding.h"
-#include "common/log_clock.h"
+#include "common/host_phase_kind.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host_log.h"

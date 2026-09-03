@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "assert_compat.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "common/chip_swimlane_profiling.h"
@@ -19,7 +20,6 @@
 
 #include "scheduler/scheduler.h"
 
-#include "aicore_completion_mailbox.h"
 #include "dispatch_payload.h"
 
 // runtime.h cannot be included here — it pulls in Handshake, which this header

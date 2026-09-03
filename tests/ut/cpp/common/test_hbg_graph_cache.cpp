@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "host_build_graph/runtime_status.h"
+
 #include "graph_cache.h"
 #include "graph_execution.h"
 #include "runtime_status/error_names.h"

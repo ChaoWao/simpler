@@ -21,7 +21,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include "common/unified_log.h"
+#include "host_build_graph/runtime_status.h"
 
 // =============================================================================
 // Size Calculation

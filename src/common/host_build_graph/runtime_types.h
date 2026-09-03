@@ -32,17 +32,22 @@
 #include <cstddef>
 #include <type_traits>
 
+#include "assert_compat.h"
+// Defines SIMPLER_DFX and the SIMPLER_*_PROFILING levels the conditionals in this
+// header test, so it has to precede them rather than sit inside one: an #if on an
+// undefined macro evaluates to 0, and a profiling block guarded that way would
+// switch itself off and report nothing. A macro named only in a preprocessor
+// condition is not a reference an include-cleaner can see, so this include reads
+// as unused to those tools.
 #include "profiling_config.h"
 #include "host_build_graph/constants.h"
-#include "host_build_graph/runtime_status.h"
 // NOTE (host_build_graph divergence from tensormap_and_ringbuffer): the
 // dispatch_payload.h include is intentionally dropped here. This header is
 // reached by a path-qualified include, and dispatch_payload.h uses #pragma once
 // (path-keyed), so leaving it in double-defines DispatchPayload against
 // tensormap_and_ringbuffer's copy inside the shared host-dispatcher TU.
-// runtime_types.h never references DispatchPayload itself; consumers that
-// need it include it via runtime.h directly.
-#include "aicore_completion_mailbox.h"
+// runtime_types.h never references DispatchPayload itself; the consumers that
+// need it include dispatch_payload.h directly.
 #include "common/args_dump_task_metadata.h"
 #include "host_build_graph/self_relative_ptr.h"
 #include "host_build_graph/submit_types.h"

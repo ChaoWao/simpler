@@ -11,12 +11,11 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 
-#include "aicpu/platform_regs.h"
-#include "aicore_completion_mailbox.h"
+#include "aicpu/cache_maintenance.h"
 #include "host_build_graph/completion_token.h"
+#include "host_build_graph/constants.h"
 #include "host_build_graph/runtime_status.h"
 
 inline uintptr_t sdma_completion_cache_line(const volatile void *addr) {
