@@ -528,19 +528,26 @@ void SchedulerContext::dispatch_ready_tasks(
     // (sync_start > MIX > C/V within the normal source). Same order and machinery,
     // fed from ready_sync_queues; an oversized cohort arms the stop-the-world drain
     // (entered_drain), which also short-circuits the regular tier below.
-    run_staging_order(
-        thread_idx, pmu_active,
-        [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
-            dispatch_shape(
-                thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
-            );
-            return entered_drain;
-        },
-        [&] {
-            return has_residual_sync_mix();
-        }
-    );
-    if (entered_drain) return;
+    // Skip Tier-0 entirely until the orchestrator has submitted a sync_start
+    // task. Without one the staging order below can only probe six empty queues
+    // per iteration. The acquire pairs with the release in prepare_task(), so
+    // observing the latch set also makes that task's submission visible.
+    if (sched_->sync_task_seen.load(std::memory_order_acquire) != 0) {
+        run_staging_order(
+            thread_idx, pmu_active,
+            [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                dispatch_shape(
+                    thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress,
+                    try_pushed
+                );
+                return entered_drain;
+            },
+            [&] {
+                return has_residual_sync_mix();
+            }
+        );
+        if (entered_drain) return;
+    }
 
     // Tier 1: regular ready work.
     run_staging_order(

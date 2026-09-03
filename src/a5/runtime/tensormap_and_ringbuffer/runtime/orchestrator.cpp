@@ -648,6 +648,17 @@ static bool prepare_task(
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
+    if (task_attrs.requires_sync_start()) {
+        // Ordered before the wiring publish below, which is the first read of
+        // this slot by any scheduler thread, so the latch is set before the
+        // task can be routed to ready_sync_queues.
+        //
+        // Tier-0 priority is best-effort for an entry that becomes visible
+        // mid-iteration: a thread already past its Tier-0 checkpoint picks that
+        // entry up on its next pass, whether the checkpoint is this latch or
+        // the six queue probes it stands in for.
+        orch->scheduler->sync_task_seen.store(1, std::memory_order_release);
+    }
     // fanin_count is set during Orch-side wiring
     scope_tasks_push(orch, out->slot_state);
 

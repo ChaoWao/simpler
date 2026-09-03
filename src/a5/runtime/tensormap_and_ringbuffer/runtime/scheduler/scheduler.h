@@ -537,6 +537,19 @@ struct SchedulerState {
     // stop-the-world drain, per-core MIX placement, head-start spacing).
     ChipReadyQueue ready_sync_queues[NUM_RESOURCE_SHAPES];
 
+    // Set when the orchestrator submits a task with requires_sync_start(), and
+    // stays set for the rest of the epoch. Only such a task reaches
+    // ready_sync_queues[], so while this is clear those queues hold nothing and
+    // the dispatch loop skips the whole Tier-0 staging order -- six shape probes
+    // per iteration, each a load on a line every scheduler thread writes.
+    //
+    // Release here, acquire on the dispatch loop's load: observing it set also
+    // makes visible the submission that set it.
+    //
+    // Own cache line: written once per epoch, read once per dispatch iteration,
+    // so it never joins the lines the scheduler threads already contend for.
+    alignas(64) std::atomic<uint32_t> sync_task_seen;
+
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
     ChipReadyQueue dummy_ready_queue;
