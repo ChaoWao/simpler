@@ -68,8 +68,9 @@ extern "C" void set_log_level(int level);
 // host-side loader resolves it by name from the AICPU SO handle. Declared here
 // so both sides agree on the signature at compile time — the struct is only
 // forward-declared, keeping <dlfcn.h> and the state layout off device targets.
+// Returns zero when the ABI is accepted and nonzero otherwise.
 struct SimplerHostLogState;
-extern "C" void set_host_log_state(struct SimplerHostLogState *state);
+extern "C" int set_host_log_state(struct SimplerHostLogState *state);
 
 // Apply the platform's logging policy to a newly loaded orchestration SO.
 // Simulation binds the process-owned host state; onboard requires no handoff.

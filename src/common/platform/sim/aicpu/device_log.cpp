@@ -46,8 +46,10 @@ extern "C" void set_log_level(int level) {
     }
 }
 
-extern "C" void set_host_log_state(SimplerHostLogState *state) {
-    if (HostLogger::get_instance().bind_state(state) == 0) g_host_log_state = state;
+extern "C" int set_host_log_state(SimplerHostLogState *state) {
+    const int result = HostLogger::get_instance().bind_state(state);
+    if (result == 0) g_host_log_state = state;
+    return result;
 }
 
 int bind_orchestration_host_log_state(void *handle, const char **error) {

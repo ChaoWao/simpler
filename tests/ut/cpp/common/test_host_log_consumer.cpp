@@ -9,21 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <gtest/gtest.h>
-
-#include "common/host_span.h"
-#include "common/log_level.h"
 #include "host_log.h"
 
-TEST(HostLogUnboundTest, PrivateModuleStateStartsSilent) {
-    EXPECT_EQ(HostLogger::get_instance().level(), static_cast<int>(simpler::log::LogLevel::NUL));
-    EXPECT_EQ(unified_log_host_span_enabled(), 0);
+extern "C" __attribute__((visibility("default"))) void test_host_log_consumer_emit() {
+    HostLogger::get_instance().log(simpler::log::LogLevel::ERROR, "consumer", "cross-dso-record");
+}
 
-    const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 1, 0, 0, 0, 100, 25, "node.dispatch", "run_id=1"
-    };
-    testing::internal::CaptureStderr();
-    HostLogger::get_instance().log(simpler::log::LogLevel::ERROR, "unbound", "must stay silent");
-    unified_log_host_span(&span);
-    EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
+extern "C" __attribute__((visibility("default"))) int test_host_log_consumer_start_writer() {
+    return HostLogger::get_instance().start_writer() ? 1 : 0;
 }

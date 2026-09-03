@@ -38,9 +38,12 @@ writes follows it: `LOG_*` records, `[STRACE]` spans, `[CLOCK_ANCHOR]`, the
 `bind phase=` summaries, and the spans Python emits through
 `unified_log_host_span`. Nothing declares an intent and no record kind is treated
 specially, so there is no state in which part of a run's log is in one place and
-part in another. The first non-empty directory in a process wins, and a record
-falls back to stderr rather than being lost whenever the file cannot take it: a
-path that does not fit, a failed open, a failed write, or a failed flush.
+part in another. The first non-empty directory in a process wins, and it is the
+destination rather than a preference: a record the file cannot take — a path
+that does not fit, a failed open, a failed write — is dropped and counted, not
+relocated to stderr. That is what keeps "the log is complete" and
+"`dropped_record_count` is zero" the same statement. stderr is the destination
+only while no directory is bound.
 
 **Python's own log records are part of this stream too.** Seeding the native
 threshold installs a handler on the `simpler` logger that forwards each record
@@ -52,15 +55,19 @@ the log rather than a second half of it. Records logged before a worker is
 initialized have no handler to forward through yet and stay on the root logger.
 See [logging.md](../logging.md).
 
-Each process's file is fully buffered. It is flushed when a depth-zero invocation
-record completes, which is the point at which the records so far describe a whole
-invocation, and whenever a `WARN` or `ERROR` record is written, which is rare and
-worth having on disk if the process dies. That flush runs on the thread that
-emitted the record, so this reduces the observer effect by roughly the ratio of
-records to flushes rather than removing it: expect a residual tail at each flush
-boundary, not a clean floor. A system tracer would hand the bytes to a consumer
-instead, and would bound its buffer and count what it drops; this does neither,
-deliberately.
+Each process has one bounded background writer. A producer formats a complete
+record of at most 512 bytes and submits it through a 4096-slot lock-free queue;
+after that writer is published, it never performs file/stderr I/O or waits for a
+flush. The pre-writer hierarchical initialization window is the deliberate
+exception: it writes synchronously so startup diagnostics survive the final
+local fork. The writer appends each accepted record directly to the process
+file, or to stderr while no directory is bound. Queue-full, bounded-claim
+failure, and final output failure increment an explicit process drop counter, attributed by cause. A quiescent boundary writes that breakdown into the log as `[HOSTLOG_DROPS]` when it has grown, so a reader holding only the log can tell that the timing below it is derived from an incomplete one. Worker shutdown and `os._exit()`
+call sites wait only boundedly for accepted records, so a stuck output cannot
+turn task execution or teardown into an unbounded wait; a timeout reports both
+pending and dropped counts. `WARN`, `ERROR`, and depth-zero spans use the same
+async path as every other steady-state record. An overlong ordinary record is
+truncated to 512 bytes and ends in `~\n`.
 
 Every DSO that compiles the logger holds its own buffered stream on that one
 file, so the buffering above is per module rather than per process: a `WARN` from

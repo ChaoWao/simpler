@@ -9,11 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Every DSO that compiles the host logger owns a private buffered stream on the
-// shared per-process log file. This pins the consequence: unloading such a
-// module must put that stream's tail on disk, because dlclose discards the
-// mapping the buffer lives in. DeviceRunner::unload_executor_binaries() does
-// exactly this to the sim AICPU SO on every teardown.
+// A bound consumer DSO submits through the process owner's queue, and enqueue
+// copies the record into the owner's slot rather than retaining the caller's
+// storage. This pins the consequence: unloading such a module cannot lose the
+// records it already submitted, even though dlclose discards the mapping they
+// were formatted in. DeviceRunner::unload_executor_binaries() does exactly this
+// to the sim AICPU SO on every teardown.
 
 #include <fstream>
 #include <string>
@@ -64,6 +65,10 @@ TEST(HostLogUnloadTest, UnloadedModuleLeavesNoRecordsInItsPrivateBuffer) {
     ASSERT_EQ(bind(owner.state()), 0);
     emit(kRecords);
     ASSERT_EQ(dlclose(handle), 0);
+    // After the unload, so this asserts the owner can still write records whose
+    // producer is gone. The writer owns the destination, so nothing is on disk
+    // until this returns — reading the file without it races the writer thread.
+    ASSERT_TRUE(owner.flush());
 
     const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
     std::ifstream input(path);

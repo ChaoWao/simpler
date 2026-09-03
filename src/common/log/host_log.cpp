@@ -15,16 +15,23 @@
 
 #include "host_log.h"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <limits.h>
+#include <mutex>
+#include <new>
 #include <pthread.h>
+#include <semaphore.h>
 #include <string>
-#include <vector>
+#include <thread>
 
 #include <unistd.h>
 
@@ -39,10 +46,23 @@ using simpler::log::LogLevel;
 
 namespace {
 
-// Every STRACE marker renders well inside this allocation bound, so the heap
-// fallback below stays off the path a traced run pays per span. This capacity
-// is not an atomic-write guarantee.
-constexpr size_t kRecordStackCapacity = 2048;
+// Every queued record fits the portable atomic pipe-write floor. The writer
+// therefore preserves one physical write per record when it falls back to a
+// stderr pipe shared by several processes.
+constexpr size_t kRecordCapacity = _POSIX_PIPE_BUF;
+// About 2 MiB per logging process: large enough to absorb ordinary bursts,
+// fixed enough that a permanently blocked destination cannot grow memory use.
+constexpr size_t kQueueCapacity = 4096;
+// Producers receive a fixed CPU budget for the lock-free MPSC position claim.
+// Exhausting it is a counted drop, never an I/O wait or condition-variable sleep.
+constexpr size_t kProducerClaimAttempts = 1024;
+constexpr uint64_t kProducerStopFlag = UINT64_C(1) << 63;
+static_assert(kQueueCapacity + 1 <= _POSIX_SEM_VALUE_MAX);
+
+#if defined(SIMPLER_HOST_LOG_TEST_HOOKS)
+std::atomic<void (*)(size_t)> g_after_queue_claim_hook{nullptr};
+std::atomic<void (*)()> g_before_gap_wait_hook{nullptr};
+#endif
 
 // POSIX guarantees atomic pipe writes up to _POSIX_PIPE_BUF (512 bytes). A
 // conservative bound for the logger prefix, fixed-width STRACE fields, and
@@ -50,6 +70,18 @@ constexpr size_t kRecordStackCapacity = 2048;
 constexpr size_t kHostSpanNameCapacity = 64;
 constexpr size_t kHostSpanAttributesCapacity = 192;
 static_assert(kHostSpanNameCapacity + kHostSpanAttributesCapacity <= _POSIX_PIPE_BUF - 256);
+static_assert(kRecordCapacity >= 2);
+
+struct QueuedRecord {
+    uint32_t size;
+    int32_t anchor_pid;
+    char data[kRecordCapacity];
+};
+
+struct QueueSlot {
+    std::atomic<size_t> sequence;
+    QueuedRecord record;
+};
 
 std::string encode_host_span_field(const char *value, size_t capacity, bool attributes) {
     static constexpr char kHex[] = "0123456789ABCDEF";
@@ -89,8 +121,8 @@ std::string encode_host_span_field(const char *value, size_t capacity, bool attr
 
 // Renders the timestamp/thread/level prefix, the caller's message, and an
 // optional trailing newline into `buffer`, and returns the length of the whole
-// record. A return value of `capacity` or more means `buffer` holds only a
-// truncated prefix and the caller must re-render into that many bytes.
+// record. A return value of `capacity` or more means `buffer` holds a truncated
+// record and the caller must replace its tail with the truncation marker.
 size_t format_record(
     char *buffer, size_t capacity, int64_t monotonic_ns, unsigned long tid, const char *level_tag, const char *func,
     const char *fmt, va_list args, bool append_newline
@@ -130,10 +162,10 @@ size_t format_record(
     return length;
 }
 
-bool write_stderr(const char *record, size_t size) {
+bool write_fd(int fd, const char *record, size_t size) {
     size_t offset = 0;
     while (offset < size) {
-        const ssize_t written = ::write(STDERR_FILENO, record + offset, size - offset);
+        const ssize_t written = ::write(fd, record + offset, size - offset);
         if (written > 0) {
             offset += static_cast<size_t>(written);
         } else if (written < 0 && errno == EINTR) {
@@ -143,6 +175,33 @@ bool write_stderr(const char *record, size_t size) {
         }
     }
     return true;
+}
+
+bool write_stderr(const char *record, size_t size) { return write_fd(STDERR_FILENO, record, size); }
+
+uint64_t atomic_load_u64(const uint64_t *value) { return __atomic_load_n(value, __ATOMIC_ACQUIRE); }
+
+void atomic_add_u64(uint64_t *value, uint64_t count) { __atomic_fetch_add(value, count, __ATOMIC_RELAXED); }
+
+void atomic_sub_u64(uint64_t *value, uint64_t count) { __atomic_fetch_sub(value, count, __ATOMIC_RELEASE); }
+
+void atomic_store_u64(uint64_t *value, uint64_t desired) { __atomic_store_n(value, desired, __ATOMIC_RELEASE); }
+
+// Every drop is one increment of the total plus one of its reason. Keeping them
+// in step is why no site touches dropped_record_count directly: a total that
+// disagrees with the breakdown is worse than either alone, because it makes both
+// unusable.
+void count_drop(SimplerHostLogState *state, SimplerHostLogDropReason reason) {
+    atomic_add_u64(&state->dropped_record_count, 1);
+    atomic_add_u64(&state->dropped_by_reason[reason], 1);
+}
+
+void release_anchor_after_write_failure(SimplerHostLogState *state, int32_t pid) {
+    int32_t observed = __atomic_load_n(&state->clock_anchor_pid, __ATOMIC_ACQUIRE);
+    while (
+        (observed == pid || observed == -pid) &&
+        !__atomic_compare_exchange_n(&state->clock_anchor_pid, &observed, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+    ) {}
 }
 
 long host_trace_tid() {
@@ -155,17 +214,18 @@ long host_trace_tid() {
 
 struct HostLogFileSink {
     HostLogFileSink();
-    ~HostLogFileSink();
 
     std::mutex mutex;
-    FILE *stream = nullptr;
+    int fd = -1;
     pid_t pid = -1;
     std::string directory;
 };
 
 HostLogFileSink &host_log_file_sink() {
-    static HostLogFileSink sink;
-    return sink;
+    // Process-lifetime allocation avoids static-destruction order racing the
+    // writer thread. The kernel closes the fd when the process exits.
+    static auto *sink = new HostLogFileSink;
+    return *sink;
 }
 
 void host_log_sink_before_fork() { host_log_file_sink().mutex.lock(); }
@@ -179,83 +239,264 @@ HostLogFileSink::HostLogFileSink() {
     (void)pthread_atfork(host_log_sink_before_fork, host_log_sink_after_fork, host_log_sink_after_fork);
 }
 
-// One sink per DSO that compiles this file, so each holds its own buffered
-// stream on the shared per-process log. Closing it here is what puts that
-// buffer's tail on disk when the DSO is unloaded: dlclose runs this destructor,
-// and a dlopened module's records would otherwise be discarded with its mapping.
-// A stream this process did not open belongs to the parent that forked it and
-// is left alone, so the parent's copied stdio buffer is never flushed twice.
-HostLogFileSink::~HostLogFileSink() {
-    std::scoped_lock lock(mutex);
-    if (stream != nullptr && pid == getpid()) (void)std::fclose(stream);
-    stream = nullptr;
-}
-
-// Append one already-formatted record. The <=`PIPE_BUF` single-write rule that
-// makes a stderr record indivisible neither applies nor is needed here: this file
-// has exactly one writer process and the sink mutex serializes the writers inside
-// it, so a flush of up to the buffer's size cannot interleave with anything.
-//
-// Two properties a system tracer would have and this deliberately does not, so
-// the difference is not mistaken for an oversight. The flush runs on the thread
-// that emitted the record, where ftrace and Perfetto hand the bytes to a consumer
-// and never let a producer touch the output; and a full buffer here blocks that
-// thread rather than dropping and counting, where every comparable tracer bounds
-// the buffer and exports a loss counter. What this buys is one write per root
-// span instead of one per record — an order of magnitude, not the elimination of
-// the observer effect.
-bool write_log_file(const char *directory, const char *record, size_t size, bool flush) {
+// Blocking I/O is confined to the process writer thread. A raw append fd makes
+// completion and loss accounting exact: successful write(2) means the whole
+// record reached the kernel, with no hidden stdio buffer left to fail later.
+bool write_log_file(const char *directory, const char *record, size_t size) {
     HostLogFileSink &sink = host_log_file_sink();
     std::scoped_lock lock(sink.mutex);
     const pid_t pid = getpid();
-    const bool inherited = sink.stream != nullptr && sink.pid != pid;
-    const bool changed_directory = sink.stream != nullptr && sink.directory != directory;
+    const bool inherited = sink.fd >= 0 && sink.pid != pid;
+    const bool changed_directory = sink.fd >= 0 && sink.directory != directory;
     if (inherited) {
-        // Do not fclose(): its copied stdio buffer contains records already
-        // owned by the parent and must never be flushed again by the child.
-        // Dropping the FILE leaks it and its buffer in the child, one per
-        // process, which is the price of not duplicating the parent's records —
-        // C offers no portable way to discard a stream's buffer.
-        const int inherited_fd = fileno(sink.stream);
-        if (inherited_fd >= 0) (void)::close(inherited_fd);
-        sink.stream = nullptr;
+        (void)::close(sink.fd);
+        sink.fd = -1;
         sink.pid = -1;
         sink.directory.clear();
     } else if (changed_directory) {
-        std::fclose(sink.stream);
-        sink.stream = nullptr;
+        (void)::close(sink.fd);
+        sink.fd = -1;
         sink.pid = -1;
         sink.directory.clear();
     }
-    if (sink.stream == nullptr) {
+    if (sink.fd < 0) {
         char path[PATH_MAX];
         const int length = std::snprintf(path, sizeof(path), "%s/host.%d.log", directory, pid);
         if (length <= 0 || static_cast<size_t>(length) >= sizeof(path)) return false;
-        sink.stream = std::fopen(path, "a");
-        if (sink.stream == nullptr) return false;
-        std::setvbuf(sink.stream, nullptr, _IOFBF, 1U << 20U);
+        int flags = O_WRONLY | O_CREAT | O_APPEND;
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+        sink.fd = ::open(path, flags, 0666);
+        if (sink.fd < 0) return false;
         sink.pid = pid;
         sink.directory = directory;
     }
-    if (std::fwrite(record, 1, size, sink.stream) != size) return false;
-    return !flush || std::fflush(sink.stream) == 0;
+    if (write_fd(sink.fd, record, size)) return true;
+    (void)::close(sink.fd);
+    sink.fd = -1;
+    sink.pid = -1;
+    sink.directory.clear();
+    return false;
 }
 
-bool flush_log_file() {
-    HostLogFileSink &sink = host_log_file_sink();
-    std::scoped_lock lock(sink.mutex);
-    return sink.stream == nullptr || std::fflush(sink.stream) == 0;
+const char *bound_log_directory(const SimplerHostLogState *state) {
+    if (__atomic_load_n(&state->log_directory_bound, __ATOMIC_ACQUIRE) != 1) return nullptr;
+    return state->log_directory;
 }
 
-}  // namespace
+// The one place a destination is chosen, and it chooses exactly one: a bound
+// directory is the destination, not a preference. A record the file cannot take
+// is dropped and counted rather than relocated to stderr, so "the log is
+// complete" and "dropped_record_count is zero" stay the same statement. The
+// alternative loses that: a bound directory that cannot be opened would send
+// every record to stderr while the counter still read zero, which is a silent
+// failure wearing a healthy counter.
+bool write_record_now(const SimplerHostLogState *state, const char *record, size_t size) {
+    const char *directory = bound_log_directory(state);
+    if (directory != nullptr) return write_log_file(directory, record, size);
+    return write_stderr(record, size);
+}
 
-namespace {
+struct HostLogAsyncSink {
+    explicit HostLogAsyncSink(SimplerHostLogState *shared_state) :
+        state(shared_state),
+        pid(getpid()) {
+        for (size_t index = 0; index < kQueueCapacity; ++index) {
+            queue[index].sequence.store(index, std::memory_order_relaxed);
+        }
+        // macOS deliberately does not implement unnamed semaphores. A named
+        // semaphore works on both supported host OSes; unlink it immediately so
+        // the kernel object has this process's handles as its only lifetime.
+        char name[32];
+        const int length = snprintf(
+            name, sizeof(name), "/sl-%x-%llx", static_cast<unsigned int>(pid),
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(this))
+        );
+        if (length > 0 && static_cast<size_t>(length) < sizeof(name)) {
+            ready = sem_open(name, O_CREAT | O_EXCL, 0600, 0);
+            if (ready != SEM_FAILED && sem_unlink(name) != 0) {
+                (void)sem_close(ready);
+                ready = SEM_FAILED;
+            }
+        }
+    }
+
+    ~HostLogAsyncSink() {
+        if (ready != SEM_FAILED) (void)sem_close(ready);
+    }
+
+    bool start() {
+        if (ready == SEM_FAILED) return false;
+        try {
+            writer = std::thread([this] {
+                run();
+            });
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool stop_when_empty(uint32_t timeout_ms) {
+        if (!wait_until_empty(timeout_ms)) return false;
+
+        stopping.store(true, std::memory_order_release);
+        (void)sem_post(ready);
+        if (writer.joinable()) writer.join();
+        return true;
+    }
+
+    bool wait_until_empty(uint32_t timeout_ms) {
+        std::unique_lock<std::mutex> lock(completion_mutex);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        for (;;) {
+            if ((atomic_load_u64(&state->sink_producer_state) & ~kProducerStopFlag) == 0 &&
+                atomic_load_u64(&state->pending_record_count) == 0) {
+                return true;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return false;
+            completion_cv.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(1)));
+        }
+    }
+
+    SimplerHostLogState *state;
+    pid_t pid;
+
+    static int
+    enqueue(void *context, SimplerHostLogState *state, const char *record, uint32_t size, int32_t anchor_pid) {
+        auto *sink = static_cast<HostLogAsyncSink *>(context);
+        if (sink == nullptr) {
+            atomic_sub_u64(&state->sink_producer_state, 1);
+            count_drop(state, SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+            return 0;
+        }
+        if (sink->state != state || sink->pid != getpid() || size > kRecordCapacity) {
+            sink->producer_done();
+            count_drop(state, SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+            return 0;
+        }
+
+        size_t position = sink->enqueue_position.load(std::memory_order_relaxed);
+        QueueSlot *slot = nullptr;
+        for (size_t attempt = 0; attempt < kProducerClaimAttempts; ++attempt) {
+            slot = &sink->queue[position % kQueueCapacity];
+            const size_t sequence = slot->sequence.load(std::memory_order_acquire);
+            const auto difference = static_cast<intptr_t>(sequence) - static_cast<intptr_t>(position);
+            if (difference == 0) {
+                if (sink->enqueue_position.compare_exchange_weak(
+                        position, position + 1, std::memory_order_relaxed, std::memory_order_relaxed
+                    )) {
+                    break;
+                }
+            } else if (difference < 0) {
+                sink->producer_done();
+                count_drop(state, SIMPLER_HOST_LOG_DROP_QUEUE_FULL);
+                return 0;  // The consumer has not freed this lap: queue full.
+            } else {
+                position = sink->enqueue_position.load(std::memory_order_relaxed);
+            }
+            slot = nullptr;
+        }
+        if (slot == nullptr) {
+            sink->producer_done();
+            count_drop(state, SIMPLER_HOST_LOG_DROP_CLAIM_EXHAUSTED);
+            return 0;
+        }
+
+#if defined(SIMPLER_HOST_LOG_TEST_HOOKS)
+        if (auto hook = g_after_queue_claim_hook.load(std::memory_order_acquire); hook != nullptr) hook(position);
+#endif
+
+        slot->record.size = size;
+        slot->record.anchor_pid = anchor_pid;
+        std::memcpy(slot->record.data, record, size);
+        atomic_add_u64(&state->pending_record_count, 1);
+        slot->sequence.store(position + 1, std::memory_order_release);
+        sink->queue_size.fetch_add(1, std::memory_order_release);
+        (void)sem_post(sink->ready);
+        sink->producer_done();
+        return 1;
+    }
+
+private:
+    void producer_done() {
+        // Producers never take the drain waiter's mutex. A waiter polls the
+        // atomic producer count at a bounded interval, so it cannot miss this
+        // transition permanently even though no condition-variable signal is
+        // needed on this hot path.
+        atomic_sub_u64(&state->sink_producer_state, 1);
+    }
+
+    bool pop(QueuedRecord *record) {
+        if (queue_size.load(std::memory_order_acquire) == 0) return false;
+        QueueSlot &slot = queue[dequeue_position % kQueueCapacity];
+        if (slot.sequence.load(std::memory_order_acquire) != dequeue_position + 1) return false;
+        *record = slot.record;
+        slot.sequence.store(dequeue_position + kQueueCapacity, std::memory_order_release);
+        ++dequeue_position;
+        queue_size.fetch_sub(1, std::memory_order_release);
+        return true;
+    }
+
+    void run() {
+        size_t ready_tokens = 0;
+        for (;;) {
+            if (ready_tokens == 0) {
+                int result;
+                do {
+                    result = sem_wait(ready);
+                } while (result != 0 && errno == EINTR);
+                if (result != 0) return;
+                if (stopping.load(std::memory_order_acquire) && queue_size.load(std::memory_order_acquire) == 0) return;
+                ++ready_tokens;
+            }
+
+            QueuedRecord record;
+            // Producers can publish adjacent MPSC positions out of order. A
+            // later token may wake us before the next position is visible, so
+            // retain every later token and sleep for the earlier producer's
+            // token instead of burning a CPU in an unbounded yield loop.
+            if (!pop(&record)) {
+#if defined(SIMPLER_HOST_LOG_TEST_HOOKS)
+                if (auto hook = g_before_gap_wait_hook.load(std::memory_order_acquire); hook != nullptr) hook();
+#endif
+                int result;
+                do {
+                    result = sem_wait(ready);
+                } while (result != 0 && errno == EINTR);
+                if (result != 0) return;
+                ++ready_tokens;
+                continue;
+            }
+            --ready_tokens;
+
+            if (!write_record_now(state, record.data, record.size)) {
+                count_drop(state, SIMPLER_HOST_LOG_DROP_OUTPUT_FAILED);
+                if (record.anchor_pid != 0) release_anchor_after_write_failure(state, record.anchor_pid);
+            }
+            atomic_sub_u64(&state->pending_record_count, 1);
+            completion_cv.notify_all();
+        }
+    }
+
+    std::array<QueueSlot, kQueueCapacity> queue;
+    std::atomic<size_t> queue_size{0};
+    std::atomic<size_t> enqueue_position{0};
+    size_t dequeue_position = 0;
+    sem_t *ready = SEM_FAILED;
+    std::atomic<bool> stopping{false};
+    std::mutex completion_mutex;
+    std::condition_variable completion_cv;
+    std::thread writer;
+};
 
 // A private logger stays silent until its owner seeds this state or its loader
 // binds the process-owned state. Missing binding is therefore observable as an
 // absent module stream rather than output filtered at the wrong threshold.
 SimplerHostLogState g_module_log_state{
-    SIMPLER_HOST_LOG_STATE_ABI_VERSION, sizeof(SimplerHostLogState), static_cast<int32_t>(LogLevel::NUL), 0, 0, {},
+    static_cast<int32_t>(LogLevel::NUL), 0, 0, {}, 0, 0, nullptr, nullptr, 0, 0, 0, {}, 0,
 };
 
 int32_t atomic_load_i32(const int32_t *value) { return __atomic_load_n(value, __ATOMIC_ACQUIRE); }
@@ -265,6 +506,34 @@ void atomic_store_i32(int32_t *value, int32_t desired) { __atomic_store_n(value,
 bool atomic_compare_exchange_i32(int32_t *value, int32_t *expected, int32_t desired) {
     return __atomic_compare_exchange_n(value, expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
+
+void *atomic_load_pointer(void *const *value) { return __atomic_load_n(value, __ATOMIC_ACQUIRE); }
+
+void atomic_store_pointer(void **value, void *desired) { __atomic_store_n(value, desired, __ATOMIC_RELEASE); }
+
+SimplerHostLogEnqueueFn atomic_load_enqueue(SimplerHostLogEnqueueFn const *value) {
+    return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+}
+
+void atomic_store_enqueue(SimplerHostLogEnqueueFn *value, SimplerHostLogEnqueueFn desired) {
+    __atomic_store_n(value, desired, __ATOMIC_RELEASE);
+}
+
+bool acquire_sink_producer(SimplerHostLogState *state) {
+    // Admission and stop are ordered by one atomic RMW. If stop won first, undo
+    // our transient producer reference and reject the record. If admission won
+    // first, prepare_to_fork() observes the reference and keeps sink_context
+    // alive until this producer returns. Unlike a CAS retry loop, this gives
+    // every producer a fixed admission cost under contention.
+    const uint64_t previous = __atomic_fetch_add(&state->sink_producer_state, 1, __ATOMIC_ACQ_REL);
+    if ((previous & kProducerStopFlag) != 0) {
+        atomic_sub_u64(&state->sink_producer_state, 1);
+        return false;
+    }
+    return true;
+}
+
+void release_sink_producer(SimplerHostLogState *state) { atomic_sub_u64(&state->sink_producer_state, 1); }
 
 }  // namespace
 
@@ -276,21 +545,185 @@ HostLogger &HostLogger::get_instance() {
 HostLogger::HostLogger() :
     state_(&g_module_log_state) {}
 
+HostLogger::~HostLogger() {
+    // Normal executable/module teardown gets a bounded chance to preserve
+    // accepted records. os._exit() call sites flush explicitly because static
+    // destructors do not run there.
+    (void)prepare_to_fork(100);
+}
+
 int HostLogger::bind_state(SimplerHostLogState *state) {
-    if (state == nullptr || state->abi_version != SIMPLER_HOST_LOG_STATE_ABI_VERSION ||
-        state->struct_size < sizeof(SimplerHostLogState) ||
-        !simpler::log::is_valid_level(atomic_load_i32(&state->threshold))) {
+    if (state == nullptr || !simpler::log::is_valid_level(atomic_load_i32(&state->threshold))) {
+        return -1;
+    }
+    state_owner_.store(false, std::memory_order_release);
+    state_.store(state, std::memory_order_release);
+    return 0;
+}
+
+int HostLogger::adopt_state(SimplerHostLogState *state) {
+    if (state == nullptr || !simpler::log::is_valid_level(atomic_load_i32(&state->threshold))) {
         return -1;
     }
     state_.store(state, std::memory_order_release);
+    state_owner_.store(true, std::memory_order_release);
     return 0;
 }
 
 SimplerHostLogState *HostLogger::state() const { return state_.load(std::memory_order_acquire); }
 
-void HostLogger::set_level(LogLevel level) {
+void HostLogger::set_level(LogLevel level, bool defer_writer) {
     atomic_store_i32(&state()->threshold, static_cast<int32_t>(level));
+    if (!defer_writer) (void)start_writer();
+}
+
+bool HostLogger::start_writer() {
+    SimplerHostLogState *shared = state();
+    const int32_t pid = static_cast<int32_t>(getpid());
+    int32_t owner = atomic_load_i32(&shared->sink_owner_pid);
+    const auto enqueue = atomic_load_enqueue(&shared->sink_enqueue);
+    void *context = atomic_load_pointer(&shared->sink_context);
+    if (owner == pid && enqueue != nullptr && context != nullptr) {
+        emit_clock_anchor_if_needed();
+        return true;
+    }
+
+    // A bound DSO may submit to an already-published process sink, but only the
+    // module that owns the process state may create that sink. Otherwise the
+    // callback and writer thread could outlive a transient dlopen() consumer.
+    if (!state_owner_.load(std::memory_order_acquire)) return false;
+
+    // Another caller is already constructing this process's sink. Treat that
+    // as a failed duplicate start instead of letting -pid claim itself.
+    if (owner == -pid) return false;
+    if (!atomic_compare_exchange_i32(&shared->sink_owner_pid, &owner, -pid)) return false;
+    __atomic_fetch_or(&shared->sink_producer_state, kProducerStopFlag, __ATOMIC_ACQ_REL);
+
+    const int32_t process_pid = atomic_load_i32(&shared->sink_process_pid);
+    if (process_pid != 0 && process_pid != pid) {
+        // A fork child inherits the parent's counters and callback addresses,
+        // but none of its threads or accepted records. Its new sink starts clean,
+        // even when the parent had already quiesced to owner=0 before fork.
+        atomic_store_u64(&shared->dropped_record_count, 0);
+        atomic_store_u64(&shared->pending_record_count, 0);
+        for (int reason = 0; reason < SIMPLER_HOST_LOG_DROP_REASON_COUNT; ++reason)
+            atomic_store_u64(&shared->dropped_by_reason[reason], 0);
+        atomic_store_u64(&shared->reported_drop_count, 0);
+        atomic_store_u64(&shared->sink_producer_state, kProducerStopFlag);
+    }
+    atomic_store_i32(&shared->sink_process_pid, pid);
+
+    auto *candidate = new (std::nothrow) HostLogAsyncSink(shared);
+    if (candidate == nullptr || !candidate->start()) {
+        delete candidate;
+        atomic_store_enqueue(&shared->sink_enqueue, nullptr);
+        atomic_store_pointer(&shared->sink_context, nullptr);
+        int32_t claim = -pid;
+        (void)atomic_compare_exchange_i32(&shared->sink_owner_pid, &claim, 0);
+        __atomic_fetch_and(&shared->sink_producer_state, ~kProducerStopFlag, __ATOMIC_RELEASE);
+        return false;
+    }
+
+    // The active sink normally has process lifetime. prepare_to_fork() is the
+    // explicit quiescent boundary that can join and reclaim it before a later
+    // hierarchical Worker forks in this process.
+    sink_.store(candidate, std::memory_order_release);
+    atomic_store_pointer(&shared->sink_context, candidate);
+    atomic_store_enqueue(&shared->sink_enqueue, &HostLogAsyncSink::enqueue);
+    atomic_store_i32(&shared->sink_owner_pid, pid);
+    __atomic_fetch_and(&shared->sink_producer_state, ~kProducerStopFlag, __ATOMIC_RELEASE);
     emit_clock_anchor_if_needed();
+    return true;
+}
+
+bool HostLogger::prepare_to_fork(uint32_t timeout_ms) {
+    SimplerHostLogState *shared = state();
+    const int32_t pid = static_cast<int32_t>(getpid());
+    int32_t owner = atomic_load_i32(&shared->sink_owner_pid);
+    if (owner == 0) return true;
+    if (owner == -pid) return false;
+    if (owner != pid) return true;
+
+    auto *sink = static_cast<HostLogAsyncSink *>(sink_.load(std::memory_order_acquire));
+    if (sink == nullptr || sink->state != shared || sink->pid != getpid()) return false;
+
+    if (!atomic_compare_exchange_i32(&shared->sink_owner_pid, &owner, -pid)) return false;
+    __atomic_fetch_or(&shared->sink_producer_state, kProducerStopFlag, __ATOMIC_ACQ_REL);
+    if (!sink->stop_when_empty(timeout_ms)) {
+        __atomic_fetch_and(&shared->sink_producer_state, ~kProducerStopFlag, __ATOMIC_RELEASE);
+        atomic_store_i32(&shared->sink_owner_pid, pid);
+        return false;
+    }
+
+    atomic_store_enqueue(&shared->sink_enqueue, nullptr);
+    atomic_store_pointer(&shared->sink_context, nullptr);
+    sink_.store(nullptr, std::memory_order_release);
+    atomic_store_i32(&shared->sink_owner_pid, 0);
+    delete sink;
+    // Last, once no queue remains to admit anyone into: the quiesced state is
+    // the same "no sink" state a process starts in, and emit()'s synchronous
+    // fallback is gated on the flag being clear. Leaving it set here would make
+    // every record between this call and the next start_writer() a silent drop —
+    // exactly the initialization window the fallback exists to cover. A producer
+    // that observes the pre-clear state still drops, as it must; one that
+    // observes the post-clear state re-reads sink_enqueue and finds it null, so
+    // it takes the fallback rather than a freed sink.
+    __atomic_fetch_and(&shared->sink_producer_state, ~kProducerStopFlag, __ATOMIC_RELEASE);
+    // Last, with the fallback usable again, so the summary reaches the same
+    // destination as everything it is accounting for.
+    report_drops_if_grown();
+    return true;
+}
+
+// The drop counters live in process memory and die with the process, so a reader
+// holding only host.<pid>.log has no other way to learn that records are missing.
+// This is the one place that can still write: every path that stops logging —
+// each fork boundary and ~HostLogger — passes through prepare_to_fork().
+//
+// Reported as a growth rather than a total, so a process that quiesces several
+// times does not restate the same losses at every boundary. ERROR, not WARN:
+// losing diagnostics is itself the failure, and a run whose threshold is ERROR
+// is exactly the one whose dropped records mattered most.
+void HostLogger::report_drops_if_grown() {
+    SimplerHostLogState *shared = state();
+    const uint64_t total = atomic_load_u64(&shared->dropped_record_count);
+    const uint64_t reported = atomic_load_u64(&shared->reported_drop_count);
+    if (total <= reported) return;
+    atomic_store_u64(&shared->reported_drop_count, total);
+    if (!is_enabled(LogLevel::ERROR)) return;
+    unsigned long long by_reason[SIMPLER_HOST_LOG_DROP_REASON_COUNT];
+    for (int reason = 0; reason < SIMPLER_HOST_LOG_DROP_REASON_COUNT; ++reason) {
+        by_reason[reason] = static_cast<unsigned long long>(atomic_load_u64(&shared->dropped_by_reason[reason]));
+    }
+    (void)emit_ungated(
+        0, level_name(LogLevel::ERROR), "host_log_drops",
+        "[HOSTLOG_DROPS] v=1 pid=%d new=%llu total=%llu queue_full=%llu claim_exhausted=%llu output_failed=%llu "
+        "not_admitted=%llu\n",
+        static_cast<int>(getpid()), static_cast<unsigned long long>(total - reported),
+        static_cast<unsigned long long>(total), by_reason[SIMPLER_HOST_LOG_DROP_QUEUE_FULL],
+        by_reason[SIMPLER_HOST_LOG_DROP_CLAIM_EXHAUSTED], by_reason[SIMPLER_HOST_LOG_DROP_OUTPUT_FAILED],
+        by_reason[SIMPLER_HOST_LOG_DROP_NOT_ADMITTED]
+    );
+}
+
+bool HostLogger::flush(uint32_t timeout_ms) {
+    SimplerHostLogState *shared = state();
+    if ((atomic_load_u64(&shared->sink_producer_state) & ~kProducerStopFlag) == 0 &&
+        atomic_load_u64(&shared->pending_record_count) == 0) {
+        return true;
+    }
+    auto *sink = static_cast<HostLogAsyncSink *>(sink_.load(std::memory_order_acquire));
+    if (sink == nullptr || sink->state != shared || sink->pid != getpid()) return false;
+    return sink->wait_until_empty(timeout_ms);
+}
+
+uint64_t HostLogger::dropped_records() const { return atomic_load_u64(&state()->dropped_record_count); }
+
+uint64_t HostLogger::pending_records() const { return atomic_load_u64(&state()->pending_record_count); }
+
+uint64_t HostLogger::dropped_records(SimplerHostLogDropReason reason) const {
+    if (reason < 0 || reason >= SIMPLER_HOST_LOG_DROP_REASON_COUNT) return 0;
+    return atomic_load_u64(&state()->dropped_by_reason[reason]);
 }
 
 int HostLogger::level() const { return atomic_load_i32(&state()->threshold); }
@@ -327,48 +760,67 @@ const char *HostLogger::level_name(LogLevel level) const {
     return "?";
 }
 
-bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args, bool flush) {
+bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args, int32_t anchor_pid) {
     const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
     const bool append_newline = fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n';
 
-    // One write per record avoids thread interleaving under mutex_. On a shared
-    // pipe, only records no larger than that pipe's PIPE_BUF are indivisible
-    // across forked writers. Machine-readable host spans are separately
-    // budgeted to the portable _POSIX_PIPE_BUF floor (512 bytes); longer human
-    // log records use this same best-effort write path without that promise.
-    char stack_buffer[kRecordStackCapacity];
-    const size_t length = format_record(
-        stack_buffer, sizeof(stack_buffer), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
-    );
-    if (length < sizeof(stack_buffer)) {
-        return write_record(stack_buffer, length, flush);
+    char record[kRecordCapacity];
+    const size_t length =
+        format_record(record, sizeof(record), monotonic_ns, tid, level_tag, func, fmt, args, append_newline);
+    size_t size = length;
+    if (length >= sizeof(record)) {
+        // A bounded record is part of the producer non-blocking contract. Keep
+        // a visible truncation marker and a complete physical log line.
+        record[sizeof(record) - 2] = '~';
+        record[sizeof(record) - 1] = '\n';
+        size = sizeof(record);
     }
 
-    std::vector<char> heap_buffer(length + 1);
-    const size_t heap_length = format_record(
-        heap_buffer.data(), heap_buffer.size(), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
-    );
-    return write_record(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length, flush);
+    SimplerHostLogState *shared = state();
+    const int32_t pid = static_cast<int32_t>(getpid());
+    const int32_t owner = atomic_load_i32(&shared->sink_owner_pid);
+    const auto current_enqueue = atomic_load_enqueue(&shared->sink_enqueue);
+    void *current_context = atomic_load_pointer(&shared->sink_context);
+    const uint64_t producer_state = atomic_load_u64(&shared->sink_producer_state);
+    if (owner == 0 && current_enqueue == nullptr && current_context == nullptr &&
+        (producer_state & kProducerStopFlag) == 0) {
+        // Hierarchical processes deliberately have no writer until their final
+        // local fork. Preserve initialization records with the synchronous
+        // path; steady-state producers below remain bounded and do no output I/O.
+        if (write_record_now(shared, record, size)) return true;
+        count_drop(shared, SIMPLER_HOST_LOG_DROP_OUTPUT_FAILED);
+        if (anchor_pid != 0) release_anchor_after_write_failure(shared, anchor_pid);
+        return false;
+    }
+    if (!acquire_sink_producer(shared)) {
+        count_drop(shared, SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+        return false;
+    }
+    if (atomic_load_i32(&shared->sink_owner_pid) != pid) {
+        release_sink_producer(shared);
+        count_drop(shared, SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+        return false;
+    }
+    const auto enqueue = atomic_load_enqueue(&shared->sink_enqueue);
+    void *context = atomic_load_pointer(&shared->sink_context);
+    if (enqueue == nullptr || context == nullptr) {
+        release_sink_producer(shared);
+        count_drop(shared, SIMPLER_HOST_LOG_DROP_NOT_ADMITTED);
+        return false;
+    }
+    // A rejection is attributed by the sink, which is the only side that knows
+    // whether the queue was full or the claim budget ran out.
+    return enqueue(context, shared, record, size, anchor_pid) != 0;
 }
 
-// The one place a destination is chosen. It is a property of this logger, so it
-// holds for every record from every caller: nothing about a record's kind, its
-// producer, or its level selects a sink here.
-bool HostLogger::write_record(const char *record, size_t size, bool flush) {
-    const char *directory = log_directory();
-    if (directory != nullptr && write_log_file(directory, record, size, flush)) return true;
-    std::scoped_lock lock(mutex_);
-    return write_stderr(record, size);
-}
-
-bool HostLogger::emit_ungated(const char *level_tag, const char *func, const char *fmt, ...) {
+bool HostLogger::emit_ungated(int32_t anchor_pid, const char *level_tag, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     // Its one caller writes the clock anchor, which every reader of this stream
     // needs before it can place anything else in wall time.
-    const bool written = emit(level_tag, func, fmt, args, /*flush=*/true);
+    const bool written = emit(level_tag, func, fmt, args, anchor_pid);
     va_end(args);
     return written;
 }
@@ -390,7 +842,7 @@ void HostLogger::emit_clock_anchor_if_needed() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
     const bool written = emit_ungated(
-        level_name(LogLevel::TIMING), "clock_anchor", "[CLOCK_ANCHOR] v=1 pid=%d mono_ns=%lld wall_ns=%lld",
+        pid_value, level_name(LogLevel::TIMING), "clock_anchor", "[CLOCK_ANCHOR] v=1 pid=%d mono_ns=%lld wall_ns=%lld",
         static_cast<int>(pid), static_cast<long long>(monotonic_ns), static_cast<long long>(wall_ns)
     );
     int32_t claim = -pid_value;
@@ -402,9 +854,7 @@ void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list
         return;
     }
     emit_clock_anchor_if_needed();
-    // A warning or an error is rare and is worth having on disk if the process
-    // dies; everything below that rides the buffer.
-    emit(level_name(level), func, fmt, args, /*flush=*/level >= LogLevel::WARN);
+    (void)emit(level_name(level), func, fmt, args);
 }
 
 void HostLogger::log(LogLevel level, const char *func, const char *fmt, ...) {
@@ -447,7 +897,7 @@ void HostLogger::log_host_span(const SimplerHostSpan *span) {
 
     // One record grammar, in one place. Where it lands is the logger's business,
     // not this emitter's.
-    char record[kRecordStackCapacity];
+    char record[kRecordCapacity];
     (void)std::snprintf(
         record, sizeof(record),
         "[STRACE] v=1 pid=%d tid=%ld inv=%" PRIu64 " hid=%" PRIx64 " depth=%d name=%s ts=%" PRId64 " dur=%" PRId64
@@ -457,12 +907,15 @@ void HostLogger::log_host_span(const SimplerHostSpan *span) {
     );
 
     log(LogLevel::TIMING, "emit_host_span", "%s", record);
-    // A closed root span is where the records so far describe a whole
-    // invocation, which is what makes an in-progress run readable. It is the one
-    // thing this emitter knows that the writer does not.
-    if (span->depth == 0) (void)flush_log_file();
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_host_log_bind_state(SimplerHostLogState *state) {
     return HostLogger::get_instance().bind_state(state);
 }
+
+#if defined(SIMPLER_HOST_LOG_TEST_HOOKS)
+extern "C" void simpler_host_log_set_queue_hooks_for_test(void (*after_claim)(size_t), void (*before_gap_wait)()) {
+    g_after_queue_claim_hook.store(after_claim, std::memory_order_release);
+    g_before_gap_wait_hook.store(before_gap_wait, std::memory_order_release);
+}
+#endif

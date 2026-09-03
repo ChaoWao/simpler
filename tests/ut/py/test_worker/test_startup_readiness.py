@@ -2085,3 +2085,23 @@ class TestFailureSurfacing:
             assert w._lifecycle is worker_mod._Lifecycle.FAILED
             assert w._sub_pids == []
             w.close()
+
+    def test_failed_hierarchical_start_restores_process_log_writer(self, monkeypatch):
+        import simpler.worker as worker_mod  # noqa: PLC0415
+
+        events: list[str] = []
+        original = RuntimeError("injected failure after logger quiesce")
+
+        monkeypatch.setattr(Worker, "_init_hierarchical", lambda self: None)
+        monkeypatch.setattr(Worker, "_start_hierarchical", _raiser(original))
+        monkeypatch.setattr(Worker, "_cleanup_partial_init", lambda self: events.append("cleanup"))
+        monkeypatch.setattr(worker_mod, "_start_host_log_writer", lambda: events.append("writer"))
+
+        w = Worker(level=3, num_sub_workers=1)
+        with pytest.raises(RuntimeError) as raised:
+            w.init()
+
+        assert raised.value is original
+        assert events == ["cleanup", "writer"]
+        assert w._lifecycle is worker_mod._Lifecycle.FAILED
+        w.close()

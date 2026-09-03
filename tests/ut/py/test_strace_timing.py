@@ -31,6 +31,7 @@ from simpler_setup.tools.strace_timing import (
     main,
     node_span_leaf,
     parse_clock_anchors,
+    parse_drop_summaries,
     parse_spans,
     print_rounds_table,
     span_family,
@@ -245,6 +246,53 @@ def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():
 
     assert count_record_heads(lines) == 2
     assert len(list(parse_spans(lines))) == 1
+
+
+def _drop_summary(pid, new, total, queue_full=0, claim_exhausted=0, output_failed=0, not_admitted=0):
+    return (
+        f"[mono_ns=1000][T0xabc][ERROR] host_log_drops: [HOSTLOG_DROPS] v=1 pid={pid} new={new} "
+        f"total={total} queue_full={queue_full} claim_exhausted={claim_exhausted} "
+        f"output_failed={output_failed} not_admitted={not_admitted}\n"
+    )
+
+
+def test_parse_drop_summaries_keeps_the_running_total_per_process():
+    # A process reports a growth at every quiescent boundary, so the reader must
+    # keep the last (largest) figure rather than summing the reports.
+    lines = [
+        _drop_summary(71, new=2, total=2, queue_full=2),
+        _drop_summary(72, new=1, total=1, output_failed=1),
+        _drop_summary(71, new=3, total=5, queue_full=5),
+    ]
+
+    summaries = parse_drop_summaries(lines)
+    assert summaries[71] == {
+        "total": 5,
+        "queue_full": 5,
+        "claim_exhausted": 0,
+        "output_failed": 0,
+        "not_admitted": 0,
+    }
+    assert summaries[72]["total"] == 1
+    assert summaries[72]["output_failed"] == 1
+
+
+def test_parse_drop_summaries_ignores_an_unknown_grammar_version():
+    lines = [_drop_summary(71, new=1, total=1).replace("v=1", "v=2")]
+
+    assert parse_drop_summaries(lines) == {}
+
+
+def test_main_warns_that_dropped_records_make_the_timing_incomplete(tmp_path, capsys):
+    log_file = tmp_path / "host.71.log"
+    log_file.write_text(_record(1, 1, "chip.run", "rank=0") + "\n" + _drop_summary(71, new=4, total=4, queue_full=4))
+
+    main([str(log_file)])
+
+    stderr = capsys.readouterr().err
+    assert "pid 71 dropped 4 host-log record(s)" in stderr
+    assert "queue_full=4" in stderr
+    assert "incomplete log" in stderr
 
 
 def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():

@@ -52,10 +52,7 @@ struct CannLogLevelCall {
 
 CannLogLevelCall g_cann_log_level_call{};
 SimplerHostLogState g_shared_log_state{
-    SIMPLER_HOST_LOG_STATE_ABI_VERSION,
-    sizeof(SimplerHostLogState),
-    static_cast<int32_t>(LogLevel::TIMING),
-    0,
+    static_cast<int32_t>(LogLevel::TIMING), 0, 0, {}, 0, 0, nullptr, nullptr, 0, 0, 0, {}, 0,
 };
 
 int capture_cann_log_level(int module_id, int level, int enable_event) {
@@ -80,6 +77,7 @@ CapturedStdio run_with_config(LogLevel level, Fn &&fn) {
     HostLogger::get_instance().set_level(level);
 
     fn();
+    EXPECT_TRUE(HostLogger::get_instance().flush());
 
     fflush(stdout);
     fflush(stderr);
@@ -104,15 +102,8 @@ CapturedStdio run_with_config(LogLevel level, Fn &&fn) {
 
 }  // namespace
 
-TEST(HostLogTest, SharedStateBindingValidatesAbiAndOwnsThreshold) {
-    SimplerHostLogState bad_version = g_shared_log_state;
-    bad_version.abi_version++;
+TEST(HostLogTest, SharedStateBindingValidatesThresholdAndOwnsIt) {
     EXPECT_NE(simpler_host_log_bind_state(nullptr), 0);
-    EXPECT_NE(simpler_host_log_bind_state(&bad_version), 0);
-
-    SimplerHostLogState bad_size = g_shared_log_state;
-    bad_size.struct_size = sizeof(SimplerHostLogState) - 1;
-    EXPECT_NE(simpler_host_log_bind_state(&bad_size), 0);
 
     SimplerHostLogState bad_threshold = g_shared_log_state;
     bad_threshold.threshold = 26;
@@ -121,6 +112,9 @@ TEST(HostLogTest, SharedStateBindingValidatesAbiAndOwnsThreshold) {
     g_shared_log_state.threshold = static_cast<int32_t>(LogLevel::ERROR);
     g_shared_log_state.clock_anchor_pid = 0;
     ASSERT_EQ(simpler_host_log_bind_state(&g_shared_log_state), 0);
+    // This executable supplies the process-owned storage; production consumers
+    // only take the exported bind path and therefore cannot create its writer.
+    ASSERT_EQ(HostLogger::get_instance().adopt_state(&g_shared_log_state), 0);
     EXPECT_EQ(HostLogger::get_instance().state(), &g_shared_log_state);
     EXPECT_EQ(HostLogger::get_instance().level(), static_cast<int>(LogLevel::ERROR));
     EXPECT_FALSE(HostLogger::get_instance().is_enabled(LogLevel::WARN));
@@ -154,6 +148,7 @@ TEST(HostLogTest, HostSpanEnabledFollowsTimingVisibility) {
         EXPECT_EQ(unified_log_host_span_enabled(), expected);
     }
     HostLogger::get_instance().set_level(LogLevel::TIMING);
+    EXPECT_TRUE(HostLogger::get_instance().flush());
 }
 
 TEST(HostLogTest, ErrorLevelEmitsErrorOnly) {
@@ -248,6 +243,7 @@ TEST(HostLogTest, EmitPrefixHasMonotonicNanosecondsAndTid) {
 }
 
 TEST(HostLogTest, TimingStartupEmitsOneClockAnchorPerProcess) {
+    ASSERT_TRUE(HostLogger::get_instance().prepare_to_fork());
     int log_pipe[2];
     ASSERT_EQ(pipe(log_pipe), 0);
 
@@ -261,6 +257,7 @@ TEST(HostLogTest, TimingStartupEmitsOneClockAnchorPerProcess) {
         HostLogger::get_instance().set_level(LogLevel::TIMING);
         HostLogger::get_instance().log(LogLevel::TIMING, "child", "first-record");
         HostLogger::get_instance().log(LogLevel::TIMING, "child", "second-record");
+        if (!HostLogger::get_instance().flush()) _exit(3);
         _exit(0);
     }
 
@@ -277,6 +274,7 @@ TEST(HostLogTest, TimingStartupEmitsOneClockAnchorPerProcess) {
     ASSERT_EQ(waitpid(child, &status, 0), child);
     ASSERT_TRUE(WIFEXITED(status));
     ASSERT_EQ(WEXITSTATUS(status), 0);
+    ASSERT_TRUE(HostLogger::get_instance().start_writer());
 
     const size_t anchor_pos = captured.find("[CLOCK_ANCHOR]");
     ASSERT_NE(anchor_pos, std::string::npos);
@@ -321,6 +319,19 @@ TEST(HostLogTest, AllOutputGoesToStderr) {
     EXPECT_NE(captured.err.find("timing-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("info-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("debug-output-marker"), std::string::npos);
+}
+
+TEST(HostLogTest, LongHumanRecordFitsPortableAtomicWriteBound) {
+    const std::string payload(4096, 'x');
+    auto captured = run_with_config(LogLevel::ERROR, [&] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "long_record", "%s", payload.c_str());
+    });
+
+    EXPECT_EQ(captured.out, "");
+    ASSERT_EQ(captured.err.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
+    EXPECT_EQ(std::count(captured.err.begin(), captured.err.end(), '\n'), 1);
+    EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
+    EXPECT_EQ(captured.err.back(), '\n');
 }
 
 TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
@@ -384,7 +395,7 @@ std::string read_log_file(const char *directory, pid_t pid) {
     return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 }
 
-TEST(HostLogTest, LogDirectorySendsEveryRecordToOneBufferedFilePerProcess) {
+TEST(HostLogTest, LogDirectorySendsEveryRecordToOneAsyncFilePerProcess) {
     char directory_template[] = "/tmp/simpler-host-strace-XXXXXX";
     char *directory = mkdtemp(directory_template);
     ASSERT_NE(directory, nullptr);
@@ -434,7 +445,7 @@ TEST(HostLogTest, LogDirectorySendsEveryRecordToOneBufferedFilePerProcess) {
     EXPECT_EQ(rmdir(directory), 0);
 }
 
-TEST(HostLogTest, LogDirectoryTakesOrdinaryRecordsAndFlushesTheSevereOnes) {
+TEST(HostLogTest, ExplicitDrainMakesAllAcceptedFileRecordsVisible) {
     char directory_template[] = "/tmp/simpler-host-log-ordinary-XXXXXX";
     char *directory = mkdtemp(directory_template);
     ASSERT_NE(directory, nullptr);
@@ -443,22 +454,22 @@ TEST(HostLogTest, LogDirectoryTakesOrdinaryRecordsAndFlushesTheSevereOnes) {
     g_shared_log_state.clock_anchor_pid = 0;
     const auto captured = run_with_config(LogLevel::TIMING, [] {
         HostLogger::get_instance().log(LogLevel::ERROR, "fn", "disk-please");
-        HostLogger::get_instance().log(LogLevel::INFO, "fn", "buffered-please");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "queued-please");
     });
     EXPECT_EQ(captured.err, "");
 
-    // Read before any root span closes: an error is rare and worth having on
-    // disk if the process dies, so it is flushed as it is written. The INFO
-    // record rides the buffer and need not be visible yet.
+    // run_with_config performs the explicit shutdown/test drain. Severity no
+    // longer selects a producer-side flush path: both records use one queue.
     const std::string contents = read_log_file(directory, getpid());
     EXPECT_NE(contents.find("disk-please"), std::string::npos);
+    EXPECT_NE(contents.find("queued-please"), std::string::npos);
 
     const std::string path = std::string(directory) + "/host." + std::to_string(static_cast<int>(getpid())) + ".log";
     EXPECT_EQ(unlink(path.c_str()), 0);
     EXPECT_EQ(rmdir(directory), 0);
 }
 
-TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
+TEST(HostLogTest, ForkBoundaryDrainsParentAndChildOpensItsOwnFile) {
     char directory_template[] = "/tmp/simpler-host-strace-fork-XXXXXX";
     char *directory = mkdtemp(directory_template);
     ASSERT_NE(directory, nullptr);
@@ -472,6 +483,9 @@ TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
         SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 8, 0x1234, 1, 0, 100, 25, "parent.span", ""
     };
     unified_log_host_span(&parent_span);
+    // Production uses this same quiescent boundary before a hierarchical
+    // Worker forks: accepted parent records are drained and the thread joined.
+    ASSERT_TRUE(HostLogger::get_instance().prepare_to_fork());
 
     const pid_t child = fork();
     ASSERT_GE(child, 0);
@@ -479,9 +493,12 @@ TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
         const SimplerHostSpan child_span{
             SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 9, 0x1234, 0, 0, 200, 25, "child.span", ""
         };
+        HostLogger::get_instance().set_level(LogLevel::TIMING);
         unified_log_host_span(&child_span);
+        if (!HostLogger::get_instance().flush()) _exit(3);
         _exit(0);
     }
+    ASSERT_TRUE(HostLogger::get_instance().start_writer());
     int status = 0;
     ASSERT_EQ(waitpid(child, &status, 0), child);
     ASSERT_TRUE(WIFEXITED(status));
@@ -495,14 +512,10 @@ TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
     const std::string child_contents((std::istreambuf_iterator<char>(child_input)), std::istreambuf_iterator<char>());
     EXPECT_EQ(child_contents.find("name=parent.span"), std::string::npos);
     EXPECT_NE(child_contents.find("name=child.span"), std::string::npos);
-    // The parent's record is depth 1, so it is still unflushed in the parent's
-    // own buffer. It can only have reached the parent's file if the child
-    // flushed the copy it inherited — which is what this test is named for, and
-    // what the child's file alone cannot show.
     std::ifstream parent_input(parent_path);
     const std::string parent_contents((std::istreambuf_iterator<char>(parent_input)), std::istreambuf_iterator<char>());
-    EXPECT_EQ(parent_contents.find("name=parent.span"), std::string::npos)
-        << "the child flushed the parent's copied stdio buffer";
+    EXPECT_NE(parent_contents.find("name=parent.span"), std::string::npos);
+    EXPECT_EQ(parent_contents.find("name=child.span"), std::string::npos);
     EXPECT_EQ(unlink(parent_path.c_str()), 0);
     EXPECT_EQ(unlink(child_path.c_str()), 0);
     EXPECT_EQ(rmdir(directory), 0);
@@ -510,7 +523,7 @@ TEST(HostLogTest, ForkedChildReopensItsOwnSpanFileWithoutFlushingParentBuffer) {
 
 TEST(HostLogTest, DisabledHostSpanProducesNoRecord) {
     const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 100, 25, "host.dispatch",
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 100, 25, "node.dispatch",
         "run_id=7 role=scheduler"
     };
 
@@ -586,6 +599,7 @@ TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
 }
 
 TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
+    ASSERT_TRUE(HostLogger::get_instance().prepare_to_fork());
     int log_pipe[2];
     int start_pipe[2];
     ASSERT_EQ(pipe(log_pipe), 0);
@@ -593,7 +607,7 @@ TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
 
     const long pipe_buf = fpathconf(log_pipe[1], _PC_PIPE_BUF);
     ASSERT_GT(pipe_buf, 256);
-    const size_t payload_size = static_cast<size_t>(std::min<long>(pipe_buf - 256, 2048));
+    constexpr size_t payload_size = 128;
     constexpr int child_count = 16;
     constexpr int records_per_child = 128;
 
@@ -618,6 +632,7 @@ TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
                     LogLevel::ERROR, "fork_writer", "child=%d seq=%d payload=%s", child, seq, payload.c_str()
                 );
             }
+            if (!HostLogger::get_instance().flush(5000)) _exit(3);
             _exit(0);
         }
         children.push_back(pid);
@@ -657,6 +672,7 @@ TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
         }
     }
     reader.join();
+    ASSERT_TRUE(HostLogger::get_instance().start_writer());
 
     std::vector<std::vector<bool>> seen(child_count, std::vector<bool>(records_per_child, false));
     std::set<int> anchor_pids;

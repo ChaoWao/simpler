@@ -595,9 +595,10 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     monkeypatch.setattr(
         worker_mod,
         "_initialize_host_log",
-        lambda level: startup_events.append(("log", level)),
+        lambda level, *, defer_writer=False: startup_events.append(("log", level, defer_writer)),
         raising=False,
     )
+    monkeypatch.setattr(worker_mod, "_start_host_log_writer", lambda: startup_events.append(("writer",)))
     monkeypatch.setattr(worker, "_await_children_ready", fake_await_children_ready)
     monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
     try:
@@ -610,8 +611,8 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert fake_parent.configured_depths == [1]
     assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
     assert fake_parent.initialized
-    assert startup_events[0] == ("log", 60)
-    assert startup_events[1:] == [("fork",), ("fork",)]
+    assert startup_events[0] == ("log", 60, True)
+    assert startup_events[1:] == [("fork",), ("fork",), ("writer",)]
 
 
 def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monkeypatch):
@@ -660,9 +661,10 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
     monkeypatch.setattr(
         worker_mod,
         "_initialize_host_log",
-        lambda level: startup_events.append(("log", level)),
+        lambda level, *, defer_writer=False: startup_events.append(("log", level, defer_writer)),
         raising=False,
     )
+    monkeypatch.setattr(worker_mod, "_start_host_log_writer", lambda: startup_events.append(("writer",)))
     monkeypatch.setattr(worker, "_await_children_ready", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
     try:
@@ -672,8 +674,8 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
             shm.close()
             shm.unlink()
 
-    assert startup_events[0] == ("log", 60)
-    assert startup_events[1:] == [("fork",)]
+    assert startup_events[0] == ("log", 60, True)
+    assert startup_events[1:] == [("fork",), ("writer",)]
 
 
 def test_a_worker_above_l3_can_never_carry_device_ids():

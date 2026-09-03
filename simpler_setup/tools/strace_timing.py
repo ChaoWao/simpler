@@ -87,6 +87,15 @@ _BIND_PHASE_RE = re.compile(
     r"\[mono_ns=\d+\]\[T0x(?P<tid_hex>[0-9a-fA-F]+)\]\[TIMING\]\s+\S+:\s+"
     r"\[[^\]]*\]\s+bind phase=(?P<phase>\w+)\s+start_ns=(?P<start>\d+)\s+dur_ns=(?P<dur>\d+)(?P<attrs>[^\r\n]*)",
 )
+# The writer's own loss report, emitted at each quiescent boundary when the drop
+# total has grown. The counters live in process memory and die with it, so this
+# record is the only way a reader holding just the log learns that records are
+# missing — and the breakdown says which knob is wrong.
+_DROP_SUMMARY_RE = re.compile(
+    r"\[HOSTLOG_DROPS\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+new=(?P<new>\d+)\s+total=(?P<total>\d+)\s+"
+    r"queue_full=(?P<queue_full>\d+)\s+claim_exhausted=(?P<claim_exhausted>\d+)\s+"
+    r"output_failed=(?P<output_failed>\d+)\s+not_admitted=(?P<not_admitted>\d+)",
+)
 _CLOCK_ANCHOR_RE = re.compile(
     r"\[mono_ns=\d+\]\[T0x[0-9a-fA-F]+\]\[TIMING\]\s+clock_anchor:\s+"
     r"\[CLOCK_ANCHOR\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+"
@@ -220,6 +229,53 @@ def count_record_heads(lines):
     without it a torn record is indistinguishable from a real measurement.
     """
     return sum(len(_STRACE_HEAD_RE.findall(line)) for line in lines)
+
+
+def parse_drop_summaries(lines):
+    """Return the cumulative loss report per process, keyed by pid.
+
+    A process reports a growth at every quiescent boundary, so the last record
+    for a pid carries its running totals. Keyed by pid because each process has
+    its own queue and its own counters.
+    """
+    latest = {}
+    for line in lines:
+        for match in _DROP_SUMMARY_RE.finditer(line):
+            if int(match["v"]) != 1:
+                continue
+            pid = int(match["pid"])
+            total = int(match["total"])
+            previous = latest.get(pid)
+            if previous is None or total >= previous["total"]:
+                latest[pid] = {
+                    key: int(match[key])
+                    for key in ("total", "queue_full", "claim_exhausted", "output_failed", "not_admitted")
+                }
+    return latest
+
+
+def warn_about_lost_records(lines, spans):
+    """Report both ways a log can be incomplete, before any timing is derived.
+
+    They are separate channels and only one is visible in the records: a torn
+    record leaves a header behind, while a dropped one leaves nothing at all and
+    is knowable only from the writer's own summary.
+    """
+    heads = count_record_heads(lines)
+    if heads > len(spans):
+        print(
+            f"warning: {heads - len(spans)} of {heads} [STRACE] records are incomplete and are "
+            "excluded from the timing below",
+            file=sys.stderr,
+        )
+    for pid, counts in sorted(parse_drop_summaries(lines).items()):
+        print(
+            f"warning: pid {pid} dropped {counts['total']} host-log record(s) before they reached the "
+            f"destination (queue_full={counts['queue_full']} claim_exhausted={counts['claim_exhausted']} "
+            f"output_failed={counts['output_failed']} not_admitted={counts['not_admitted']}); "
+            "the timing below is computed from an incomplete log",
+            file=sys.stderr,
+        )
 
 
 def parse_clock_anchors(lines):
@@ -1470,13 +1526,7 @@ def main(argv=None):
             "check that every input is complete and that no process's stream is missing.",
             file=sys.stderr,
         )
-    heads = count_record_heads(lines)
-    if heads > len(spans):
-        print(
-            f"warning: {heads - len(spans)} of {heads} [STRACE] records are incomplete and are "
-            "excluded from the timing below",
-            file=sys.stderr,
-        )
+    warn_about_lost_records(lines, spans)
     keyed = invocation_spans(spans)
     invocations = group_invocations(keyed)
     buckets = bucket_by_hid(invocations)
