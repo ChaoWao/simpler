@@ -883,7 +883,7 @@ int32_t SchedulerContext::try_early_dispatch(
                 c->to_payload().running_slot_count.store(
                     static_cast<int16_t>(staged.running_cores), std::memory_order_seq_cst
                 );
-                sched_->maybe_rendezvous_ring(*c);
+                sched_->try_launch_sync_start_cohort(*c);
                 SchedulerState::finish_early_sync_drain(c->to_payload());
                 total_staged += staged.staged_blocks;
             } else if (enter_drain_mode(c, c->logical_block_num)) {

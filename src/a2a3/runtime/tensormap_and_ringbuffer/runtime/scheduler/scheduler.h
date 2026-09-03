@@ -888,7 +888,7 @@ struct SchedulerState {
     // release and each pending->running promotion); whichever observes the second half
     // wins the launch latch and rings exactly once. Returns true only to that winner,
     // which may then expose the cohort to its fanout.
-    inline bool maybe_rendezvous_ring(ChipTaskSlotState &slot_state) {
+    inline bool try_launch_sync_start_cohort(ChipTaskSlotState &slot_state) {
         // running_slot_count is the publication seed: every staged_core_mask OR
         // happens-before its final store. Read the seed first, then the mask, so
         // observing the final count cannot be paired with a partially published
@@ -912,7 +912,7 @@ struct SchedulerState {
     }
 
     inline bool retry_sync_start_rendezvous_after_staging(ChipTaskSlotState &slot_state) {
-        if (!maybe_rendezvous_ring(slot_state)) return false;
+        if (!try_launch_sync_start_cohort(slot_state)) return false;
         propagate_dispatch_fanin(slot_state);
         return true;
     }
@@ -1047,12 +1047,12 @@ struct SchedulerState {
         // Producer released: ring the gated cores. A non-sync_start consumer launches
         // each block the instant its doorbell fires. A sync_start consumer instead holds
         // for the rendezvous — every gated core must occupy a running slot first — so the
-        // flip to DISPATCHED above is only the producer-released half; maybe_rendezvous_ring
+        // flip to DISPATCHED above is only the producer-released half; try_launch_sync_start_cohort
         // rings now iff running_slot_count already reached popcount(staged_core_mask) (all
         // gated cores took idle running slots), else the last pending->running promotion rings.
         bool launched = true;
         if (sync_start) {
-            launched = maybe_rendezvous_ring(slot_state);
+            launched = try_launch_sync_start_cohort(slot_state);
         } else {
             // Destructively claim every published bit. A stager racing this pass
             // can claim only bits that land after the exchange, so each gated core

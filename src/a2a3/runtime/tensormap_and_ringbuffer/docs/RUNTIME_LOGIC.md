@@ -673,7 +673,7 @@ logical clusters even though each block may stage multiple cores.
    barrier also serializes a global coordinator with any local staging that raced drain
    publication: the local scheduler cannot ack until its tracker mutations are complete.
 4. **Rendezvous launch** — both paths publish every `staged_core_mask` word before storing
-   the final `running_slot_count` seed. `maybe_rendezvous_ring` reads the seed first and then
+   the final `running_slot_count` seed. `try_launch_sync_start_cohort` reads the seed first and then
    the mask; when the counts match **and** the producer has released, one launch-latch winner
    rings every gated core's doorbell together.
 
