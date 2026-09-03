@@ -694,7 +694,7 @@ two all-or-nothing cases:
 4. **Rendezvous launch** — after the complete `staged_core_mask` is published,
    `running_slot_count` is seeded with the staged running-slot cores. The rendezvous reads
    that seed before the full mask; when it equals `popcount(staged_core_mask)` **and** the
-   producer has released, `maybe_rendezvous_ring` rings every gated core's doorbell
+   producer has released, `try_launch_sync_start_cohort` rings every gated core's doorbell
    together — the cohort starts as one.
 
 If a global drain is published concurrently after Case A's zero check, its ack barrier

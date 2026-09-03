@@ -399,7 +399,7 @@ void SchedulerContext::check_running_cores_for_completion(
                 promote_pending_to_running(core);  // Case 2 or Case 3 (with pending)
                 if (sync_start_promote) {
                     promoted->to_payload().running_slot_count.fetch_add(1, std::memory_order_seq_cst);
-                    sched_->maybe_rendezvous_ring(*promoted);
+                    sched_->try_launch_sync_start_cohort(*promoted);
                 }
             } else {
                 clear_running_slot(core);  // Case 1 or Case 3 (no pending)
@@ -741,7 +741,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     }
     if (gated) {
         // Seed the rendezvous with the running-slot cores staged across all threads; pending
-        // cores advance it as they promote. maybe_rendezvous_ring (producer release) rings iff
+        // cores advance it as they promote. try_launch_sync_start_cohort (producer release) rings iff
         // this already equals popcount(staged_core_mask) — i.e. no pending spill.
         slot_state->to_payload().running_slot_count.store(
             static_cast<int16_t>(drain_state_.drain_running_staged.load(std::memory_order_acquire)),
@@ -764,7 +764,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // ahead of drain completion and fail while running_slot_count is still incomplete. When
     // every block landed directly in a running slot, no pending promotion remains to retry it.
     if (gated) {
-        sched_->maybe_rendezvous_ring(*slot_state);
+        sched_->try_launch_sync_start_cohort(*slot_state);
     }
     SchedulerState::finish_early_sync_drain(slot_state->to_payload());
 }

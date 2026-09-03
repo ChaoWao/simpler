@@ -454,7 +454,7 @@ void SchedulerContext::check_running_cores_for_completion(
                 promote_pending_to_running(core);  // Case 2 or Case 3 (with pending)
                 if (sync_start_promote) {
                     promoted->payload->running_slot_count.fetch_add(1, std::memory_order_seq_cst);
-                    if (sched_->maybe_rendezvous_ring(*promoted)) {
+                    if (sched_->try_launch_sync_start_cohort(*promoted)) {
                         sched_->propagate_dispatch_fanin(*promoted);
                     }
                 }
@@ -792,7 +792,7 @@ void SchedulerContext::handle_drain_mode(
     }
     if (gated) {
         // Seed the rendezvous with the running-slot cores staged across all threads; pending
-        // cores advance it as they promote. maybe_rendezvous_ring (producer release) rings iff
+        // cores advance it as they promote. try_launch_sync_start_cohort (producer release) rings iff
         // this already equals popcount(staged_core_mask) — i.e. no pending spill.
         slot_state->payload->running_slot_count.store(
             static_cast<int16_t>(drain_state_.drain_running_staged.load(std::memory_order_acquire)),

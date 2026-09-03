@@ -402,7 +402,7 @@ void SchedulerContext::check_running_cores_for_completion(
                 promote_pending_to_running(core);
                 if (sync_start_promote) {
                     promoted->payload->running_slot_count.fetch_add(1, std::memory_order_seq_cst);
-                    if (sched_->maybe_rendezvous_ring(*promoted)) {
+                    if (sched_->try_launch_sync_start_cohort(*promoted)) {
                         sched_->propagate_dispatch_fanin(*promoted);
                     }
                 }

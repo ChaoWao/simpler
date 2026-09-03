@@ -877,7 +877,7 @@ struct SchedulerState {
         }
     }
 
-    inline bool maybe_rendezvous_ring(ChipTaskSlotState &slot_state) {
+    inline bool try_launch_sync_start_cohort(ChipTaskSlotState &slot_state) {
         // Staging publishes the complete mask before seeding running_slot_count.
         // Read the seed first: observing the final seq_cst seed then orders every
         // mask read after all of the stager's mask updates. Reading the mask first
@@ -901,7 +901,7 @@ struct SchedulerState {
     }
 
     inline bool retry_sync_start_rendezvous_after_staging(ChipTaskSlotState &slot_state) {
-        if (!maybe_rendezvous_ring(slot_state)) return false;
+        if (!try_launch_sync_start_cohort(slot_state)) return false;
         propagate_dispatch_fanin(slot_state);
         return true;
     }
@@ -997,7 +997,7 @@ struct SchedulerState {
         );
         bool launched = true;
         if (sync_start) {
-            launched = maybe_rendezvous_ring(slot_state);
+            launched = try_launch_sync_start_cohort(slot_state);
         } else {
             for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                 uint64_t owned = claim_all_staged_doorbell_bits(slot_state.payload->staged_core_mask[w]);

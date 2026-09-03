@@ -888,7 +888,7 @@ struct SchedulerState {
             // The flip to DISPATCHED is only the producer-released half of the
             // rendezvous; the ring fires once every gated core also occupies a
             // running slot, from whichever half completes second.
-            maybe_rendezvous_ring(slot_state);
+            try_launch_sync_start_cohort(slot_state);
         } else {
             for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
                 uint64_t owned = claim_all_staged_doorbell_bits(payload.staged_core_mask[w]);
@@ -1083,7 +1083,7 @@ struct SchedulerState {
     // release and each pending->running promotion); whichever observes the second half
     // wins the launch latch and rings exactly once. Returns true only to that winner,
     // which may then expose the cohort to its fanout.
-    inline bool maybe_rendezvous_ring(ChipTaskSlotState &slot_state) {
+    inline bool try_launch_sync_start_cohort(ChipTaskSlotState &slot_state) {
         // running_slot_count is the publication seed: every staged_core_mask OR
         // happens-before its final store. Read the seed first, then the mask, so
         // observing the final count cannot be paired with a partially published
