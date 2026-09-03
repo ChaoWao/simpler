@@ -630,6 +630,24 @@ _CTRL_DELEGATED_REGION = 26
 _LOCAL_GLOBAL_CONTROL_HEADER = struct.Struct("<IIQ")
 _CTRL_OP_NAMES[_CTRL_GLOBAL_DOMAIN_NODE] = "global_domain"
 _CTRL_OP_NAMES[_CTRL_DELEGATED_REGION] = "delegated_region"
+_CTRL_CHIP_EXTENSION = 27
+_CTRL_OP_NAMES[_CTRL_CHIP_EXTENSION] = "chip_extension"
+
+_CHIP_EXTENSION_HEADER = struct.Struct("!H")
+_chip_control_extensions: dict[str, Any] = {}
+
+
+def register_chip_control_extension(name: str, handler) -> None:
+    """Register a trusted Python control handler inherited by chip children."""
+    if not isinstance(name, str) or not name or len(name.encode("utf-8")) > 255:
+        raise ValueError("chip control extension name must contain 1 to 255 UTF-8 bytes")
+    if not callable(handler):
+        raise TypeError("chip control extension handler must be callable")
+    existing = _chip_control_extensions.get(name)
+    if existing is not None and existing is not handler:
+        raise ValueError(f"chip control extension {name!r} is already registered")
+    _chip_control_extensions[name] = handler
+
 
 # Layout of the CTRL_COMM_INIT request shm.
 _COMM_INIT_HEADER = struct.Struct("<II")  # rank (u32), nranks (u32)
@@ -1683,6 +1701,39 @@ def _read_ctrl_staged_shm_name(buf: memoryview) -> str:
     raw = bytes(buf[_OFF_ARGS : _OFF_ARGS + _CTRL_SHM_NAME_BYTES])
     nul = raw.find(b"\x00")
     return raw[: nul if nul >= 0 else _CTRL_SHM_NAME_BYTES].decode("utf-8", "replace")
+
+
+def _read_ctrl_staged_payload(buf: memoryview) -> bytes:
+    payload_size = int(struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0])
+    shm_name = _read_ctrl_staged_shm_name(buf)
+    if payload_size <= 0 or not shm_name:
+        raise ValueError("chip control extension payload must not be empty")
+    shm = SharedMemory(name=shm_name)
+    shm_buf = cast(memoryview, shm.buf)
+    try:
+        if payload_size > shm.size:
+            raise ValueError(f"chip control extension payload size {payload_size} exceeds shm size {shm.size}")
+        return bytes(shm_buf[:payload_size])
+    finally:
+        shm_buf.release()
+        shm.close()
+
+
+def _handle_chip_control_extension(cw: ChipWorker, buf: memoryview, device_id: int) -> None:
+    envelope = _read_ctrl_staged_payload(buf)
+    if len(envelope) < _CHIP_EXTENSION_HEADER.size:
+        raise ValueError("chip control extension envelope is truncated")
+    (name_size,) = _CHIP_EXTENSION_HEADER.unpack_from(envelope)
+    name_end = _CHIP_EXTENSION_HEADER.size + name_size
+    if name_size == 0 or name_end > len(envelope):
+        raise ValueError("chip control extension name is invalid")
+    name = envelope[_CHIP_EXTENSION_HEADER.size : name_end].decode("utf-8")
+    handler = _chip_control_extensions.get(name)
+    if handler is None:
+        raise KeyError(f"chip control extension {name!r} is not registered")
+    error = handler(cw, envelope[name_end:], device_id)
+    if error:
+        raise RuntimeError(str(error))
 
 
 def _allocate_local_slot(registry: dict[int, Any]) -> int:
@@ -3006,6 +3057,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             elif sub_cmd == _CTRL_DEVICE_MEMORY_INFO:
                 info = cw.device_memory_info()
                 _DEVICE_MEMORY_INFO.pack_into(buf, _CTRL_OFF_RESULT, info.free_bytes, info.total_bytes)
+            elif sub_cmd == _CTRL_CHIP_EXTENSION:
+                _handle_chip_control_extension(cw, buf, device_id)
             elif sub_cmd == _CTRL_IMPORT_RELEASE:
                 import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_PREPARE:
@@ -10583,6 +10636,35 @@ class Worker:
         nbytes = max(0, host_nbytes - host_offset) if nbytes is None else int(nbytes)
         _require_copy_span(host_nbytes, host_offset, nbytes, side=host_side, api=api)
         return device_offset, host_offset, nbytes
+
+    def run_chip_control_extension(
+        self,
+        name: str,
+        payload: bytes,
+        *,
+        timeout_s: float | None = None,
+    ) -> None:
+        """Broadcast one named control payload to every local chip child."""
+        with self._operation_lease("run_chip_control_extension"):
+            if self.level < 3 or self._worker is None:
+                raise TypeError("chip control extensions require an initialized level >= 3 Worker")
+            if name not in _chip_control_extensions:
+                raise KeyError(f"chip control extension {name!r} is not registered in the parent")
+            name_bytes = name.encode("utf-8")
+            envelope = _CHIP_EXTENSION_HEADER.pack(len(name_bytes)) + name_bytes + bytes(payload)
+            with self._device_control_admission("run_chip_control_extension"):
+                results = self._worker.broadcast_control_all(
+                    WorkerType.NEXT_LEVEL,
+                    _CTRL_CHIP_EXTENSION,
+                    envelope,
+                    None,
+                    timeout_s=timeout_s,
+                )
+            errors = self._control_errors(list(results))
+            if errors:
+                raise RuntimeError(
+                    f"chip control extension {name!r} failed on {len(errors)} child workers; first error: {errors[0]}"
+                )
 
     @staticmethod
     def _require_device_end(handle: Buffer, *, api: str) -> None:
