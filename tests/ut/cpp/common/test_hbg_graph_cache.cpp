@@ -84,14 +84,14 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     std::vector<GraphTensor> tensors{make_test_tensor(boundary_address), make_test_tensor(boundary_address)};
     tensors[1].buffer_size = 32;
     std::vector<GraphTensorSourceRef> tensor_sources(2);
-    tensor_sources[0].source = static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT);
-    tensor_sources[1].source = static_cast<uint8_t>(GraphTensorSource::INTERNAL);
+    tensor_sources[0].source_kind = static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_EXACT);
+    tensor_sources[1].source_kind = static_cast<uint8_t>(GraphTensorSourceKind::INTERNAL);
     tensor_sources[1].packed_offset = 16;
     std::vector<uint64_t> scalars{0, 18};
     std::vector<GraphScalarSourceRef> scalar_sources(2);
-    scalar_sources[0].source = static_cast<uint8_t>(GraphScalarSource::BOUNDARY);
+    scalar_sources[0].source_kind = static_cast<uint8_t>(GraphScalarSourceKind::BOUNDARY);
     scalar_sources[0].source_index = boundary_scalar_count - 1;
-    scalar_sources[1].source = static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE);
+    scalar_sources[1].source_kind = static_cast<uint8_t>(GraphScalarSourceKind::STATIC_VALUE);
 
     GraphDefinition definition{};
     definition.full_key = graph_key;

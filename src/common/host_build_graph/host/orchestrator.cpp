@@ -251,7 +251,9 @@ bool OrchestratorState::init(void *sm_base, void *gm_heap, uint64_t heap_size, u
     return true;
 }
 
-enum class GraphRecordedTensorSource : uint8_t {
+// The recorder's own form of GraphTensorSourceKind. Its Ref counterpart carries a
+// size_t index, which graph_pack_tensor_source narrows to the wire form's uint16.
+enum class GraphRecordedTensorSourceKind : uint8_t {
     BOUNDARY_EXACT,
     BOUNDARY_VIEW,
     INTERNAL,
@@ -259,19 +261,19 @@ enum class GraphRecordedTensorSource : uint8_t {
 };
 
 struct GraphRecordedTensorSourceRef {
-    GraphRecordedTensorSource source{GraphRecordedTensorSource::BOUNDARY_EXACT};
+    GraphRecordedTensorSourceKind source_kind{GraphRecordedTensorSourceKind::BOUNDARY_EXACT};
     size_t source_index{0};
     uint64_t packed_offset{0};
 };
 
-enum class GraphRecordedScalarSource : uint8_t {
+enum class GraphRecordedScalarSourceKind : uint8_t {
     STATIC_VALUE,
     BOUNDARY,
     INVALIDATED_BOUNDARY,
 };
 
 struct GraphRecordedScalarSourceRef {
-    GraphRecordedScalarSource source{GraphRecordedScalarSource::STATIC_VALUE};
+    GraphRecordedScalarSourceKind source_kind{GraphRecordedScalarSourceKind::STATIC_VALUE};
     size_t source_index{0};
 };
 
@@ -350,15 +352,13 @@ static_assert(
                                         "update this size"
 );
 
-// One recorded task's scratch output window. reserve_heap_scratch is a pure bump
-// and a task stores the aligned size it advanced by, so consecutive windows abut:
-// held in record order these are sorted and disjoint, which is what lets an
-// address lookup binary search instead of walking every producer. A task with no
-// output advances nothing and owns no entry.
-struct GraphRecordedOutputRange {
-    uintptr_t begin;
-    uintptr_t end;
-    int32_t task_index;
+// One boundary tensor keyed by the address a lookup arrives with. The address is held
+// here rather than followed through `index` so a search touches this array alone: the
+// boundary tensors are 128 bytes apiece, and reading one only to compare eight of its
+// bytes is what makes a scan over them a scan over memory.
+struct GraphBoundaryByAddress {
+    uint64_t addr;
+    uint32_t index;
 };
 
 // The Graph boundary as the submitting thread captured it, deep-copied because the
@@ -411,10 +411,14 @@ struct GraphRecording {
     std::vector<uint64_t> scalars;
     std::vector<GraphRecordedScalarSourceRef> scalar_sources;
     std::vector<int32_t> internal_fanins;
-    std::vector<GraphRecordedOutputRange> output_ranges;
     // Indexed by RecordedInGraphTask::predicate_index; only predicated tasks
     // contribute an entry.
     std::vector<GraphRecordedPredicate> predicates;
+    // The boundary tensors ordered by the buffer address both boundary kinds require,
+    // built once when the boundary is bound. Ties keep the boundary's own order, which
+    // is what lets a walk over one address's entries pick the same tensor the boundary
+    // order would have.
+    std::vector<GraphBoundaryByAddress> boundary_by_address;
     // Hazard state for the recorded body, owned per recorder thread because
     // several graphs record at once, each on its own thread.
     //
@@ -589,25 +593,41 @@ bool graph_tensor_exact(const simpler::hbg::Tensor &lhs, const simpler::hbg::Ten
 bool graph_tensor_from_boundary(
     const GraphRecording &recording, const simpler::hbg::Tensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
-    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
-        if (!graph_tensor_exact(tensor, recording.boundary_tensors()[i])) continue;
-        source->source = GraphRecordedTensorSource::BOUNDARY_EXACT;
-        source->source_index = i;
-        source->packed_offset = 0;
-        return true;
-    }
-    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
-        const simpler::hbg::Tensor &boundary = recording.boundary_tensors()[i];
-        if (tensor.buffer.addr != boundary.buffer.addr || tensor.buffer.size != boundary.buffer.size ||
-            tensor.start_offset < boundary.start_offset) {
-            continue;
+    // Both kinds require the boundary tensor's whole buffer, so the search is over the
+    // entries sharing this tensor's buffer address and nothing else. Within them an exact
+    // match wins wherever it sits, so it returns on sight; a view match cannot, because an
+    // exact one may still lie ahead of it, so the earliest view is carried to the end of
+    // the run and used only if none was found. Entries of one address are in boundary
+    // order, so "earliest" is the same tensor a walk over the whole boundary would pick.
+    const size_t boundary_count = recording.boundary_tensors().size();
+    size_t view_index = boundary_count;
+    uint64_t view_offset = 0;
+    const auto &by_address = recording.boundary_by_address;
+    auto entry = std::lower_bound(
+        by_address.begin(), by_address.end(), tensor.buffer.addr, [](const GraphBoundaryByAddress &lhs, uint64_t addr) {
+            return lhs.addr < addr;
         }
-        source->source = GraphRecordedTensorSource::BOUNDARY_VIEW;
-        source->source_index = i;
-        source->packed_offset = tensor.start_offset - boundary.start_offset;
-        return true;
+    );
+    for (; entry != by_address.end() && entry->addr == tensor.buffer.addr; ++entry) {
+        const size_t i = entry->index;
+        const simpler::hbg::Tensor &boundary = recording.boundary_tensors()[i];
+        if (tensor.buffer.size != boundary.buffer.size) continue;
+        if (graph_tensor_exact(tensor, boundary)) {
+            source->source_kind = GraphRecordedTensorSourceKind::BOUNDARY_EXACT;
+            source->source_index = i;
+            source->packed_offset = 0;
+            return true;
+        }
+        if (view_index == boundary_count && tensor.start_offset >= boundary.start_offset) {
+            view_index = i;
+            view_offset = tensor.start_offset - boundary.start_offset;
+        }
     }
-    return false;
+    if (view_index == boundary_count) return false;
+    source->source_kind = GraphRecordedTensorSourceKind::BOUNDARY_VIEW;
+    source->source_index = view_index;
+    source->packed_offset = view_offset;
+    return true;
 }
 
 template <typename ArgT>
@@ -618,7 +638,7 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
     // different capacities, so compare the addresses through void.
     if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args()) &&
         scalar_index < recording.boundary_args()->scalar_count()) {
-        return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(scalar_index)};
+        return GraphRecordedScalarSourceRef{GraphRecordedScalarSourceKind::BOUNDARY, static_cast<size_t>(scalar_index)};
     }
 
     const void *source = args.scalar_source(scalar_index);
@@ -627,11 +647,11 @@ graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t
     for (int32_t i = 0; i < recording.boundary_args()->scalar_count(); ++i) {
         const void *boundary_source = static_cast<const void *>(&recording.boundary_args()->scalar(i));
         if (source == boundary_source) {
-            return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(i)};
+            return GraphRecordedScalarSourceRef{GraphRecordedScalarSourceKind::BOUNDARY, static_cast<size_t>(i)};
         }
         if (invalidated_source == boundary_source) {
             return GraphRecordedScalarSourceRef{
-                GraphRecordedScalarSource::INVALIDATED_BOUNDARY, static_cast<size_t>(i)
+                GraphRecordedScalarSourceKind::INVALIDATED_BOUNDARY, static_cast<size_t>(i)
             };
         }
     }
@@ -716,7 +736,7 @@ void unbind_recorder_boundary() {
 // Each bound is a per-task cap times the in-graph task cap, so these are the recorded
 // body's own limits rather than a worst case invented here: the tensor pool and
 // tensor_sources are one entry per tensor argument (CORE_MAX_TENSOR_ARGS), the two scalar
-// arrays one per scalar argument (CORE_MAX_SCALAR_ARGS), and predicates and output_ranges at
+// arrays one per scalar argument (CORE_MAX_SCALAR_ARGS), and predicates at
 // most one per task.
 //
 // internal_fanins is the one array left growing, and the reason is the size it grows to
@@ -747,7 +767,6 @@ bool graph_recording_reserve_storage(GraphRecording &recording) {
     recording.tensor_sources.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_TENSOR_ARGS));
     recording.scalars.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
     recording.scalar_sources.reserve(kInGraphTaskCap * static_cast<size_t>(CORE_MAX_SCALAR_ARGS));
-    recording.output_ranges.reserve(kInGraphTaskCap);
     recording.predicates.reserve(kInGraphTaskCap);
     return true;
 }
@@ -809,8 +828,24 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
     recording.scalars.clear();
     recording.scalar_sources.clear();
     recording.internal_fanins.clear();
-    recording.output_ranges.clear();
     recording.predicates.clear();
+    // Built once here rather than per lookup: a body classifies every tensor argument of
+    // every task against this boundary, so one ordering serves them all. stable_sort keeps
+    // equal addresses in boundary order, which is what makes the walk in
+    // graph_tensor_from_boundary pick the same tensor the boundary order would.
+    recording.boundary_by_address.clear();
+    recording.boundary_by_address.reserve(recording.boundary_tensors().size());
+    for (size_t i = 0; i < recording.boundary_tensors().size(); ++i) {
+        recording.boundary_by_address.push_back(
+            {recording.boundary_tensors()[i].buffer.addr, static_cast<uint32_t>(i)}
+        );
+    }
+    std::stable_sort(
+        recording.boundary_by_address.begin(), recording.boundary_by_address.end(),
+        [](const GraphBoundaryByAddress &lhs, const GraphBoundaryByAddress &rhs) {
+            return lhs.addr < rhs.addr;
+        }
+    );
     return true;
 }
 
@@ -818,36 +853,65 @@ bool graph_classify_tensor(
     const GraphRecording &recording, const RecordedInGraphTask &current, int32_t task_index,
     const simpler::hbg::Tensor &tensor, GraphRecordedTensorSourceRef *source
 ) {
-    if (graph_tensor_from_boundary(recording, tensor, source)) return true;
     const uintptr_t tensor_addr = static_cast<uintptr_t>(tensor.buffer.addr);
-    // The task being recorded is not in output_ranges yet — its entry is appended
-    // once its own tensors are classified — so its window is tested here, and a
-    // hit is OWN_OUTPUT rather than a dependency.
-    if (current.record_packed_base != 0 && current.total_output_size != 0 &&
-        current.total_output_size <= UINTPTR_MAX - current.record_packed_base) {
+    // The address alone decides which half of the classification can match, because the
+    // three windows are disjoint: recording is the only thing that hands out an address
+    // at or above GRAPH_RECORD_VIRTUAL_BASE, and a boundary tensor always names a
+    // graph-heap or device address below it.
+    if (!is_graph_record_address(tensor_addr)) {
+        return graph_tensor_from_boundary(recording, tensor, source);
+    }
+    // Whether `addr` lies in the output window task `index` was given. Written as a
+    // subtraction on unsigned values so a window ending past the address space cannot
+    // wrap the bound.
+    auto window_offset = [&recording](int32_t index, uintptr_t addr, uint64_t *offset_out) {
+        const RecordedInGraphTask &producer = recording.tasks[static_cast<size_t>(index)];
+        if (producer.total_output_size == 0 || addr < producer.record_packed_base) return false;
+        const uint64_t offset = addr - producer.record_packed_base;
+        if (offset >= producer.total_output_size) return false;
+        *offset_out = offset;
+        return true;
+    };
+
+    // The task being recorded owns a window like any other, but it is a source of its own
+    // outputs rather than a dependency, so it is asked first and answers OWN_OUTPUT.
+    uint64_t offset = 0;
+    if (current.record_packed_base != 0 && current.total_output_size != 0) {
         const uintptr_t begin = current.record_packed_base;
-        if (tensor_addr >= begin && tensor_addr < begin + current.total_output_size) {
-            source->source = GraphRecordedTensorSource::OWN_OUTPUT;
+        if (tensor_addr >= begin && tensor_addr - begin < current.total_output_size) {
+            source->source_kind = GraphRecordedTensorSourceKind::OWN_OUTPUT;
             source->source_index = static_cast<size_t>(task_index);
             source->packed_offset = tensor_addr - begin;
             return true;
         }
     }
-    // Sorted and disjoint, so the only window that can hold the address is the
-    // last one starting at or below it.
-    const auto after = std::upper_bound(
-        recording.output_ranges.begin(), recording.output_ranges.end(), tensor_addr,
-        [](uintptr_t addr, const GraphRecordedOutputRange &range) {
-            return addr < range.begin;
+
+    // owner_task_id names the task that created this tensor, so it reaches the producer
+    // without a search. It is a hint and not the answer: a Tensor built from a bare
+    // address carries no owner, and the classification a Definition replays has to follow
+    // the address. So the window is checked, and a hint that does not hold falls through
+    // to the scan below rather than deciding anything.
+    const TaskId owner = tensor.owner_task_id;
+    if (owner.is_valid() && !owner.is_global()) {
+        const int32_t owner_index = owner.local_id();
+        if (owner_index >= 0 && owner_index < task_index && window_offset(owner_index, tensor_addr, &offset)) {
+            source->source_kind = GraphRecordedTensorSourceKind::INTERNAL;
+            source->source_index = static_cast<size_t>(owner_index);
+            source->packed_offset = offset;
+            return true;
         }
-    );
-    if (after == recording.output_ranges.begin()) return false;
-    const GraphRecordedOutputRange &range = *(after - 1);
-    if (tensor_addr >= range.end) return false;
-    source->source = GraphRecordedTensorSource::INTERNAL;
-    source->source_index = range.task_index;
-    source->packed_offset = tensor_addr - range.begin;
-    return true;
+    }
+
+    // The windows are disjoint, so at most one holds the address and the order of the
+    // walk does not change the answer.
+    for (int32_t i = 0; i < task_index; ++i) {
+        if (!window_offset(i, tensor_addr, &offset)) continue;
+        source->source_kind = GraphRecordedTensorSourceKind::INTERNAL;
+        source->source_index = static_cast<size_t>(i);
+        source->packed_offset = offset;
+        return true;
+    }
+    return false;
 }
 
 GraphBoundarySignature
@@ -869,18 +933,18 @@ std::optional<GraphTensorSourceRef> graph_pack_tensor_source(const GraphRecorded
     if (source.source_index > UINT16_MAX) return std::nullopt;
 
     GraphTensorSourceRef packed{};
-    switch (source.source) {
-    case GraphRecordedTensorSource::BOUNDARY_EXACT:
-        packed.source = static_cast<uint8_t>(GraphTensorSource::BOUNDARY_EXACT);
+    switch (source.source_kind) {
+    case GraphRecordedTensorSourceKind::BOUNDARY_EXACT:
+        packed.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_EXACT);
         break;
-    case GraphRecordedTensorSource::BOUNDARY_VIEW:
-        packed.source = static_cast<uint8_t>(GraphTensorSource::BOUNDARY_VIEW);
+    case GraphRecordedTensorSourceKind::BOUNDARY_VIEW:
+        packed.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_VIEW);
         break;
-    case GraphRecordedTensorSource::INTERNAL:
-        packed.source = static_cast<uint8_t>(GraphTensorSource::INTERNAL);
+    case GraphRecordedTensorSourceKind::INTERNAL:
+        packed.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::INTERNAL);
         break;
-    case GraphRecordedTensorSource::OWN_OUTPUT:
-        packed.source = static_cast<uint8_t>(GraphTensorSource::OWN_OUTPUT);
+    case GraphRecordedTensorSourceKind::OWN_OUTPUT:
+        packed.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::OWN_OUTPUT);
         break;
     }
     packed.source_index = static_cast<uint16_t>(source.source_index);
@@ -889,14 +953,14 @@ std::optional<GraphTensorSourceRef> graph_pack_tensor_source(const GraphRecorded
 }
 
 std::optional<GraphScalarSourceRef> graph_pack_scalar_source(const GraphRecordedScalarSourceRef &source) {
-    if (source.source == GraphRecordedScalarSource::INVALIDATED_BOUNDARY || source.source_index > UINT16_MAX) {
+    if (source.source_kind == GraphRecordedScalarSourceKind::INVALIDATED_BOUNDARY || source.source_index > UINT16_MAX) {
         return std::nullopt;
     }
 
     GraphScalarSourceRef packed{};
-    packed.source = source.source == GraphRecordedScalarSource::BOUNDARY ?
-                        static_cast<uint8_t>(GraphScalarSource::BOUNDARY) :
-                        static_cast<uint8_t>(GraphScalarSource::STATIC_VALUE);
+    packed.source_kind = source.source_kind == GraphRecordedScalarSourceKind::BOUNDARY ?
+                             static_cast<uint8_t>(GraphScalarSourceKind::BOUNDARY) :
+                             static_cast<uint8_t>(GraphScalarSourceKind::STATIC_VALUE);
     packed.source_index = static_cast<uint16_t>(source.source_index);
     return packed;
 }
@@ -1119,14 +1183,15 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
             std::optional<GraphScalarSourceRef> packed_source =
                 graph_pack_scalar_source(recording.scalar_sources[source.scalar_offset + scalar_index]);
             if (!packed_source.has_value() ||
-                (packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) &&
+                (packed_source->source_kind == static_cast<uint8_t>(GraphScalarSourceKind::BOUNDARY) &&
                  packed_source->source_index >= recording.boundary_args()->scalar_count())) {
                 return false;
             }
             scalar_sources[scalar_cursor] = *packed_source;
-            scalars[scalar_cursor++] = packed_source->source == static_cast<uint8_t>(GraphScalarSource::BOUNDARY) ?
-                                           0 :
-                                           recording.scalars[source.scalar_offset + scalar_index];
+            scalars[scalar_cursor++] =
+                packed_source->source_kind == static_cast<uint8_t>(GraphScalarSourceKind::BOUNDARY) ?
+                    0 :
+                    recording.scalars[source.scalar_offset + scalar_index];
         }
     }
     if (tensor_cursor != total_tensors || scalar_cursor != total_scalars || fanin_cursor != total_fanins ||
@@ -2215,7 +2280,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
     recording.scalar_sources.resize(task.scalar_offset + task.scalar_count);
     for (int32_t i = 0; i < args.scalar_count(); ++i) {
         GraphRecordedScalarSourceRef source = graph_classify_scalar(recording, args, i);
-        if (source.source == GraphRecordedScalarSource::INVALIDATED_BOUNDARY) recording.unsupported = true;
+        if (source.source_kind == GraphRecordedScalarSourceKind::INVALIDATED_BOUNDARY) recording.unsupported = true;
         recording.scalar_sources[task.scalar_offset + i] = source;
     }
 
@@ -2260,7 +2325,7 @@ TaskOutputTensors graph_record_submit_in_graph_task(
         if (operand == nullptr || operand->ndims > MAX_TENSOR_DIMS || pred.operand.ndims > operand->ndims ||
             flat_offset < operand->start_offset || flat_offset - operand->start_offset >= operand->extent_elem_cache ||
             !graph_classify_tensor(recording, task, task_index, *operand, &recorded.source) ||
-            recorded.source.source == GraphRecordedTensorSource::OWN_OUTPUT) {
+            recorded.source.source_kind == GraphRecordedTensorSourceKind::OWN_OUTPUT) {
             recording.unsupported = true;
         } else {
             recorded.operand.copy(*operand);
@@ -2282,7 +2347,9 @@ TaskOutputTensors graph_record_submit_in_graph_task(
     };
     for (int32_t i = 0; i < tensor_count; ++i) {
         const GraphRecordedTensorSourceRef &source = recording.tensor_sources[task.tensor_source_offset + i];
-        if (source.source == GraphRecordedTensorSource::INTERNAL) add_fanin(static_cast<int32_t>(source.source_index));
+        if (source.source_kind == GraphRecordedTensorSourceKind::INTERNAL) {
+            add_fanin(static_cast<int32_t>(source.source_index));
+        }
     }
 
     // Inferred hazards, on the same terms as the ordinary path. The loop above only
@@ -2366,16 +2433,6 @@ TaskOutputTensors graph_record_submit_in_graph_task(
     }
 
     task.fanin_count = static_cast<int32_t>(recording.internal_fanins.size() - task.fanin_offset);
-    if (task.record_packed_base != 0 && task.total_output_size != 0 &&
-        task.total_output_size <= UINTPTR_MAX - task.record_packed_base) {
-        const uintptr_t begin = task.record_packed_base;
-        const uintptr_t end = begin + task.total_output_size;
-        // The sorted-and-disjoint property the lookup depends on, checked rather
-        // than assumed: a mid-recording heap rollback would break it, and today
-        // the only rollback is graph_end's, after every task of the body is recorded.
-        always_assert(recording.output_ranges.empty() || recording.output_ranges.back().end <= begin);
-        recording.output_ranges.push_back({begin, end, task_index});
-    }
     // Published last: until this advances, the slot is not part of the recording, so
     // nothing that scans the recorded tasks can see the task being built.
     recording.task_count = task_index + 1;
