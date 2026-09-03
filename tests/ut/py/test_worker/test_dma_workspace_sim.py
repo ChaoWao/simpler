@@ -54,8 +54,10 @@ class TestSimProvisionsSdmaWorkspace:
         # with PTO_RUNTIME_ERR_UNSUPPORTED (-1001), which kept every kernel that
         # merely hints a prefetch off the simulator.
         worker = _make_sim_worker(enable_sdma=True)
-        worker.init()
-        worker.close()
+        try:
+            worker.init()
+        finally:
+            worker.close()
 
     def test_without_sdma_init_succeeds(self):
         # Control: coming up is not itself evidence the request was honoured, so
@@ -63,5 +65,7 @@ class TestSimProvisionsSdmaWorkspace:
         # each one hands a kernel is covered end-to-end by the a2a3
         # prefetch_async_demo scene test, which reads it on-device.
         worker = _make_sim_worker(enable_sdma=False)
-        worker.init()
-        worker.close()
+        try:
+            worker.init()
+        finally:
+            worker.close()

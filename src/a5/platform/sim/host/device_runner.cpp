@@ -831,6 +831,7 @@ int DeviceRunner::finalize() {
     prebuilt_runtime_arena_cache_image_.clear();
 
     mem_alloc_.finalize();
+    dma_workspace_block_ = nullptr;
     clear_cpu_sim_shared_storage();
 
     if (device_wall_dev_ptr_ != nullptr) {

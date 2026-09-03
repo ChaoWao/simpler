@@ -871,6 +871,7 @@ int DeviceRunner::finalize() {
     }
 
     mem_alloc_.finalize();
+    dma_workspace_block_ = nullptr;
     clear_cpu_sim_shared_storage();
 
     device_id_ = -1;
