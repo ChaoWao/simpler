@@ -832,50 +832,54 @@ inline ChipSwimlaneAicpuTaskPool *get_perf_buffer_state(void *base_ptr, int core
  *
  * Layout (after the fixed ChipSwimlaneDataHeader, which carries the phase
  * metadata fields):
- *   [ChipSwimlaneAicpuTaskPool       × num_cores]
- *   [ChipSwimlaneAicoreTaskPool      × num_cores]
+ *   [ChipSwimlaneAicpuTaskPool       × PLATFORM_MAX_CORES]
+ *   [ChipSwimlaneAicoreTaskPool      × PLATFORM_MAX_CORES]
  *   [ChipSwimlaneAicpuSchedPhasePool × PLATFORM_MAX_AICPU_THREADS]
- *   [ChipSwimlaneAicpuOrchPhasePool  × num_orch_phase_threads]
+ *   [ChipSwimlaneAicpuOrchPhasePool  × PLATFORM_MAX_AICPU_THREADS]
  *
- * @param num_cores               Number of AICore instances
- * @param num_sched_phase_threads Retained for API compatibility; scheduler allocation uses the platform maximum
- * @param num_orch_phase_threads  Number of orchestrator-phase pools
+ * Every array is dimensioned by a platform maximum, not by the run. The host
+ * and the AICPU both address this region, and each used to supply its own core
+ * count to locate the arrays — the host the run's, the device its worker_count.
+ * A single basis they cannot disagree about is the point: the pool *states* are
+ * a fixed grid, and only the record buffers hanging off them are allocated per
+ * run. header->num_cores therefore still means "cores this run uses" and is not
+ * an addressing input.
+ *
  * @return Total bytes needed for header + all buffer states
  */
-inline size_t
-calc_perf_data_size_with_phases(int num_cores, int /*num_sched_phase_threads*/, int num_orch_phase_threads) {
-    return calc_perf_data_size(num_cores) + num_cores * sizeof(ChipSwimlaneAicoreTaskPool) +
+inline size_t calc_perf_data_size_with_phases() {
+    return calc_perf_data_size(PLATFORM_MAX_CORES) + PLATFORM_MAX_CORES * sizeof(ChipSwimlaneAicoreTaskPool) +
            PLATFORM_MAX_AICPU_THREADS * sizeof(ChipSwimlaneAicpuSchedPhasePool) +
-           num_orch_phase_threads * sizeof(ChipSwimlaneAicpuOrchPhasePool);
+           PLATFORM_MAX_AICPU_THREADS * sizeof(ChipSwimlaneAicpuOrchPhasePool);
 }
 
 /**
  * Get ChipSwimlaneAicoreTaskPool array start address (located immediately
  * after the ChipSwimlaneAicpuTaskPool array).
  */
-inline ChipSwimlaneAicoreTaskPool *get_aicore_buffer_states(void *base_ptr, int num_cores) {
+inline ChipSwimlaneAicoreTaskPool *get_aicore_buffer_states(void *base_ptr) {
     return reinterpret_cast<ChipSwimlaneAicoreTaskPool *>(
-        reinterpret_cast<char *>(base_ptr) + calc_perf_data_size(num_cores)
+        reinterpret_cast<char *>(base_ptr) + calc_perf_data_size(PLATFORM_MAX_CORES)
     );
 }
 
-inline ChipSwimlaneAicoreTaskPool *get_aicore_buffer_state(void *base_ptr, int num_cores, int core_index) {
-    return &get_aicore_buffer_states(base_ptr, num_cores)[core_index];
+inline ChipSwimlaneAicoreTaskPool *get_aicore_buffer_state(void *base_ptr, int core_index) {
+    return &get_aicore_buffer_states(base_ptr)[core_index];
 }
 
 /**
  * Get ChipSwimlaneAicpuSchedPhasePool array start address (located immediately
  * after the ChipSwimlaneAicoreTaskPool array).
  */
-inline ChipSwimlaneAicpuSchedPhasePool *get_sched_phase_buffer_states(void *base_ptr, int num_cores) {
+inline ChipSwimlaneAicpuSchedPhasePool *get_sched_phase_buffer_states(void *base_ptr) {
     return reinterpret_cast<ChipSwimlaneAicpuSchedPhasePool *>(
-        reinterpret_cast<char *>(base_ptr) + calc_perf_data_size(num_cores) +
-        num_cores * sizeof(ChipSwimlaneAicoreTaskPool)
+        reinterpret_cast<char *>(base_ptr) + calc_perf_data_size(PLATFORM_MAX_CORES) +
+        PLATFORM_MAX_CORES * sizeof(ChipSwimlaneAicoreTaskPool)
     );
 }
 
-inline ChipSwimlaneAicpuSchedPhasePool *get_sched_phase_buffer_state(void *base_ptr, int num_cores, int thread_idx) {
-    return &get_sched_phase_buffer_states(base_ptr, num_cores)[thread_idx];
+inline ChipSwimlaneAicpuSchedPhasePool *get_sched_phase_buffer_state(void *base_ptr, int thread_idx) {
+    return &get_sched_phase_buffer_states(base_ptr)[thread_idx];
 }
 
 /**
@@ -890,15 +894,15 @@ inline ChipSwimlaneAicpuSchedPhasePool *get_sched_phase_buffer_state(void *base_
  * AICPU's iteration count (actual) — otherwise AICPU reads the orch array
  * from inside the (still allocated) sched array tail, corrupting both.
  */
-inline ChipSwimlaneAicpuOrchPhasePool *get_orch_phase_buffer_states(void *base_ptr, int num_cores) {
+inline ChipSwimlaneAicpuOrchPhasePool *get_orch_phase_buffer_states(void *base_ptr) {
     return reinterpret_cast<ChipSwimlaneAicpuOrchPhasePool *>(
-        reinterpret_cast<char *>(get_sched_phase_buffer_states(base_ptr, num_cores)) +
+        reinterpret_cast<char *>(get_sched_phase_buffer_states(base_ptr)) +
         PLATFORM_MAX_AICPU_THREADS * sizeof(ChipSwimlaneAicpuSchedPhasePool)
     );
 }
 
-inline ChipSwimlaneAicpuOrchPhasePool *get_orch_phase_buffer_state(void *base_ptr, int num_cores, int thread_idx) {
-    return &get_orch_phase_buffer_states(base_ptr, num_cores)[thread_idx];
+inline ChipSwimlaneAicpuOrchPhasePool *get_orch_phase_buffer_state(void *base_ptr, int thread_idx) {
+    return &get_orch_phase_buffer_states(base_ptr)[thread_idx];
 }
 
 #ifdef __cplusplus

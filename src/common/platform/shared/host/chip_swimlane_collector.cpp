@@ -145,7 +145,7 @@ int ChipSwimlaneCollector::initialize(
     // both sched and orch — AICPU picks the actual counts at init_phase time
     // and writes them into the header.
     int num_phase_threads = PLATFORM_MAX_AICPU_THREADS;
-    size_t total_size = calc_perf_data_size_with_phases(num_aicore, num_phase_threads, num_phase_threads);
+    size_t total_size = calc_perf_data_size_with_phases();
 
     LOG_DEBUG("Shared memory allocation plan:");
     LOG_DEBUG("  Number of cores:      %d", num_aicore);
@@ -276,7 +276,7 @@ int ChipSwimlaneCollector::initialize(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (int i = 0; i < num_aicore; i++) {
-        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(perf_host_ptr, num_aicore, i);
+        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(perf_host_ptr, i);
         memset(ac_state, 0, sizeof(ChipSwimlaneAicoreTaskPool));
 
         const int initial_free_count = kAicoreInitialFreeCount;
@@ -348,13 +348,13 @@ int ChipSwimlaneCollector::initialize(
     // allocated only for the first buffer_count pools. For sched the two are
     // equal; orch is a single instance (pool 0), so it zeroes all slots but
     // allocates buffers for just pool 0 — no buffers wasted on unused slots.
-    auto init_phase_pools = [&](auto *buffer_tag, ChipSwimlaneAicpuTaskPool *(*get_state)(void *, int, int),
-                                int state_count, int buffer_count, int buffers_per_thread, ProfBufferType recycle_kind,
+    auto init_phase_pools = [&](auto *buffer_tag, ChipSwimlaneAicpuTaskPool *(*get_state)(void *, int), int state_count,
+                                int buffer_count, int buffers_per_thread, ProfBufferType recycle_kind,
                                 const char *kind_label) -> int {
         using Buffer = std::remove_pointer_t<decltype(buffer_tag)>;
         constexpr size_t buffer_bytes = sizeof(Buffer);
         for (int t = 0; t < state_count; t++) {
-            auto *state = get_state(perf_host_ptr, num_aicore, t);
+            auto *state = get_state(perf_host_ptr, t);
             memset(state, 0, sizeof(ChipSwimlaneAicpuTaskPool));
             if (t >= buffer_count) continue;  // zeroed state only; no buffers (unused slot)
             const int initial_free_count =
@@ -405,8 +405,8 @@ int ChipSwimlaneCollector::initialize(
         ) != 0) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
-    auto orch_get_state = [](void *base, int n_cores, int t) {
-        return get_orch_phase_buffer_state(base, n_cores, t);
+    auto orch_get_state = [](void *base, int t) {
+        return get_orch_phase_buffer_state(base, t);
     };
     const int orch_buffer_count = chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES && !host_orchestrated_ ? 1 : 0;
     if (init_phase_pools(
@@ -802,7 +802,7 @@ void ChipSwimlaneCollector::reconcile_counters() {
     reconcile_one(
         "SCHED_PHASE", "thread", PLATFORM_MAX_AICPU_THREADS,
         [this](int thread_index) {
-            return get_sched_phase_buffer_state(shm_host_, num_aicore_, thread_index);
+            return get_sched_phase_buffer_state(shm_host_, thread_index);
         },
         [](void *host_ptr) {
             return reinterpret_cast<ChipSwimlaneAicpuSchedPhaseBuffer *>(host_ptr)->count;
@@ -813,7 +813,7 @@ void ChipSwimlaneCollector::reconcile_counters() {
     reconcile_one(
         "ORCH_PHASE", "thread", PLATFORM_MAX_AICPU_THREADS,
         [this](int thread_index) {
-            return get_orch_phase_buffer_state(shm_host_, num_aicore_, thread_index);
+            return get_orch_phase_buffer_state(shm_host_, thread_index);
         },
         [](void *host_ptr) {
             return reinterpret_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(host_ptr)->count;
@@ -1332,7 +1332,7 @@ int ChipSwimlaneCollector::finalize(
         state->head.current_buf_ptr = 0;
         drain_free_queue(state->free_queue);
 
-        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(shm_host_, num_aicore_, i);
+        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(shm_host_, i);
         release_one_buffer(reinterpret_cast<void *>(ac_state->head.current_buf_ptr), unregister_cb, free_cb);
         ac_state->head.current_buf_ptr = 0;
         drain_free_queue(ac_state->free_queue);
@@ -1358,10 +1358,10 @@ int ChipSwimlaneCollector::finalize(
     };
     int num_phase_threads = PLATFORM_MAX_AICPU_THREADS;
     for (int t = 0; t < num_phase_threads; t++) {
-        release_phase_pool(get_sched_phase_buffer_state(shm_host_, num_aicore_, t));
+        release_phase_pool(get_sched_phase_buffer_state(shm_host_, t));
     }
     for (int t = 0; t < num_phase_threads; t++) {
-        release_phase_pool(get_orch_phase_buffer_state(shm_host_, num_aicore_, t));
+        release_phase_pool(get_orch_phase_buffer_state(shm_host_, t));
     }
 
     // Main shm: unregister + free as a pair, same as every other buffer.

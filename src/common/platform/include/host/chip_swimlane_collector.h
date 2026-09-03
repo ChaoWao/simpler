@@ -231,21 +231,21 @@ struct ChipSwimlaneModule {
             break;
         }
         case ChipSwimlaneBufferKind::AicpuSchedPhase: {
-            auto *state = get_sched_phase_buffer_state(shm, num_cores, static_cast<int>(entry.core_index));
+            auto *state = get_sched_phase_buffer_state(shm, static_cast<int>(entry.core_index));
             site.free_queue = &state->free_queue;
             site.buffer_size = sizeof(ChipSwimlaneAicpuSchedPhaseBuffer);
             site.info.type = ProfBufferType::AICPU_SCHED_PHASE;
             break;
         }
         case ChipSwimlaneBufferKind::AicpuOrchPhase: {
-            auto *state = get_orch_phase_buffer_state(shm, num_cores, static_cast<int>(entry.core_index));
+            auto *state = get_orch_phase_buffer_state(shm, static_cast<int>(entry.core_index));
             site.free_queue = &state->free_queue;
             site.buffer_size = sizeof(ChipSwimlaneAicpuOrchPhaseBuffer);
             site.info.type = ProfBufferType::AICPU_ORCH_PHASE;
             break;
         }
         case ChipSwimlaneBufferKind::AicoreTask: {
-            auto *ac_state = get_aicore_buffer_state(shm, num_cores, static_cast<int>(entry.core_index));
+            auto *ac_state = get_aicore_buffer_state(shm, static_cast<int>(entry.core_index));
             site.free_queue = &ac_state->free_queue;
             site.buffer_size = sizeof(ChipSwimlaneAicoreTaskBuffer);
             site.info.type = ProfBufferType::AICORE_TASK;
@@ -268,7 +268,7 @@ struct ChipSwimlaneModule {
 
         // AicoreTask: per-core (kind 3)
         for (int i = 0; i < num_cores; i++) {
-            auto *ac_state = get_aicore_buffer_state(shm, num_cores, i);
+            auto *ac_state = get_aicore_buffer_state(shm, i);
             cb(/*kind=*/static_cast<int>(ChipSwimlaneBufferKind::AicoreTask), &ac_state->free_queue,
                sizeof(ChipSwimlaneAicoreTaskBuffer));
         }
@@ -282,7 +282,7 @@ struct ChipSwimlaneModule {
             num_sched_phase_threads = 0;
         }
         for (int t = 0; t < num_sched_phase_threads; t++) {
-            auto *state = get_sched_phase_buffer_state(shm, num_cores, t);
+            auto *state = get_sched_phase_buffer_state(shm, t);
             cb(/*kind=*/static_cast<int>(ChipSwimlaneBufferKind::AicpuSchedPhase), &state->free_queue,
                sizeof(ChipSwimlaneAicpuSchedPhaseBuffer));
         }
@@ -293,7 +293,7 @@ struct ChipSwimlaneModule {
             num_orch_phase_threads = 0;
         }
         for (int t = 0; t < num_orch_phase_threads; t++) {
-            auto *state = get_orch_phase_buffer_state(shm, num_cores, t);
+            auto *state = get_orch_phase_buffer_state(shm, t);
             cb(/*kind=*/static_cast<int>(ChipSwimlaneBufferKind::AicpuOrchPhase), &state->free_queue,
                sizeof(ChipSwimlaneAicpuOrchPhaseBuffer));
         }

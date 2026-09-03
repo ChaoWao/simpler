@@ -330,7 +330,7 @@ void chip_swimlane_aicpu_init(int worker_count) {
     // Pop first buffer from free_queue for each core
     for (int i = 0; i < worker_count; i++) {
         ChipSwimlaneAicpuTaskPool *state = get_perf_buffer_state(chip_swimlane_base, i);
-        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(chip_swimlane_base, worker_count, i);
+        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(chip_swimlane_base, i);
 
         s_aicpu_task_pools[i] = state;
         s_aicore_task_pools[i] = ac_state;
@@ -798,7 +798,7 @@ static Buffer *prime_phase_pool(
     return buf;
 }
 
-void chip_swimlane_aicpu_init_phase(int worker_count, int num_sched_phase_threads, int num_orch_phase_threads) {
+void chip_swimlane_aicpu_init_phase(int /*worker_count*/, int num_sched_phase_threads, int num_orch_phase_threads) {
     void *chip_swimlane_base = reinterpret_cast<void *>(g_platform_chip_swimlane_base);
     if (chip_swimlane_base == nullptr) {
         LOG_ERROR("chip_swimlane_data_base is NULL, cannot initialize phase profiling");
@@ -819,7 +819,7 @@ void chip_swimlane_aicpu_init_phase(int worker_count, int num_sched_phase_thread
     if (orch_n > PLATFORM_MAX_AICPU_THREADS) orch_n = PLATFORM_MAX_AICPU_THREADS;
 
     for (int t = 0; t < sched_n; t++) {
-        auto *state = get_sched_phase_buffer_state(chip_swimlane_base, worker_count, t);
+        auto *state = get_sched_phase_buffer_state(chip_swimlane_base, t);
         s_sched_phase_pools[t] = state;
         s_current_sched_phase_buffers[t] = prime_phase_pool<ChipSwimlaneAicpuSchedPhaseBuffer>(
             state, t, ChipSwimlaneBufferKind::AicpuSchedPhase, &s_current_sched_phase_buffers[t], "sched"
@@ -831,7 +831,7 @@ void chip_swimlane_aicpu_init_phase(int worker_count, int num_sched_phase_thread
     }
 
     for (int t = 0; t < orch_n; t++) {
-        auto *state = get_orch_phase_buffer_state(chip_swimlane_base, worker_count, t);
+        auto *state = get_orch_phase_buffer_state(chip_swimlane_base, t);
         s_orch_phase_pools[t] = state;
         s_current_orch_phase_buffers[t] = prime_phase_pool<ChipSwimlaneAicpuOrchPhaseBuffer>(
             state, t, ChipSwimlaneBufferKind::AicpuOrchPhase, &s_current_orch_phase_buffers[t], "orch"
