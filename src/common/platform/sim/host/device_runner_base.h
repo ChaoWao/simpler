@@ -251,6 +251,18 @@ public:
         aicpu_so_binary_ = std::move(aicpu_so_binary);
         aicore_kernel_binary_ = std::move(aicore_kernel_binary);
     }
+
+    /**
+     * Record whether this Worker asked for an async-DMA workspace.
+     *
+     * Simulation has no DMA engine, so the workspace it hands out is inert
+     * scratch: `TPREFETCH_ASYNC` is a no-op under CPU simulation (pto-isa
+     * `cpu/TPrefetchAsync.hpp`) and nothing else reads it. It is provisioned
+     * anyway so a kernel that treats a null workspace as broken injection sees
+     * a live address, which is the same contract onboard offers. A Worker that
+     * does not ask keeps a zero address.
+     */
+    void set_dma_workspace_request(bool enable_sdma) { dma_workspace_requested_ = enable_sdma; }
     int device_id() const { return device_id_; }
     uint64_t last_device_wall_ns() const { return device_wall_ns_; }
     // Per-phase AICPU wall (ns) from the most recent run; RunWall aliases
@@ -338,6 +350,15 @@ protected:
     // owned for the rest of the runner's lifetime.
     std::vector<uint8_t> aicpu_so_binary_;
     std::vector<uint8_t> aicore_kernel_binary_;
+
+    // Set by simpler_init; read when the AICPU SO is loaded to decide whether to
+    // publish a workspace address into it.
+    bool dma_workspace_requested_{false};
+    // Matches the 16 KB the a2a3 onboard SdmaWorkspaceManager provisions, so a
+    // kernel sizing its use of the workspace against the onboard budget stays
+    // in bounds here. Freed with every other tracked block by mem_alloc_.
+    static constexpr size_t kSimDmaWorkspaceBytes = 16 * 1024;
+    void *dma_workspace_block_{nullptr};
 
     MemoryAllocator mem_alloc_;
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};

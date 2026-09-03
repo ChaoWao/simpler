@@ -32,6 +32,7 @@
 #include "aicpu/platform_aicpu_affinity.h"
 #include "call_config.h"
 #include "callable_protocol.h"
+#include "common/dma_workspace.h"
 #include "common/host_log_binding.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
@@ -203,6 +204,33 @@ int DeviceRunner::ensure_binaries_loaded() {
             return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_platform_scope_stats_base", reinterpret_cast<void **>(&set_platform_scope_stats_base_func_)))
             return PTO_RUNTIME_ERR_INTERNAL;
+
+        // Per-device one-shot latch, mirroring the onboard InitArgs path that
+        // feeds set_dma_workspace_addr: the scheduler copies these addresses
+        // into every core's GlobalContext, where get_dma_workspace(args, kind)
+        // reads them. The block is inert scratch — CPU simulation runs
+        // TPREFETCH_ASYNC as a no-op (pto-isa cpu/TPrefetchAsync.hpp) and has no
+        // implementation of the async transfers that would read it — but it is
+        // a live address, so a kernel that rejects a null workspace as broken
+        // injection behaves the same here as it does onboard. Kinds other than
+        // SDMA keep the zero address they start with.
+        if (dma_workspace_requested_) {
+            using SetDmaWorkspaceAddrFunc = void (*)(int, unsigned long long);
+            SetDmaWorkspaceAddrFunc set_dma_workspace_addr_func = nullptr;
+            if (!load_sym("set_dma_workspace_addr", reinterpret_cast<void **>(&set_dma_workspace_addr_func)))
+                return PTO_RUNTIME_ERR_INTERNAL;
+            if (dma_workspace_block_ == nullptr) {
+                dma_workspace_block_ = mem_alloc_.alloc(kSimDmaWorkspaceBytes);
+                if (dma_workspace_block_ == nullptr) {
+                    LOG_ERROR("Failed to allocate the %zu-byte sim async-DMA workspace", kSimDmaWorkspaceBytes);
+                    return PTO_RUNTIME_ERR_INTERNAL;
+                }
+                std::memset(dma_workspace_block_, 0, kSimDmaWorkspaceBytes);
+            }
+            set_dma_workspace_addr_func(
+                DMA_WORKSPACE_SDMA, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(dma_workspace_block_))
+            );
+        }
 
         // The AICPU sim SO binds its private HostLogger before the compatibility
         // level setter can emit a clock anchor.
