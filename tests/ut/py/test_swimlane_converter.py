@@ -372,7 +372,11 @@ def test_l3_directory_merge_rejects_different_or_missing_host_clock_domains(tmp_
         sc._generate_l3_trace(args, root)
 
 
-def test_task_statistics_level_one_hides_aicpu_metrics(capsys):
+@pytest.mark.parametrize(
+    ("level", "description"),
+    [(1, "AICore timing only"), (3, "AICore + Scheduler task timing + scheduler phases")],
+)
+def test_task_statistics_without_scheduler_timestamps_hides_scheduler_metrics(capsys, level, description):
     tasks = [
         {
             "task_id": 1,
@@ -389,12 +393,12 @@ def test_task_statistics_level_one_hides_aicpu_metrics(capsys):
         }
     ]
 
-    sc.print_task_statistics(tasks, {"0": "kernel"}, chip_swimlane_level=1)
+    sc.print_task_statistics(tasks, {"0": "kernel"}, chip_swimlane_level=level)
 
     output = capsys.readouterr().out
     row = next(line for line in output.splitlines() if line.startswith("0        kernel"))
     total = next(line for line in output.splitlines() if line.startswith("TOTAL"))
-    assert "Source chip_swimlane_level: 1 (AICore timing only; recorded in chip_swimlane_records.json)" in output
+    assert f"Source chip_swimlane_level: {level} ({description}; recorded in chip_swimlane_records.json)" in output
     assert row.split() == ["0", "kernel", "1", "5.00", "-", "-", "-", "-", "-", "0.50"]
     assert total.split() == ["TOTAL", "1", "5.00", "-"]
     assert "AICore Observed Span: 5.50 us (from earliest AICore receive to latest AICore end)" in output
@@ -464,6 +468,7 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
 
     data = sc.read_perf_data(raw)
 
+    assert data["scheduler_task_producer"] == "aicpu"
     assert data["orchestrator_source"] == "host"
     assert data["aicpu_orchestrator_phases"][0][0]["start_time_us"] == 0.0
     assert data["aicpu_orchestrator_phases"][0][0]["end_time_us"] == 2.0
@@ -574,6 +579,284 @@ def test_aicpu_orchestrator_uses_host_timeline_when_clock_anchors_exist(tmp_path
     assert data["timeline_metadata"]["clock_alignment"]["status"] == "calibrated"
     assert data["timeline_metadata"]["host_clock_domain_id"] == "same-boot"
     assert data["timeline_metadata"]["source_timeline_origin_ns"] == 1_000
+
+
+def test_aicore_scheduler_records_keep_common_shape_and_stream_metadata(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 3,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+                "scheduler_tasks": {
+                    "schema_version": 1,
+                    "producer": "aicore",
+                    "records": [[0, 7, 115, 185]],
+                },
+                "aicpu_lifecycle_records": [
+                    {
+                        "worker_id": 6,
+                        "aicpu_thread_id": 1,
+                        "core_type": "aiv",
+                        "physical_core_id": 9,
+                        "handshake_observed_cycles": 90,
+                        "handshake_partition_complete_cycles": 91,
+                        "config_start_cycles": 92,
+                        "topology_complete_cycles": 93,
+                        "context_publish_complete_cycles": 94,
+                        "bootstrap_wait_start_cycles": 95,
+                        "bootstrap_complete_cycles": 96,
+                        "register_release_cycles": 97,
+                        "exit_signal_cycles": 181,
+                        "exit_ack_cycles": 182,
+                    }
+                ],
+                "scheduler_records": {
+                    "schema_version": 1,
+                    "streams": [
+                        {
+                            "platform": "a5",
+                            "runtime": "host_build_graph",
+                            "producer": "aicore",
+                            "scheduler_id": 2,
+                            "worker_id": 6,
+                            "core_type": "aiv",
+                            "physical_core_id": 9,
+                            "capture": {"committed": 2, "dropped": 0, "truncated": False},
+                            "records": [
+                                {
+                                    "start_cycles": 100,
+                                    "end_cycles": 110,
+                                    "loop_iter": 3,
+                                    "kind": "ready_claim",
+                                    "tasks_processed": 1,
+                                    "task_id": 7,
+                                },
+                                {
+                                    "start_cycles": 111,
+                                    "end_cycles": 119,
+                                    "loop_iter": 3,
+                                    "kind": "idle",
+                                    "tasks_processed": 0,
+                                    "task_id": None,
+                                },
+                            ],
+                            "metrics": [{"record_index": 0, "claim_retries": 2}],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert [task["task_id"] for task in data["tasks"]] == [7]
+    assert data["scheduler_task_producer"] == "aicore"
+    assert data["tasks"][0]["dispatch_time_us"] == pytest.approx(0.025)
+    assert data["tasks"][0]["finish_time_us"] == pytest.approx(0.095)
+    assert data["scheduler_streams"][0]["producer"] == "aicore"
+    assert data["scheduler_records"][0][0]["claim_retries"] == 2
+    assert data["scheduler_records"][0][1]["task_id"] is None
+    assert data["aicpu_lifecycle_records"][0]["register_release_time_us"] == pytest.approx(0.007)
+
+    trace_path = tmp_path / "merged_swimlane.json"
+    sc.generate_chrome_trace_json(
+        data["tasks"],
+        str(trace_path),
+        scheduler_phases=data["scheduler_records"],
+        scheduler_streams=data["scheduler_streams"],
+        aicpu_lifecycle_records=data["aicpu_lifecycle_records"],
+    )
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    assert any(
+        event.get("name") == "process_name" and event.get("args", {}).get("name") == "AICore Scheduler"
+        for event in events
+    )
+    assert any(event.get("cat") == "scheduler" and event.get("name") == "idle(0)" for event in events)
+    assert any(
+        event.get("name") == "process_name" and event.get("args", {}).get("name") == "AICPU Lifecycle"
+        for event in events
+    )
+    assert any(event.get("cat") == "aicpu_lifecycle" and event.get("name") == "bootstrap_wait" for event in events)
+
+
+def test_level_two_rejects_missing_scheduler_task_timing(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="level 2 requires Scheduler task timing for every AICore task"):
+        sc.read_perf_data(raw)
+
+
+@pytest.mark.parametrize("producer", ["aicpu", "aicore"])
+def test_level_two_accepts_task_timing_from_either_scheduler_producer(tmp_path, producer):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+                "scheduler_tasks": {
+                    "schema_version": 1,
+                    "producer": producer,
+                    "records": [[0, 7, 115, 185]],
+                },
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert data["scheduler_task_producer"] == producer
+    assert data["tasks"][0]["dispatch_time_us"] == pytest.approx(0.005)
+    assert data["tasks"][0]["finish_time_us"] == pytest.approx(0.075)
+
+
+def test_level_one_accepts_aicore_only_timing(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 1,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert [task["task_id"] for task in data["tasks"]] == [7]
+    assert "dispatch_time_us" not in data["tasks"][0]
+    assert "finish_time_us" not in data["tasks"][0]
+    assert "scheduler_task_producer" not in data
+
+
+@pytest.mark.parametrize(
+    ("scheduler_tasks", "error"),
+    [
+        ({"schema_version": 2, "producer": "aicore", "records": []}, "schema_version"),
+        ({"schema_version": 1, "producer": "host", "records": []}, "producer"),
+        ({"schema_version": 1, "producer": "aicore", "records": [[0, 1, 2]]}, "four-column"),
+    ],
+)
+def test_scheduler_tasks_reject_schema_drift(tmp_path, scheduler_tasks, error):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000},
+                "aicore_tasks": [],
+                "scheduler_tasks": scheduler_tasks,
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=error):
+        sc.read_perf_data(raw)
+
+
+def test_scheduler_tasks_reject_ambiguous_legacy_stream(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000},
+                "aicore_tasks": [],
+                "scheduler_tasks": {"schema_version": 1, "producer": "aicore", "records": []},
+                "aicpu_tasks": [],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="both scheduler_tasks and legacy aicpu_tasks"):
+        sc.read_perf_data(raw)
+
+
+def test_scheduler_records_reject_schema_drift(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 3,
+                "metadata": {"clock_freq_hz": 1_000_000_000},
+                "scheduler_records": {
+                    "schema_version": 1,
+                    "streams": [{"records": [{"kind": "idle"}], "metrics": []}],
+                },
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="must contain exactly"):
+        sc.read_perf_data(raw)
+
+
+def test_scheduler_metrics_cannot_overwrite_fixed_record_fields(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 3,
+                "metadata": {"clock_freq_hz": 1_000_000_000},
+                "scheduler_records": {
+                    "schema_version": 1,
+                    "streams": [
+                        {
+                            "records": [
+                                {
+                                    "start_cycles": 10,
+                                    "end_cycles": 20,
+                                    "loop_iter": 0,
+                                    "kind": "idle",
+                                    "tasks_processed": 0,
+                                    "task_id": None,
+                                }
+                            ],
+                            "metrics": [{"record_index": 0, "start_cycles": 30}],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="metric overwrites fixed record fields"):
+        sc.read_perf_data(raw)
+
+
+def test_lifecycle_interval_can_start_at_relative_time_origin(tmp_path):
+    trace_path = tmp_path / "merged_swimlane.json"
+    sc.generate_chrome_trace_json(
+        [],
+        str(trace_path),
+        aicpu_lifecycle_records=[
+            {
+                "worker_id": 0,
+                "aicpu_thread_id": 1,
+                "handshake_observed_time_us": 0.0,
+                "handshake_partition_complete_time_us": 2.0,
+            }
+        ],
+    )
+
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    interval = next(event for event in events if event.get("name") == "handshake_partition")
+    assert interval["ts"] == 0.0
+    assert interval["dur"] == 2.0
 
 
 def test_host_capture_is_complete_when_the_pool_holds_more_than_the_submit_projection(tmp_path):

@@ -28,8 +28,8 @@ end-to-end runtime numbers. Two cases dominate the profiler diet:
   pinpoints the fix.
 
 chip swimlane profiling captures both: per-task `(start, end,
-dispatch, finish)` records on the AICore side, plus per-iteration
-phase records on the AICPU scheduler side and per-submit orchestrator
+dispatch, finish)` records, plus per-iteration phase records from the active
+AICPU or AICore scheduler producer and per-submit orchestrator
 envelopes. The host writes a Chrome Trace Event JSON
 that loads directly in Perfetto, and the same file feeds a
 scheduler-overhead deep-dive report when a device log is
@@ -45,7 +45,7 @@ available.
   `chip_swimlane_records.json` with `deps.json` from
   [`dep_gen`](dep-gen.md) at post-process time; see
   [§3.5](#35-dependency-arrows-from-dep_gen).
-- **AICPU scheduler phases** — per-iteration breakdown into mutually
+- **Scheduler phases** — producer-specific per-iteration breakdown. AICPU uses mutually
   time-exclusive **outer** phases (`complete` / `async_poll` / `dispatch` /
   `release` / `dummy` / `early_dispatch` / `drain` / `graph_prepare`), plus
   nested phases.
@@ -106,9 +106,9 @@ backward-compatible with the old boolean behavior).
 | Level | Collects | Notes |
 | ----- | -------- | ----- |
 | 0 | Nothing (disabled) | Default when flag is absent |
-| 1 | AICore timing only (start_time_us/end_time_us/task_id/func_id/core_type) | No AICPU timestamps |
-| 2 | + dispatch_time_us, finish_time_us | Full per-task AICPU record |
-| 3 | + scheduler phases (`aicpu_scheduler_phases[]`) | Skips orchestrator phases |
+| 1 | AICore timing only (start_time_us/end_time_us/task_id/func_id/core_type) | No Scheduler timestamps |
+| 2 | + Scheduler per-task dispatch_time_us, finish_time_us | Producer is identified as `aicpu` or `aicore` |
+| 3 | + scheduler phases (`scheduler_records`) | Skips orchestrator phases |
 | 4 | + orchestrator phases (`aicpu_orchestrator_phases[]`) | Full collection |
 
 Dependency arrows are not produced by any swimlane level — see
@@ -135,13 +135,13 @@ The flag sets `CallConfig::enable_chip_swimlane` to the chosen
 level. The host then allocates the per-core / per-thread shared
 region and publishes its base address through
 `kernel_args.chip_swimlane_data_base`. AICore writes timing into
-per-task WIP slots; AICPU commits the records on FIN. Per-task
-dispatch/finish timestamps are recorded only at level >= 2,
+per-task WIP slots; the active Scheduler records dispatch/finish timestamps.
+Per-task Scheduler timestamps are recorded only at level >= 2,
 scheduler phase records only at level >= 3, and orchestrator phase
 records only at level >= 4.
 
 The JSON output `"chip_swimlane_level"` field is the captured perf_level:
-`1` = AICore timing only, `2` = +AICPU dispatch/finish,
+`1` = AICore timing only, `2` = +Scheduler per-task dispatch/finish,
 `3` = +scheduler phases, `4` = +orchestrator phases.
 
 Chip-swimlane collection is disabled when `--rounds > 1` so benchmark
@@ -231,31 +231,51 @@ layers to be aware of:**
     "core_to_thread": [<int>, ...]     // optional; level >= 3 only
   },
 
-  // Bulk task streams — flat array of tuples. Column order is fixed.
+  // Bulk task streams. Tuple column order is fixed.
   //   aicore_tasks: [core_id, task_token_raw, reg_task_id,
   //                  start_cycles, end_cycles]
-  //   aicpu_tasks:  [core_id, reg_task_id,
-  //                  dispatch_cycles, finish_cycles]
+  //   scheduler_tasks.records: [core_id, reg_task_id,
+  //                             dispatch_cycles, finish_cycles]
   "aicore_tasks": [[...], ...],
-  "aicpu_tasks":  [[...], ...],
+  "scheduler_tasks": {
+    "schema_version": 1,
+    "producer": "<aicpu|aicore>",
+    "records": [[...], ...]
+  },
 
-  // Per-scheduler-thread arrays of objects (level >= 3 only).
-  //   sched record: {kind, start_cycles, end_cycles, loop_iter,
-  //                  tasks_processed, [pop_hit, pop_miss]}
+  // Producer-neutral per-Scheduler streams (level >= 3 only).
+  "scheduler_records": {
+    "schema_version": 1,
+    "streams": [{
+      "platform": "<a2a3|a5>",
+      "runtime": "<host_build_graph|tensormap_and_ringbuffer>",
+      "producer": "<aicpu|aicore>",
+      "scheduler_id": <int>,
+      "worker_id": <int>,
+      "core_type": "<aicpu|aic|aiv>",
+      "physical_core_id": "<int|null>",
+      "capture": {"committed": <int>, "dropped": <int>, "truncated": <bool>},
+      "records": [{"start_cycles": <int>, "end_cycles": <int>,
+                   "loop_iter": <int>, "kind": <str>,
+                   "tasks_processed": <int>, "task_id": "<int|null>"}],
+      "metrics": [{"record_index": <int>, ...}]
+    }]
+  },
+
+  // Orchestrator records (level >= 4 only).
   //   orch record:  {submit_idx, task_id, start_cycles, end_cycles}
-  // pop_hit / pop_miss are present only on Dispatch records.
-  "aicpu_scheduler_phases":    [ [ {...}, ... ], ... ],
   "aicpu_orchestrator_phases": [ [ {...}, ... ], ... ]   // level >= 4 only
 }
 ```
 
 All timestamps on disk are raw `get_sys_cnt` cycles (uint64). The
-join key between `aicore_tasks` and `aicpu_tasks` is
+join key between `aicore_tasks` and `scheduler_tasks.records` is
 `(core_id, reg_task_id)` — *not* `task_token_raw`, because SPMD
 `block_num > num_cores` and MIX cluster spread can dispatch the same
 `task_token_raw` to the same core multiple times. AICore is the
-canonical producer of `task_token_raw`; AICPU only stamps the
-dispatch / finish timestamps and the per-core join token.
+canonical producer of `task_token_raw`; the Scheduler producer stamps the
+dispatch / finish timestamps and the per-core join token. Archived raw files
+with the former `aicpu_tasks` array remain readable as `producer: "aicpu"`.
 
 #### Reader output (µs domain)
 
@@ -268,15 +288,16 @@ microseconds, downstream code sees:
 | `func_id` | Kernel function id. Always `-1` on disk; resolved post-process from `deps.json::tasks[].kernel_ids[3]` (see `swimlane_converter.resolve_func_id_from_kernel_map`) |
 | `core_id` / `core_type` | Physical core index and `"aic"` / `"aiv"` string |
 | `start_time_us` / `end_time_us` / `duration_us` | AICore execution window in microseconds |
-| `dispatch_time_us` | AICPU timestamp when this task was dispatched (filled at level >= 2; `0.0` at level 1) |
-| `finish_time_us` | AICPU timestamp when AICPU observed FIN (filled at level >= 2; `0.0` at level 1) |
+| `dispatch_time_us` | Scheduler timestamp when dispatch publication completed (filled at level >= 2) |
+| `finish_time_us` | Scheduler timestamp when completion processing began (filled at level >= 2) |
 
 Note: per-task records carry **no** fanout edges. Dependency arrows
 come from a separate `deps.json` (dep_gen) joined at convert time —
 see [§3.5](#35-dependency-arrows-from-dep_gen).
 
-Phase records (per scheduler thread, level >= 3 for
-`aicpu_scheduler_phases[]` and level >= 4 for
+Phase records (per Scheduler stream, level >= 3 in raw
+`scheduler_records`—also exposed through the legacy reader alias
+`aicpu_scheduler_phases`—and level >= 4 for
 `aicpu_orchestrator_phases[]`):
 
 | Field | Meaning |
@@ -446,13 +467,13 @@ same lane structure — the directory form repeats it once per Rank under the
 
 - **Orchestrator** (pid=1) — per-submit `orch_submit` envelope
   blocks (level >= 4).
-- **AICPU Scheduler** (pid=2) — per-iteration scheduler phase
+- **Scheduler** (pid=2) — per-iteration scheduler phase
   blocks coloured by `phase` (level >= 3). Outer phases appear as sibling bars
   on each scheduler thread's first `Sched_N` lane. TMR's nested `resolve`
   appears on an adjacent `Sched_N` sub-lane; HBG's standalone `resolve` stays
   on the P thread's first lane. `drain_prepare` and `drain_publish` nest within
   `drain`.
-- **Scheduler View** (pid=3) — task-execution overlay using AICPU
+- **Scheduler View** (pid=3) — task-execution overlay using Scheduler
   dispatch/finish timestamps (level >= 2), with the same labels
   as Worker View.
 - **Worker View** (pid=4) — one swim-lane per physical worker:
