@@ -337,13 +337,49 @@ message tag.
 | `_ChipWorker.init()` | Load sim context and host runtime, then bind each module's logger state | `src/common/worker/chip_worker.cpp` |
 | `simpler_init` | Onboard maps the bound threshold to CANN; attach and take executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
 | Nested host load | Bind generated host orchestration/AICore logger state before entry | runtime maker / sim device runner |
-| AICPU init | Sim binds the live host state; onboard snapshots CANN policy | platform AICPU init |
+| AICPU init | Sim binds the live host state; onboard snapshots CANN policy **and latches `InitArgs.log_level` once for the Worker's life** | platform AICPU init |
 
 The Python level is still sampled during worker initialization. Calling
 `logger.setLevel(...)` does not itself call the native setter; recreate or
 reinitialize the worker to apply a new Python configuration. Within a process,
 all bound host modules observe a native state update immediately instead of
 requiring threshold fan-out to every DSO.
+
+### The threshold is live on the host and fixed on the device
+
+Two different lifetimes, and the boundary is the silicon rather than the
+language:
+
+| reader | when a `set_level` takes effect |
+| ------ | ------------------------------- |
+| Every host module in the process, including a `dlopen`ed one | **immediately** — each reads `state()->threshold` on every record |
+| Sim AICPU | **immediately** — it runs in the host process as a bound consumer of the same state |
+| **Onboard AICPU** | **never; it keeps the threshold it was given at device init** |
+
+Onboard AICPU receives the threshold once, in `InitArgs.log_level`, and
+`simpler_aicpu_init` pushes it into a device-side flag. That entry runs once per
+Worker, so the value it latched is the value for that Worker's life.
+
+**This is a design decision, not a gap.** Raising verbosity mid-run to chase a
+device-side problem is not a workflow this runtime supports: recreate the Worker
+with the level you want. Two reasons it is not worth supporting:
+
+- A `Worker` is cheap to recreate, so the workaround costs nothing a debugging
+  session would notice.
+- Device log volume is exactly where an accidental `DEBUG` is most expensive —
+  `codestyle.md` rule 7 forbids logging on AICPU hot paths precisely because
+  `device_log` writes serialize on the single AICPU op and can trip the
+  op-execute timeout. A threshold that can be raised into that from outside is a
+  liability rather than a feature.
+
+Delivering it would also cost more than it looks. The threshold could ride an
+existing per-run payload, but making it *immediately* live needs either a device
+launch per `set_level` — the opposite direction from #2092, which exists to make
+`simpler_aicpu_init` launch exactly once — or a new host-writable device-resident
+location polled outside any launch.
+
+So: **any claim that "the log level is live" is scoped to host modules.** State
+it that way when writing one.
 
 ### The Python logger is a client, not a second system
 

@@ -59,6 +59,14 @@ public:
     // Owner initialization starts the bounded writer by default. Hierarchical
     // workers defer it until their final local fork so no process forks with a
     // C++ thread already running.
+    //
+    // Takes effect immediately for every host module in the process, since each
+    // reads the bound state's threshold per record — sim AICPU included, because
+    // it is one of them. It does NOT reach onboard AICPU, which latches
+    // InitArgs.log_level once in simpler_aicpu_init and keeps it for the
+    // Worker's life; that is deliberate, not missing (see docs/logging.md,
+    // "The threshold is live on the host and fixed on the device"). Recreate the
+    // Worker to change the device threshold.
     void set_level(simpler::log::LogLevel level, bool defer_writer = false);
     bool start_writer();
 
