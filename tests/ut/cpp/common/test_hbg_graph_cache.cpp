@@ -432,7 +432,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     execution->task_at(1).payload.scalar_data()[0] = 31415;
     storage.payload.tensor_data()[0].version = 1618;
     storage.slot.completed_subtasks.store(1, std::memory_order_relaxed);
-    storage.payload.dispatch_fanin.store(1, std::memory_order_relaxed);
+    storage.payload.published_block_count.store(1, std::memory_order_relaxed);
 
     execution = heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(second_boundary.data()), 99);
     ASSERT_NE(execution, nullptr);
@@ -451,7 +451,7 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(storage.payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(second_boundary.data()));
     EXPECT_EQ(execution->task_at(1).payload.tensor_data()[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
     EXPECT_EQ(storage.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
-    EXPECT_EQ(storage.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(storage.payload.published_block_count.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(storage.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
 }
 
@@ -769,7 +769,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
         ASSERT_EQ(storage.slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_PENDING);
         ASSERT_EQ(storage.slot.task_kind, TaskKind::KERNEL);
         ASSERT_EQ(storage.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
-        ASSERT_EQ(storage.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
+        ASSERT_EQ(storage.payload.published_block_count.load(std::memory_order_relaxed), 0);
         ASSERT_EQ(storage.payload.tensor_count, 1);
         ASSERT_EQ(storage.payload.scalar_count, 1);
         // A tensor address of 0xAAAAAAAAAAAAAAAA would mean the fill leaked

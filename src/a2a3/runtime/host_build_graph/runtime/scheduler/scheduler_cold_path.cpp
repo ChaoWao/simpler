@@ -221,7 +221,7 @@ void SchedulerContext::log_stall_diagnostics(
             ChipTaskSlotState &slot_state = tasks.get_slot_state_by_task_id(si);
             ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
-            // fanin ids vs the completion_flags (rc = satisfied producers,
+            // fanin ids vs the progress_flags (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
             int32_t fi = slot_state.to_payload().fanin_count;
             int32_t rc = 0;
@@ -1100,6 +1100,16 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
         } else {
             int32_t prod_local = slot.to_payload().fanin_data()[state];
             sched_->register_wake(&tasks.get_slot_state_by_task_id(prod_local), &slot);
+            // A not-yet-ready candidate also enters the publish list, hung on
+            // its latest-submitted unpublished producer — or, when every
+            // producer is already published at intake (pre-completed fanin),
+            // goes straight to the ED queue. An already-ready task never does:
+            // there is nothing left to pre-stage ahead of.
+            if ((slot.ed_flags & ED_FLAG_CANDIDATE) != 0) {
+                if (sched_->register_on_ed_publish_list(slot)) {
+                    sched_->enqueue_early_dispatch_candidate(slot);
+                }
+            }
         }
     }
 }

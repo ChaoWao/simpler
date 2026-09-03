@@ -47,8 +47,6 @@ void reset_graph_payload(TaskPayload &payload) {
     for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; ++w) {
         payload.staged_core_mask[w].store(0, std::memory_order_relaxed);
     }
-    payload.dispatch_fanin.store(0, std::memory_order_relaxed);
-    payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
     payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);

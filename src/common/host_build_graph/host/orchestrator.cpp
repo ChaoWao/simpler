@@ -1305,7 +1305,7 @@ append_fanin_or_fail(OrchestratorState &orch, TaskId producer_task_id, int32_t *
     // its own storage index and hbg never recycles a slot, so the entry that id
     // names is the producer's by construction — there is no stale-slot case to
     // screen for. A COMPLETED producer is a real fanin edge under polling (its
-    // completion_flags byte is set), so it is not screened out either.
+    // progress_flags byte is set), so it is not screened out either.
     if (fanin_mark_seen(orch, producer_task_id)) {
         return true;
     }
@@ -1403,7 +1403,7 @@ static bool prepare_task(
     // past total_tasks, so this claim-time write is the only per-slot SM reset and
     // the unclaimed tail is neither initialized nor read.
     out->slot_state->reset_for_reuse();
-    orch->sm_header->tasks.completion_flags[out->alloc_result.task_id].store(0, std::memory_order_relaxed);
+    orch->sm_header->tasks.progress_flags[out->alloc_result.task_id].store(0, std::memory_order_relaxed);
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
@@ -1760,6 +1760,36 @@ static TaskOutputTensors submit_task_common(
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
     orch->fanin_pool_cursor += CHIP_ALIGN_UP(payload.fanin_count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
 
+    // Early-dispatch qualification, decided once here where the fanin region is
+    // final. The conjunction is order-independent, so it runs on the row as
+    // filled; only a CANDIDATE's row is then sorted by producer local id — ids
+    // come from the forward-only bump allocator, so ascending id order IS
+    // submission order and the sorted row's tail names the latest-submitted
+    // producer, the one the publish-list bet hangs on. Non-candidate rows keep
+    // their fill order: a flag-free graph schedules exactly as it always has.
+    int32_t *const fanin_row = payload.fanin_data();
+    SharedMemoryTaskHeader &sm_tasks = orch->sm_header->tasks;
+    bool ed_candidate =
+        payload.fanin_count > 0 && !task_attrs.has_predicate() && active_mask.to_shape() != ResourceShape::DUMMY;
+    for (int32_t i = 0; ed_candidate && i < payload.fanin_count; i++) {
+        const ChipTaskSlotState &producer = sm_tasks.get_slot_state_by_task_id(fanin_row[i]);
+        if (producer.task_kind == TaskKind::GRAPH) {
+            // A Graph shell has no publication event, so its consumers schedule
+            // normally.
+            ed_candidate = false;
+        } else if (!producer.task_attrs.allow_early_resolve()) {
+            ed_candidate = false;
+        }
+    }
+    if (ed_candidate) {
+        std::sort(fanin_row, fanin_row + payload.fanin_count);
+        prepared.slot_state->ed_flags |= ED_FLAG_CANDIDATE;
+        // Every producer of a candidate must record its publication state.
+        for (int32_t i = 0; i < payload.fanin_count; i++) {
+            sm_tasks.get_slot_state_by_task_id(fanin_row[i]).ed_flags |= ED_FLAG_TRACKED;
+        }
+    }
+
     ORCH_STEP_LAP(g_orch_fanin_ns);
     ORCH_PHASE_END(HostPhaseKind::OrchSubmitTask, task_id.raw);
 
@@ -1888,8 +1918,6 @@ void graph_reset_outer_payload(TaskPayload &payload) {
     payload.early_dispatch_state.store(EARLY_DISPATCH_NONE, std::memory_order_relaxed);
     for (auto &word : payload.staged_core_mask)
         word.store(0, std::memory_order_relaxed);
-    payload.dispatch_fanin.store(0, std::memory_order_relaxed);
-    payload.dispatch_propagated.store(0, std::memory_order_relaxed);
     payload.published_block_count.store(0, std::memory_order_relaxed);
     payload.early_dispatch_launch_state.store(EARLY_DISPATCH_LAUNCH_NONE, std::memory_order_relaxed);
     payload.running_slot_count.store(0, std::memory_order_relaxed);
@@ -1953,7 +1981,7 @@ bool graph_submit_outer(
     // list against every consumer, and a stale completion flag would report the
     // Graph done before it ran.
     slot.reset_for_reuse();
-    tasks.completion_flags[allocation.task_id].store(0, std::memory_order_relaxed);
+    tasks.progress_flags[allocation.task_id].store(0, std::memory_order_relaxed);
 
     // Graph boundaries use the same compact argument pools as ordinary tasks. The
     // outer payload carries the invocation data; graph_context only names the
@@ -2912,15 +2940,14 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         //
         // Flag the creator so it does NOT suppress its consumers' early-dispatch.
         // Under the direct-only model an unflagged producer disqualifies its
-        // consumer, and a pre-completed producer only seeds dispatch_fanin when
-        // flagged. A buffer allocation is pure memory whose output is ready at
+        // consumer. A buffer allocation is pure memory whose output is ready at
         // creation — it should always be transparent, never a barrier. Unlike a
         // codegen task there is no Arg-driven hint to honor here, so mark it
         // unconditionally.
         prepared.slot_state->task_attrs.set_early_resolve(true);
         prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is only the completion mirror
-        // Polling: pre-set the device-visible completion_flags byte in the H2D
-        // image. Consumers poll completion_flags (not task_state), so a hidden-alloc
+        // Polling: pre-set the device-visible progress_flags byte in the H2D
+        // image. Consumers poll progress_flags (not task_state), so a hidden-alloc
         // producer completed here on the host must publish its flag too — otherwise
         // every consumer register_wakes on a producer that never runs on device and
         // the run hangs.

@@ -80,21 +80,41 @@ struct alignas(64) SharedMemoryTaskHeader {
     //
     // A hidden-alloc task is the one flag the host presets to 1: it completes during
     // orchestration, and a consumer polls this array rather than task_state.
-    std::atomic<uint8_t> *completion_flags;
+    std::atomic<uint8_t> *progress_flags;
 
     // Tasks this run submitted, i.e. the slot count the two segments above are
     // pitched to. Written once by the host after orchestration (run_host_orchestration)
     // and read-only from then on, so it packs into the padding rather than taking a
     // line of its own. Bounds every slot-indexed walk: no slot at or above it was
-    // claimed, and the bytes past completion_flags[total_tasks - 1] are not flags.
+    // claimed, and the bytes past progress_flags[total_tasks - 1] are not flags.
     int32_t total_tasks;
 
+    // One byte carries two monotonic facts about a task, each its own bit:
+    //   COMPLETED  every subtask finished; the readiness truth consumers scan
+    //   PUBLISHED  every logical block's payload + MMIO token is written; the
+    //              early-dispatch publish list scans this bit, and completion
+    //              implies it (a finished task occupies no cores)
+    // Completion is a plain store of both bits. Publication is a fetch_or:
+    // the publish-side bookkeeping can run after the block's FIN has already
+    // been observed, so a plain store could erase a completion that landed
+    // in between — OR preserves it under either ordering.
+    static constexpr uint8_t TASK_FLAG_COMPLETED = 1u << 0;
+    static constexpr uint8_t TASK_FLAG_PUBLISHED = 1u << 1;
+
     bool is_completion_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
-        return completion_flags[local_id].load(order) != 0;
+        return (progress_flags[local_id].load(order) & TASK_FLAG_COMPLETED) != 0;
     }
 
     void set_completion_flag(int32_t local_id, std::memory_order order = std::memory_order_release) const {
-        completion_flags[local_id].store(1, order);
+        progress_flags[local_id].store(TASK_FLAG_COMPLETED | TASK_FLAG_PUBLISHED, order);
+    }
+
+    bool is_publish_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
+        return (progress_flags[local_id].load(order) & TASK_FLAG_PUBLISHED) != 0;
+    }
+
+    void set_publish_flag(int32_t local_id) const {
+        progress_flags[local_id].fetch_or(TASK_FLAG_PUBLISHED, std::memory_order_release);
     }
 
     // A task id is its own storage index, so the three records it names are reached
@@ -226,7 +246,7 @@ inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
 }
 
 // Byte offsets (from the SM base) of the image's segments. The layout is: header, then
-// storage -> completion_flags -> the three argument pools, every segment
+// storage -> progress_flags -> the three argument pools, every segment
 // CHIP_ALIGN_UP-padded. ImageExtents dimensions them: the mirror for the worst case the
 // API allows, the image for what this bind holds, which is what makes the live prefixes
 // contiguous and the upload one copy.
@@ -236,11 +256,11 @@ inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
 // restack's change of pitch untouched.
 //
 // The pools sit last because nothing on the device resolves a segment past
-// completion_flags: a payload names its argument regions by delta, so the two
+// progress_flags: a payload names its argument regions by delta, so the two
 // slot-pitched offsets are all the attach path computes.
 struct SegmentOffsets {
     uint64_t storage;
-    uint64_t completion_flags;  // polling-completion byte array (1 byte/slot)
+    uint64_t progress_flags;  // polling-completion byte array (1 byte/slot)
     uint64_t fanin_pool;
     uint64_t tensor_pool;
     uint64_t scalar_pool;
@@ -277,7 +297,7 @@ inline SegmentOffsets segment_offsets(const ImageExtents &e) noexcept {
     SegmentOffsets o{};
     o.storage = off;
     off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskStorage), CHIP_ALIGN_SIZE);
-    o.completion_flags = off;
+    o.progress_flags = off;
     off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), CHIP_ALIGN_SIZE);
     o.fanin_pool = off;
     off += CHIP_ALIGN_UP(e.fanin_elems * sizeof(int32_t), CHIP_ALIGN_SIZE);
@@ -408,14 +428,14 @@ inline uint64_t compact_live_image(
     std::memcpy(out_base, mirror_base, to.storage);
     auto &out_tasks = reinterpret_cast<SharedMemoryHeader *>(out_base)->tasks;
     out_tasks.task_storage = nullptr;
-    out_tasks.completion_flags = nullptr;
+    out_tasks.progress_flags = nullptr;
 
     const uint64_t nt = used.submitted_tasks;
     // One copy for all three of a task's records: ChipTaskStorage is fixed-size, so
     // the mirror and the image share a stride. Each pool is likewise one copy of its
     // own prefix.
     std::memcpy(out_base + to.storage, mirror_base + from.storage, nt * sizeof(ChipTaskStorage));
-    std::memcpy(out_base + to.completion_flags, mirror_base + from.completion_flags, nt * sizeof(std::atomic<uint8_t>));
+    std::memcpy(out_base + to.progress_flags, mirror_base + from.progress_flags, nt * sizeof(std::atomic<uint8_t>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
     std::memcpy(
         out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(simpler::hbg::Tensor)

@@ -90,6 +90,7 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
     layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
+    layout.off_ed_publish_drain_queue_slots = ready_queue_reserve_layout(arena, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     }
@@ -100,7 +101,7 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
-    // the payload and readiness is via completion_flags.
+    // the payload and readiness is via progress_flags.
     return layout;
 }
 
@@ -129,6 +130,7 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
         ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     }
     ready_queue_init_data_from_layout(&sched->early_sync_start_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
+    ready_queue_init_data_from_layout(&sched->ed_publish_drain_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
 
     // Polling: no dep_pool arena region to initialize.
     (void)arena;
@@ -155,6 +157,7 @@ void SchedulerState::seed_queue_slots() {
         sched->early_dispatch_queues[i].seed_slots();
     }
     sched->early_sync_start_queue.seed_slots();
+    sched->ed_publish_drain_queue.seed_slots();
 }
 
 void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena) {
@@ -174,6 +177,7 @@ void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceAr
         );
     }
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
+    ready_queue_wire_arena_pointers(&sched->ed_publish_drain_queue, arena, layout.off_ed_publish_drain_queue_slots);
 }
 
 void SchedulerState::destroy() {
@@ -192,6 +196,7 @@ void SchedulerState::destroy() {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
     }
     ready_queue_destroy(&sched->early_sync_start_queue);
+    ready_queue_destroy(&sched->ed_publish_drain_queue);
 }
 
 // =============================================================================
