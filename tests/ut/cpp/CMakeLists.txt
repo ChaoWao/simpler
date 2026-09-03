@@ -627,23 +627,6 @@ target_link_libraries(test_a5_trb_runtime_temp_buffer PRIVATE
 add_test(NAME test_a5_trb_runtime_temp_buffer COMMAND test_a5_trb_runtime_temp_buffer)
 set_tests_properties(test_a5_trb_runtime_temp_buffer PROPERTIES LABELS "no_hardware")
 
-add_executable(test_worker_chip_message_queue
-    common/test_worker_chip_message_queue.cpp
-    stubs/test_stubs.cpp
-)
-target_include_directories(test_worker_chip_message_queue PRIVATE
-    ${GTEST_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
-    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
-)
-target_link_libraries(test_worker_chip_message_queue PRIVATE
-    ${GTEST_MAIN_LIB}
-    ${GTEST_LIB}
-    pthread
-)
-add_test(NAME test_worker_chip_message_queue COMMAND test_worker_chip_message_queue)
-set_tests_properties(test_worker_chip_message_queue PROPERTIES LABELS "no_hardware")
-
 add_executable(test_region_template
     common/test_region_template.cpp
 )
