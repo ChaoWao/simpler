@@ -18,6 +18,7 @@ no repo checkout required.
 - **[phase_time_split](#phase_time_split)** — the same `bind phase=` markers split into on-CPU and off-CPU per phase, from per-thread CPU clocks, with cold and warm binds reported separately
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
+- **[rtt_die_preflight](#rtt_die_preflight)** — full AICPU affinity preflight → `aicpu_affinity_plan.json` (authoritative `allowed_cpus`; backend: `aicpu_device_query/`)
 
 For CLIs that allow an omitted input, auto-detection paths
 (`outputs/*/chip_swimlane_records.json`, `outputs/*/args_dump/`) are resolved
@@ -825,6 +826,39 @@ For batch-run hardware regression, see the dev-only script
 - Install graphviz: `brew install graphviz` (macOS) or `apt install graphviz` (Debian/Ubuntu)
 - Verify with `which dot`; should print a path
 - Use a different layout engine with `--engine sfdp` for very large graphs
+
+---
+
+## rtt_die_preflight
+
+Full A5 AICPU affinity preflight. Invokes
+`simpler_setup/tools/aicpu_device_query` (`--rtt-json`) to:
+
+1. enumerate the user AICPU pool (serial `aicpu_num=1`)
+2. elect the orchestrator via atomic-flag pairwise handshake (1000 iters)
+3. score non-orch threads with COND die sums (100 samples/core)
+4. pack physical picks `{die0,die1,die1,die0}` into logical
+   `[S0,S1,S2,S3,O]` so **S0/S1 own die0 and S2/S3 own die1**
+
+Atomically merges into `build/config/aicpu_affinity_plan.json` (schema v3) keyed
+by `(soc_name, device_id)`, plus a per-device
+`aicpu_affinity_plan.<device_id>.cpus` companion for the thin runtime reader.
+L3 multi-card binds keep one bucket / one `.cpus` file per device.
+Pool size `< 5` writes a contiguous shrink plan and skips handshake/COND.
+
+On a5 onboard `ChipWorker.init`, if the `.cpus` file is missing the Python
+wrapper runs this CLI (`--plan-source auto-first-run`) and prints start / done /
+fail. `DeviceRunner` only reads the side file; on miss it uses OCCUPY
+contiguous `[S…, O]` and never spawns Python. Force a refresh with `--probe`.
+
+```bash
+task-submit --device auto --device-num 1 --run \
+  'python -m simpler_setup.tools.rtt_die_preflight --device "$TASK_DEVICE" --probe'
+
+# Offline authoritative write (plan_source=manual):
+python -m simpler_setup.tools.rtt_die_preflight --device 0 \
+  --soc Ascend950PR_9599 --allowed-cpus 3,4,5,6,8
+```
 
 ---
 
