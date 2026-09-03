@@ -887,8 +887,7 @@ const char *HostLogger::log_directory() const {
 
 void HostLogger::log_host_span(const SimplerHostSpan *span) {
     if (!is_enabled(LogLevel::TIMING)) return;
-    if (span == nullptr || span->abi_version != SIMPLER_HOST_SPAN_ABI_VERSION ||
-        span->struct_size < sizeof(SimplerHostSpan) || span->name == nullptr) {
+    if (span == nullptr || span->name == nullptr) {
         return;
     }
     const std::string name = encode_host_span_field(span->name, kHostSpanNameCapacity, false);

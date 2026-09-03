@@ -101,18 +101,7 @@ inline void emit_record(
     const char *name, uint64_t invocation_id, uint64_t callable_hash, int32_t depth, int64_t timestamp_ns,
     int64_t duration_ns, const char *attributes
 ) {
-    const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION,
-        sizeof(SimplerHostSpan),
-        invocation_id,
-        callable_hash,
-        depth,
-        0,
-        timestamp_ns,
-        duration_ns,
-        name,
-        attributes
-    };
+    const SimplerHostSpan span{invocation_id, callable_hash, depth, 0, timestamp_ns, duration_ns, name, attributes};
     unified_log_host_span(&span);
 }
 

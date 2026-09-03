@@ -337,16 +337,7 @@ TEST(HostLogTest, LongHumanRecordFitsPortableAtomicWriteBound) {
 TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
     const std::string name = "bad name\n[STRACE]=x";
     const std::string attributes = "run_id=7 role=worker\n[STRACE] injected=1 " + std::string(4096, 'x');
-    const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
-                               sizeof(SimplerHostSpan),
-                               7,
-                               0x1234,
-                               0,
-                               0,
-                               100,
-                               25,
-                               name.c_str(),
-                               attributes.c_str()};
+    const SimplerHostSpan span{7, 0x1234, 0, 0, 100, 25, name.c_str(), attributes.c_str()};
 
     auto captured = run_with_config(LogLevel::TIMING, [&] {
         unified_log_host_span(&span);
@@ -402,12 +393,8 @@ TEST(HostLogTest, LogDirectorySendsEveryRecordToOneAsyncFilePerProcess) {
     ScopedLogDirectory scoped_log_directory(directory);
     ASSERT_STREQ(HostLogger::get_instance().log_directory(), directory);
 
-    const SimplerHostSpan nested{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 1, 0, 100, 25, "chip.run.bind", "run_id=7"
-    };
-    const SimplerHostSpan root{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 90, 50, "chip.run", "run_id=7"
-    };
+    const SimplerHostSpan nested{7, 0x1234, 1, 0, 100, 25, "chip.run.bind", "run_id=7"};
+    const SimplerHostSpan root{7, 0x1234, 0, 0, 90, 50, "chip.run", "run_id=7"};
     g_shared_log_state.clock_anchor_pid = 0;
     const auto captured = run_with_config(LogLevel::TIMING, [&] {
         unified_log_host_span(&nested);
@@ -479,9 +466,7 @@ TEST(HostLogTest, ForkBoundaryDrainsParentAndChildOpensItsOwnFile) {
     // test in this binary left behind.
     HostLogger::get_instance().set_level(LogLevel::TIMING);
 
-    const SimplerHostSpan parent_span{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 8, 0x1234, 1, 0, 100, 25, "parent.span", ""
-    };
+    const SimplerHostSpan parent_span{8, 0x1234, 1, 0, 100, 25, "parent.span", ""};
     unified_log_host_span(&parent_span);
     // Production uses this same quiescent boundary before a hierarchical
     // Worker forks: accepted parent records are drained and the thread joined.
@@ -490,9 +475,7 @@ TEST(HostLogTest, ForkBoundaryDrainsParentAndChildOpensItsOwnFile) {
     const pid_t child = fork();
     ASSERT_GE(child, 0);
     if (child == 0) {
-        const SimplerHostSpan child_span{
-            SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 9, 0x1234, 0, 0, 200, 25, "child.span", ""
-        };
+        const SimplerHostSpan child_span{9, 0x1234, 0, 0, 200, 25, "child.span", ""};
         HostLogger::get_instance().set_level(LogLevel::TIMING);
         unified_log_host_span(&child_span);
         if (!HostLogger::get_instance().flush()) _exit(3);
@@ -522,10 +505,7 @@ TEST(HostLogTest, ForkBoundaryDrainsParentAndChildOpensItsOwnFile) {
 }
 
 TEST(HostLogTest, DisabledHostSpanProducesNoRecord) {
-    const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 100, 25, "node.dispatch",
-        "run_id=7 role=scheduler"
-    };
+    const SimplerHostSpan span{7, 0x1234, 0, 0, 100, 25, "node.dispatch", "run_id=7 role=scheduler"};
 
     auto captured = run_with_config(LogLevel::WARN, [&] {
         unified_log_host_span(&span);
@@ -544,16 +524,7 @@ TEST(HostLogTest, AllHostSpanEmitPathsPreserve64BitInvocationIds) {
         { simpler::strace::StraceScope scope("scope_path"); }
         simpler::strace::emit_host_span_at("explicit_path", 100, 25, 0);
 
-        const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
-                                   sizeof(SimplerHostSpan),
-                                   invocation_id,
-                                   callable_hash,
-                                   0,
-                                   0,
-                                   200,
-                                   30,
-                                   "c_abi_path",
-                                   ""};
+        const SimplerHostSpan span{invocation_id, callable_hash, 0, 0, 200, 30, "c_abi_path", ""};
         unified_log_host_span(&span);
     });
 
@@ -575,16 +546,7 @@ TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
     // 3 (leading escape) + 186 + 3 (trailing escape) is exactly the 192-byte
     // attribute budget, so the next byte truncates on an escape boundary.
     const std::string attributes = "\n" + std::string(186, 'x') + "\ny";
-    const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
-                               sizeof(SimplerHostSpan),
-                               7,
-                               0x1234,
-                               0,
-                               0,
-                               100,
-                               25,
-                               "node.dispatch",
-                               attributes.c_str()};
+    const SimplerHostSpan span{7, 0x1234, 0, 0, 100, 25, "node.dispatch", attributes.c_str()};
 
     auto captured = run_with_config(LogLevel::TIMING, [&] {
         unified_log_host_span(&span);

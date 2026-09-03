@@ -42,18 +42,7 @@ inline void emit(
     int64_t duration_ns, const char *attributes
 ) noexcept {
     if (!enabled()) return;
-    const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION,
-        sizeof(SimplerHostSpan),
-        invocation_id,
-        callable_hash,
-        depth,
-        0,
-        timestamp_ns,
-        duration_ns,
-        name,
-        attributes
-    };
+    const SimplerHostSpan span{invocation_id, callable_hash, depth, 0, timestamp_ns, duration_ns, name, attributes};
     unified_log_host_span(&span);
 }
 

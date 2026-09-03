@@ -13,15 +13,18 @@
 
 #include <stdint.h>
 
-#define SIMPLER_HOST_SPAN_ABI_VERSION 1U
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/*
+ * One span record on its way to the logger. A stack temporary, handed to the
+ * link-time unified_log_host_span in the same DSO, so it carries no version or
+ * size word: the two producers are inline in this repository's headers and the
+ * validator is compiled from the same header in the same build, which leaves
+ * nothing for such a word to detect.
+ */
 typedef struct SimplerHostSpan {
-    uint32_t abi_version;
-    uint32_t struct_size;
     uint64_t invocation_id;
     uint64_t callable_hash;
     int32_t depth;
