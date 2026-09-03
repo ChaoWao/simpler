@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
+import json
+
 import torch
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup.scene_test import _sanitize_for_filename
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -30,6 +33,12 @@ class TestSchedulerPhases(SceneTestCase):
                 "source": "kernels/aiv/kernel_noop.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
+            },
+            {
+                "func_id": 1,
+                "source": "kernels/aiv/kernel_empty.cpp",
+                "core_type": "aiv",
+                "signature": [],
             },
         ],
     }
@@ -50,6 +59,44 @@ class TestSchedulerPhases(SceneTestCase):
 
     def compute_golden(self, args, params):
         args.input[0] = 1
+
+    def test_run(self, st_platform, st_worker, request):
+        super().test_run(st_platform, st_worker, request)
+        level = self._effective_enable_chip_swimlane(request)
+        if level == 0:
+            return
+
+        for case in self._matching_cases(st_platform, request):
+            case_label = _sanitize_for_filename(f"TestSchedulerPhases_{case['name']}")
+            output_prefix = self._diagnostic_output_prefixes.get(case["name"])
+            assert output_prefix is not None, f"no output directory created for {case_label}"
+            raw = json.loads((output_prefix / "chip_swimlane_records.json").read_text())
+            aicore_rows = raw["aicore_tasks"]
+            assert len(aicore_rows) == 35, "task timing does not cover the fanout/fanin DAG and terminal dummy"
+
+            if level >= 2:
+                scheduler_tasks = raw["scheduler_tasks"]
+                assert scheduler_tasks["schema_version"] == 1
+                assert scheduler_tasks["producer"] == "aicore"
+                scheduler_rows = scheduler_tasks["records"]
+                assert len(scheduler_rows) == len(aicore_rows)
+                aicore_by_key = {(int(row[0]), int(row[2])): row for row in aicore_rows}
+                assert {(int(row[0]), int(row[1])) for row in scheduler_rows} == set(aicore_by_key)
+                for core_id, reg_task_id, dispatch_cycles, finish_cycles in scheduler_rows:
+                    aicore_row = aicore_by_key[(int(core_id), int(reg_task_id))]
+                    assert 0 < dispatch_cycles <= aicore_row[3] <= aicore_row[4] <= finish_cycles
+                assert raw["aicpu_lifecycle_records"], "AICPU lifecycle records are missing"
+
+            if level >= 3:
+                streams = raw["scheduler_records"]["streams"]
+                assert streams, "A5 HBG AICore Scheduler records are missing"
+                assert all(stream["producer"] == "aicore" for stream in streams)
+                assert all(stream["capture"]["dropped"] == 0 for stream in streams)
+                emitted_kinds = {record["kind"] for stream in streams for record in stream["records"]}
+                required_kinds = {"bootstrap", "fanin", "dispatch", "complete", "resolve", "idle"}
+                assert required_kinds <= emitted_kinds, (
+                    f"missing Scheduler kinds: {sorted(required_kinds - emitted_kinds)}"
+                )
 
 
 if __name__ == "__main__":

@@ -147,6 +147,7 @@ struct FixtureStorage {
             metadata[task].logical_block_num = 1;
             metadata[task].total_required_subtasks = 1;
             metadata[task].flags = SCHEDULER_TASK_EXECUTABLE;
+            metadata[task].timing_slot = -1;
         }
     }
 
@@ -242,6 +243,10 @@ TEST(SchedulerClusterCompletion, SpscGenerationCompletesNormalTask) {
     scheduler_initialize_free_slot(slot);
     slot->task_id = 0;
     slot->gang = 0;
+    slot->executor_trace.generation = slot->generation;
+    slot->executor_trace.kernel_start_cycles = 100;
+    slot->executor_trace.kernel_end_cycles = 200;
+    storage.metadata[0].timing_slot = 0;
     scheduler_gm_store(
         slot->publication, scheduler_dispatch_publication(slot->generation, SchedulerDispatchSlotState::READY)
     );
@@ -261,6 +266,11 @@ TEST(SchedulerClusterCompletion, SpscGenerationCompletesNormalTask) {
     EXPECT_EQ(control->state, static_cast<int64_t>(SchedulerTaskState::DONE));
     EXPECT_EQ(control->wake_list_head, SCHEDULER_WAKE_LIST_CLOSED);
     EXPECT_EQ(storage.run_control->resolved_task_count, 1u);
+    auto *traces =
+        scheduler_state_at<SchedulerTaskTrace>(storage.scheduler_state->base(), storage.layout.trace_cells_offset);
+    EXPECT_EQ(traces[0].kernel_start_cycles, 100u);
+    EXPECT_EQ(traces[0].kernel_end_cycles, 200u);
+    EXPECT_EQ(traces[0].valid, 0u);
 }
 
 TEST(SchedulerClusterCompletion, RejectsStaleCompletionGenerationAtNamedSite) {
@@ -342,6 +352,9 @@ TEST(SchedulerClusterCompletion, PropagatesTraceToCompletionAndWokenTask) {
     auto *slot = scheduler_dispatch_slot_at(storage.scheduler_state->base(), &scheduler, 0, 0);
     scheduler_initialize_free_slot(slot);
     slot->task_id = 0;
+    slot->executor_trace.generation = slot->generation;
+    slot->executor_trace.kernel_start_cycles = 100;
+    slot->executor_trace.kernel_end_cycles = 200;
     scheduler_gm_store(
         slot->publication, scheduler_dispatch_publication(slot->generation, SchedulerDispatchSlotState::READY)
     );
@@ -364,6 +377,9 @@ TEST(SchedulerClusterCompletion, PropagatesTraceToCompletionAndWokenTask) {
     EXPECT_EQ(producer->completion_resolve_end_cycles, 0u);
     EXPECT_EQ(producer->scheduler_worker_id, scheduler.worker_index);
     EXPECT_EQ(traces[1].ready_transition_cycles, 0u);
+    EXPECT_EQ(traces[0].valid, 1u);
+    EXPECT_EQ(traces[0].kernel_start_cycles, 100u);
+    EXPECT_EQ(traces[0].kernel_end_cycles, 200u);
     auto *waiter = scheduler_task_control_at(storage.scheduler_state->base(), &scheduler, 1);
     EXPECT_EQ(waiter->state, static_cast<int64_t>(SchedulerTaskState::READY));
 }

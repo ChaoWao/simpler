@@ -627,6 +627,7 @@ inline constexpr uint32_t SCHEDULER_CORE_TYPE_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_CLUSTER_CAPACITY = SCHEDULER_WORKER_CAPACITY / 3;
 inline constexpr uint32_t SCHEDULER_CAPACITY = SCHEDULER_CLUSTER_CAPACITY;
 inline constexpr uint32_t SCHEDULER_GANG_COHORT_COUNT = 2;
+inline constexpr uint32_t SCHEDULER_ACTIVITY_CAPACITY = 1024;
 inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD = 7;
 inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_SHARD_COUNT =
     (SCHEDULER_CAPACITY + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD - 1) / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
@@ -647,6 +648,38 @@ enum class SchedulerReadySource : uint8_t {
     LOCAL = 0,
     STOLEN = 1,
 };
+
+enum class AicoreSchedulerKind : uint32_t {
+    Complete = 0,
+    Dispatch = 1,
+    Resolve = 6,
+    Bootstrap = 32,
+    Fanin = 33,
+    ReadyClaim = 34,
+    ReadySteal = 35,
+    DirectRefill = 36,
+    Idle = 37,
+};
+
+struct AicoreSchedulerRecord {
+    uint64_t start_time;
+    uint64_t end_time;
+    uint64_t task_id;
+    uint32_t loop_iter;
+    AicoreSchedulerKind kind;
+    uint32_t tasks_processed;
+    uint32_t reserved;
+};
+static_assert(sizeof(AicoreSchedulerRecord) == 40, "AICore scheduler record layout changed");
+
+struct alignas(64) SchedulerActivityBuffer {
+    volatile uint32_t committed;
+    volatile uint32_t dropped;
+    uint32_t capacity;
+    uint32_t reserved;
+    AicoreSchedulerRecord records[SCHEDULER_ACTIVITY_CAPACITY];
+};
+static_assert(sizeof(SchedulerActivityBuffer) % 64 == 0, "scheduler activity buffer must be cache aligned");
 
 enum class SchedulerDispatchSlotState : uint8_t {
     EMPTY = 0,
@@ -740,7 +773,8 @@ struct alignas(128) SchedulerTaskControl {
     uint64_t completion_resolve_end_cycles;
     uint64_t ready_publish_cycles;
     uint64_t scheduler_worker_id;
-    uint8_t scheduler_line_padding[16];
+    uint64_t completion_resolve_loop_iter;
+    uint8_t scheduler_line_padding[8];
 };
 
 struct alignas(64) SchedulerCompletionInbox {
@@ -858,8 +892,25 @@ struct alignas(128) SchedulerReadyDirectory {
     volatile uint64_t bootstrap_ready_types[SCHEDULER_WORKER_CAPACITY];
 };
 
+// The Executor publishes this per-slot payload before the completion generation.
+// The generation is the release/acquire hand-off to the Scheduler; neither side
+// writes the final per-task trace concurrently.
+struct alignas(128) SchedulerExecutorTaskTrace {
+    volatile uint64_t generation;
+    uint64_t kernel_start_cycles;
+    uint64_t kernel_end_cycles;
+    uint64_t ready_scan_start_cycles;
+    uint64_t ready_observe_cycles;
+    uint64_t completion_end_cycles;
+    uint64_t completion_bookkeeping_end_cycles;
+    uint64_t completion_id;
+
+    uint64_t completion_inbox_index;
+    uint64_t reserved[7];
+};
+
 // Scheduler-owned metadata occupies the first line. The Executor polls only
-// publication in the second line.
+// publication in the second line and owns the trailing trace payload.
 struct alignas(128) SchedulerDispatchSlot {
     int64_t task_id;
     uint64_t ready_inbox_index;
@@ -881,6 +932,8 @@ struct alignas(128) SchedulerDispatchSlot {
 
     volatile uint64_t publication;
     uint8_t publication_padding[56];
+
+    SchedulerExecutorTaskTrace executor_trace;
 };
 
 // Stable device-side localization for the first scheduler failure. These values
@@ -1036,7 +1089,7 @@ struct alignas(128) SchedulerWorkerContext {
     volatile uint64_t task_metadata_offset;
     volatile uint64_t ready_inboxes_offset;
     volatile uint64_t ready_directory_offset;
-    uint64_t scheduling_reserved;
+    volatile uint64_t activity_buffers_offset;
     volatile uint64_t worker_contexts_offset;
     volatile uint64_t dispatch_slots_offset;
     volatile uint64_t callable_addresses_offset;
@@ -1061,7 +1114,8 @@ struct alignas(128) SchedulerWorkerContext {
     volatile uint64_t scheduler_worker_id;
     volatile uint64_t is_scheduler;
     volatile uint64_t cluster_worker_ids[3];
-    uint64_t topology_reserved[3];
+    volatile uint64_t profiling_loop_iter;
+    uint64_t topology_reserved[2];
 
     uint64_t bootstrap_task_count;
     uint64_t ready_enqueue_count;
@@ -1084,7 +1138,11 @@ struct alignas(128) SchedulerWorkerContext {
     uint64_t wake_close_count;
     uint64_t completion_enqueue_count;
     uint64_t completion_resolve_count;
-    uint64_t completion_stats_reserved[6];
+    uint64_t trace_aicore_entry_cycles;
+    uint64_t trace_handshake_publish_cycles;
+    uint64_t trace_register_release_cycles;
+    uint64_t trace_descriptor_cache_observed_cycles;
+    uint64_t completion_stats_reserved[2];
     uint64_t ready_to_kernel_cycles;
     uint64_t ready_to_kernel_max_cycles;
     uint64_t payload_cycles;
@@ -1108,6 +1166,8 @@ struct alignas(128) SchedulerWorkerContext {
 };
 
 struct alignas(128) SchedulerTaskTrace {
+    // Dispatch publishes this line before READY; completion publishes valid.
+    // Bootstrap owns only the fanin line and must not dirty this cache line.
     volatile uint64_t valid;
     uint64_t ready_source;
     uint64_t worker_id;
@@ -1115,7 +1175,7 @@ struct alignas(128) SchedulerTaskTrace {
     uint64_t claim_worker_id;
     uint64_t claim_start_cycles;
     uint64_t claim_end_cycles;
-    uint64_t previous_trace_commit_end_cycles;
+    uint64_t claim_loop_iter;
 
     uint64_t kernel_start_cycles;
     uint64_t kernel_end_cycles;
@@ -1127,34 +1187,33 @@ struct alignas(128) SchedulerTaskTrace {
     uint64_t completion_inbox_index;
 
     uint64_t ready_transition_cycles;
-    uint64_t inter_task_completion_service_cycles;
-    uint64_t inter_task_dispatch_aic_cycles;
-    uint64_t inter_task_dispatch_aiv_cycles;
-    uint64_t inter_task_ready_poll_cycles;
-    uint64_t inter_task_backoff_cycles;
+    uint64_t fanin_start_cycles;
+    uint64_t fanin_end_cycles;
+    uint64_t fanin_scheduler_worker_id;
+    uint64_t fanin_loop_iter;
     uint64_t aicore_entry_cycles;
     uint64_t handshake_publish_cycles;
-
     uint64_t register_release_cycles;
-    uint64_t descriptor_cache_observed_cycles;
-    uint64_t completion_prepare_start_cycles;
+
+    // The dispatching Scheduler owns this cache line through completion.
+    uint64_t dispatch_start_cycles;
+    uint64_t dispatch_end_cycles;
+    uint64_t dispatch_scheduler_worker_id;
+    uint64_t dispatch_loop_iter;
+    uint64_t complete_start_cycles;
+    uint64_t complete_end_cycles;
+    uint64_t complete_scheduler_worker_id;
+    uint64_t complete_loop_iter;
     uint64_t refill_scheduler_worker_id;
     uint64_t refill_start_cycles;
     uint64_t refill_end_cycles;
     uint64_t refill_task_id;
-    uint64_t inter_task_completion_refill_cycles;
+    uint64_t refill_loop_iter;
+    uint64_t completion_reserved[3];
 
-    uint64_t inter_task_completion_scan_cycles;
-    uint64_t inter_task_completion_consume_cycles;
-    uint64_t inter_task_completion_resolve_cycles;
-    uint64_t inter_task_completion_ready_publish_cycles;
-    uint64_t inter_task_completion_finalize_cycles;
-    uint64_t inter_task_gang_service_cycles;
-    uint64_t inter_task_dispatch_probe_cycles[SCHEDULER_CORE_TYPE_COUNT];
-    uint64_t inter_task_dispatch_claim_cycles[SCHEDULER_CORE_TYPE_COUNT];
-    uint64_t inter_task_dispatch_prepare_cycles[SCHEDULER_CORE_TYPE_COUNT];
-    uint64_t inter_task_dispatch_materialize_cycles[SCHEDULER_CORE_TYPE_COUNT];
-    uint64_t inter_task_dispatch_publish_cycles[SCHEDULER_CORE_TYPE_COUNT];
+    // The completion Scheduler consolidates the Executor's staged timing here.
+    uint64_t descriptor_cache_observed_cycles;
+    uint64_t executor_reserved[7];
 };
 
 static_assert(sizeof(SchedulerTaskMetadata) == 16, "task metadata layout changed");
@@ -1209,9 +1268,17 @@ static_assert(
                                         128 * 128),
     "ready directory layout changed"
 );
-static_assert(sizeof(SchedulerDispatchSlot) == 128, "dispatch slot must occupy two cache lines");
+static_assert(sizeof(SchedulerExecutorTaskTrace) == 128, "executor trace must occupy two cache lines");
+static_assert(alignof(SchedulerExecutorTaskTrace) == 128, "executor trace alignment changed");
+static_assert(offsetof(SchedulerExecutorTaskTrace, generation) == 0, "executor trace generation must lead payload");
+static_assert(
+    offsetof(SchedulerExecutorTaskTrace, completion_inbox_index) == 64,
+    "executor trace lifecycle must start on its second cache line"
+);
+static_assert(sizeof(SchedulerDispatchSlot) == 256, "dispatch slot layout changed");
 static_assert(alignof(SchedulerDispatchSlot) == 128, "dispatch slot alignment changed");
 static_assert(offsetof(SchedulerDispatchSlot, publication) == 64, "dispatch publication needs its own line");
+static_assert(offsetof(SchedulerDispatchSlot, executor_trace) == 128, "executor trace needs exclusive cache lines");
 static_assert(sizeof(SchedulerRunControl) == 384, "run control layout changed");
 static_assert(alignof(SchedulerRunControl) == 128, "run control alignment changed");
 static_assert(offsetof(SchedulerRunControl, executed_task_count) == 128, "lifecycle atomics need their own line");
@@ -1228,6 +1295,22 @@ static_assert(offsetof(SchedulerWorkerContext, wake_cas_retry_count) == 512, "wa
 static_assert(offsetof(SchedulerWorkerContext, completion_enqueue_cycles) == 640, "termination stats offset changed");
 static_assert(offsetof(SchedulerWorkerContext, scheduler_tail_trace) == 768, "scheduler tail trace offset changed");
 static_assert(sizeof(SchedulerTaskTrace) == 384, "task trace layout changed");
+static_assert(
+    offsetof(SchedulerTaskTrace, dispatch_start_cycles) % 64 == 0,
+    "Scheduler-owned dispatch and completion fields must begin on a cache-line boundary"
+);
+static_assert(
+    offsetof(SchedulerTaskTrace, complete_loop_iter) / 64 == offsetof(SchedulerTaskTrace, dispatch_start_cycles) / 64,
+    "dispatch and completion fields must share their Scheduler-owned cache line"
+);
+static_assert(
+    offsetof(SchedulerTaskTrace, refill_scheduler_worker_id) % 64 == 0,
+    "Scheduler-owned refill fields must begin on a cache-line boundary"
+);
+static_assert(
+    offsetof(SchedulerTaskTrace, descriptor_cache_observed_cycles) % 64 == 0,
+    "consolidated descriptor timing must begin on a cache-line boundary"
+);
 
 template <typename T>
 inline __aicore__ __gm__ T *scheduler_state_at(__gm__ void *base, uint64_t offset) {
@@ -1237,6 +1320,10 @@ inline __aicore__ __gm__ T *scheduler_state_at(__gm__ void *base, uint64_t offse
 #if !defined(__CCE_AICORE__)
 #include <type_traits>
 static_assert(std::is_standard_layout_v<AicoreSchedulerLayout> && std::is_trivially_copyable_v<AicoreSchedulerLayout>);
+static_assert(std::is_standard_layout_v<AicoreSchedulerRecord> && std::is_trivially_copyable_v<AicoreSchedulerRecord>);
+static_assert(
+    std::is_standard_layout_v<SchedulerActivityBuffer> && std::is_trivially_copyable_v<SchedulerActivityBuffer>
+);
 static_assert(std::is_standard_layout_v<SchedulerTaskMetadata> && std::is_trivially_copyable_v<SchedulerTaskMetadata>);
 static_assert(std::is_standard_layout_v<SchedulerTaskControl> && std::is_trivially_copyable_v<SchedulerTaskControl>);
 static_assert(
@@ -1263,6 +1350,7 @@ static_assert(
     std::is_standard_layout_v<SchedulerWorkerContext> && std::is_trivially_copyable_v<SchedulerWorkerContext>
 );
 static_assert(std::is_standard_layout_v<SchedulerTailTrace> && std::is_trivially_copyable_v<SchedulerTailTrace>);
+static_assert(std::is_standard_layout_v<SchedulerTaskTrace> && std::is_trivially_copyable_v<SchedulerTaskTrace>);
 
 inline bool scheduler_layout_checked_add(uint64_t lhs, uint64_t rhs, uint64_t *out) {
     if (out == nullptr || rhs > UINT64_MAX - lhs) return false;
@@ -1296,7 +1384,8 @@ inline bool scheduler_layout_reserve(uint64_t *cursor, uint64_t size, uint64_t a
 }
 
 inline bool scheduler_plan_layout(
-    uint64_t task_count, uint64_t aic_task_count, uint64_t aiv_task_count, AicoreSchedulerLayout *layout
+    uint64_t task_count, uint64_t aic_task_count, uint64_t aiv_task_count, AicoreSchedulerLayout *layout,
+    bool enable_activity_profiling = false
 ) {
     if (layout == nullptr || aic_task_count > task_count || aiv_task_count > task_count) return false;
     AicoreSchedulerLayout next{};
@@ -1308,42 +1397,44 @@ inline bool scheduler_plan_layout(
 #define SCHEDULER_RESERVE_ARRAY(count, type, field)                 \
     (scheduler_layout_checked_mul((count), sizeof(type), &bytes) && \
      scheduler_layout_reserve(&cursor, bytes, alignof(type), &next.field))
-    if (!scheduler_layout_reserve(
+    bool valid =
+        scheduler_layout_reserve(
             &cursor, sizeof(SchedulerRunControl), alignof(SchedulerRunControl), &next.run_control_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, AicpuCoreLifecycleTrace, aicpu_lifecycle_traces_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerWorkerContext, worker_contexts_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, AicpuCoreLifecycleTrace, aicpu_lifecycle_traces_offset) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerWorkerContext, worker_contexts_offset) &&
+        SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_WORKER_CAPACITY * SCHEDULER_PENDING_SLOT_COUNT, DispatchPayload, dispatch_payloads_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_WORKER_CAPACITY * SCHEDULER_PENDING_SLOT_COUNT, SchedulerDispatchSlot, dispatch_slots_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_CALLABLE_CAPACITY, uint64_t, callable_addresses_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskMetadata, task_metadata_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskControl, task_controls_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerCompletionInbox, completion_inboxes_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_CALLABLE_CAPACITY, uint64_t, callable_addresses_offset) &&
+        SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskMetadata, task_metadata_offset) &&
+        SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskControl, task_controls_offset) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerCompletionInbox, completion_inboxes_offset) &&
+        SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_WORKER_CAPACITY, SchedulerReadyInbox, ready_inboxes_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) ||
-        !scheduler_layout_reserve(
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) &&
+        scheduler_layout_reserve(
             &cursor, sizeof(SchedulerReadyDirectory), alignof(SchedulerReadyDirectory), &next.ready_directory_offset
-        ) ||
-        !scheduler_layout_reserve(
+        ) &&
+        scheduler_layout_reserve(
             &cursor, sizeof(SchedulerGangCoordinator), alignof(SchedulerGangCoordinator), &next.gang_coordinator_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_GANG_COHORT_COUNT, SchedulerGangCohort, gang_cohorts_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_GANG_COHORT_COUNT, SchedulerGangCohort, gang_cohorts_offset) &&
+        SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_GANG_COHORT_COUNT * SCHEDULER_CLUSTER_CAPACITY, SchedulerGangParticipant, gang_participants_offset
-        ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_CLUSTER_CAPACITY, SchedulerGangCommand, gang_commands_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskTrace, trace_cells_offset) ||
-        !scheduler_layout_checked_align(cursor, SCHEDULER_STATE_ALIGNMENT, &next.total_size)) {
+        ) &&
+        SCHEDULER_RESERVE_ARRAY(SCHEDULER_CLUSTER_CAPACITY, SchedulerGangCommand, gang_commands_offset) &&
+        SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskTrace, trace_cells_offset);
+    if (valid && enable_activity_profiling)
+        valid = SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerActivityBuffer, activity_buffers_offset);
+    next.activity_buffer_capacity = enable_activity_profiling ? SCHEDULER_ACTIVITY_CAPACITY : 0;
+    if (valid) valid = scheduler_layout_checked_align(cursor, SCHEDULER_STATE_ALIGNMENT, &next.total_size);
 #undef SCHEDULER_RESERVE_ARRAY
-        return false;
-    }
-#undef SCHEDULER_RESERVE_ARRAY
+    if (!valid) return false;
     *layout = next;
     return true;
 }
@@ -1377,9 +1468,15 @@ inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLay
         contexts[worker].cluster_index = UINT64_MAX;
         contexts[worker].scheduler_index = UINT64_MAX;
         contexts[worker].scheduler_worker_id = UINT64_MAX;
+        contexts[worker].activity_buffers_offset = layout.activity_buffers_offset;
         contexts[worker].cluster_worker_ids[0] = UINT64_MAX;
         contexts[worker].cluster_worker_ids[1] = UINT64_MAX;
         contexts[worker].cluster_worker_ids[2] = UINT64_MAX;
+    }
+    if (layout.activity_buffers_offset != 0) {
+        auto *buffers = scheduler_state_at<SchedulerActivityBuffer>(base, layout.activity_buffers_offset);
+        for (uint64_t worker = 0; worker < SCHEDULER_WORKER_CAPACITY; ++worker)
+            buffers[worker].capacity = SCHEDULER_ACTIVITY_CAPACITY;
     }
     auto *coordinator = scheduler_state_at<SchedulerGangCoordinator>(base, layout.gang_coordinator_offset);
     coordinator->active_dispatch_cohort = UINT64_MAX;

@@ -173,6 +173,36 @@ struct FixtureStorage {
     uint64_t *callable_addresses{nullptr};
 };
 
+TEST(SchedulerActivityBuffer, IsAllocatedOnlyWhenRequestedAndNeverWraps) {
+    AicoreSchedulerLayout disabled{};
+    ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &disabled));
+    EXPECT_EQ(disabled.activity_buffers_offset, 0u);
+    EXPECT_EQ(disabled.activity_buffer_capacity, 0u);
+
+    AicoreSchedulerLayout enabled{};
+    ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &enabled, true));
+    ASSERT_NE(enabled.activity_buffers_offset, 0u);
+    EXPECT_EQ(enabled.activity_buffer_capacity, SCHEDULER_ACTIVITY_CAPACITY);
+    SchedulerStateBuffer storage(enabled);
+    auto *contexts = scheduler_state_at<SchedulerWorkerContext>(storage.base(), enabled.worker_contexts_offset);
+    auto *buffers = scheduler_state_at<SchedulerActivityBuffer>(storage.base(), enabled.activity_buffers_offset);
+    contexts[0].worker_index = 0;
+    contexts[0].profiling_loop_iter = 17;
+    buffers[0].committed = SCHEDULER_ACTIVITY_CAPACITY - 1;
+
+    scheduler_append_activity(storage.base(), &contexts[0], AicoreSchedulerKind::Idle, 10, 20);
+    scheduler_append_activity(storage.base(), &contexts[0], AicoreSchedulerKind::Idle, 30, 40);
+
+    EXPECT_EQ(buffers[0].committed, SCHEDULER_ACTIVITY_CAPACITY);
+    EXPECT_EQ(buffers[0].dropped, 1u);
+    const AicoreSchedulerRecord &last = buffers[0].records[SCHEDULER_ACTIVITY_CAPACITY - 1];
+    EXPECT_EQ(last.start_time, 10u);
+    EXPECT_EQ(last.end_time, 20u);
+    EXPECT_EQ(last.loop_iter, 17u);
+    EXPECT_EQ(last.kind, AicoreSchedulerKind::Idle);
+    EXPECT_EQ(last.task_id, UINT64_MAX);
+}
+
 TEST(SchedulerBootstrap, RegistersOnlyOnFirstExecutableProducer) {
     FixtureStorage storage(4, 2);
     GraphBuffer graph(4);
