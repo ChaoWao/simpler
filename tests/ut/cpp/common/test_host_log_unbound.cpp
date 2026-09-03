@@ -19,9 +19,7 @@ TEST(HostLogUnboundTest, PrivateModuleStateStartsSilent) {
     EXPECT_EQ(HostLogger::get_instance().level(), static_cast<int>(simpler::log::LogLevel::NUL));
     EXPECT_EQ(unified_log_host_span_enabled(), 0);
 
-    const SimplerHostSpan span{
-        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 1, 0, 0, 0, 100, 25, "node.dispatch", "run_id=1"
-    };
+    const SimplerHostSpan span{1, 0, 0, 0, 100, 25, "node.dispatch", "run_id=1"};
     testing::internal::CaptureStderr();
     HostLogger::get_instance().log(simpler::log::LogLevel::ERROR, "unbound", "must stay silent");
     unified_log_host_span(&span);
