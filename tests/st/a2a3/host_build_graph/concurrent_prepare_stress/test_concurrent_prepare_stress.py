@@ -202,7 +202,7 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         while inflight:
             self._retire(inflight.pop(0))
 
-    def test_concurrent_prepare_overlap(self, st_platform, st_worker, capfd):
+    def test_concurrent_prepare_overlap(self, st_platform, st_worker, capfd, drain_host_log):
         """Golden-check a 2-deep overlapping pipeline over both arena banks.
 
         Each submission prepares (fully binds) its run against one bank while the
@@ -219,9 +219,9 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         callable_id = _ARM_CALLABLE_ID
 
         with self._registered_callable(chip_worker, callable_id, callable_obj):
-            capfd.readouterr()  # only this arm's spans reach the verdict
+            drain_host_log(capfd)  # only this arm's spans reach the verdict
             self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _ITERS, inflight_limit=2)
-            captured = capfd.readouterr().err
+            captured = drain_host_log(capfd)
 
         # Each pair must prove prepare(N+1) ran concurrently with device(N) — the
         # property this pipeline exists for. Not that prepare *finished* inside
@@ -230,7 +230,7 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         checks = assert_native_overlap(parse_spans(captured.splitlines()))
         assert len(checks) == _ITERS - 1
 
-    def test_serial_submission_is_rejected_as_not_overlapping(self, st_platform, st_worker, capfd):
+    def test_serial_submission_is_rejected_as_not_overlapping(self, st_platform, st_worker, capfd, drain_host_log):
         """One run at a time must fail the same assertion the overlapping arm passes.
 
         The single-variable control for the positive arm: same lane, same
@@ -254,14 +254,14 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         callable_id = _ARM_CALLABLE_ID
 
         with self._registered_callable(chip_worker, callable_id, callable_obj):
-            capfd.readouterr()
+            drain_host_log(capfd)
             self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _CONTROL_ITERS, inflight_limit=1)
-            captured = capfd.readouterr().err
+            captured = drain_host_log(capfd)
 
         with pytest.raises(NativeOverlapError, match="did not overlap"):
             assert_native_overlap(parse_spans(captured.splitlines()))
 
-    def test_diagnostics_config_serializes_the_native_lane(self, st_platform, st_worker, capfd):
+    def test_diagnostics_config_serializes_the_native_lane(self, st_platform, st_worker, capfd, drain_host_log):
         """A diagnostic flag turns staging off, and the log must then be rejected.
 
         ``allow_prepared_successor`` folds in ``CallConfig::diagnostics_any()`` —
@@ -303,9 +303,9 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
             # is required by CallConfig::validate() whenever one of them is.
             config = self._build_config({}, enable_scope_stats=True, output_prefix=output_dir)
             with self._registered_callable(chip_worker, callable_id, callable_obj):
-                capfd.readouterr()
+                drain_host_log(capfd)
                 self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _CONTROL_ITERS, inflight_limit=2)
-                captured = capfd.readouterr().err
+                captured = drain_host_log(capfd)
 
         with pytest.raises(NativeOverlapError, match="did not overlap"):
             assert_native_overlap(parse_spans(captured.splitlines()))

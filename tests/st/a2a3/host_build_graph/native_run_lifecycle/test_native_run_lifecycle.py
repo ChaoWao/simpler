@@ -68,10 +68,10 @@ class TestNativeRunLifecycle(SceneTestCase):
     def compute_golden(self, args, params):
         args.out[:] = args.a + args.b + _CHAIN_LENGTH
 
-    def test_run(self, st_platform, st_worker, request, capfd):
+    def test_run(self, st_platform, st_worker, request, capfd, drain_host_log):
         super().test_run(st_platform, st_worker, request)
 
-        spans = list(parse_spans(capfd.readouterr().err.splitlines()))
+        spans = list(parse_spans(drain_host_log(capfd).splitlines()))
         invocations = [inv for inv in group_invocations(spans) if "chip.run" in inv.by_name()]
         # Two of these are the abandoned diagnostic prepares below, which record a
         # chip.run invocation without ever reaching chip.run.runner_run.
