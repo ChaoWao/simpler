@@ -283,7 +283,7 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
         the freq MUST come from the host, never be hardcoded here)
       - join `aicpu_tasks` by `(core_id, reg_task_id)`; unmatched rows are
         dropped and counted
-      - AICORE_TIMING (level=1): aicpu_tasks is empty by construction, so
+      - TASK_TIMING (level=1): aicpu_tasks is empty by construction, so
         synthesize one task per aicore record (dispatch/finish = 0)
       - sort joined `tasks` by `task_id` (= task_token_raw)
       - convert phase records from `*_cycles` → `*_time_us`
@@ -511,7 +511,7 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
                 }
             )
     elif level == 1:
-        # AICORE_TIMING fallback: AICPU records are absent (complete_task
+        # TASK_TIMING fallback: AICPU records are absent (complete_task
         # bypassed). The AICore stream alone is the source of truth.
         for row in aicore_rows:
             core_id, task_token_raw, _reg_task_id, start_cycles, end_cycles, *rest = row
@@ -734,7 +734,7 @@ def load_deps_kernel_map(deps_path):
     """Build a ``task_id → kernel_ids[3]`` map from deps.json's ``tasks[]``.
 
     a2a3 dep_gen captures per-task ``kernel_ids = [aic, aiv0, aiv1]`` so the
-    swimlane post-processor can resolve ``func_id`` at AICORE_TIMING (level=1)
+    swimlane post-processor can resolve ``func_id`` at TASK_TIMING (level=1)
     where the AICore record alone is on disk and carries ``func_id == -1``.
     The trace generator uses the per-record ``core_type`` to pick the right
     subslot: ``aic → kernel_ids[0]``, ``aiv → kernel_ids[1]`` (falling back
@@ -943,7 +943,7 @@ def _append_dependency_flow_pair(  # noqa: PLR0913
 
 
 def resolve_func_id_from_kernel_map(task_id, core_type, kernel_map):
-    """Look up the active ``func_id`` for an AICORE_TIMING record via dep_gen.
+    """Look up the active ``func_id`` for a TASK_TIMING record via dep_gen.
 
     Picks the kernel_ids[3] subslot by record ``core_type``. Returns the
     resolved func_id (>= 0) on a hit, or -1 if no usable subslot was found
@@ -1438,7 +1438,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     if verbose:
         print(f"  Unique cores: {len(unique_cores)}")
 
-    # Recover func_id for AICORE_TIMING (level=1) records, which the host
+    # Recover func_id for TASK_TIMING (level=1) records, which the host
     # emits as func_id=-1. Resolve once here against dep_gen's per-task
     # kernel_ids[3] (picking the subslot by core_type) and write it back onto
     # the task, so every downstream consumer — Worker View, Scheduler View, and
@@ -3498,9 +3498,9 @@ def main():
         deps_path = Path(args.deps_json) if args.deps_json else Path(input_path).parent / "deps.json"
         deps_edges = load_deps_json(deps_path)
         # Load the per-task kernel_ids map separately so the trace generator
-        # can resolve func_id=-1 records (AICORE_TIMING / level=1) back to
+        # can resolve func_id=-1 records (TASK_TIMING / level=1) back to
         # the real kernel name. Optional — pre-schema deps.json without
-        # kernel_ids and AICPU_TIMING+ runs both leave this at None.
+        # kernel_ids and SCHEDULE_TIMING+ runs both leave this at None.
         deps_kernel_map = load_deps_kernel_map(deps_path)
         deps_block_map = load_deps_block_map(deps_path)
         if deps_edges is not None:

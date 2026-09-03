@@ -38,7 +38,7 @@
  *   - granular ChipSwimlaneLevel — `ChipSwimlaneDataHeader::chip_swimlane_level`
  *     (shared memory); read in `chip_swimlane_aicpu_init` and cached, then queried
  *     via `get_chip_swimlane_level()` for
- *     `>= AICPU_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
+ *     `>= SCHEDULE_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
  */
 extern "C" void set_platform_chip_swimlane_base(uint64_t chip_swimlane_data_base);
 extern "C" uint64_t get_platform_chip_swimlane_base();
@@ -89,7 +89,7 @@ void chip_swimlane_aicpu_init(int worker_count);
  *      ACK-gated release (see chip_swimlane_aicpu_on_aicore_ack).
  *   3. Bump the AICore pool's `total_record_count` so host reconcile
  *      (total == collected + dropped) stays accurate at all levels —
- *      including AICORE_TIMING (level=1), where `complete_task` is bypassed.
+ *      including TASK_TIMING (level=1), where `complete_task` is bypassed.
  *
  * Race safety: rotation runs BEFORE the dispatch register write. The
  * completion-before-dispatch invariant proves prior tasks FIN'd, but

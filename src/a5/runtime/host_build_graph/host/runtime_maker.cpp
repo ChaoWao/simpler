@@ -934,7 +934,7 @@ bool create_scheduler_state(
             runtime, SchedulerStateOwner{allocation, reinterpret_cast<void *>(aligned_address), allocation_size, layout}
         );
     }
-    LOG_INFO("A5 HBG: selected resident AICore scheduling for %d tasks", total_tasks);
+    LOG_INFO("A5 HBG: selected AICore Scheduler for %d tasks", total_tasks);
     return true;
 }
 

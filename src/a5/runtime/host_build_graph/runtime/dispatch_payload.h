@@ -119,7 +119,7 @@ struct alignas(64) DispatchPayload {
     uint64_t args[DISPATCH_MAX_ARGS];
 
     /** Per-dispatch global context: sub_block_id identifies the selected AIV
-     *  task subslot. The resident scheduler writes it during materialization;
+     *  task subslot. The AICore Scheduler writes it during materialization;
      *  the legacy scheduler seeds the equivalent per-core value at startup.
      *  args[SPMD_GLOBAL_CONTEXT_INDEX] points here. */
     GlobalContext global_context;

@@ -237,7 +237,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
     // boundary. The completion-before-dispatch invariant makes this race-free
     // (all prior tasks on this core have FIN'd, so AICore has dcci'd their
     // records out of the old buffer). Gated on the same enable bit as flush
-    // so level=1 (AICORE_TIMING-only) participates without needing complete_task.
+    // so level=1 (TASK_TIMING-only) participates without needing complete_task.
 #if SIMPLER_DFX
     if (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED) {
         chip_swimlane_aicpu_on_aicore_dispatch(core_id, thread_idx, reg_task_id);
@@ -246,7 +246,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
 
     uint64_t *dispatch_timestamp_slot = nullptr;
 #if SIMPLER_DFX
-    if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
+    if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
         dispatch_timestamp_slot =
             to_pending ? &core_exec_state.pending_dispatch_timestamp : &core_exec_state.running_dispatch_timestamp;
     }
@@ -401,7 +401,7 @@ void SchedulerContext::dispatch_shape(
             wmb();
             uint64_t dispatch_ts = 0;
 #if SIMPLER_DFX
-            if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
+            if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
                 dispatch_ts = get_sys_cnt_aicpu();
             }
 #endif

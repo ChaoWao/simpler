@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Gate for the A5 HBG empty-graph resident lifecycle."""
+"""Gate for the A5 HBG AICore Scheduler empty-graph lifecycle."""
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, scene_test
 

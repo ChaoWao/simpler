@@ -117,7 +117,7 @@ static void record_resident_timeout(Runtime *runtime, SchedulerErrorSite error_s
             &header->sched_error_code, static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT)
         );
     }
-    LOG_ERROR("A5 HBG resident scheduler timeout site=%" PRIu64, static_cast<uint64_t>(error_site));
+    LOG_ERROR("A5 HBG AICore Scheduler timeout site=%" PRIu64, static_cast<uint64_t>(error_site));
 }
 
 static int32_t read_runtime_status(Runtime *runtime) {

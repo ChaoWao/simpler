@@ -399,7 +399,7 @@ In-graph task storage remains untouched until bounded materialization begins.
 Host orchestration builds the complete task image before device execution. At
 the end of orchestration, the Host copies one bind image containing the
 compacted shared-memory task window and argument pools, then launches the
-resident Scheduler. Slot task and payload references remain self-relative;
+Scheduler. Slot task and payload references remain self-relative;
 `graph_context` is the absolute address of the retained Definition object until
 initial classification localizes the execution in the outer heap.
 

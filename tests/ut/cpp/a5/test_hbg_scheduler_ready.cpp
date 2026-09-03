@@ -123,7 +123,7 @@ struct FixtureStorage {
         owner_states =
             scheduler_state_at<SchedulerReadyOwnerState>(scheduler_state->base(), layout.ready_owner_states_offset);
         run_control->aiv_active_worker_count = workers;
-        run_control->resolver_count = workers;
+        run_control->scheduler_count = workers;
         for (uint64_t worker = 0; worker < workers; ++worker) {
             SchedulerWorkerContext &context = contexts[worker];
             context.core_type = static_cast<int32_t>(CoreType::AIV);
@@ -248,7 +248,7 @@ TEST(SchedulerBootstrap, PublishesExclusiveInboxAndAggregatesDirectory) {
     EXPECT_EQ(stats.batch_count, 1u);
 }
 
-TEST(SchedulerReadyInbox, RejectsResolverCapacityBoundary) {
+TEST(SchedulerReadyInbox, RejectsSchedulerCapacityBoundary) {
     FixtureStorage storage(1, 1);
     SchedulerReadyStats stats{};
     SchedulerReadyBatch batch{};
@@ -256,20 +256,19 @@ TEST(SchedulerReadyInbox, RejectsResolverCapacityBoundary) {
     uint64_t ready_types = 0;
 
     EXPECT_FALSE(scheduler_bootstrap_ready_batch_publish(
-        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_RESOLVER_CAPACITY, &batch, &stats,
-        &ready_types
+        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_CAPACITY, &batch, &stats, &ready_types
     ));
-    storage.contexts[0].inbox_index = SCHEDULER_RESOLVER_CAPACITY;
+    storage.contexts[0].inbox_index = SCHEDULER_CAPACITY;
     EXPECT_FALSE(scheduler_ready_owner_maintain_type(
         storage.scheduler_state->base(), &storage.contexts[0], 0, &storage.owner_states[0]
     ));
     EXPECT_FALSE(scheduler_ready_batch_push(
-        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_RESOLVER_CAPACITY, &batch, &stats,
+        storage.scheduler_state->base(), &storage.contexts[0], 0, SCHEDULER_CAPACITY, &batch, &stats,
         &storage.owner_states[0]
     ));
     storage.contexts[0].inbox_index = 0;
     EXPECT_FALSE(scheduler_bootstrap_ready_directory_publish(
-        storage.scheduler_state->base(), &storage.contexts[0], SCHEDULER_RESOLVER_CAPACITY + 1
+        storage.scheduler_state->base(), &storage.contexts[0], SCHEDULER_CAPACITY + 1
     ));
 }
 
@@ -512,7 +511,7 @@ TEST(SchedulerReadyInbox, StealsOnlyFromMarkedVictim) {
     EXPECT_EQ(stats.steal_count, 1u);
 }
 
-TEST(SchedulerReadyInbox, DirectoryShardIgnoresResolverTail) {
+TEST(SchedulerReadyInbox, DirectoryShardIgnoresSchedulerTail) {
     FixtureStorage storage(1, 9);
     auto *directory = scheduler_ready_directory_at(storage.scheduler_state->base(), &storage.contexts[0]);
     directory->core_types[0][1].bits = UINT64_C(1) << 6;
@@ -1080,7 +1079,7 @@ TEST(SchedulerReadyWake, ConcurrentRegistrationAndCloseResolveEveryConsumerExact
     }
 }
 
-TEST(SchedulerReadyWake, WakeResolvePublishesConsumerToResolverLocalInbox) {
+TEST(SchedulerReadyWake, WakeResolvePublishesConsumerToSchedulerLocalInbox) {
     FixtureStorage storage(2, 1);
     GraphBuffer graph(2);
     graph.executable(0, 0);

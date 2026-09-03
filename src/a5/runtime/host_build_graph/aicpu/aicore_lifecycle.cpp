@@ -71,8 +71,8 @@ int32_t AicoreLifecycle::pre_handshake_init(Runtime *runtime, int32_t aicpu_thre
     const bool chip_swimlane_enabled = is_chip_swimlane_enabled();
     if (chip_swimlane_enabled || is_pmu_enabled() || is_dump_args_enabled()) {
         LOG_WARN(
-            "A5 HBG resident AICore diagnostics are best-effort: artifacts may be absent or incomplete and do not "
-            "yet describe Resolver scheduling"
+            "A5 HBG AICore Scheduler diagnostics are best-effort: artifacts may be absent or incomplete and do not "
+            "yet describe Scheduler scheduling"
         );
     }
     if (chip_swimlane_enabled) chip_swimlane_aicpu_init(core_count_);
@@ -125,7 +125,7 @@ void AicoreLifecycle::handshake_partition(Runtime *runtime, int32_t tidx, int32_
             };
         }
         if (scheduler_watchdog_expired(wait_start, get_sys_cnt_aicpu(), timeout_cycles)) {
-            LOG_ERROR("A5 HBG resident scheduler handshake timeout thread=%d remaining=%d", tidx, remaining);
+            LOG_ERROR("A5 HBG AICore Scheduler handshake timeout thread=%d remaining=%d", tidx, remaining);
             record_lifecycle_timeout(runtime, SchedulerErrorSite::AICPU_HANDSHAKE_TIMEOUT);
             handshake_failed_.store(true, std::memory_order_release);
             return;
@@ -214,8 +214,8 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
         }
         cluster_workers[cluster][lane] = worker;
     }
-    static_assert(PLATFORM_CORES_PER_BLOCKDIM == 3, "Resolver selection assumes one AIC and two AIV lanes");
-    static_assert(PLATFORM_AIV_CORES_PER_BLOCKDIM == 2, "Resolver selection assumes two AIV lanes per cluster");
+    static_assert(PLATFORM_CORES_PER_BLOCKDIM == 3, "Scheduler selection assumes one AIC and two AIV lanes");
+    static_assert(PLATFORM_AIV_CORES_PER_BLOCKDIM == 2, "Scheduler selection assumes two AIV lanes per cluster");
     for (int32_t cluster = 0; cluster < aic_count; ++cluster) {
         for (int32_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
             if (cluster_workers[cluster][lane] < 0) {
@@ -252,27 +252,27 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
     for (int32_t cluster = 0; cluster < aic_count; ++cluster) {
         const int32_t aiv0_worker = cluster_workers[cluster][1];
         const int32_t aiv1_worker = cluster_workers[cluster][2];
-        // Do not bind Resolver ownership to a runtime worker rank. Pick the
+        // Do not bind Scheduler ownership to a runtime worker rank. Pick the
         // lower physical AIV in each discovered hardware Cluster.
-        const uint64_t resolver_worker = static_cast<uint64_t>(
+        const uint64_t scheduler_worker = static_cast<uint64_t>(
             cores_[aiv0_worker].physical_core_id <= cores_[aiv1_worker].physical_core_id ? aiv0_worker : aiv1_worker
         );
         for (int32_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
             const int32_t worker = cluster_workers[cluster][lane];
-            const bool resolver_lane = static_cast<uint64_t>(worker) == resolver_worker;
+            const bool scheduler_lane = static_cast<uint64_t>(worker) == scheduler_worker;
             const bool additional_aiv_lane =
-                lane != 0 && !resolver_lane && cluster * PLATFORM_AIV_CORES_PER_BLOCKDIM + 1 < requested_aiv;
+                lane != 0 && !scheduler_lane && cluster * PLATFORM_AIV_CORES_PER_BLOCKDIM + 1 < requested_aiv;
             const bool active_lane = cluster < active_clusters &&
-                                     (resolver_lane || (lane == 0 && cluster < requested_aic) || additional_aiv_lane);
+                                     (scheduler_lane || (lane == 0 && cluster < requested_aic) || additional_aiv_lane);
             contexts[worker].active = active_lane ? 1 : 0;
             contexts[worker].cluster_count = static_cast<uint64_t>(active_clusters);
             contexts[worker].cluster_index = static_cast<uint64_t>(cluster);
-            contexts[worker].resolver_index = cluster < active_clusters ? static_cast<uint64_t>(cluster) : UINT64_MAX;
-            contexts[worker].resolver_worker_id = resolver_worker;
-            contexts[worker].is_resolver = resolver_lane && cluster < active_clusters ? 1 : 0;
+            contexts[worker].scheduler_index = cluster < active_clusters ? static_cast<uint64_t>(cluster) : UINT64_MAX;
+            contexts[worker].scheduler_worker_id = scheduler_worker;
+            contexts[worker].is_scheduler = scheduler_lane && cluster < active_clusters ? 1 : 0;
             contexts[worker].inbox_index =
-                contexts[worker].is_resolver != 0 ? static_cast<uint64_t>(cluster) : UINT64_MAX;
-            contexts[worker].resolver_count = static_cast<uint64_t>(active_clusters);
+                contexts[worker].is_scheduler != 0 ? static_cast<uint64_t>(cluster) : UINT64_MAX;
+            contexts[worker].scheduler_count = static_cast<uint64_t>(active_clusters);
             for (int32_t member = 0; member < PLATFORM_CORES_PER_BLOCKDIM; ++member)
                 contexts[worker].cluster_worker_ids[member] = static_cast<uint64_t>(cluster_workers[cluster][member]);
         }
@@ -287,7 +287,7 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
     run_control->active_worker_count = static_cast<uint64_t>(active_aic) + static_cast<uint64_t>(active_aiv);
     run_control->aic_active_worker_count = static_cast<uint64_t>(active_aic);
     run_control->aiv_active_worker_count = static_cast<uint64_t>(active_aiv);
-    run_control->resolver_count = static_cast<uint64_t>(active_clusters);
+    run_control->scheduler_count = static_cast<uint64_t>(active_clusters);
     run_control->scheduler_timeout_cycles = resident_scheduler_timeout_cycles();
     if (executable_task_count == 0) {
         run_control->bootstrap_scan_arrived_count = static_cast<uint64_t>(active_clusters);
@@ -355,7 +355,7 @@ int32_t AicoreLifecycle::wait_bootstrap_complete(Runtime *runtime) {
             if (run_control->scheduler_error != 0) return -1;
         }
         if (scheduler_watchdog_expired(watchdog_start, get_sys_cnt_aicpu(), timeout_cycles)) {
-            LOG_ERROR("%s", "A5 HBG resident scheduler bootstrap timeout");
+            LOG_ERROR("%s", "A5 HBG AICore Scheduler bootstrap timeout");
             record_lifecycle_timeout(runtime, SchedulerErrorSite::BOOTSTRAP_COMPLETE_TIMEOUT);
             return -1;
         }

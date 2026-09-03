@@ -208,7 +208,7 @@ int ChipSwimlaneCollector::initialize(
     // Phase metadata: must be zero-initialized here. alloc_cb returns
     // uninitialized device memory; AICPU only writes these fields when
     // phase init runs (level >= SCHED_PHASES). Without zeroing, lower
-    // levels (AICORE_TIMING / AICPU_TIMING) leave garbage that
+    // levels (TASK_TIMING / SCHEDULE_TIMING) leave garbage that
     // for_each_instance iterates as `num_sched_phase_threads` /
     // `num_orch_phase_threads`, walking off the end of the allocated pool
     // array → segfault. The host-side reader (read_phase_header_metadata)
@@ -931,7 +931,7 @@ void ChipSwimlaneCollector::record_clock_anchor_samples(std::vector<simpler::dfx
 void ChipSwimlaneCollector::finish_clock_correlation_session() { clock_correlation_session_.finish(); }
 
 // JSON v2 emit: the host now dumps raw cycle-domain per-stream records plus
-// metadata, and `swimlane_converter.py` performs the join (AICore↔AICPU on
+// metadata, and `swimlane_converter.py` performs the join (AICore↔Scheduler on
 // reg_task_id, base_time normalization, cycles→µs conversion, sort, core_type
 // lookup, func_id resolution against deps.json). Moving the join into Python
 // makes the schema easy to evolve without round-tripping through C++ + a
