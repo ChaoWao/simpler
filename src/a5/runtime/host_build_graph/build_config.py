@@ -9,14 +9,9 @@
 # host_build_graph Runtime build configuration
 # All paths are relative to this file's directory (src/runtime/host_build_graph/)
 #
-# This is the host-orchestration variant of tensormap_and_ringbuffer: it shares
-# the same scheduler, ring buffers, and shared-memory layout, differing only in
-# WHEN the orchestrator runs.
-# - Host runs the orchestrator to completion, populating SM + arena, then H2Ds
-#   the image to device (vs tensormap, where AICPU thread N-1 orchestrates on
-#   device concurrently with the scheduler threads)
-# - AICPU threads 0..N-1 all run schedulers (no on-device orchestrator thread)
-# - AICore executes tasks via an aligned DispatchPayload + pre-built dispatch_args
+# The host materializes the graph and uploads a read-only view. AICore workers
+# resolve dependencies and execute kernels. AICPU participates only in worker
+# initialization, run completion waiting, and teardown.
 #
 # The "orchestration" directory contains source files compiled into both
 # runtime targets AND the orchestration .so (e.g., tensor methods needed

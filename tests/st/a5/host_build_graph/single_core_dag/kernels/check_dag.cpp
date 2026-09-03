@@ -20,13 +20,28 @@
 #endif
 
 #ifndef __aicore__
-#define __aicore__ [aicore]
+#define __aicore__ [aicore]  // NOLINT(whitespace/braces)
 #endif
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     __gm__ Tensor *tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ int32_t *output = reinterpret_cast<__gm__ int32_t *>(tensor->buffer.addr) + tensor->start_offset;
-    output[0] = 1;
-    dcci(&output[0], cache_line_t::SINGLE_CACHE_LINE, dcci_dst_t::CACHELINE_OUT);
+    __gm__ int64_t *state = reinterpret_cast<__gm__ int64_t *>(tensor->buffer.addr) + tensor->start_offset;
+    int64_t task_id = args[1];
+    uint64_t producer_mask = static_cast<uint64_t>(args[2]);
+    for (int64_t producer = 0; producer < 64; ++producer) {
+        if ((producer_mask & (UINT64_C(1) << producer)) != 0)
+            dcci(&state[producer * 8], cache_line_t::SINGLE_CACHE_LINE);
+    }
+    dsb((mem_dsb_t)0);
+    for (int64_t producer = 0; producer < 64; ++producer) {
+        if ((producer_mask & (UINT64_C(1) << producer)) != 0 && state[producer * 8] != producer + 1) {
+            state[task_id * 8] = -(producer + 1);
+            dcci(&state[task_id * 8], cache_line_t::SINGLE_CACHE_LINE, dcci_dst_t::CACHELINE_OUT);
+            dsb((mem_dsb_t)0);
+            return;
+        }
+    }
+    state[task_id * 8] = task_id + 1;
+    dcci(&state[task_id * 8], cache_line_t::SINGLE_CACHE_LINE, dcci_dst_t::CACHELINE_OUT);
     dsb((mem_dsb_t)0);
 }

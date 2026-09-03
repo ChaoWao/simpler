@@ -52,7 +52,13 @@ enum class SchedulerGraphResult : uint64_t {
     INVALID_CALLABLE = 7,
     INVALID_FANIN_COUNT = 8,
     INVALID_FANIN_ID = 9,
+    TIMEOUT = 10,
 };
+
+inline constexpr bool
+scheduler_resident_v0_task_shape_supported(uint32_t active_subtasks, uint32_t logical_block_num, bool sync_start) {
+    return active_subtasks == 1 && logical_block_num == 1 && !sync_start;
+}
 
 struct SchedulerGraphView {
     // Base of the ChipTaskStorage array. One address, because a task's descriptor
@@ -66,7 +72,7 @@ struct SchedulerGraphView {
     // Kept in the wire view for diagnostics. HBG task ids directly index the
     // whole-graph-resident tables and never wrap, so this value must not be
     // used to mask an id (the configured capacity need not be a power of two).
-    uint64_t task_window_mask;
+    uint64_t task_window_last_index;
 };
 
 struct SchedulerTaskInfo {
@@ -95,6 +101,13 @@ static_assert(offsetof(SchedulerGraphView, storage_address) == 0, "storage addre
 static_assert(sizeof(SchedulerTaskInfo) == 24, "root classification result layout changed");
 static_assert(sizeof(SchedulerTaskShape) == 24, "task shape result layout changed");
 static_assert(sizeof(SchedulerDispatchPredicate) == 24, "dispatch predicate layout changed");
+
+inline __aicore__ bool
+scheduler_dispatch_predicate_metadata_valid(uint64_t address, uint8_t element_size, uint8_t operation) {
+    if (operation == 0) return true;
+    const bool valid_width = element_size == 1 || element_size == 2 || element_size == 4 || element_size == 8;
+    return operation <= 6 && valid_width && address != 0 && (address & (static_cast<uint64_t>(element_size) - 1)) == 0;
+}
 
 inline __aicore__ __gm__ uint8_t *scheduler_graph_storage(const SchedulerGraphView &graph, int64_t task_id) {
     uint64_t slot = static_cast<uint64_t>(task_id);

@@ -7,49 +7,37 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+"""Gate for the A5 HBG empty-graph resident lifecycle."""
 
-from __future__ import annotations
-
-import torch
-from simpler.task_interface import ArgDirection as D
-
-from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, scene_test
 
 
 @scene_test(level=2, runtime="host_build_graph")
-class TestSchedulerPhases(SceneTestCase):
+class TestHbgEmptyLifecycle(SceneTestCase):
     CALLABLE = {
         "orchestration": {
-            "source": "kernels/orchestration/scheduler_phases_orch.cpp",
+            "source": "kernels/orchestration/empty_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [],
         },
-        "incores": [
-            {
-                "func_id": 0,
-                "source": "kernels/aiv/kernel_noop.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-        ],
+        "incores": [],
     }
 
     CASES = [
         {
-            "name": "resolve_dummy",
+            "name": "empty_lifecycle",
             "platforms": ["a5sim", "a5"],
-            "manual": ["a5sim"],
+            # Exercise the minimum supported AICPU population during a no-task shutdown.
+            "config": {"aicpu_thread_num": 2},
             "params": {},
         },
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(
-            TensorArg("input", torch.zeros(1, dtype=torch.int32)),
-        )
+        return TaskArgsBuilder()
 
     def compute_golden(self, args, params):
-        args.input[0] = 1
+        pass
 
 
 if __name__ == "__main__":
