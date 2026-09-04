@@ -195,6 +195,73 @@ TEST_F(SchedulerStateTest, ConsumedTransition) {
     EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
+TEST_F(SchedulerStateTest, DrainOrElideExactDrainReleasesToConsumed) {
+    alignas(64) ChipTaskSlotState first;
+    alignas(64) ChipTaskSlotState second;
+    init_slot(first, CHIP_TASK_COMPLETED, 0, 1);
+    init_slot(second, CHIP_TASK_COMPLETED, 0, 1);
+    first.fanout_refcount.store(1);
+    second.fanout_refcount.store(1);
+    ChipTaskSlotState *deferred[2] = {&first, &second};
+    int32_t deferred_count = 2;
+
+    drain_or_elide_deferred_releases(&sched, deferred, deferred_count, /*release_elided=*/false);
+
+    EXPECT_EQ(deferred_count, 0);
+    EXPECT_EQ(first.task_state.load(), CHIP_TASK_CONSUMED);
+    EXPECT_EQ(second.task_state.load(), CHIP_TASK_CONSUMED);
+}
+
+TEST_F(SchedulerStateTest, DrainOrElideTerminalOrchestrationSkipsLifecycleRelease) {
+    alignas(64) ChipTaskSlotState first;
+    alignas(64) ChipTaskSlotState second;
+    init_slot(first, CHIP_TASK_COMPLETED, 0, 1);
+    init_slot(second, CHIP_TASK_COMPLETED, 0, 1);
+    first.fanout_refcount.store(1);
+    second.fanout_refcount.store(1);
+    ChipTaskSlotState *deferred[2] = {&first, &second};
+    int32_t deferred_count = 2;
+
+    // The terminal flag means no more submissions, independently of whether
+    // orchestration succeeded or reported an error. Error propagation is
+    // handled separately from this lifecycle optimization.
+    drain_or_elide_deferred_releases(&sched, deferred, deferred_count, /*release_elided=*/true);
+
+    EXPECT_EQ(deferred_count, 0);
+    EXPECT_EQ(first.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(second.task_state.load(), CHIP_TASK_COMPLETED);
+}
+
+TEST_F(SchedulerStateTest, AsyncInlineCompletionDefersReleaseAndDrainsExactlyAtCapacity) {
+    alignas(64) ChipTaskSlotState first;
+    alignas(64) ChipTaskSlotState second;
+    // fanout_count == fanout_refcount so an exact on_task_release reaches CONSUMED.
+    init_slot(first, CHIP_TASK_PENDING, 0, 1);
+    init_slot(second, CHIP_TASK_PENDING, 0, 1);
+    first.fanout_refcount.store(1);
+    second.fanout_refcount.store(1);
+    ChipTaskSlotState *deferred[1]{};
+    int32_t deferred_count = 0;
+    AsyncWaitList::DrainCompletionSink sink{};
+    sink.sched = &sched;
+    sink.deferred_release_slot_states = deferred;
+    sink.deferred_release_count = &deferred_count;
+    sink.deferred_release_capacity = 1;
+
+    EXPECT_TRUE(sched.async_wait_list.try_inline_complete_locked(sink, first));
+    EXPECT_EQ(first.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(deferred_count, 1);
+    EXPECT_EQ(deferred[0], &first);
+
+    // Async path always passes release_elided=false: capacity drains first via
+    // on_task_release (CONSUMED), then defers second.
+    EXPECT_TRUE(sched.async_wait_list.try_inline_complete_locked(sink, second));
+    EXPECT_EQ(first.task_state.load(), CHIP_TASK_CONSUMED);
+    EXPECT_EQ(second.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(deferred_count, 1);
+    EXPECT_EQ(deferred[0], &second);
+}
+
 TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
     constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     constexpr int32_t head_task_id = 0;
