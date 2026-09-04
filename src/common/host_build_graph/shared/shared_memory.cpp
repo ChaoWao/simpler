@@ -41,7 +41,7 @@ void SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     char *base = (char *)sm_base;
     header = (SharedMemoryHeader *)base;
 
-    // storage / progress_flags — offsets from the single source
+    // storage / task_states — offsets from the single source
     // of truth (sm_layout::segment_offsets), so this setup and the
     // device-address helpers cannot drift.
     //
@@ -52,7 +52,7 @@ void SharedMemoryHandle::setup_pointers(uint64_t pitch) {
     auto off = sm_layout::segment_offsets(sm_layout::image_extents({pitch, 0, 0, 0}));
     auto &tasks = header->tasks;
     tasks.task_storage = (ChipTaskStorage *)(base + off.storage);
-    tasks.progress_flags = (std::atomic<uint8_t> *)(base + off.progress_flags);
+    tasks.task_states = (std::atomic<ChipTaskState> *)(base + off.task_states);
 }
 
 bool SharedMemoryHandle::init(void *sm_base_arg, uint64_t sm_size_arg, uint64_t max_tasks) {

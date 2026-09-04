@@ -946,7 +946,7 @@ int32_t run_host_orchestration(
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 
-    // Init-on-write: descriptors, payloads, slot_states and progress_flags are
+    // Init-on-write: descriptors, payloads, slot_states and task_states are
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.

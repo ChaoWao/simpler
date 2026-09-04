@@ -65,6 +65,12 @@ protected:
         sm_arena.release();
     }
 
+    // A whole publish event as the dispatch path performs it: account for the
+    // blocks before their tokens go out, then seal once they have.
+    void publish_blocks(ChipTaskSlotState &slot_state, int32_t count) {
+        if (sched.account_published_blocks(slot_state, count)) sched.seal_ed_publish_list(slot_state);
+    }
+
     // One AIV producer with an output tensor; `flagged` sets allow_early_resolve.
     TaskId submit_producer(bool flagged) {
         uint32_t shape[] = {16};
@@ -151,7 +157,7 @@ TEST_F(HbgEdQualificationTest, DummyConsumerIsNotCandidate) {
 }
 
 // The wake-scan cursor: each classification resumes where the last one hung
-// and never re-walks the row's completed tail. Monotonic completion bits make
+// and never re-walks the row's completed tail. The monotone state byte makes
 // the resume equivalent to a full rescan, so hang decisions are unchanged.
 TEST_F(HbgEdQualificationTest, WakeScanCursorResumesAndNeverRewalks) {
     TaskId p1 = submit_producer(/*flagged=*/false);
@@ -172,16 +178,16 @@ TEST_F(HbgEdQualificationTest, WakeScanCursorResumesAndNeverRewalks) {
 
     // The hung-at producer completes: the rescan resumes at the cursor and
     // walks down to the next unmet entry.
-    tasks.set_completion_flag(row[2]);
+    tasks.store_completed(row[2]);
     EXPECT_EQ(sched.classify_fanin_state(&c_slot), 1);
     EXPECT_EQ(c_slot.wake_scan_cursor, 1);
 
     // Entries above the cursor completing do not move it (nothing rescans
     // them); completing the remaining tail yields the ready verdict.
-    tasks.set_completion_flag(row[0]);
+    tasks.store_completed(row[0]);
     EXPECT_EQ(sched.classify_fanin_state(&c_slot), 1);
     EXPECT_EQ(c_slot.wake_scan_cursor, 1);
-    tasks.set_completion_flag(row[1]);
+    tasks.store_completed(row[1]);
     EXPECT_EQ(sched.classify_fanin_state(&c_slot), -1);
 }
 
@@ -211,7 +217,7 @@ TEST_F(HbgEdQualificationTest, PublishListDetectsAllPublished) {
 
     // p2 publishes its only block: chain seals, detached head reaches the
     // pending-drain queue.
-    sched.record_published_blocks(p2_slot, 1);
+    publish_blocks(p2_slot, 1);
     EXPECT_EQ(p2_slot.ed_publish_list_head.load(std::memory_order_relaxed), ED_PUBLISH_LIST_SENTINEL);
     ChipTaskSlotState *detached = nullptr;
     ASSERT_EQ(sched.ed_publish_drain_queue.pop_batch(&detached, 1), 1);
@@ -224,7 +230,7 @@ TEST_F(HbgEdQualificationTest, PublishListDetectsAllPublished) {
 
     // p1 publishes: rescan reaches the all-published verdict; the claim CAS
     // moves the candidate to STAGING and its shape queue.
-    sched.record_published_blocks(p1_slot, 1);
+    publish_blocks(p1_slot, 1);
     ASSERT_EQ(sched.ed_publish_drain_queue.pop_batch(&detached, 1), 1);
     ASSERT_EQ(detached, &c_slot);
     ASSERT_TRUE(sched.advance_ed_publish_scan(*detached));
@@ -263,7 +269,7 @@ TEST_F(HbgEdQualificationTest, GatedCandidateSealsWhileStagingAndReleasesItsCons
     // (pre-staged, doorbell not rung — the gated state).
     ChipTaskSlotState &p0_slot =
         sm_handle->header->tasks.get_slot_state_by_task_id(static_cast<int32_t>(p0.local_id()));
-    sched.record_published_blocks(p0_slot, 1);
+    publish_blocks(p0_slot, 1);
     ChipTaskSlotState *detached = nullptr;
     ASSERT_EQ(sched.ed_publish_drain_queue.pop_batch(&detached, 1), 1);
     ASSERT_EQ(detached, &p1_slot);
@@ -273,7 +279,7 @@ TEST_F(HbgEdQualificationTest, GatedCandidateSealsWhileStagingAndReleasesItsCons
 
     // p1's (gated) blocks publish while it is STAGING: the seal fires anyway —
     // publication counts placement, not launch — and hands C to the drain.
-    sched.record_published_blocks(p1_slot, 1);
+    publish_blocks(p1_slot, 1);
     EXPECT_EQ(p1_slot.ed_publish_list_head.load(std::memory_order_relaxed), ED_PUBLISH_LIST_SENTINEL);
     ASSERT_EQ(sched.ed_publish_drain_queue.pop_batch(&detached, 1), 1);
     ASSERT_EQ(detached, &c_slot);
@@ -288,7 +294,7 @@ TEST_F(HbgEdQualificationTest, ReleaseClaimsNeverStagedTaskForNormalRoute) {
     TaskId p1 = submit_producer(/*flagged=*/false);
     ChipTaskSlotState &p1_slot = sm_handle->header->tasks.get_slot_state_by_task_id(p1.local_id());
     // Untracked: publication leaves no publish state behind.
-    sched.record_published_blocks(p1_slot, 1);
+    publish_blocks(p1_slot, 1);
     EXPECT_EQ(p1_slot.to_payload().published_block_count.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(p1_slot.ed_publish_list_head.load(std::memory_order_relaxed), nullptr);
 

@@ -101,7 +101,7 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
-    // the payload and readiness is via progress_flags.
+    // the payload and readiness is via the task_states array.
     return layout;
 }
 

@@ -221,14 +221,14 @@ void SchedulerContext::log_stall_diagnostics(
             ChipTaskSlotState &slot_state = tasks.get_slot_state_by_task_id(si);
             ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
-            // fanin ids vs the progress_flags (rc = satisfied producers,
+            // fanin ids vs the task_states array (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
             int32_t fi = slot_state.to_payload().fanin_count;
             int32_t rc = 0;
             {
                 const int32_t *fanin = slot_state.to_payload().fanin_data();
                 for (int32_t k = 0; k < fi; k++) {
-                    if (tasks.is_completion_flag_set(fanin[k], std::memory_order_relaxed)) rc++;
+                    if (tasks.is_completed(fanin[k], std::memory_order_relaxed)) rc++;
                 }
             }
             int32_t kid_aic = slot_state.to_descriptor().kernel_id[0];
@@ -236,8 +236,9 @@ void SchedulerContext::log_stall_diagnostics(
             int32_t kid_aiv1 = slot_state.to_descriptor().kernel_id[2];
             int64_t task_id = static_cast<int64_t>(slot_state.to_descriptor().task_id.raw);
             if (st >= CHIP_TASK_COMPLETED) continue;
-            // task_state has no intermediate ready/running value — it
-            // stays PENDING until the worker stores COMPLETED. Classify
+            // The slot mirror has no intermediate ready/running value — it
+            // stays PENDING until the worker stores COMPLETED (PUBLISHED
+            // lives in the task_states array, not here). Classify
             // by the ground truth instead: a slot is RUNNING iff some
             // core has it as running_slot_state. A task occupies at most
             // 3 cores (one cluster), all under the same owner thread by
@@ -1086,7 +1087,7 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
     const int32_t lo = static_cast<int32_t>((static_cast<int64_t>(submitted) * thread_idx) / nthreads);
     const int32_t hi = static_cast<int32_t>((static_cast<int64_t>(submitted) * (thread_idx + 1)) / nthreads);
     for (int32_t id = lo; id < hi; id++) {
-        if (tasks.is_completion_flag_set(id)) {
+        if (tasks.is_completed(id)) {
             continue;  // completed on the host (hidden alloc); nothing to dispatch
         }
         ChipTaskSlotState &slot = tasks.get_slot_state_by_task_id(id);

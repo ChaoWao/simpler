@@ -65,56 +65,63 @@ struct alignas(64) SharedMemoryTaskHeader {
     // holding that task's descriptor, slot state and payload — see ChipTaskStorage.
     ChipTaskStorage *task_storage;
 
-    // Polling-completion state (device-addressed array, one byte per slot).
-    // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
-    // on_mixed_task_complete; reader = consumer fanin polling (is_completion_flag_set).
-    // Cleared per-slot in orch::prepare_task as each slot is claimed. Indexed by
-    // local task id, like the storage array — so it covers GLOBAL tasks only. An
-    // IN_GRAPH task holds no slot here and publishes completion through its own
+    // Polling-progress state (device-addressed array, one ChipTaskState byte per
+    // slot): PENDING -> PUBLISHED -> COMPLETED. Writers = the total-reaching
+    // publisher at account_published_blocks (PUBLISHED) and the task's completer
+    // at on_mixed_task_complete (COMPLETED); readers = consumer fanin polling
+    // (is_completed) and the ED publish scan (is_published). Reset per-slot in
+    // orch::prepare_task as each slot is claimed. Indexed by local task id, like
+    // the storage array — so it covers GLOBAL tasks only. An IN_GRAPH task holds
+    // no slot here and publishes completion through its own
     // ChipTaskSlotState::task_state instead; the Graph's outer shell is the GLOBAL
-    // task that carries a flag for the whole body.
+    // task that carries the byte for the whole body.
     //
     // A byte array of its own rather than a field of ChipTaskStorage: a fanin scan
-    // reads many producers' flags at once, which one cache line answers here and
+    // reads many producers' states at once, which one cache line answers here and
     // would take one line per producer inside the storage stride.
     //
-    // A hidden-alloc task is the one flag the host presets to 1: it completes during
-    // orchestration, and a consumer polls this array rather than task_state.
-    std::atomic<uint8_t> *progress_flags;
+    // A hidden-alloc task is the one byte the host presets to COMPLETED: it
+    // completes during orchestration, and a consumer polls this array rather than
+    // task_state.
+    std::atomic<ChipTaskState> *task_states;
 
     // Tasks this run submitted, i.e. the slot count the two segments above are
     // pitched to. Written once by the host after orchestration (run_host_orchestration)
     // and read-only from then on, so it packs into the padding rather than taking a
     // line of its own. Bounds every slot-indexed walk: no slot at or above it was
-    // claimed, and the bytes past progress_flags[total_tasks - 1] are not flags.
+    // claimed, and the bytes past task_states[total_tasks - 1] are not states.
     int32_t total_tasks;
 
-    // One byte carries two monotonic facts about a task, each its own bit:
-    //   COMPLETED  every subtask finished; the readiness truth consumers scan
-    //   PUBLISHED  every logical block's payload + MMIO token is written; the
-    //              early-dispatch publish list scans this bit, and completion
-    //              implies it (a finished task occupies no cores)
-    // Completion is a plain store of both bits. Publication is a fetch_or:
-    // the publish-side bookkeeping can run after the block's FIN has already
-    // been observed, so a plain store could erase a completion that landed
-    // in between — OR preserves it under either ordering.
-    static constexpr uint8_t TASK_FLAG_COMPLETED = 1u << 0;
-    static constexpr uint8_t TASK_FLAG_PUBLISHED = 1u << 1;
+    // The byte holds a ChipTaskState and only ever advances:
+    //   PENDING -> PUBLISHED -> COMPLETED
+    // Both transitions are plain stores; monotonicity is by construction, not
+    // by encoding. The total-reaching publisher stores PUBLISHED before its
+    // batch's MMIO token writes, every block's FIN follows its token, and the
+    // all-FIN completer stores COMPLETED — so PUBLISHED ≺ token ≺ FIN ≺
+    // COMPLETED and no writer can regress the byte. Readers use ordered
+    // comparisons: COMPLETED implies published (a finished task occupies no
+    // cores), which is what lets a tracked producer that never publishes
+    // (DUMMY, predicate-retired) release its publish-list waiters through the
+    // completion store alone.
 
-    bool is_completion_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
-        return (progress_flags[local_id].load(order) & TASK_FLAG_COMPLETED) != 0;
+    bool is_completed(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
+        return task_states[local_id].load(order) >= CHIP_TASK_COMPLETED;
     }
 
-    void set_completion_flag(int32_t local_id, std::memory_order order = std::memory_order_release) const {
-        progress_flags[local_id].store(TASK_FLAG_COMPLETED | TASK_FLAG_PUBLISHED, order);
+    void store_completed(int32_t local_id, std::memory_order order = std::memory_order_release) const {
+        task_states[local_id].store(CHIP_TASK_COMPLETED, order);
     }
 
-    bool is_publish_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
-        return (progress_flags[local_id].load(order) & TASK_FLAG_PUBLISHED) != 0;
+    bool is_published(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
+        return task_states[local_id].load(order) >= CHIP_TASK_PUBLISHED;
     }
 
-    void set_publish_flag(int32_t local_id) const {
-        progress_flags[local_id].fetch_or(TASK_FLAG_PUBLISHED, std::memory_order_release);
+    void store_published(int32_t local_id) const {
+        task_states[local_id].store(CHIP_TASK_PUBLISHED, std::memory_order_release);
+    }
+
+    void reset_task_state(int32_t local_id) const {
+        task_states[local_id].store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     }
 
     // A task id is its own storage index, so the three records it names are reached
@@ -246,7 +253,7 @@ inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
 }
 
 // Byte offsets (from the SM base) of the image's segments. The layout is: header, then
-// storage -> progress_flags -> the three argument pools, every segment
+// storage -> task_states -> the three argument pools, every segment
 // CHIP_ALIGN_UP-padded. ImageExtents dimensions them: the mirror for the worst case the
 // API allows, the image for what this bind holds, which is what makes the live prefixes
 // contiguous and the upload one copy.
@@ -256,11 +263,11 @@ inline SharedMemoryTaskHeader *task_header_addr(void *sm_dev_base) noexcept {
 // restack's change of pitch untouched.
 //
 // The pools sit last because nothing on the device resolves a segment past
-// progress_flags: a payload names its argument regions by delta, so the two
+// task_states: a payload names its argument regions by delta, so the two
 // slot-pitched offsets are all the attach path computes.
 struct SegmentOffsets {
     uint64_t storage;
-    uint64_t progress_flags;  // polling-completion byte array (1 byte/slot)
+    uint64_t task_states;  // polling-progress ChipTaskState array (1 byte/slot)
     uint64_t fanin_pool;
     uint64_t tensor_pool;
     uint64_t scalar_pool;
@@ -297,8 +304,8 @@ inline SegmentOffsets segment_offsets(const ImageExtents &e) noexcept {
     SegmentOffsets o{};
     o.storage = off;
     off += CHIP_ALIGN_UP(e.slots * sizeof(ChipTaskStorage), CHIP_ALIGN_SIZE);
-    o.progress_flags = off;
-    off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<uint8_t>), CHIP_ALIGN_SIZE);
+    o.task_states = off;
+    off += CHIP_ALIGN_UP(e.slots * sizeof(std::atomic<ChipTaskState>), CHIP_ALIGN_SIZE);
     o.fanin_pool = off;
     off += CHIP_ALIGN_UP(e.fanin_elems * sizeof(int32_t), CHIP_ALIGN_SIZE);
     o.tensor_pool = off;
@@ -428,14 +435,14 @@ inline uint64_t compact_live_image(
     std::memcpy(out_base, mirror_base, to.storage);
     auto &out_tasks = reinterpret_cast<SharedMemoryHeader *>(out_base)->tasks;
     out_tasks.task_storage = nullptr;
-    out_tasks.progress_flags = nullptr;
+    out_tasks.task_states = nullptr;
 
     const uint64_t nt = used.submitted_tasks;
     // One copy for all three of a task's records: ChipTaskStorage is fixed-size, so
     // the mirror and the image share a stride. Each pool is likewise one copy of its
     // own prefix.
     std::memcpy(out_base + to.storage, mirror_base + from.storage, nt * sizeof(ChipTaskStorage));
-    std::memcpy(out_base + to.progress_flags, mirror_base + from.progress_flags, nt * sizeof(std::atomic<uint8_t>));
+    std::memcpy(out_base + to.task_states, mirror_base + from.task_states, nt * sizeof(std::atomic<ChipTaskState>));
     std::memcpy(out_base + to.fanin_pool, mirror_base + from.fanin_pool, used.fanin_elems * sizeof(int32_t));
     std::memcpy(
         out_base + to.tensor_pool, mirror_base + from.tensor_pool, used.tensor_elems * sizeof(simpler::hbg::Tensor)

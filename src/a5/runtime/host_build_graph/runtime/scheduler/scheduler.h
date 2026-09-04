@@ -15,11 +15,11 @@
  * The Scheduler is responsible for:
  * 1. Maintaining per-resource-shape ready queues
  * 2. Polling-completion dependency resolution: a GLOBAL task is ready when every
- *    producer named in its inline fanin has set its progress_flags byte, an
+ *    producer named in its inline fanin has a COMPLETED task_states byte, an
  *    IN_GRAPH one when every producer in its Graph's fanin wire has reached
  *    task_state == COMPLETED (that table has no flag bytes); a producer publishes
  *    completion + drains its wake list on finish
- * 3. Publishing completion (task_state PENDING -> COMPLETED, progress_flags byte)
+ * 3. Publishing completion (task_state PENDING -> COMPLETED, task_states byte)
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
@@ -506,7 +506,7 @@ struct SchedulerState {
         SharedMemoryTaskHeader *tasks;
 
         // Polling: no dep_pool. Readiness is derived from the task table's
-        // progress_flags; there is no arena-side wiring pool to reserve or wire.
+        // task_states; there is no arena-side wiring pool to reserve or wire.
         // The `tasks` field stores the device address of the SM task header —
         // computed via offset arithmetic, no SM dereference.
         bool init_data_from_layout(void *sm_dev_base);
@@ -612,7 +612,7 @@ struct SchedulerState {
 
     // ---- Polling completion primitives ---------------------------------------
     // Readiness: a task is ready iff every producer named in its inline fanin has
-    // set its progress_flags byte. A producer is named by its local id alone, so
+    // a COMPLETED task_states byte. A producer is named by its local id alone, so
     // there is no per-edge indirection.
 
     // Unmet-fanin classification. Returns -1 (all fanins met -> route to ready)
@@ -627,7 +627,7 @@ struct SchedulerState {
     // lists. The decision is terminal: tasks are never re-polled; a producer's
     // completion re-scans its waiters via on_mixed_task_complete's wake drain.
     // Resumes at the wake-scan cursor: entries above it were completed at the
-    // last classification and completion bits are monotonic, so re-walking
+    // last classification and the task_states byte is monotone, so re-walking
     // them cannot change the verdict. An unmet verdict records itself as the
     // new cursor — the caller hangs the task exactly there, and this
     // classifier is the task's only owner at that moment.
@@ -637,7 +637,7 @@ struct SchedulerState {
         const int32_t *fanin = p.fanin_data();
         const int32_t start = s->wake_scan_cursor < p.fanin_count ? s->wake_scan_cursor : p.fanin_count - 1;
         for (int32_t i = start; i >= 0; i--) {
-            if (!tasks.is_completion_flag_set(fanin[i])) {
+            if (!tasks.is_completed(fanin[i])) {
                 s->wake_scan_cursor = static_cast<uint8_t>(i);
                 return i;
             }
@@ -648,7 +648,7 @@ struct SchedulerState {
     // Register `consumer` on `producer`'s wake list. If the producer already
     // completed (head == SENTINEL), re-classify against ALL fanins: route to
     // ready only when every fanin is met, else re-target the next unmet producer
-    // and retry. Monotonic progress_flags guarantee termination.
+    // and retry. The monotone task_states bytes guarantee termination.
     void register_wake(ChipTaskSlotState *producer, ChipTaskSlotState *consumer) {
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
         while (true) {
@@ -671,7 +671,7 @@ struct SchedulerState {
     }
 
     // Producer completion under polling: publish the task_state completion
-    // mirror + the device-visible progress_flags byte, then drain the wake list
+    // mirror + the device-visible task_states byte, then drain the wake list
     // (route/re-register each waiter). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
@@ -679,10 +679,10 @@ struct SchedulerState {
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
         slot_state.mark_completed();  // completion mirror (task_state = COMPLETED)
-        tasks.set_completion_flag(task_id);
-        // The completion byte carries the publish bit, so a tracked producer
-        // that never published (DUMMY, predicate-retired) still releases its
-        // publish-list waiters here. Idempotent after a publish-time seal.
+        tasks.store_completed(task_id);
+        // COMPLETED >= PUBLISHED, so a tracked producer that never published
+        // (DUMMY, predicate-retired) still releases its publish-list waiters
+        // here. Idempotent after a publish-time seal.
         if ((slot_state.ed_flags & ED_FLAG_TRACKED) != 0) seal_ed_publish_list(slot_state);
 
         ChipTaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
@@ -905,8 +905,8 @@ struct SchedulerState {
     // Publication accounting for the producers early dispatch watches. Only
     // ED_FLAG_TRACKED tasks pay: the host set that bit exactly on the
     // producers of at least one candidate. When the count reaches the task's
-    // logical blocks, the publish byte-bit is set and the publish list is
-    // sealed — everything past that leaves the dispatch path.
+    // logical blocks, the state byte advances to PUBLISHED and the caller seals
+    // the publish list — everything past that leaves the dispatch path.
     //
     // "Published" counts placement, not launch: a gated candidate's staged
     // blocks publish here too, so its consumers may pre-stage while it still
@@ -919,31 +919,44 @@ struct SchedulerState {
     // reclaiming tensormap_and_ringbuffer runtime instead defers propagation
     // to launch visibility; whole-graph-resident hbg holds no reclaimable
     // resource a gated chain could pin, so placement is the sufficient gate.)
-    inline void record_published_blocks(ChipTaskSlotState &slot_state, int32_t count) {
-        if (count <= 0 || (slot_state.ed_flags & ED_FLAG_TRACKED) == 0) return;
+    // Called BEFORE the batch's MMIO token writes, with the count that batch is
+    // about to publish. Returns true when this call reached the task's total,
+    // i.e. this caller owns the seal and must call seal_ed_publish_list once its
+    // tokens are flushed.
+    //
+    // Accounting ahead of the tokens is what makes the state byte a plain
+    // sequential store: it puts PUBLISHED before every token this task will
+    // ever emit, so PUBLISHED ≺ token ≺ FIN ≺ COMPLETED holds no matter how
+    // fast a core FINs or how sibling publishers interleave — the total-reaching
+    // thread's store precedes its own tokens, and those tokens' FINs gate the
+    // all-FIN completion. Cores are claimed at prepare time, before any of this,
+    // so a consumer staged off the early PUBLISHED cannot occupy cores the
+    // producer's in-flight blocks still need.
+    inline bool account_published_blocks(ChipTaskSlotState &slot_state, int32_t count) {
+        if (count <= 0 || (slot_state.ed_flags & ED_FLAG_TRACKED) == 0) return false;
         const int16_t total = static_cast<int16_t>(
             slot_state.to_payload().published_block_count.fetch_add(
                 static_cast<int16_t>(count), std::memory_order_seq_cst
             ) +
             count
         );
-        if (total == slot_state.logical_block_num) seal_ed_publish_list(slot_state);
+        if (total != slot_state.logical_block_num) return false;
+        task_view.tasks->store_published(slot_state.to_descriptor().task_id.local_id());
+        return true;
     }
 
-    // Publish event of a tracked producer: publish bit, then seal. The order
-    // pairs with the acquire loads in advance_ed_publish_scan — a scanner that
-    // meets the sentinel is guaranteed to read the bit as set. The exchange
-    // makes the seal exactly-once (a second call gets the sentinel back), so
-    // the completion path can call this too for tracked producers that never
-    // publish (DUMMY / predicate-retired), whose completion byte carries the
-    // publish bit. A full pending-drain queue drops the chain: those
+    // Seal event of a tracked producer, after its tokens are flushed. The
+    // PUBLISHED store already happened in account_published_blocks, so a scanner
+    // that meets the sentinel is guaranteed to read the byte as published. The
+    // exchange makes the seal exactly-once (a second call gets the sentinel
+    // back), so the completion path can call this too for tracked producers that
+    // never publish (DUMMY / predicate-retired), whose COMPLETED byte already
+    // compares as published. A full pending-drain queue drops the chain: those
     // candidates miss early dispatch, nothing blocks.
     inline void seal_ed_publish_list(ChipTaskSlotState &slot_state) {
         // The sentinel is monotone (set once, never cleared), so an
-        // already-sealed list needs neither the flag RMW nor the exchange.
+        // already-sealed list needs no exchange.
         if (slot_state.ed_publish_list_head.load(std::memory_order_acquire) == ED_PUBLISH_LIST_SENTINEL) return;
-        const int32_t local_id = slot_state.to_descriptor().task_id.local_id();
-        task_view.tasks->set_publish_flag(local_id);
         ChipTaskSlotState *head =
             slot_state.ed_publish_list_head.exchange(ED_PUBLISH_LIST_SENTINEL, std::memory_order_acq_rel);
         if (head == ED_PUBLISH_LIST_SENTINEL) return;
@@ -960,7 +973,7 @@ struct SchedulerState {
     }
 
     // Resume candidate `c`'s publish scan at its cursor. The row is sorted and
-    // publish bits are monotonic, so entries above the cursor stay published
+    // the state byte is monotone, so entries above the cursor stay published
     // forever and each entry is loaded once per life. Returns true when every
     // producer is published — the early-dispatch trigger; false when `c` was
     // re-hung on a still-unpublished producer's publish list. A hang CAS that
@@ -971,7 +984,7 @@ struct SchedulerState {
         const int32_t *fanin = p.fanin_data();
         int32_t i = c.ed_publish_scan_cursor;
         while (i >= 0) {
-            if (tasks.is_publish_flag_set(fanin[i])) {
+            if (tasks.is_published(fanin[i])) {
                 i--;
                 continue;
             }
@@ -1368,7 +1381,7 @@ struct SchedulerState {
 #endif
     ) {
         // Polling completion: publish the task_state completion mirror + the
-        // device-visible progress_flags byte and drain the wake list (route or
+        // device-visible task_states byte and drain the wake list (route or
         // re-register each waiter). Replaces the
         // fanout-list walk + fanin_refcount decrements of the wiring model.
         on_mixed_task_complete(slot_state);
