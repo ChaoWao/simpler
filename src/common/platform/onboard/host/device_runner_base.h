@@ -740,6 +740,8 @@ public:
     const simpler::dfx::HostPhaseRecordStore &host_phase_records() const { return host_phase_records_; }
     /** Hand this pass's records to the swimlane reader, just before its export. */
     void publish_host_phase_records_to_swimlane();
+    /** Start the level-4 Host/Device clock correlation once per run. */
+    void begin_clock_correlation_session_if_needed() noexcept;
     /**
      * Write this pass's per-event host phase records to `output_prefix_`.
      *
@@ -1299,5 +1301,6 @@ protected:
     bool enable_scope_stats_{false};
     ChipSwimlaneLevel chip_swimlane_level_{ChipSwimlaneLevel::DISABLED};  // resolved from set_chip_swimlane_enabled()
     PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};         // resolved from set_pmu_enabled()
+    bool capture_clock_anchors_{false};                                   // from CallConfig::capture_clock_anchors
     std::string output_prefix_{};                                         // diagnostic artifact root directory
 };

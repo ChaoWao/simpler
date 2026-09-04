@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +27,127 @@ from simpler_setup.scene_test import (
     run_class_cases,
     standalone_pytest_options,
 )
+
+
+def test_l3_swimlane_postprocess_merges_dispatches_present_on_every_rank(tmp_path, monkeypatch) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    for rank in (0, 1):
+        for dispatch in ("d0", "d1"):
+            records = tmp_path / f"rank{rank}" / dispatch / "chip_swimlane_records.json"
+            records.parent.mkdir(parents=True)
+            records.write_text("{}")
+
+    calls = []
+    monkeypatch.setattr(scene_test_module, "_run_swimlane_converter", lambda **kwargs: calls.append(kwargs))
+
+    scene_test_module._convert_case_swimlane("case", tmp_path)
+
+    assert [call["dispatch"] for call in calls] == ["d0", "d1"]
+    assert [call["output_path"] for call in calls] == [
+        Path(tmp_path) / "l3_swimlane_d0.json",
+        Path(tmp_path) / "l3_swimlane_d1.json",
+    ]
+
+
+def test_l3_swimlane_postprocess_falls_back_per_rank_below_level_four(tmp_path, monkeypatch, caplog) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    for rank in (0, 1):
+        records = tmp_path / f"rank{rank}" / "d0" / "chip_swimlane_records.json"
+        records.parent.mkdir(parents=True)
+        records.write_text(json.dumps({"chip_swimlane_level": 3}))
+
+    calls = []
+    monkeypatch.setattr(scene_test_module, "_run_swimlane_converter", lambda **kwargs: calls.append(kwargs))
+
+    scene_test_module._convert_case_swimlane("case", tmp_path)
+
+    # No cross-Rank merge without clock anchors — one single-file conversion per Rank.
+    assert [call["input_path"] for call in calls] == [
+        tmp_path / "rank0" / "d0" / "chip_swimlane_records.json",
+        tmp_path / "rank1" / "d0" / "chip_swimlane_records.json",
+    ]
+    assert all("dispatch" not in call for call in calls)
+    assert "cross-Rank merging needs --enable-chip-swimlane 4" in caplog.text
+
+
+def test_l3_swimlane_postprocess_refuses_asymmetric_local_capture_indexes(tmp_path, monkeypatch, caplog) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    for rank, dispatches in ((0, ("d0", "d1")), (1, ("d0",))):
+        for dispatch in dispatches:
+            records = tmp_path / f"rank{rank}" / dispatch / "chip_swimlane_records.json"
+            records.parent.mkdir(parents=True)
+            records.write_text("{}")
+
+    calls = []
+    monkeypatch.setattr(scene_test_module, "_run_swimlane_converter", lambda **kwargs: calls.append(kwargs))
+
+    scene_test_module._convert_case_swimlane("case", tmp_path)
+
+    assert calls == []
+    assert "refusing to pair asymmetric local capture indexes" in caplog.text
+
+
+def test_l3_swimlane_postprocess_uses_parent_identity_when_rank_d_paths_are_reordered(tmp_path, monkeypatch) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    captures = {
+        (0, "d0"): (5, 0),
+        (0, "d1"): (6, 0),
+        (1, "d0"): (6, 1),
+        (1, "d1"): (5, 1),
+    }
+    for (rank, dispatch), (task_slot, group_index) in captures.items():
+        capture = tmp_path / f"rank{rank}" / dispatch
+        capture.mkdir(parents=True)
+        (capture / "chip_swimlane_records.json").write_text("{}")
+        (capture / "dispatch_identity.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": 17,
+                    "task_slot": task_slot,
+                    "group_index": group_index,
+                    "group_size": 2,
+                    "chip_rank": rank,
+                    "local_capture_index": int(dispatch.removeprefix("d")),
+                    "endpoint_dispatch_id": int(dispatch.removeprefix("d")) + 1,
+                    "pipeline_slot": 0,
+                    "pipeline_generation": 1,
+                    "callable_digest": "ab" * 32,
+                }
+            )
+        )
+
+    calls = []
+    monkeypatch.setattr(scene_test_module, "_run_swimlane_converter", lambda **kwargs: calls.append(kwargs))
+
+    scene_test_module._convert_case_swimlane("case", tmp_path)
+
+    assert [(call["dispatch"], call["dispatch_id"]) for call in calls] == [(None, "17:5"), (None, "17:6")]
+    assert [call["output_path"].name for call in calls] == [
+        "l3_swimlane_run17_task5.json",
+        "l3_swimlane_run17_task6.json",
+    ]
+
+
+def test_rank_local_dep_and_scope_postprocessors_follow_swimlane_output_prefix(tmp_path, monkeypatch) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    captures = [tmp_path / f"rank{rank}" / "d0" for rank in (0, 1)]
+    for capture in captures:
+        (capture / "scope_stats").mkdir(parents=True)
+        (capture / "deps.json").write_text("{}")
+        (capture / "scope_stats" / "scope_stats.jsonl").write_text("")
+
+    dep_calls = []
+    scope_calls = []
+    monkeypatch.setattr(
+        scene_test_module, "_graph_case_dep_gen", lambda _label, path, **_kwargs: dep_calls.append(path)
+    )
+    monkeypatch.setattr(scene_test_module, "_plot_case_scope_stats", lambda _label, path: scope_calls.append(path))
+
+    scene_test_module.finalize_diagnostic_outputs("case", tmp_path, dep_gen=True, scope_stats=True)
+
+    assert dep_calls == captures
+    assert scope_calls == captures
 
 
 def test_multi_rounds_disable_every_diagnostic() -> None:

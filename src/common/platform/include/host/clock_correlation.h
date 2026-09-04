@@ -21,6 +21,19 @@ namespace simpler::dfx {
 
 constexpr std::size_t kClockAnchorSamplesPerPosition = 3;
 
+// The two ends of the calibrated interval. Device timestamps outside
+// [HostOrchestrationBegin, DeviceExecutionComplete] cannot be mapped to the
+// Host clock, so the opening anchor is taken at whatever point in a runtime's
+// sequence precedes every device timestamp it will record:
+//
+//   host_build_graph            before Host orchestration (host_phase_pool_arm),
+//                               so the interval also spans bind and H2D
+//   tensormap_and_ringbuffer    before kernel launch (start_shared_collectors_
+//                               for_run), the earliest point it has
+//
+// The serialized name "pre_host_orchestration" predates the second case and is
+// kept because it is an on-wire value in every existing capture; read it as
+// "start of the calibrated interval", not as a claim about Host orchestration.
 enum class ClockAnchorPosition : uint32_t {
     HostOrchestrationBegin = 0,
     DeviceExecutionComplete = 1,

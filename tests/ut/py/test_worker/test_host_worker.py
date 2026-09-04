@@ -225,7 +225,10 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
         def finalize(self) -> None:
             events.append(("finalize",))
 
-    def fake_run_chip_main_loop(cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1):
+    def fake_run_chip_main_loop(
+        cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1, chip_rank=None
+    ):
+        assert chip_rank is None
         published_depths.append(worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)[0])
         published_frame_counts.append(task_frame_count)
         events.append(("main_loop", cw, chip_platform, chip_runtime))
@@ -1084,13 +1087,16 @@ class _TwoFrameLoopHarness:
         state: int = worker_mod._TASK_READY,
         generation: int = 11,
         diagnostics: bool = False,
+        task_slot: Optional[int] = None,
+        group_index: int = 0,
+        group_size: int = 1,
     ) -> None:
         offset = self._frame_offset(index)
         frame = self.buf[offset : offset + worker_mod.MAILBOX_FRAME_SIZE]
         try:
             frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = self.digest
             struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
-            cfg_values = [0] * (6 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+            cfg_values = [0] * (7 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
             cfg_values[3] = int(diagnostics)
             output_prefix = b"/tmp/simpler-test" if diagnostics else b""
             worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, output_prefix)
@@ -1100,6 +1106,11 @@ class _TwoFrameLoopHarness:
             struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_SLOT_ID, index)
             struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, generation)
             struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_DISPATCH_ID, dispatch_id)
+            struct.pack_into(
+                "=Q", frame, worker_mod._OFF_FRAME_TASK_SLOT, dispatch_id if task_slot is None else task_slot
+            )
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_INDEX, group_index)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_SIZE, group_size)
         finally:
             frame.release()
         _mailbox_store_i32(self.accepted_addr(index), 0)
@@ -8169,6 +8180,91 @@ class TestChipMainLoopDigestRegister:
             shm.unlink()
             payload_shm.close()
             payload_shm.unlink()
+
+
+def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path):
+    """A rankN/dN write failure is this task's error, not the loop's.
+
+    The sidecar is written while the task config is read, before anything the
+    task itself does. An exception escaping there leaves ``_run_mailbox_loop``
+    without publishing TASK_DONE or an error message, so the parent waits on a
+    mailbox that never completes — a far worse outcome than the diagnostic
+    artifact this path exists to produce.
+    """
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    # rank0 as a regular file makes os.makedirs("<prefix>/rank0/d0") raise,
+    # while output_prefix itself stays a directory the host log setter accepts.
+    (tmp_path / "rank0").write_text("")
+
+    shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+    buf = shm.buf
+    assert buf is not None
+    mailbox_addr = _mailbox_addr(shm)
+    state_addr = mailbox_addr + _OFF_STATE
+    frame_state_addr = mailbox_addr + worker_mod.MAILBOX_FRAME_SIZE + _OFF_STATE
+    _mailbox_store_i32(state_addr, worker_mod._IDLE)
+
+    digest = bytes([0x42]) * worker_mod.CALLABLE_HASH_DIGEST_BYTES
+    frame = buf[worker_mod.MAILBOX_FRAME_SIZE : 2 * worker_mod.MAILBOX_FRAME_SIZE]
+    try:
+        frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = digest
+        struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
+        cfg_values = [0] * (7 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+        cfg_values[1] = 4  # enable_chip_swimlane
+        worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, str(tmp_path).encode())
+        worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, 0, 0, 11)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_RUN_ID, 5)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_SLOT_ID, 0)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, 11)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_DISPATCH_ID, 1)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_TASK_SLOT, 3)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_INDEX, 0)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_SIZE, 1)
+    finally:
+        frame.release()
+
+    thread = threading.Thread(
+        target=worker_mod._run_chip_main_loop,
+        args=(
+            MagicMock(),
+            buf,
+            mailbox_addr,
+            state_addr,
+            0,
+            {},
+            {digest: 7},
+            {digest: 1},
+            worker_mod.mint_owner_instance_id(),
+        ),
+        kwargs={"chip_platform": "a2a3", "chip_runtime": "", "prepared": {7}, "chip_rank": 0},
+        daemon=True,
+    )
+    try:
+        _mailbox_store_i32(frame_state_addr, worker_mod._TASK_READY)
+        thread.start()
+        deadline = time.monotonic() + 5.0
+        while _mailbox_load_i32(frame_state_addr) != worker_mod._TASK_DONE:
+            assert time.monotonic() < deadline, "loop exited without publishing TASK_DONE"
+            time.sleep(0.001)
+
+        task_frame = buf[worker_mod.MAILBOX_FRAME_SIZE : 2 * worker_mod.MAILBOX_FRAME_SIZE]
+        try:
+            error_code = struct.unpack_from("i", task_frame, worker_mod._OFF_ERROR)[0]
+            raw = bytes(task_frame[MAILBOX_OFF_ERROR_MSG : MAILBOX_OFF_ERROR_MSG + MAILBOX_ERROR_MSG_SIZE])
+        finally:
+            task_frame.release()
+        assert error_code == 1
+        assert raw.split(b"\x00", 1)[0].decode("utf-8", "replace").startswith("chip_process dev=0")
+        assert not (tmp_path / "rank0" / "d0").exists()
+        assert thread.is_alive()
+    finally:
+        _mailbox_store_i32(state_addr, worker_mod._SHUTDOWN)
+        thread.join(5.0)
+        assert not thread.is_alive()
+        shm.close()
+        shm.unlink()
 
 
 def test_the_cpp_pre_bind_level_word_is_the_ladder_word_for_l3():

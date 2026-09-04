@@ -529,7 +529,10 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 auto thread_factory = [this](std::function<void()> fn) {
                     return create_thread(std::move(fn));
                 };
-                if (enable_chip_swimlane_) chip_swimlane_collector_.start(thread_factory);
+                if (enable_chip_swimlane_) {
+                    if (capture_clock_anchors_) begin_clock_correlation_session_if_needed();
+                    chip_swimlane_collector_.start(thread_factory);
+                }
                 if (enable_dump_args_) dump_collector_.start(thread_factory);
                 if (enable_pmu_) pmu_collector_.start(thread_factory);
                 if (enable_dep_gen_ && !dep_gen_host_graph_active()) dep_gen_collector_.start(thread_factory);

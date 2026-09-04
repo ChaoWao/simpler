@@ -162,11 +162,18 @@ def compute_dag_stats_from_deps(deps_data, perf_data, threads):
 
 
 def auto_select_chip_swimlane_records_json():
-    """Find the latest outputs/<case>/chip_swimlane_records.json (sorted by mtime)."""
+    """Find the newest ``chip_swimlane_records.json`` under ``outputs/`` by mtime.
+
+    Recursive because the depth varies with the level that produced the capture:
+    an L2 case writes it at ``outputs/<case>/``, while each chip of an L3 case
+    writes its own below ``outputs/<case>/rank<N>/d<N>/``. A fixed one-level
+    glob finds only the former and reports "no records" for a run that produced
+    several.
+    """
     outputs_dir = Path.cwd() / "outputs"
-    files = sorted(outputs_dir.glob("*/chip_swimlane_records.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(outputs_dir.rglob("chip_swimlane_records.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
-        raise FileNotFoundError(f"No outputs/*/chip_swimlane_records.json found under {outputs_dir}")
+        raise FileNotFoundError(f"No chip_swimlane_records.json found anywhere under {outputs_dir}")
     return files[0]
 
 

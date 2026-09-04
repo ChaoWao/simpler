@@ -799,17 +799,24 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
 
     const uint64_t protocol = MAILBOX_TASK_PROTOCOL_VERSION;
     const uint64_t slot_id = state.pipeline_lease.slot_id;
+    const uint64_t task_slot = static_cast<uint64_t>(dispatch.task_slot);
+    const uint64_t group_index = static_cast<uint64_t>(dispatch.group_index);
+    const uint64_t group_size = static_cast<uint64_t>(state.group_size());
     std::memcpy(frame + MAILBOX_OFF_FRAME_PROTOCOL, &protocol, sizeof(protocol));
     std::memcpy(frame + MAILBOX_OFF_FRAME_RUN_ID, &state.run_id, sizeof(state.run_id));
     std::memcpy(frame + MAILBOX_OFF_FRAME_SLOT_ID, &slot_id, sizeof(slot_id));
     std::memcpy(frame + MAILBOX_OFF_FRAME_GENERATION, &state.pipeline_lease.generation, sizeof(uint64_t));
     std::memcpy(frame + MAILBOX_OFF_FRAME_DISPATCH_ID, &dispatch.dispatch_id, sizeof(dispatch.dispatch_id));
+    std::memcpy(frame + MAILBOX_OFF_FRAME_TASK_SLOT, &task_slot, sizeof(task_slot));
+    std::memcpy(frame + MAILBOX_OFF_FRAME_GROUP_INDEX, &group_index, sizeof(group_index));
+    std::memcpy(frame + MAILBOX_OFF_FRAME_GROUP_SIZE, &group_size, sizeof(group_size));
 
     record.occupied = true;
     record.dispatch = dispatch;
     record.run_id = state.run_id;
     record.slot_id = slot_id;
     record.generation = state.pipeline_lease.generation;
+    record.group_size = group_size;
     write_mailbox_state(dispatch.prepare_only ? MailboxState::PREPARE_READY : MailboxState::TASK_READY, frame);
 }
 
@@ -819,15 +826,23 @@ bool LocalMailboxEndpoint::frame_identity_matches(const FrameRecord &record, con
     uint64_t slot_id = 0;
     uint64_t generation = 0;
     uint64_t dispatch_id = 0;
+    uint64_t task_slot = 0;
+    uint64_t group_index = 0;
+    uint64_t group_size = 0;
     PipelineSlotLease lease{};
     std::memcpy(&protocol, frame + MAILBOX_OFF_FRAME_PROTOCOL, sizeof(protocol));
     std::memcpy(&run_id, frame + MAILBOX_OFF_FRAME_RUN_ID, sizeof(run_id));
     std::memcpy(&slot_id, frame + MAILBOX_OFF_FRAME_SLOT_ID, sizeof(slot_id));
     std::memcpy(&generation, frame + MAILBOX_OFF_FRAME_GENERATION, sizeof(generation));
     std::memcpy(&dispatch_id, frame + MAILBOX_OFF_FRAME_DISPATCH_ID, sizeof(dispatch_id));
+    std::memcpy(&task_slot, frame + MAILBOX_OFF_FRAME_TASK_SLOT, sizeof(task_slot));
+    std::memcpy(&group_index, frame + MAILBOX_OFF_FRAME_GROUP_INDEX, sizeof(group_index));
+    std::memcpy(&group_size, frame + MAILBOX_OFF_FRAME_GROUP_SIZE, sizeof(group_size));
     std::memcpy(&lease, frame + MAILBOX_OFF_PIPELINE_LEASE, sizeof(lease));
     return protocol == MAILBOX_TASK_PROTOCOL_VERSION && run_id == record.run_id && slot_id == record.slot_id &&
            generation == record.generation && dispatch_id == record.dispatch.dispatch_id &&
+           task_slot == static_cast<uint64_t>(record.dispatch.task_slot) &&
+           group_index == static_cast<uint64_t>(record.dispatch.group_index) && group_size == record.group_size &&
            lease.slot_id == record.slot_id && lease.reserved == 0 && lease.generation == record.generation;
 }
 

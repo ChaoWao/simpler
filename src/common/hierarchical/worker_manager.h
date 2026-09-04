@@ -99,7 +99,7 @@ static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
 static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
 static constexpr size_t MAILBOX_FIRST_TASK_FRAME = 1;
 static constexpr size_t MAILBOX_SIZE = MAILBOX_FRAME_SIZE * (1 + MAILBOX_TASK_FRAME_COUNT);
-static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 3;
+static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 4;
 
 // Error message region lives at the mailbox tail. 256 B of headroom is
 // enough for `<ExceptionType>: <short message>` produced by the child-side
@@ -149,13 +149,19 @@ static constexpr ptrdiff_t MAILBOX_OFF_FRAME_RUN_ID = MAILBOX_OFF_ACCEPTED - 32;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_SLOT_ID = MAILBOX_OFF_ACCEPTED - 24;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_GENERATION = MAILBOX_OFF_ACCEPTED - 16;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_DISPATCH_ID = MAILBOX_OFF_ACCEPTED - 8;
+// Parent-DAG identity shared by every member of one NEXT_LEVEL group. Unlike
+// dispatch_id (which is local to one WorkerThread), task_slot is comparable
+// across the group's Rank endpoints within run_id.
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_TASK_SLOT = MAILBOX_OFF_ACCEPTED - 48;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_GROUP_INDEX = MAILBOX_OFF_ACCEPTED - 56;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_GROUP_SIZE = MAILBOX_OFF_ACCEPTED - 64;
 // Termination is a sticky one-way word on the control frame, not a MailboxState:
 // MAILBOX_OFF_STATE has three writers (the parent's CONTROL_REQUEST, the child's
 // CONTROL_DONE, and this endpoint's return-to-IDLE), any of which overwrites a
 // SHUTDOWN store. Only a terminating parent writes this word, 0 -> 1, and
 // nothing ever clears it, so a child that observes it exits its serve loop no
 // matter what state word a concurrent control command leaves behind.
-static constexpr ptrdiff_t MAILBOX_OFF_SHUTDOWN = MAILBOX_OFF_FRAME_PROTOCOL - 8;
+static constexpr ptrdiff_t MAILBOX_OFF_SHUTDOWN = MAILBOX_OFF_ACCEPTED - 72;
 static constexpr int32_t MAILBOX_SHUTDOWN_REQUESTED = 1;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_CALLABLE_HASH = MAILBOX_OFF_ARGS;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_ARGS_BLOB =
@@ -522,6 +528,7 @@ private:
         RunId run_id{INVALID_RUN_ID};
         uint64_t slot_id{0};
         uint64_t generation{0};
+        uint64_t group_size{0};
     };
     std::array<FrameRecord, MAILBOX_TASK_FRAME_COUNT> frames_{};
 

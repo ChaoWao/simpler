@@ -673,6 +673,24 @@ static uint64_t test_frame_dispatch_id(const char *frame) {
     return dispatch_id;
 }
 
+static uint64_t test_frame_task_slot(const char *frame) {
+    uint64_t task_slot = 0;
+    std::memcpy(&task_slot, frame + MAILBOX_OFF_FRAME_TASK_SLOT, sizeof(task_slot));
+    return task_slot;
+}
+
+static uint64_t test_frame_group_index(const char *frame) {
+    uint64_t group_index = 0;
+    std::memcpy(&group_index, frame + MAILBOX_OFF_FRAME_GROUP_INDEX, sizeof(group_index));
+    return group_index;
+}
+
+static uint64_t test_frame_group_size(const char *frame) {
+    uint64_t group_size = 0;
+    std::memcpy(&group_size, frame + MAILBOX_OFF_FRAME_GROUP_SIZE, sizeof(group_size));
+    return group_size;
+}
+
 class ScopedChildProcess {
 public:
     explicit ScopedChildProcess(pid_t pid) :
@@ -1510,6 +1528,12 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     EXPECT_EQ(test_frame_state(upper_frame), MailboxState::TASK_READY);
     EXPECT_EQ(test_frame_dispatch_id(lower_frame), 42u);
     EXPECT_EQ(test_frame_dispatch_id(upper_frame), 41u);
+    EXPECT_EQ(test_frame_task_slot(lower_frame), static_cast<uint64_t>(staged_slot));
+    EXPECT_EQ(test_frame_task_slot(upper_frame), static_cast<uint64_t>(active_slot));
+    EXPECT_EQ(test_frame_group_index(lower_frame), 0u);
+    EXPECT_EQ(test_frame_group_index(upper_frame), 0u);
+    EXPECT_EQ(test_frame_group_size(lower_frame), 1u);
+    EXPECT_EQ(test_frame_group_size(upper_frame), 1u);
 
     EXPECT_TRUE(endpoint.activate_progress(/*run_id=*/22));
     EXPECT_EQ(test_frame_state(lower_frame), MailboxState::PREPARE_READY);
@@ -1542,16 +1566,23 @@ TEST(WorkerManagerTest, CapacityOneMailboxUsesTheProgressTaskFrame) {
     allocator.init(/*heap_bytes=*/0);
     TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/21, /*pipeline_slot=*/1, /*generation=*/7);
     ASSERT_NE(task_slot, INVALID_SLOT);
+    TaskSlotState *state = allocator.slot_state(task_slot);
+    ASSERT_NE(state, nullptr);
+    state->is_group_ = true;
+    state->task_args_list.resize(3);
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/1);
     EXPECT_FALSE(endpoint.caps().supports_frame_staging);
 
-    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/41, /*prepare_only=*/false};
+    WorkerDispatch dispatch{task_slot, 1, /*dispatch_id=*/41, /*prepare_only=*/false};
     endpoint.submit_progress(&allocator, dispatch);
 
     char *frame = test_task_frame(mailbox, 0);
     EXPECT_EQ(test_frame_state(frame), MailboxState::TASK_READY);
     EXPECT_EQ(test_frame_dispatch_id(frame), 41u);
+    EXPECT_EQ(test_frame_task_slot(frame), static_cast<uint64_t>(task_slot));
+    EXPECT_EQ(test_frame_group_index(frame), 1u);
+    EXPECT_EQ(test_frame_group_size(frame), 3u);
 
     set_test_frame_accepted(frame);
     WorkerEndpointProgress progress;

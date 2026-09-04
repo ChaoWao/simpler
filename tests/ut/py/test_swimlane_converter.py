@@ -9,6 +9,9 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import json
+from pathlib import Path
+
+import pytest
 
 from simpler_setup.tools import swimlane_converter as sc
 
@@ -106,6 +109,267 @@ def _generate_trace(tasks, deps_edges, deps_block_map, tmp_path):
         deps_block_map=deps_block_map,
     )
     return out
+
+
+def _write_l3_rank(root, rank, *, host_shift_ns, task_id, clock_domain="same-boot", dispatch="d0"):
+    rank_dir = root / f"rank{rank}" / dispatch
+    rank_dir.mkdir(parents=True)
+    device_base = 100 + rank * 100_000
+    records = {
+        "chip_swimlane_level": 4,
+        "metadata": {
+            "clock_freq_hz": 1_000_000_000,
+            "num_cores": 1,
+            "core_types": ["aiv"],
+            "core_to_thread": [0],
+            "orchestrator_source": "host",
+            "orchestrator_clock_domain": "host_monotonic_ns",
+            "host_clock_domain_id": clock_domain,
+            "host_orchestration_origin_ns": host_shift_ns + 1_500,
+            "host_capture": {
+                "status": "complete",
+                "expected_records": 1,
+                "recorded_records": 1,
+                "dropped_records": 0,
+                "error": None,
+            },
+            "clock_anchors": {
+                "device_timestamp_unit": "syscnt_cycles",
+                "samples": [
+                    {
+                        "position": "pre_host_orchestration",
+                        "sample_idx": 0,
+                        "host_before_ns": host_shift_ns + 990,
+                        "device_cycles": device_base,
+                        "host_after_ns": host_shift_ns + 1_010,
+                        "error": None,
+                    },
+                    {
+                        "position": "post_device_execution",
+                        "sample_idx": 0,
+                        "host_before_ns": host_shift_ns + 8_980,
+                        "device_cycles": device_base + 8_000,
+                        "host_after_ns": host_shift_ns + 9_020,
+                        "error": None,
+                    },
+                ],
+            },
+        },
+        "aicore_tasks": [[0, task_id, 1, device_base + 1_000, device_base + 1_100, 0]],
+        "aicpu_tasks": [[0, 1, device_base + 900, device_base + 1_200]],
+        "aicpu_scheduler_phases": [
+            [{"kind": "dispatch", "start_cycles": device_base + 800, "end_cycles": device_base + 850}]
+        ],
+        "host_orchestrator_phases": [
+            [
+                {
+                    "submit_idx": 0,
+                    "task_id": task_id,
+                    "start_host_ns": host_shift_ns + 1_500,
+                    "end_host_ns": host_shift_ns + 1_800,
+                }
+            ]
+        ],
+    }
+    (rank_dir / "chip_swimlane_records.json").write_text(json.dumps(records))
+    (rank_dir / "name_map.json").write_text(json.dumps({"callable_id_to_name": {"0": f"kernel_r{rank}"}}))
+    return rank_dir
+
+
+def _write_dispatch_identity(capture_dir, *, run_id, task_slot, group_index, group_size):
+    rank = int(capture_dir.parent.name.removeprefix("rank"))
+    capture_index = int(capture_dir.name.removeprefix("d"))
+    (capture_dir / "dispatch_identity.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "task_slot": task_slot,
+                "group_index": group_index,
+                "group_size": group_size,
+                "chip_rank": rank,
+                "local_capture_index": capture_index,
+                "endpoint_dispatch_id": capture_index + 1,
+                "pipeline_slot": 0,
+                "pipeline_generation": 1,
+                "callable_digest": "ab" * 32,
+            }
+        )
+    )
+
+
+def test_l3_directory_merge_uses_common_host_origin_and_rank_namespaces(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    _write_l3_rank(root, 0, host_shift_ns=0, task_id=7)
+    _write_l3_rank(root, 1, host_shift_ns=10_000, task_id=8)
+    output = tmp_path / "l3.json"
+    args = sc._build_parser().parse_args([str(root), "--dispatch", "d0", "-o", str(output)])
+
+    output_path, rank_metadata = sc._generate_l3_trace(args, root)
+
+    assert output_path == output
+    assert [item["rank"] for item in rank_metadata] == [0, 1]
+    trace = json.loads(output.read_text())
+    assert trace["metadata"]["global_origin_ns"] == 1_500
+    assert trace["metadata"]["host_clock_domain_id"] == "same-boot"
+    assert trace["metadata"]["cross_rank_uncertainty_ns"] == 40
+    assert trace["metadata"]["pre_anchor_group_duration_spread_ns"] == 0
+    assert trace["metadata"]["pre_anchor_group_duration_max_ns"] == 20
+    assert trace["metadata"]["dispatch_pairing"] == "local_capture_index"
+
+    process_names = {
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("ph") == "M" and event.get("name") == "process_name"
+    }
+    assert "rank0 / Worker View" in process_names
+    assert "rank1 / Worker View" in process_names
+    worker_events = {
+        event["args"]["taskId"]: event
+        for event in trace["traceEvents"]
+        if event.get("ph") == "X" and event.get("cat") == "event" and event.get("pid") % 100 == 4
+    }
+    assert worker_events[7]["pid"] == 4
+    assert worker_events[7]["ts"] == 0.5
+    assert worker_events[8]["pid"] == 104
+    assert worker_events[8]["ts"] == 10.5
+
+
+def test_l3_parent_dispatch_identity_pairs_different_local_capture_indexes(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    rank0 = _write_l3_rank(root, 0, host_shift_ns=0, task_id=7, dispatch="d0")
+    rank1 = _write_l3_rank(root, 1, host_shift_ns=10_000, task_id=8, dispatch="d1")
+    _write_dispatch_identity(rank0, run_id=17, task_slot=5, group_index=0, group_size=2)
+    _write_dispatch_identity(rank1, run_id=17, task_slot=5, group_index=1, group_size=2)
+    output = tmp_path / "semantic.json"
+    args = sc._build_parser().parse_args([str(root), "--dispatch-id", "17:5", "-o", str(output)])
+
+    _, rank_metadata = sc._generate_l3_trace(args, root)
+
+    trace = json.loads(output.read_text())
+    assert [Path(item["input"]).parent.name for item in rank_metadata] == ["d0", "d1"]
+    assert trace["metadata"]["dispatch_pairing"] == "parent_dispatch_identity"
+    assert trace["metadata"]["dispatch_identity"] == {
+        "run_id": 17,
+        "task_slot": 5,
+        "group_size": 2,
+        "callable_digest": "ab" * 32,
+    }
+    assert [item["dispatch_identity"]["group_index"] for item in rank_metadata] == [0, 1]
+
+
+def test_l3_local_capture_selector_rejects_different_parent_dispatches(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    rank0 = _write_l3_rank(root, 0, host_shift_ns=0, task_id=7)
+    rank1 = _write_l3_rank(root, 1, host_shift_ns=10_000, task_id=8)
+    _write_dispatch_identity(rank0, run_id=17, task_slot=5, group_index=0, group_size=2)
+    _write_dispatch_identity(rank1, run_id=17, task_slot=6, group_index=1, group_size=2)
+    args = sc._build_parser().parse_args([str(root), "--dispatch", "d0"])
+
+    with pytest.raises(ValueError, match="different parent dispatches"):
+        sc._generate_l3_trace(args, root)
+
+
+def test_l3_auto_discovery_rejects_incomplete_parent_group(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    rank0 = _write_l3_rank(root, 0, host_shift_ns=0, task_id=7)
+    _write_l3_rank(root, 1, host_shift_ns=10_000, task_id=8)
+    _write_dispatch_identity(rank0, run_id=17, task_slot=5, group_index=0, group_size=2)
+
+    with pytest.raises(ValueError, match="incomplete parent dispatch 17:5"):
+        sc.discover_l3_conversion_targets(root)
+
+
+def test_l3_auto_discovery_pairs_two_groups_despite_reordered_d_paths(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    captures = {
+        (0, "d0"): (17, 5, 0),
+        (0, "d1"): (17, 6, 0),
+        (1, "d0"): (17, 6, 1),
+        (1, "d1"): (17, 5, 1),
+    }
+    for (rank, dispatch), (run_id, task_slot, group_index) in captures.items():
+        capture_dir = _write_l3_rank(
+            root,
+            rank,
+            host_shift_ns=rank * 10_000,
+            task_id=rank * 10 + int(dispatch.removeprefix("d")),
+            dispatch=dispatch,
+        )
+        _write_dispatch_identity(
+            capture_dir,
+            run_id=run_id,
+            task_slot=task_slot,
+            group_index=group_index,
+            group_size=2,
+        )
+
+    targets = sc.discover_l3_conversion_targets(root)
+
+    assert [(target["dispatch"], target["dispatch_id"]) for target in targets] == [
+        (None, "17:5"),
+        (None, "17:6"),
+    ]
+    assert [[path.name for path in target["capture_dirs"]] for target in targets] == [["d0", "d1"], ["d1", "d0"]]
+
+
+def test_l3_auto_discovery_keeps_paired_groups_when_the_remainder_is_asymmetric(tmp_path, capsys):
+    # A group is paired by (run_id, task_slot), so it is unaffected by what the
+    # leftover dN sets look like. Refusing the whole root would discard exactly
+    # the pairing the parent identity exists to make.
+    root = tmp_path / "dfx_outputs"
+    for rank, group_index in ((0, 0), (1, 1)):
+        capture_dir = _write_l3_rank(root, rank, host_shift_ns=rank * 10_000, task_id=rank, dispatch="d0")
+        _write_dispatch_identity(capture_dir, run_id=17, task_slot=5, group_index=group_index, group_size=2)
+    # An extra individually submitted capture on rank0 only: no sibling to pair
+    # it with, and no identity that would let it pair by anything but its name.
+    _write_l3_rank(root, 0, host_shift_ns=0, task_id=99, dispatch="d1")
+
+    targets = sc.discover_l3_conversion_targets(root)
+
+    assert [(target["dispatch"], target["dispatch_id"]) for target in targets] == [(None, "17:5")]
+    assert "refusing to pair asymmetric local capture indexes" in capsys.readouterr().err
+
+
+def test_rank_namespace_does_not_turn_rank_into_a_counter_series():
+    trace = {
+        "traceEvents": [
+            {"ph": "C", "pid": 2, "tid": 1, "args": {"AIC": 3, "AIV": 4}},
+            {"ph": "X", "pid": 4, "tid": 2, "args": {"taskId": 9}},
+        ]
+    }
+
+    sc._namespace_rank_trace(trace, 2)
+
+    counter, task = trace["traceEvents"]
+    assert counter["pid"] == 202
+    assert counter["args"] == {"AIC": 3, "AIV": 4}
+    assert task["pid"] == 204
+    assert task["args"]["rank"] == 2
+
+
+def test_rank_namespace_rejects_a_view_pid_wider_than_the_stride():
+    trace = {"traceEvents": [{"ph": "X", "pid": sc._RANK_PID_STRIDE, "tid": 1, "args": {}}]}
+
+    with pytest.raises(ValueError, match="does not fit the per-Rank stride"):
+        sc._namespace_rank_trace(trace, 1)
+
+
+def test_l3_directory_merge_rejects_different_or_missing_host_clock_domains(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    _write_l3_rank(root, 0, host_shift_ns=0, task_id=7, clock_domain="boot-a")
+    rank1_dir = _write_l3_rank(root, 1, host_shift_ns=10_000, task_id=8, clock_domain="boot-b")
+    args = sc._build_parser().parse_args([str(root), "--dispatch", "d0"])
+
+    with pytest.raises(ValueError, match="different Host clock domains"):
+        sc._generate_l3_trace(args, root)
+
+    rank1_path = rank1_dir / "chip_swimlane_records.json"
+    rank1 = json.loads(rank1_path.read_text())
+    rank1["metadata"].pop("host_clock_domain_id")
+    rank1_path.write_text(json.dumps(rank1))
+    with pytest.raises(ValueError, match="missing metadata.host_clock_domain_id"):
+        sc._generate_l3_trace(args, root)
 
 
 def test_task_statistics_level_one_hides_aicpu_metrics(capsys):
@@ -228,6 +492,8 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
         "cross_domain_gap_unknown": True,
         "cross_domain_latency_available": False,
         "logical_seam_us": 2.0,
+        "source_timeline_origin_ns": 1_000,
+        "timeline_origin_ns": 1_000,
     }
 
     trace_path = tmp_path / "merged_swimlane.json"
@@ -251,6 +517,63 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
     assert not any(
         event.get("cat") == "flow" and event.get("name") == "submit→dispatch" for event in trace["traceEvents"]
     )
+
+
+def test_aicpu_orchestrator_uses_host_timeline_when_clock_anchors_exist(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 4,
+                "metadata": {
+                    "clock_freq_hz": 1_000_000_000,
+                    "num_cores": 1,
+                    "core_types": ["aiv"],
+                    "core_to_thread": [0],
+                    "host_clock_domain_id": "same-boot",
+                    "host_timeline_origin_ns": 1_000,
+                    "clock_anchors": {
+                        "device_timestamp_unit": "syscnt_cycles",
+                        "samples": [
+                            {
+                                "position": "pre_host_orchestration",
+                                "sample_idx": 0,
+                                "host_before_ns": 990,
+                                "device_cycles": 100,
+                                "host_after_ns": 1_010,
+                                "error": None,
+                            },
+                            {
+                                "position": "post_device_execution",
+                                "sample_idx": 0,
+                                "host_before_ns": 5_080,
+                                "device_cycles": 4_100,
+                                "host_after_ns": 5_120,
+                                "error": None,
+                            },
+                        ],
+                    },
+                },
+                "aicore_tasks": [[0, 7, 1, 2_100, 2_200, 0]],
+                "aicpu_tasks": [[0, 1, 2_000, 2_300]],
+                "aicpu_scheduler_phases": [
+                    [{"kind": "dispatch", "start_cycles": 1_900, "end_cycles": 1_950, "tasks_processed": 1}]
+                ],
+                "aicpu_orchestrator_phases": [
+                    [{"submit_idx": 0, "task_id": 7, "start_cycles": 1_800, "end_cycles": 1_850}]
+                ],
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert data["orchestrator_source"] == "aicpu"
+    assert data["tasks"][0]["start_time_us"] == 2.05
+    assert data["timeline_metadata"]["layout"] == "clock_aligned"
+    assert data["timeline_metadata"]["clock_alignment"]["status"] == "calibrated"
+    assert data["timeline_metadata"]["host_clock_domain_id"] == "same-boot"
+    assert data["timeline_metadata"]["source_timeline_origin_ns"] == 1_000
 
 
 def test_host_capture_is_complete_when_the_pool_holds_more_than_the_submit_projection(tmp_path):
@@ -380,6 +703,10 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
                 "pre_host_orchestration": 0,
                 "post_device_execution": 0,
             },
+            "anchor_group_duration_ns": {
+                "pre_host_orchestration": 20,
+                "post_device_execution": 40,
+            },
         },
         "host_capture": {
             "status": "complete",
@@ -390,6 +717,8 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
         },
         "host_records_complete": True,
         "cross_domain_latency_available": True,
+        "source_timeline_origin_ns": 1_500,
+        "timeline_origin_ns": 1_500,
     }
 
 

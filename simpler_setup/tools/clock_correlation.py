@@ -34,6 +34,8 @@ class ClockAlignment:
     host_timestamp_quantization_ns: int = 0
     start: Optional[ClockAnchor] = None
     end: Optional[ClockAnchor] = None
+    pre_anchor_group_duration_ns: Optional[int] = None
+    post_anchor_group_duration_ns: Optional[int] = None
 
     @property
     def anchor_uncertainty_ns(self):
@@ -62,6 +64,12 @@ class ClockAlignment:
                 self.start.position: self.start.sample_idx,
                 self.end.position: self.end.sample_idx,
             }
+        group_durations = {
+            _A0_POSITION: self.pre_anchor_group_duration_ns,
+            _A2_POSITION: self.post_anchor_group_duration_ns,
+        }
+        if any(duration is not None for duration in group_durations.values()):
+            out["anchor_group_duration_ns"] = group_durations
         return out
 
     def contains(self, device_cycles):
@@ -129,6 +137,23 @@ def _parse_anchor(sample, position, device_quantization_ns):
     )
 
 
+def _anchor_group_duration_ns(samples, position):
+    bounds = []
+    for sample in samples:
+        if not isinstance(sample, dict) or sample.get("position") != position:
+            continue
+        try:
+            before = int(sample["host_before_ns"])
+            after = int(sample["host_after_ns"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if before > 0 and after >= before:
+            bounds.append((before, after))
+    if not bounds:
+        return None
+    return max(after for _, after in bounds) - min(before for before, _ in bounds)
+
+
 def build_clock_alignment(  # noqa: PLR0912
     clock_anchors, frequency_hz, device_timestamps=(), host_timestamp_quantization_ns=0
 ):
@@ -184,6 +209,8 @@ def build_clock_alignment(  # noqa: PLR0912
         host_timestamp_quantization_ns=host_timestamp_quantization_ns,
         start=start,
         end=end,
+        pre_anchor_group_duration_ns=_anchor_group_duration_ns(samples, _A0_POSITION),
+        post_anchor_group_duration_ns=_anchor_group_duration_ns(samples, _A2_POSITION),
     )
     for timestamp in device_timestamps:
         timestamp = int(timestamp)

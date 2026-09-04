@@ -347,8 +347,9 @@ silently:
    `bind phase=` lines alone, so Recipe A's environment collects no records.
 2. **A diagnostic flag must be on**, because that is what makes
    `CallConfig.output_prefix` non-empty. `--enable-scope-stats` is the cheapest
-   for an L3 case; `--enable-chip-swimlane` raises `NotImplementedError` for
-   `level=3` (per-chip-process filename collision).
+   choice when only Host phase records are needed. `--enable-chip-swimlane` is
+   also supported for same-host L3 and writes each ChipWorker capture below a
+   separate `rankN/dN` directory, but it collects substantially more data.
 3. **`--rounds` must be 1.** `rounds > 1` force-disables every diagnostic flag —
    this one does warn, `<flag> disabled: --rounds > 1` per flag
    ([`simpler_setup/scene_test.py`](../../simpler_setup/scene_test.py)), but the
