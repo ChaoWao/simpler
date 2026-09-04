@@ -90,7 +90,7 @@ protected:
         state.completed_subtasks.store(7, std::memory_order_relaxed);
         state.next_block_idx.store(3, std::memory_order_relaxed);
         state.in_graph_local_id = 11;
-        sm_handle->header->tasks.progress_flags[slot].store(1, std::memory_order_relaxed);
+        sm_handle->header->tasks.store_completed(slot);
     }
 
     void expect_slot_pristine(int32_t slot) {
@@ -101,8 +101,8 @@ protected:
         EXPECT_FALSE(state.has_any_subtask_deferred());
         EXPECT_EQ(state.completed_subtasks.load(std::memory_order_relaxed), 0);
         EXPECT_EQ(state.next_block_idx.load(std::memory_order_relaxed), 0);
-        EXPECT_EQ(sm_handle->header->tasks.progress_flags[slot].load(std::memory_order_relaxed), 0)
-            << "a stale completion flag reports this task done before it has run";
+        EXPECT_EQ(sm_handle->header->tasks.task_states[slot].load(std::memory_order_relaxed), CHIP_TASK_PENDING)
+            << "a stale progress state reports this task done before it has run";
     }
 };
 

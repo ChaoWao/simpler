@@ -1370,7 +1370,7 @@ append_fanin_or_fail(OrchestratorState &orch, TaskId producer_task_id, int32_t *
     // its own storage index and hbg never recycles a slot, so the entry that id
     // names is the producer's by construction — there is no stale-slot case to
     // screen for. A COMPLETED producer is a real fanin edge under polling (its
-    // progress_flags byte is set), so it is not screened out either.
+    // task_states byte says so), so it is not screened out either.
     if (fanin_mark_seen(orch, producer_task_id)) {
         return true;
     }
@@ -1468,7 +1468,7 @@ static bool prepare_task(
     // past total_tasks, so this claim-time write is the only per-slot SM reset and
     // the unclaimed tail is neither initialized nor read.
     out->slot_state->reset_for_reuse();
-    orch->sm_header->tasks.progress_flags[out->alloc_result.task_id].store(0, std::memory_order_relaxed);
+    orch->sm_header->tasks.reset_task_state(out->alloc_result.task_id);
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
@@ -2046,7 +2046,7 @@ bool graph_submit_outer(
     // list against every consumer, and a stale completion flag would report the
     // Graph done before it ran.
     slot.reset_for_reuse();
-    tasks.progress_flags[allocation.task_id].store(0, std::memory_order_relaxed);
+    tasks.reset_task_state(allocation.task_id);
 
     // Graph boundaries use the same compact argument pools as ordinary tasks. The
     // outer payload carries the invocation data; graph_context only names the
@@ -3003,14 +3003,14 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // unconditionally.
         prepared.slot_state->task_attrs.set_early_resolve(true);
         prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is only the completion mirror
-        // Polling: pre-set the device-visible progress_flags byte in the H2D
-        // image. Consumers poll progress_flags (not task_state), so a hidden-alloc
-        // producer completed here on the host must publish its flag too — otherwise
-        // every consumer register_wakes on a producer that never runs on device and
-        // the run hangs.
+        // Polling: pre-set the device-visible task_states byte in the H2D
+        // image. Consumers poll task_states (not the slot's task_state), so a
+        // hidden-alloc producer completed here on the host must publish its byte
+        // too — otherwise every consumer register_wakes on a producer that never
+        // runs on device and the run hangs.
         SharedMemoryTaskHeader &done_tasks = orch->sm_header->tasks;
         int32_t done_local = prepared.task_id.local_id();
-        done_tasks.set_completion_flag(done_local);
+        done_tasks.store_completed(done_local);
     }
     orch->inline_completed_tasks++;
 

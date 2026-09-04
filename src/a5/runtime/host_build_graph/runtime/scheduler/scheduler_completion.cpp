@@ -189,7 +189,7 @@ void SchedulerContext::complete_slot_task(
         }
 #endif
         // 3S+1P: hand the finished task to the dedicated resolution (P) thread.
-        // P publishes progress_flags and drains the wake list — and owns
+        // P publishes task_states and drains the wake list — and owns
         // completed_tasks_, so this scheduler thread neither
         // resolves nor bumps completed_this_turn. (The Resolve swimlane bar is
         // emitted by P, not here.)
@@ -534,6 +534,8 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                     thread_idx, core_offset, *slot_state, shape, to_pending, start + b, &handles[handle_count], gated
                 );
             }
+            // Account before the tokens, seal after them (see account_published_blocks).
+            const bool owns_seal = sched_->account_published_blocks(*slot_state, claim);
             wmb();
             uint64_t dispatch_ts = 0;
 #if SIMPLER_DFX
@@ -582,7 +584,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                 );
             }
 #endif
-            sched_->record_published_blocks(*slot_state, claim);
+            if (owns_seal) sched_->seal_ed_publish_list(*slot_state);
             // AIC/AIV running placement (whole block on idle cores); MIX running cores are
             // counted per-cluster above (mix_cluster_idle_core_count).
             if (gated && shape != ResourceShape::MIX && !to_pending) result.running_cores += handle_count;

@@ -172,25 +172,34 @@ inline constexpr int32_t ARG_POOL_ALIGN = 64;
 /**
  * Task state enumeration
  *
- * State transitions:
- *   PENDING -> COMPLETED
+ * State transitions (strictly linear, values ordered so readers can use
+ * ordered comparisons: `>= CHIP_TASK_PUBLISHED` asks "every block placed?",
+ * `>= CHIP_TASK_COMPLETED` asks "every subtask finished?"):
+ *   PENDING -> PUBLISHED -> COMPLETED
  *
- * The slot stays in PENDING from submit through "ready in queue" and "running
+ * The task stays in PENDING from submit through "ready in queue" and "running
  * on a worker": readiness comes from the producers' completion state, and
  * running-vs-idle from the per-core running_slot_state -- neither from this
  * field. Which completion state carries readiness depends on the task's id
  * space; see ChipTaskSlotState below.
  *
  * Conditions:
- *   PENDING->COMPLETED:   all subtasks finish (set by scheduler) or task is a
- *                         hidden alloc completed inline by the orchestrator
+ *   PENDING->PUBLISHED:   every logical block's payload + MMIO token is
+ *                         written (placement, not launch). Only the SM
+ *                         task_states byte of an ED_FLAG_TRACKED task takes
+ *                         this value; the slot-resident mirror never does.
+ *   ->COMPLETED:          all subtasks finish (set by scheduler) or task is a
+ *                         hidden alloc completed inline by the orchestrator.
+ *                         Completion implies publication (a finished task
+ *                         occupies no cores), so COMPLETED > PUBLISHED.
  *
  * COMPLETED is terminal: no slot is recycled before the run ends, so nothing
  * advances a task past it.
  */
 typedef enum : uint8_t {
-    CHIP_TASK_PENDING = 0,   // Submitted; awaiting fanin, queued, or dispatched
-    CHIP_TASK_COMPLETED = 1  // Execution finished, output may still be in use
+    CHIP_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched
+    CHIP_TASK_PUBLISHED = 1,  // Every logical block placed on a core (tracked producers only)
+    CHIP_TASK_COMPLETED = 2   // Execution finished, output may still be in use
 } ChipTaskState;
 
 /**
@@ -345,7 +354,7 @@ struct TaskPayload {
     //
     // fanin holds flat position-independent producer local task ids. A producer is
     // named by its local id alone, so no per-edge indirection is stored. Scanned by
-    // classify_fanin_state against the shared-memory progress_flags. Hard-capped at
+    // classify_fanin_state against the shared-memory task_states. Hard-capped at
     // CHIP_MAX_FANIN (no dep-pool spill). Unbound on an in-graph task, whose
     // dependencies live in the Definition's fanin CSR instead.
     simpler::hbg::SelfRelativePtr<simpler::hbg::Tensor> tensors;
@@ -559,7 +568,9 @@ static_assert(
 static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be 2 cache lines");
 
 /**
- * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
+ * Per-task slot scheduling state. Only the scheduler mutates it, but it lives
+ * wherever its ChipTaskStorage does: the SM image's storage segment for a
+ * GLOBAL task, the GraphExecution image for an IN_GRAPH one.
  *
  * 64 bytes = one cache line. Under the polling completion model a task's
  * readiness is derived from its producers' completion state; producer completion
@@ -570,16 +581,17 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  * belongs to, and both are load-bearing:
  *
  *   - A GLOBAL task holds a slot in the SM task table, so its readiness truth is
- *     `progress_flags[local_id]` — a byte-per-slot array, which is what lets a
+ *     `task_states[local_id]` — a byte-per-slot array, which is what lets a
  *     fanin scan read many producers out of one cache line. `task_state` is then
  *     a mirror, read only by the cold-path stall dump.
  *   - An IN_GRAPH task lives in its Graph's own storage and has no slot in that
- *     table, hence no flag byte. `task_state` IS its readiness truth, read on the
- *     device by graph_first_unmet_producer; only the outer Graph shell (a GLOBAL
- *     task) gets a flag when the body finishes.
+ *     table, hence no byte there. `task_state` IS its readiness truth, read on
+ *     the device by graph_first_unmet_producer; only the outer Graph shell (a
+ *     GLOBAL task) gets its byte advanced when the body finishes.
  *
  * So a completion publishes both for a GLOBAL task and `task_state` alone for an
- * IN_GRAPH one.
+ * IN_GRAPH one. `task_state` itself only ever holds PENDING or COMPLETED; the
+ * PUBLISHED middle value exists in the task_states array alone.
  */
 struct alignas(64) ChipTaskSlotState {
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
@@ -634,10 +646,11 @@ struct alignas(64) ChipTaskSlotState {
     // ranges through claim_block_range().
     std::atomic<int16_t> next_block_idx{0};
 
-    // Completion state. PENDING at submit; COMPLETED at whichever completion path
-    // owns this slot. For an IN_GRAPH task this is the readiness truth the device
-    // itself polls (graph_first_unmet_producer); for a GLOBAL task it mirrors
-    // progress_flags[slot], which is what the device reads instead. Also read by
+    // Completion state, PENDING or COMPLETED only (never PUBLISHED). PENDING at
+    // submit; COMPLETED at whichever completion path owns this slot. For an
+    // IN_GRAPH task this is the readiness truth the device itself polls
+    // (graph_first_unmet_producer); for a GLOBAL task it mirrors
+    // task_states[slot], which is what the device reads instead. Also read by
     // the cold-path stall dump.
     std::atomic<ChipTaskState> task_state;
 
@@ -706,8 +719,8 @@ struct alignas(64) ChipTaskSlotState {
     }
 
     // Publishes completion. For an IN_GRAPH task this store is the whole
-    // publication — that task has no progress_flags byte. For a GLOBAL task it
-    // accompanies the progress_flags[slot] store that on_mixed_task_complete
+    // publication — that task has no task_states byte. For a GLOBAL task it
+    // accompanies the task_states[slot] store that on_mixed_task_complete
     // makes, and is the copy the cold-path stall dump reads.
     void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
 

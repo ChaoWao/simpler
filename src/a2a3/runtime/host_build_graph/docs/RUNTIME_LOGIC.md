@@ -126,7 +126,7 @@ scalar `rt_orchestration_done` publishes into the runtime header.
 **Why the scheduler state is device-written.** `SchedulerState` holds no
 per-run content: `sm_header` and the task-header pointer derive from a pooled SM base,
 queue capacities are compile-time constants, polling reserves no wiring or
-dependency pool (readiness comes from the task table's `progress_flags`, which
+dependency pool (readiness comes from the task table's `task_states`, which
 the task header owns), and it has no host-side entry point at all. So the host would
 only be writing an initialization pattern — 203,392 bytes
 of it, dominated by `AsyncWaitList::entries` — for the device to receive and never
@@ -190,7 +190,7 @@ past `total_tasks`. So the SM H2D shipped each run is bounded, not capacity-size
 the contract that keeps `bind` proportional to the workload.
 
 The header is zeroed on the host; `descriptors`, `payloads`, `slot_states` and
-`progress_flags` are each written per task at submit. Per-slot reset is
+`task_states` are each written per task at submit. Per-slot reset is
 init-on-write in `orch::prepare_task` as each slot is claimed — there is no
 table-wide reset. In the mirror those four live prefixes are a full reservation
 apart, so `compact_live_image` restacks them (plus the three argument pools) into
@@ -223,7 +223,7 @@ therefore also its slot index: ids run `0..capacity-1`, never wrap, and every
 segment is indexed by the id directly — there is no slot mask, so the capacity need
 not be a power of two.
 
-Completion is published per task, in `progress_flags[local_id]`, and reclaims
+Completion is published per task, in `task_states[local_id]`, and reclaims
 neither task slots nor heap.
 
 There is no post-run sweep that makes graph space reusable. Runtime destruction

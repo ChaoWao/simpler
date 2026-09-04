@@ -142,7 +142,7 @@ public:
 
     // Dedicated resolution (P) thread entry (3S+1P). Owns no cores: drains the
     // per-S CompletedTaskQueues and runs on_task_complete for each finished task
-    // (progress_flags publish + wake-list drain), making P
+    // (task_states publish + wake-list drain), making P
     // the sole producer of the ready queues. Owns completed_tasks_ / termination.
     int32_t run_resolution_thread(Runtime *runtime, int32_t thread_idx);
 
