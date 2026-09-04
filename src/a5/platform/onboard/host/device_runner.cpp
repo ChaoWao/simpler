@@ -289,7 +289,7 @@ int DeviceRunner::prepare_execution(
         return rc;
     }
 
-    ensure_device_wall_buffer(execution->kernel_args);
+    ensure_device_wall_buffer(execution->kernel_args, pipeline_slot);
 
     if (block_dim < 1) {
         LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
@@ -619,7 +619,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         return rc;
     }
 
-    read_device_wall_ns();
+    read_device_wall_ns(prepared.kernel_args);
     teardown_shared_collectors_after_run(true);
 
     // a5-specific dep_gen teardown: host-orch emits the graph its orchestration

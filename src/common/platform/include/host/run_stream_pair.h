@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <functional>
@@ -22,11 +24,10 @@
 /**
  * The one AICPU + AICore stream pair every run submits on.
  *
- * A stream is an ordered queue and the execution claim is exclusive, so runs
- * reach the device one at a time and a single pair carries all of them. The
- * pair is not indexed by pipeline slot: a slot exists for resources that
- * *preparation* mutates, and preparing a run writes nothing to a stream — only
- * launch submits, and launch holds the claim.
+ * A stream is an ordered queue, so consecutive runs share one pair and may be
+ * submitted before their predecessors complete. The pair is not indexed by
+ * pipeline slot: slots select run-owned preparation state and completion
+ * events, while the stream order serializes device execution.
  *
  * The two streams must stay distinct. The AICPU Run kernel spins in the
  * handshake waiting for the AICore workers, so serializing both onto one queue
@@ -38,9 +39,9 @@
  * launch destroys it and creates a replacement. Creating a stream is the only
  * operation known to leave a core free of the previous image's instructions.
  *
- * Only the run that submitted the pair may retire it. A prepared successor
- * overlaps its predecessor's execution, so an unproven retirement from a run
- * that never submitted must leave the live pair alone.
+ * Submitted owners retire in FIFO order after proven completion. An unproven
+ * retirement poisons reuse and defers stream destruction until no queued owner
+ * remains. A run that never submitted leaves the live pair alone.
  *
  * Threading: launch and drain are the owning operations, but poll may query the
  * pair from a progress thread while the executor retires it. The pair therefore
@@ -51,6 +52,19 @@
  * without a device.
  */
 class RunStreamPair {
+private:
+    struct Submission {
+        const void *owner{nullptr};
+        bool complete{false};
+    };
+    Submission *find_submission(const void *owner) {
+        auto end = submissions_.begin() + static_cast<std::ptrdiff_t>(submission_count_);
+        auto match = std::find_if(submissions_.begin(), end, [owner](const Submission &submission) {
+            return submission.owner == owner;
+        });
+        return match == end ? nullptr : &*match;
+    }
+
 public:
     using CreateFn = std::function<int(void **out_stream)>;
     using DestroyFn = std::function<int(void *stream)>;
@@ -63,7 +77,8 @@ public:
     /**
      * Ready the pair for a launch: both streams on first use, and a
      * replacement AICore stream when a code publication marked it stale.
-     * Callers hold the execution claim, so the pair is idle here.
+     * A warm pair accepts another submission while earlier runs remain queued.
+     * A stale pair can only be replaced after every submitted run retires.
      */
     int ensure() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -75,13 +90,8 @@ public:
             }
         }
         if (aicore_ != nullptr) {
-            // A run that has not retired still owns the pair: a device-complete
-            // poll is not a finalized run, and replacing the stream under it
-            // would strand a live submission.
-            if (owner_ != nullptr) return PTO_RUNTIME_ERR_INTERNAL;
+            if (submission_count_ != 0) return stale_ || unproven_ ? PTO_RUNTIME_ERR_INTERNAL : 0;
             if (!stale_) {
-                submitted_ = false;
-                complete_ = false;
                 return 0;
             }
             int rc = destroy_(aicore_);
@@ -95,8 +105,7 @@ public:
         }
         created_count_.fetch_add(1, std::memory_order_relaxed);
         stale_ = false;
-        submitted_ = false;
-        complete_ = false;
+        unproven_ = false;
         return 0;
     }
 
@@ -106,14 +115,16 @@ public:
         stale_ = true;
     }
 
-    /** Make the pair visible to non-blocking poll and record its submitter. */
+    /** Append one submitter to the stream-ordered in-flight FIFO. */
     int mark_submitted(const void *owner) {
         if (owner == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
         std::lock_guard<std::mutex> lock(mutex_);
         if (aicpu_ == nullptr || aicore_ == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
-        owner_ = owner;
-        submitted_ = true;
-        complete_ = false;
+        if (stale_ || unproven_ || submission_count_ >= submissions_.size()) {
+            return PTO_RUNTIME_ERR_INTERNAL;
+        }
+        if (find_submission(owner) != nullptr) return PTO_RUNTIME_ERR_INTERNAL;
+        submissions_[submission_count_++] = Submission{owner, false};
         return 0;
     }
 
@@ -125,15 +136,16 @@ public:
      * missing handle as an error.
      */
     template <typename QueryPairFn>
-    int poll(QueryPairFn &&query) {
+    int poll(const void *owner, QueryPairFn &&query) {
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
-        if (complete_) return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
-        if (!submitted_ || aicpu_ == nullptr || aicore_ == nullptr) {
+        Submission *submission = find_submission(owner);
+        if (submission == nullptr || aicpu_ == nullptr || aicore_ == nullptr) {
             return SIMPLER_NATIVE_RUN_POLL_ERROR;
         }
+        if (submission->complete) return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
         const int rc = std::forward<QueryPairFn>(query)(aicpu_, aicore_);
-        if (rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE) complete_ = true;
+        if (rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE) submission->complete = true;
         return rc;
     }
 
@@ -147,29 +159,36 @@ public:
      */
     int retire(CompletionStatus completion_status, const void *owner) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (owner == nullptr || owner_ != owner) return 0;
+        Submission *submission = find_submission(owner);
+        if (submission == nullptr) return 0;
+        const size_t index = static_cast<size_t>(submission - submissions_.data());
+        const bool order_error = completion_status == CompletionStatus::Complete && index != 0;
+        if (order_error) completion_status = CompletionStatus::Unproven;
         // Publish the proven terminal state before destroying the handle. Poll
         // either finishes its in-flight query first or observes this result.
         // An error-path retirement clears a completion that raced ahead of a
         // later failing sync, so the sync error remains authoritative.
-        submitted_ = false;
-        complete_ = completion_status == CompletionStatus::Complete;
-        owner_ = nullptr;
-        if (completion_status == CompletionStatus::Complete) return 0;
-        if (aicore_ == nullptr) return 0;
+        if (completion_status == CompletionStatus::Unproven) unproven_ = true;
+        for (size_t i = index + 1; i < submission_count_; ++i)
+            submissions_[i - 1] = submissions_[i];
+        submissions_[--submission_count_] = Submission{};
+        if (submission_count_ != 0 || !unproven_ || aicore_ == nullptr) {
+            return order_error ? PTO_RUNTIME_ERR_INTERNAL : 0;
+        }
         int rc = destroy_(aicore_);
         if (rc != 0) return rc;
         aicore_ = nullptr;
-        return 0;
+        unproven_ = false;
+        return order_error ? PTO_RUNTIME_ERR_INTERNAL : 0;
     }
 
     /** Destroy both streams, keeping a handle whose destroy failed. */
     int destroy() {
         std::lock_guard<std::mutex> lock(mutex_);
         int first_error = 0;
-        submitted_ = false;
-        complete_ = false;
-        owner_ = nullptr;
+        submissions_.fill(Submission{});
+        submission_count_ = 0;
+        unproven_ = false;
         for (void **stream : {&aicpu_, &aicore_}) {
             if (*stream == nullptr) continue;
             int rc = destroy_(*stream);
@@ -191,9 +210,9 @@ public:
         aicpu_ = nullptr;
         aicore_ = nullptr;
         stale_ = false;
-        submitted_ = false;
-        complete_ = false;
-        owner_ = nullptr;
+        submissions_.fill(Submission{});
+        submission_count_ = 0;
+        unproven_ = false;
     }
 
     // Handle reads are unsynchronized: the claim holder is the only writer once
@@ -207,11 +226,10 @@ private:
     mutable std::mutex mutex_;
     void *aicpu_{nullptr};
     void *aicore_{nullptr};
-    // The run that submitted the pair, or null while no run owns it.
-    const void *owner_{nullptr};
     bool stale_{false};
-    bool submitted_{false};
-    bool complete_{false};
+    bool unproven_{false};
+    std::array<Submission, PTO_PIPELINE_MAX_DEPTH> submissions_{};
+    size_t submission_count_{0};
 
     CreateFn create_;
     DestroyFn destroy_;

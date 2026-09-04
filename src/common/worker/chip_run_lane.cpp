@@ -79,6 +79,10 @@ struct ChipRunLaneState {
         return permits_native_successor(predecessor, successor.config);
     }
 
+    bool permits_queued_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
+        return worker->supports_queued_native_launch() && permits_native_successor(predecessor, successor);
+    }
+
     void prepare(const std::shared_ptr<ChipRunState> &run) {
         run->native_run = worker->prepare_native_run_for_lane(
             run->callable_id, &run->args, run->config, run->lease, run->run_id, run->dispatch_id, run->accepted_state,
@@ -96,13 +100,18 @@ struct ChipRunLaneState {
     void finish(const std::shared_ptr<ChipRunState> &run) noexcept {
         try {
             worker->finalize_native_run(run->native_run);
+        } catch (const NativeRunFailure &e) {
+            const std::exception_ptr finalize_error = std::current_exception();
+            if (run->error == nullptr) run->error = finalize_error;
+            if (e.poisons_lane()) poison_with(run, finalize_error);
         } catch (...) {
             const std::exception_ptr finalize_error = std::current_exception();
             if (run->error == nullptr) run->error = finalize_error;
             poison_with(run, finalize_error);
         }
         run->phase = ChipRunState::Phase::TERMINAL;
-        if (!fifo.empty() && fifo.front() == run) fifo.pop_front();
+        auto it = std::find(fifo.begin(), fifo.end(), run);
+        if (it != fifo.end()) fifo.erase(it);
     }
 
     void fail_launch(const std::shared_ptr<ChipRunState> &run) noexcept {
@@ -165,6 +174,21 @@ struct ChipRunLaneState {
         }
     }
 
+    void launch_successor_if_eligible() noexcept {
+        if (fifo.size() != 2) return;
+        const auto predecessor = fifo.front();
+        const auto successor = fifo.back();
+        if (!successor->activated || successor->phase != ChipRunState::Phase::PREPARED) return;
+        if (!permits_queued_successor(*predecessor, *successor)) return;
+        try {
+            worker->launch_native_run(successor->native_run);
+            successor->phase = ChipRunState::Phase::LAUNCHED;
+            successor->crossed_launch_fence = true;
+        } catch (...) {
+            fail_launch(successor);
+        }
+    }
+
     bool progress(const std::shared_ptr<ChipRunState> &target) {
         if (target->phase == ChipRunState::Phase::TERMINAL) return true;
         if (fifo.empty()) throw std::runtime_error("chip run lane lost a nonterminal run");
@@ -176,6 +200,7 @@ struct ChipRunLaneState {
 
         launch_front();
         if (fifo.size() == 2 && fifo.front() == target) prepare_successor_if_eligible(fifo.back());
+        launch_successor_if_eligible();
         if (target->phase == ChipRunState::Phase::TERMINAL) {
             launch_front();
             return true;
@@ -305,6 +330,7 @@ void ChipRun::activate() {
     if (lane_->fifo.size() == 2 && lane_->fifo.front() == run_) {
         lane_->prepare_successor_if_eligible(lane_->fifo.back());
     }
+    lane_->launch_successor_if_eligible();
 }
 
 void ChipRun::abandon() {
@@ -411,6 +437,7 @@ ChipRun ChipRunLane::submit(
         } else {
             state_->prepare_successor_if_eligible(run);
         }
+        state_->launch_successor_if_eligible();
     } catch (...) {
         run->error = std::current_exception();
         run->phase = ChipRunState::Phase::TERMINAL;
@@ -474,6 +501,7 @@ ChipRun ChipRunLane::submit(
     } else {
         state_->prepare_successor_if_eligible(run);
     }
+    state_->launch_successor_if_eligible();
     return ChipRun(state_, std::move(run));
 }
 

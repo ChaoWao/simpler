@@ -440,12 +440,10 @@ def bucket_by_hid(invocations):
     return buckets
 
 
-# The spans one native run contributes to the overlap proof. All three already
-# exist in the `chip.run` tree; only `claim_release` was added for it.
+# The spans one native run contributes to the overlap proof.
 _PREPARE_SPAN = "chip.run.bind"
 _DEVICE_SPAN = "chip.run.runner_run"
-_RELEASE_SPAN = "chip.run.claim_release"
-_NATIVE_REQUIRED_SPANS = (_PREPARE_SPAN, _DEVICE_SPAN, _RELEASE_SPAN)
+_NATIVE_REQUIRED_SPANS = (_PREPARE_SPAN, _DEVICE_SPAN)
 _PIPELINE_IDENTITY_FIELDS = ("run_id", "dispatch_id", "run_epoch", "slot_id", "generation")
 
 
@@ -497,7 +495,8 @@ def assert_native_overlap(spans, *, require_hidden=False):
     * ``bind(N+1)`` overlaps ``runner_run(N)`` — the intervals intersect, which
       is what makes the successor's preparation concurrent with the
       predecessor's device work.
-    * ``runner_run(N+1)`` does not start before ``claim_release(N)``.
+    * ``runner_run(N+1)`` starts before ``runner_run(N)`` ends, proving the
+      successor was submitted before the predecessor's completion fence.
 
     ``bind`` is the successor's own arena build and host orchestration and sits
     inside its prepare, so reading it is conservative: an overlap it reports is
@@ -526,7 +525,6 @@ def assert_native_overlap(spans, *, require_hidden=False):
                     f"launch order is not monotonic: predecessor={predecessor.sequence} successor={successor.sequence}"
                 )
             pred_device = pred_spans[_DEVICE_SPAN]
-            pred_release = pred_spans[_RELEASE_SPAN]
             succ_prepare = succ_spans[_PREPARE_SPAN]
             succ_device = succ_spans[_DEVICE_SPAN]
             pred_device_end = pred_device.ts + pred_device.dur
@@ -542,10 +540,10 @@ def assert_native_overlap(spans, *, require_hidden=False):
                     f"preparation was not fully hidden: sequence={successor.sequence} prepare_end="
                     f"{succ_prepare_end} predecessor_device_end={pred_device_end}"
                 )
-            if succ_device.ts < pred_release.ts:
+            if succ_device.ts >= pred_device_end:
                 raise NativeOverlapError(
-                    f"device execution reordered before the claim release: sequence={successor.sequence} "
-                    f"device_start={succ_device.ts} predecessor_release={pred_release.ts}"
+                    f"successor was not queued before predecessor completion: sequence={successor.sequence} "
+                    f"successor_start={succ_device.ts} predecessor_end={pred_device_end}"
                 )
             checks.append(NativeOverlapCheck(predecessor=predecessor, successor=successor))
     if not checks:

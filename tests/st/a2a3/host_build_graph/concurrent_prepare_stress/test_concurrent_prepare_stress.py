@@ -7,13 +7,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Concurrent-prepare overlap stress for host_build_graph.
+"""Depth-two prepare and queued-launch stress for host_build_graph.
 
 Drives a 2-deep native-run pipeline over the two arena banks: run i is
 *prepared* (which runs its full bind — arena build + host orchestration) while
 run i-1 is still launched-but-not-finalized. That is exactly the
 ``overlaps_active_run`` path (a successor prepared into bank B while a
 predecessor executes in bank A), which the ordinary blocking run() never hits.
+The same trace verdict also requires ``runner_run(i)`` to begin before
+``runner_run(i-1)`` ends, proving the successor reached the shared streams
+before the predecessor's completion fence.
 
 Each iteration uses distinct input data, so any cross-run interference between
 the two banks' runtimes/orchestrators (e.g. a shared or under-initialized
@@ -25,7 +28,7 @@ Three arms drive the same pipeline through :meth:`_drive_pipeline` and read the
 same ``assert_native_overlap`` verdict, so each negative arm differs from the
 positive one in exactly one variable:
 
-* ``inflight_limit=2``, ordinary config — overlap is required.
+* ``inflight_limit=2``, ordinary config — prepare and queued-launch overlap are required.
 * ``inflight_limit=1`` — the lane's capability is untouched and the submissions
   simply never coexist, so the verdict must be *rejected*. This is what makes
   the positive arm a detector rather than a formality: the span chain between

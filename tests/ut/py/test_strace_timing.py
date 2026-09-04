@@ -823,7 +823,7 @@ def test_native_overlap_reads_identity_from_the_invocation_root():
     `(pid, inv)` is what joins them — the same grouping the TPOT views use.
     """
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(180, 100), release=280)
 
     checks = assert_native_overlap(parse_spans(lines))
 
@@ -840,7 +840,7 @@ def test_native_overlap_accepts_a_prepare_that_outlasts_the_device_window():
     blames the wrong thing.
     """
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, prepare=(190, 40), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, prepare=(190, 40), device=(195, 100), release=295)
 
     assert len(assert_native_overlap(parse_spans(lines))) == 1
 
@@ -850,17 +850,17 @@ def test_native_overlap_accepts_a_prepare_that_outlasts_the_device_window():
 
 def test_native_overlap_rejects_a_prepare_after_the_device_window():
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, prepare=(210, 20), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, prepare=(210, 20), device=(220, 100), release=320)
 
     with pytest.raises(NativeOverlapError, match="did not overlap"):
         assert_native_overlap(parse_spans(lines))
 
 
-def test_native_overlap_rejects_device_work_before_the_predecessor_release():
-    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=250)
+def test_native_overlap_rejects_a_successor_launched_after_predecessor_completion():
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=210)
     lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=400)
 
-    with pytest.raises(NativeOverlapError, match="reordered before the claim release"):
+    with pytest.raises(NativeOverlapError, match="not queued before predecessor completion"):
         assert_native_overlap(parse_spans(lines))
 
 
@@ -870,7 +870,7 @@ def test_native_overlap_orders_by_run_epoch_when_dispatch_id_is_absent():
     `run_epoch` is the only identity those runs carry, so it is what orders them.
     """
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(180, 100), release=280)
 
     identities = [check.predecessor for check in assert_native_overlap(parse_spans(lines))]
 
@@ -881,7 +881,7 @@ def test_native_overlap_orders_by_run_epoch_when_dispatch_id_is_absent():
 
 def test_native_overlap_orders_by_dispatch_id_when_the_scheduler_allocates_one():
     lines = _run_records(run_epoch=1, dispatch_id=10, run_id=5, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, dispatch_id=11, run_id=6, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, dispatch_id=11, run_id=6, prepare=(150, 30), device=(180, 100), release=280)
 
     checks = assert_native_overlap(parse_spans(lines))
 
@@ -891,7 +891,7 @@ def test_native_overlap_orders_by_dispatch_id_when_the_scheduler_allocates_one()
 def test_native_overlap_skips_an_invocation_that_is_not_a_phased_run():
     """A lexical `chip.run` carries no identity attrs, so it orders nothing."""
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
-    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(180, 100), release=280)
     lines += [_record(7, 99, "chip.run", "", depth=0, ts=10, dur=5)]
 
     assert len(assert_native_overlap(parse_spans(lines))) == 1

@@ -188,7 +188,8 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   `ChipTaskSlotState` in the `TaskAttrs` byte (bit 3 `is_timed` + bits 4-7 the
   0..15 tag), co-located with the other per-task scheduling flags. The 16 slots
   are a fixed `TaskTimingRecord[16]` **tail** appended after the `AicpuPhaseRecord`
-  region in the same device buffer — same base pointer and per-run H2D reset.
+  region in the same per-slot device buffer — one base per in-flight slot and a
+  per-run H2D reset.
   A 16-byte header at the front lets the host skip the tail D2H entirely when
   no task was tagged (saving 1536 bytes on a2a3 and 3584 bytes on a5 per run).
   The tail is a distinct record type (dispatch/finish, not start/end) reduced by

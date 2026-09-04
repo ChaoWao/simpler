@@ -314,6 +314,20 @@ def _build_chip_callable(platform: str, case: dict) -> ChipCallable:
     )
 
 
+def _build_successful_callable(platform: str) -> ChipCallable:
+    kc = KernelCompiler(platform=platform)
+    orch_bytes = kc.compile_orchestration(
+        runtime_name=RUNTIME,
+        source_path=os.path.join(ORCH_DIR, "successful_orch.cpp"),
+    )
+    return ChipCallable.build(
+        signature=[],
+        func_name="aicpu_orchestration_entry",
+        binary=orch_bytes,
+        children=[],
+    )
+
+
 def _make_worker(platform: str, device_id: int, case_name: str, monkeypatch):
     case = CASES[case_name]
     # Per-case timeout-chain overrides (which watchdog must fire, and when).
@@ -378,5 +392,25 @@ def test_device_error_class_reaches_host_log(st_platform, st_device_ids, case_na
             dropped_before,
         )
         _assert_annotated(log, case)
+    finally:
+        worker.close()
+
+
+@pytest.mark.platforms(["a2a3"])
+@pytest.mark.device_count(1)
+@pytest.mark.runtime(RUNTIME)
+def test_invalid_args_failure_keeps_worker_usable(st_platform, st_device_ids):
+    failure_callable = _build_chip_callable(st_platform, CASES["invalid_args"])
+    success_callable = _build_successful_callable(st_platform)
+    worker = Worker(level=2, platform=st_platform, runtime=RUNTIME, device_id=int(st_device_ids[0]))
+    failure_handle = worker.register(failure_callable)
+    success_handle = worker.register(success_callable)
+    worker.init()
+    try:
+        config = CallConfig()
+        config.aicpu_thread_num = 2
+        with pytest.raises(RuntimeError, match=r"failed with code -5\b"):
+            worker.run(failure_handle, None, config)
+        worker.run(success_handle, None, config)
     finally:
         worker.close()

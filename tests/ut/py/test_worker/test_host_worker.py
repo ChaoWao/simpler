@@ -714,6 +714,7 @@ class _FakeChipRun:
         self.activated = True
         self._lane._launch_front()
         self._lane._prepare_successor()
+        self._lane._launch_successor()
 
     def abandon(self) -> None:
         if self._launched:
@@ -732,6 +733,7 @@ class _FakeChipRun:
 class _FakeNativeRunImpl:
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
         self.supports_concurrent_native_prepare = supports_concurrent_native_prepare
+        self.supports_queued_native_launch = supports_concurrent_native_prepare
         self.events: list[tuple] = []
         self.completed = [threading.Event(), threading.Event()]
         self.prepared = [threading.Event(), threading.Event()]
@@ -743,6 +745,7 @@ class _FakeNativeRunImpl:
         self.prepare_errors: dict[tuple[int, int], BaseException] = {}
         self.poll_errors: dict[tuple[int, int], BaseException] = {}
         self.finalize_errors: dict[tuple[int, int], BaseException] = {}
+        self.recoverable_finalize_errors: set[tuple[int, int]] = set()
         self.prepare_identities: list[tuple[int, int, int, int]] = []
         self.poll_states: list[tuple[int, int]] = []
         self.register_calls: list[tuple[int, int]] = []
@@ -865,7 +868,9 @@ class _FakeNativeRunImpl:
                 self._finalize_native_run(run.token)
         except BaseException as error:  # noqa: BLE001
             run.error = run.error or error
-            self._lane_poisoned = True
+            run_key = (int(run.token.slot_id), int(run.token.generation))
+            if run_key not in self.recoverable_finalize_errors:
+                self._lane_poisoned = True
         run.terminal = True
         if run in self._runs:
             self._runs.remove(run)
@@ -913,6 +918,26 @@ class _FakeNativeRunImpl:
                 successor.terminal = True
                 self._runs.remove(successor)
 
+    def _launch_successor(self) -> None:
+        if len(self._runs) != 2:
+            return
+        predecessor, successor = self._runs
+        if (
+            predecessor._launched
+            and successor.activated
+            and successor.token is not None
+            and not successor._launched
+            and self.supports_queued_native_launch
+            and not self._has_diagnostics(predecessor.submission.config)
+            and not self._has_diagnostics(successor.submission.config)
+        ):
+            try:
+                self._launch_native_run(successor.token)
+                successor._launched = True
+            except BaseException as error:  # noqa: BLE001
+                successor.error = error
+                self._finish(successor)
+
     def _progress(self, target: _FakeChipRun) -> bool:
         if target.terminal:
             return True
@@ -925,6 +950,7 @@ class _FakeNativeRunImpl:
             return False
         self._launch_front()
         self._prepare_successor()
+        self._launch_successor()
         if target.terminal:
             self._launch_front()
             return True
@@ -971,6 +997,7 @@ class _FakeNativeRunImpl:
         self._runs.sort(key=lambda candidate: candidate.submission.dispatch_id)
         self._launch_front()
         self._prepare_successor()
+        self._launch_successor()
         return run
 
     def _close_chip_run_lane(self) -> None:
@@ -1244,14 +1271,12 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        assert harness.cw._impl.wait_for_non_head_progress(1)
-        assert not harness.cw._impl.launched[1].is_set()
-        assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+        assert harness.cw._impl.launched[1].wait(5.0)
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
+        assert not harness.cw._impl.finalized[0].is_set()
 
         harness.cw._impl.completed[0].set()
         assert harness.cw._impl.finalized[0].wait(5.0)
-        assert harness.cw._impl.launched[1].wait(5.0)
-        assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
         harness.cw._impl.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
 
@@ -1260,8 +1285,8 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
             ("prepare", 0),
             ("launch", 0),
             ("prepare", 1),
-            ("finalize", 0),
             ("launch", 1),
+            ("finalize", 0),
             ("finalize", 1),
         ]
     finally:
@@ -1325,16 +1350,16 @@ def test_two_frame_hbg_prepares_and_launches_reverse_ready_frames_by_dispatch_id
         harness.start()
 
         assert harness.cw._impl.launched[1].wait(5.0)
-        assert not harness.cw._impl.launched[0].is_set()
+        assert harness.cw._impl.launched[0].wait(5.0)
         assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 1),
             ("launch", 1),
             ("prepare", 0),
+            ("launch", 0),
         ]
         assert harness.cw._impl.prepare_identities == [(1, 11, 5, 1), (0, 11, 5, 2)]
 
         harness.cw._impl.completed[1].set()
-        assert harness.cw._impl.launched[0].wait(5.0)
         harness.cw._impl.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
@@ -1839,6 +1864,41 @@ def test_two_frame_native_progress_failure_terminalizes_staged_successor(failure
         assert not harness.cw._impl.prepared[1].is_set()
         assert not harness.cw._impl.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+    finally:
+        harness.close()
+
+
+def test_two_frame_recoverable_runtime_failure_keeps_successor_and_lane_usable():
+    harness = _TwoFrameLoopHarness(
+        supports_concurrent_native_prepare=True,
+        chip_runtime="host_build_graph",
+    )
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish(1, 2, state=worker_mod._PREPARE_READY)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[1].wait(5.0)
+
+        harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("invalid orchestration args")
+        harness.cw._impl.recoverable_finalize_errors.add((0, 11))
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+        assert harness.thread.is_alive()
+
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+
+        harness.cw._impl.completed[0].clear()
+        harness.cw._impl.launched[0].clear()
+        harness.publish(0, 3, generation=12)
+        harness.cw._impl.finalize_errors.pop((0, 11))
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
 

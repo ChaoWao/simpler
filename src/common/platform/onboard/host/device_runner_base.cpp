@@ -1542,11 +1542,10 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     // mem_alloc_ and the device context are still live. free_tensor() routes
     // through mem_alloc_.free(), so it must run before mem_alloc_.finalize()
     // and before the subclass's `rtDeviceReset()` tears down the device runtime.
-    if (device_wall_dev_ptr_ != nullptr) {
-        if (!abandon_device_resources) {
-            free_tensor(device_wall_dev_ptr_);
-        }
-        device_wall_dev_ptr_ = nullptr;
+    for (void *&device_wall_dev_ptr : device_wall_dev_ptrs_) {
+        if (device_wall_dev_ptr == nullptr) continue;
+        if (!abandon_device_resources) free_tensor(device_wall_dev_ptr);
+        device_wall_dev_ptr = nullptr;
     }
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)
@@ -1651,7 +1650,7 @@ int DeviceRunnerBase::resolve_aicpu_thread_num(int requested, int usable, int ar
     return total;
 }
 
-void DeviceRunnerBase::ensure_device_wall_buffer(KernelArgsHelper &kernel_args) {
+void DeviceRunnerBase::ensure_device_wall_buffer(KernelArgsHelper &kernel_args, uint32_t pipeline_slot) {
     if (!device_phase_capture_enabled()) {
         // A null base makes the AICPU stamping helpers no-op.
         kernel_args.args.device_wall_data_base = 0;
@@ -1663,22 +1662,27 @@ void DeviceRunnerBase::ensure_device_wall_buffer(KernelArgsHelper &kernel_args) 
     // the on-NPU portion. Each surviving AICPU thread writes its own records
     // (plain stores, no atomics); read_device_phases() reduces RunWall as
     // max(end) - min(start) and surfaces the other phases as trace markers. The
-    // buffer is allocated once (lazy) but RESET every run so a stale prior run
+    // buffer is allocated once per slot (lazy) but RESET every run so a stale prior run
     // cannot leak into the reduction.
     constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     using BufferImage = DevicePhaseBufferStorage<kThreads>;
     constexpr size_t kBytes = device_phase_buffer_bytes(kThreads);
     static_assert(sizeof(BufferImage) == kBytes, "device-phase buffer layout drift");
-    if (device_wall_dev_ptr_ == nullptr) {
-        device_wall_dev_ptr_ = allocate_tensor(kBytes);
+    if (pipeline_slot >= device_wall_dev_ptrs_.size()) {
+        kernel_args.args.device_wall_data_base = 0;
+        return;
     }
-    if (device_wall_dev_ptr_ != nullptr) {
-        kernel_args.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr_);
+    void *&device_wall_dev_ptr = device_wall_dev_ptrs_[pipeline_slot];
+    if (device_wall_dev_ptr == nullptr) {
+        device_wall_dev_ptr = allocate_tensor(kBytes);
+    }
+    if (device_wall_dev_ptr != nullptr) {
+        kernel_args.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr);
     }
 }
 
 int DeviceRunnerBase::arm_device_wall_buffer(KernelArgsHelper &kernel_args) {
-    if (device_wall_dev_ptr_ == nullptr || kernel_args.args.device_wall_data_base == 0) return 0;
+    if (kernel_args.args.device_wall_data_base == 0) return 0;
     constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     using BufferImage = DevicePhaseBufferStorage<kThreads>;
     static const BufferImage init = [] {
@@ -1686,10 +1690,11 @@ int DeviceRunnerBase::arm_device_wall_buffer(KernelArgsHelper &kernel_args) {
         reset_device_phase_buffer(&image, kThreads);
         return image;
     }();
-    if (copy_to_device(device_wall_dev_ptr_, &init, sizeof(init)) != 0) {
+    void *device_wall_dev_ptr = reinterpret_cast<void *>(kernel_args.args.device_wall_data_base);
+    if (copy_to_device(device_wall_dev_ptr, &init, sizeof(init)) != 0) {
         // Reset failed — disable capture for this run so stale slot data
-        // can't leak into the reduction. Keep the shared allocation alive:
-        // an earlier run may still reference it, and the next run retries reset.
+        // can't leak into the reduction. Keep the slot allocation alive so its
+        // next owner can retry the reset.
         LOG_WARN("device_phase reset H2D failed; disabling phase capture this run");
         kernel_args.args.device_wall_data_base = 0;
         return 0;
@@ -1795,7 +1800,7 @@ int DeviceRunnerBase::sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicor
     return 0;
 }
 
-void DeviceRunnerBase::read_device_wall_ns() {
+void DeviceRunnerBase::read_device_wall_ns(const KernelArgsHelper &kernel_args) {
     // Pull the per-thread AICPU phase records back from the device buffer that
     // AICPU writes through via KernelArgs::device_wall_data_base. (We can't use
     // the device_k_args_ shadow here — CANN's rtAicpuKernelLaunchExWithArgs
@@ -1812,13 +1817,14 @@ void DeviceRunnerBase::read_device_wall_ns() {
         task_slot_finish_ns_[s] = 0;
     }
     if (!device_phase_capture_enabled()) return;
-    if (device_wall_dev_ptr_ == nullptr) return;
+    if (kernel_args.args.device_wall_data_base == 0) return;
+    const void *device_wall_dev_ptr = reinterpret_cast<const void *>(kernel_args.args.device_wall_data_base);
 
     constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     using BufferPrefix = DevicePhaseBufferPrefixStorage<kThreads>;
     static_assert(sizeof(BufferPrefix) == task_timing_tail_offset(kThreads), "device-phase prefix layout drift");
     BufferPrefix buf{};
-    int wall_rc = rtMemcpy(&buf, sizeof(buf), device_wall_dev_ptr_, sizeof(buf), RT_MEMCPY_DEVICE_TO_HOST);
+    int wall_rc = rtMemcpy(&buf, sizeof(buf), device_wall_dev_ptr, sizeof(buf), RT_MEMCPY_DEVICE_TO_HOST);
     if (wall_rc != 0) {
         LOG_WARN("rtMemcpy(device_phase) D2H failed: %d", wall_rc);
         return;
@@ -1856,7 +1862,7 @@ void DeviceRunnerBase::read_device_wall_ns() {
     int tail_rc = read_task_timing_tail_if_used(buf.header, [&]() {
         TaskTimingRecord tail[kTailRecords] = {};
         const void *tail_src =
-            reinterpret_cast<const uint8_t *>(device_wall_dev_ptr_) + task_timing_tail_offset(kThreads);
+            reinterpret_cast<const uint8_t *>(device_wall_dev_ptr) + task_timing_tail_offset(kThreads);
         int rc = rtMemcpy(tail, sizeof(tail), tail_src, sizeof(tail), RT_MEMCPY_DEVICE_TO_HOST);
         if (rc != 0) return rc;
         resolve_task_timing_slots_ns(
@@ -1968,31 +1974,37 @@ bool DeviceRunnerBase::try_acquire_native_run(
         }
     }
     if (!reserved) return false;
-    const void *expected = nullptr;
-    if (!active_native_run_.compare_exchange_strong(
-            expected, owner, std::memory_order_acq_rel, std::memory_order_acquire
-        )) {
-        return false;
+
+    size_t active_count = 0;
+    for (const void *active : active_native_runs_) {
+        if (active == owner) return false;
+        if (active != nullptr) ++active_count;
     }
+    if (active_count >= native_launch_depth()) return false;
+    auto slot = std::find(active_native_runs_.begin(), active_native_runs_.end(), nullptr);
+    if (slot == active_native_runs_.end()) return false;
+    *slot = owner;
     *permit = LaunchPermit(identity);
     return true;
 }
 
 void DeviceRunnerBase::release_native_run(const void *owner) {
     std::lock_guard<std::mutex> lk(native_run_mu_);
-    if (active_native_run_.load(std::memory_order_acquire) != owner) return;
-    const void *expected = owner;
-    (void)active_native_run_.compare_exchange_strong(
-        expected, nullptr, std::memory_order_release, std::memory_order_relaxed
-    );
+    auto slot = std::find(active_native_runs_.begin(), active_native_runs_.end(), owner);
+    if (slot != active_native_runs_.end()) *slot = nullptr;
 }
 
 bool DeviceRunnerBase::native_run_active() const {
-    return active_native_run_.load(std::memory_order_acquire) != nullptr;
+    std::lock_guard<std::mutex> lk(native_run_mu_);
+    return std::any_of(active_native_runs_.begin(), active_native_runs_.end(), [](const void *owner) {
+        return owner != nullptr;
+    });
 }
 
 bool DeviceRunnerBase::native_run_owned_by(const void *owner) const {
-    return owner != nullptr && active_native_run_.load(std::memory_order_acquire) == owner;
+    if (owner == nullptr) return false;
+    std::lock_guard<std::mutex> lk(native_run_mu_);
+    return std::find(active_native_runs_.begin(), active_native_runs_.end(), owner) != active_native_runs_.end();
 }
 
 bool DeviceRunnerBase::try_reserve_native_run(
@@ -2014,9 +2026,12 @@ bool DeviceRunnerBase::try_reserve_native_run(
         existing = &reservation;
     }
     if (occupied != 0) {
-        const void *active = active_native_run_.load(std::memory_order_acquire);
+        const bool existing_active =
+            std::any_of(active_native_runs_.begin(), active_native_runs_.end(), [existing](const void *active_owner) {
+                return active_owner == existing->owner;
+            });
         if (!allow_prepared_successor || occupied != 1 || existing == nullptr ||
-            !existing->permits_prepared_successor || active != existing->owner) {
+            !existing->permits_prepared_successor || !existing_active) {
             return false;
         }
     }

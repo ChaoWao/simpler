@@ -348,6 +348,15 @@ static int32_t read_runtime_status(Runtime *runtime, const HostApi *api, SharedM
     return runtime_status_from_error_code(sched_error_code);
 }
 
+extern "C" int completed_runtime_status_impl(Runtime *runtime, const HostApi *api) {
+    SharedMemoryHeader host_header{};
+    return read_runtime_status(runtime, api, &host_header);
+}
+
+extern "C" int runtime_status_poisons_device_impl(int runtime_status) {
+    return latched_error_may_poison_device(-runtime_status) ? 1 : 0;
+}
+
 namespace {
 
 // host_build_graph is host-orchestration-first: the HOST dlopens the

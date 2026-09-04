@@ -297,9 +297,10 @@ layer's.
 
 Run streams are outside that lease, and there is one pair of them per runner
 rather than one per slot. A slot indexes the resources *preparation* mutates,
-and preparing a run writes nothing to a stream: only launch submits, and launch
-holds the exclusive execution claim, so runs reach the device one at a time and
-the stream orders them. The two streams stay distinct because the AICPU Run
+and preparing a run writes nothing to a stream. On a2a3 onboard, two successful
+launches may enqueue consecutive runs on that pair; per-slot completion events
+identify each run's tail while the stream orders their device work. The two
+streams stay distinct because the AICPU Run
 kernel spins in the handshake waiting for the AICore workers — one queue would
 leave the AICore submission behind a spin that never ends.
 
@@ -308,15 +309,15 @@ content-hash deduplicated GM allocations: simultaneously resident code images
 occupy different allocations, while unregister frees an allocation that a later
 registration may reuse. A dedup miss is the only repeatable path that publishes
 new AICore instruction bytes; after that H2D copy succeeds the pair is marked
-stale, and the next launch destroys the AICore stream and creates a replacement.
+stale, and the next launch after all outstanding runs retire destroys the AICore
+stream and creates a replacement.
 (The `kernel_entry` ELF that `rtRegisterAllKernel` publishes needs no such mark:
 CANN offers no unregister, so it is registered once per runner and released with
 the streams at finalize.) Without a new publication the pair stays warm even
-when two resident callables alternate. Unproven completion still destroys the
-AICore stream conservatively, and only the run that submitted the pair may
-retire it — a prepared successor overlaps its predecessor's execution and must
-leave the live pair alone. The AICPU stream carries no instruction cache state
-and lives for the runner.
+when two resident callables alternate. Proven owners retire in submission order.
+An unproven completion prevents reuse and defers AICore stream destruction until
+the submitted queue is empty. The AICPU stream carries no instruction cache
+state and lives for the runner.
 
 #### Whole-run FIFO admission
 
@@ -415,10 +416,13 @@ Backend and per-run capabilities, rather than the mailbox protocol, select
 between these meanings.
 
 An HBG successor's prepared token remains unlaunched and unaccepted until
-`ACTIVATE`, and activation still cannot launch it until the predecessor has
-polled complete and finalized. The sticky acceptance word therefore remains
-zero throughout preparation. Shutdown, stale activation, and pre-launch
-failure finalize the token exactly once before the frame becomes terminal.
+`ACTIVATE`. On a queued-launch-capable a2a3 backend, activation may submit it
+behind the predecessor before that predecessor finalizes; per-slot events keep
+completion and finalization FIFO. Diagnostic, incompatible, and unsupported
+paths still wait for predecessor finalization. The sticky acceptance word
+therefore remains zero throughout preparation and changes only after launch.
+Shutdown, stale activation, and pre-launch failure finalize the token exactly
+once before the frame becomes terminal.
 
 The scheduler stages only the first eligible single NEXT_LEVEL task from the
 prepared FIFO successor. Tasks from the active run use only the active lane, so
@@ -758,7 +762,7 @@ Step-by-step (one chip worker):
 | 4 | Scheduler thread | pop `slot` from worker 0's FIFO; resolve stable worker ID 0 to WT_chip_0; dispatch |
 | 5 | WT_chip_0 parent side | encode one leased task frame: write `config`, digest prefix, and the args blob; publish `TASK_READY` for the active lane or `PREPARE_READY` for a staged successor |
 | 6 | chip_0 child process | validate the frame and resolve its digest; ordinary HBG with an active predecessor also prepares the leased inactive arena bank before publishing `FRAME_STAGED`, while a frame with no active predecessor, diagnostic HBG, and TMR publish after validation and defer native prepare |
-| 7 | chip_0 native-run path | after activation and the predecessor's finalization fence, launch an already-prepared HBG run or finish deferred native preparation and then launch; poll it to completion and finalize it before another staged frame may launch. Compatibility endpoints perform the equivalent operation through blocking `ChipWorker::run` |
+| 7 | chip_0 native-run path | after activation, a capable a2a3 backend launches the prepared successor onto the predecessor's stream pair; per-slot events preserve FIFO completion and finalization. Diagnostic and incompatible paths wait for predecessor finalization before preparing or launching. Compatibility endpoints perform the equivalent operation through blocking `ChipWorker::run` |
 | 8 | runtime.so | translate host ptrs → device ptrs; dispatch AICPU / AICore; write output into `c`'s shm |
 | 9 | chip_0 child | native finalization returns; write `TASK_DONE` |
 | 10 | WT_chip_0 parent | observe `TASK_DONE`; push success completion |

@@ -32,6 +32,8 @@
  *                   get_run_stream_set_create_count
  *   - pipeline:     get_pipeline_contract,
  *                   supports_concurrent_native_prepare_ctx,
+ *                   supports_queued_native_launch_ctx,
+ *                   native_run_error_poisons_ctx,
  *                   get_arena_bank_gm_heap_base_ctx,
  *                   get_retained_temp_addr_ctx
  *   - ACL/stream:   ensure_acl_ready_ctx, create_comm_stream_ctx,
@@ -434,6 +436,12 @@ int simpler_prepare_run(
  * claim held by a run in another pipeline slot.
  */
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx);
+
+/** Return nonzero when two prepared runs may be submitted to the same run streams. */
+int supports_queued_native_launch_ctx(DeviceContextHandle ctx);
+
+/** Return nonzero when an execution error invalidates the native run lane. */
+int native_run_error_poisons_ctx(DeviceContextHandle ctx, int execution_rc);
 
 /**
  * Launch a prepared run. Returns only after the platform has published its

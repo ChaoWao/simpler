@@ -66,6 +66,11 @@ extern "C" {
  * =========================================================================== */
 int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
+__attribute__((weak)) int completed_runtime_status_impl(Runtime * /*runtime*/, const HostApi * /*api*/) { return 0; }
+// Backends that do not report a per-run status keep the conservative policy.
+// a5 still completes through stream sync and never reaches this fallback for a
+// successful drain; a future queued-launch backend must provide both hooks.
+__attribute__((weak)) int runtime_status_poisons_device_impl(int /*runtime_status*/) { return 1; }
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
 __attribute__((weak)) int prepared_run_config_compatible_impl(
     const HostApi * /*api*/, const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
@@ -652,8 +657,34 @@ static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
     state->runner_trace_start_ns = 0;
 }
 
+static int completed_execution_rc(OnboardNativeRunContext *state, int drain_rc) {
+    if (drain_rc != 0) return drain_rc;
+    // Per-run events delimit the completed stream prefix but do not carry the
+    // runtime's device-side error latches. Read this run's small status header
+    // before validation decides whether outputs are safe to copy back.
+    const int runtime_status = completed_runtime_status_impl(&state->runtime, &state->host_api);
+    if (runtime_status == 0) return 0;
+    if (runtime_status_poisons_device_impl(runtime_status) != 0) {
+        state->runner->recover_device_or_mark_unusable(runtime_status);
+    }
+    return runtime_status;
+}
+
+int native_run_error_poisons_ctx(DeviceContextHandle ctx, int execution_rc) {
+    if (ctx == nullptr || execution_rc == 0) return 0;
+    if (execution_rc <= -1 && execution_rc >= -PTO_RUNTIME_LATCHED_CODE_MAX) {
+        return runtime_status_poisons_device_impl(execution_rc) != 0 ? 1 : 0;
+    }
+    return 1;
+}
+
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {
     return ctx != nullptr && concurrent_native_prepare_supported_impl() != 0 ? 1 : 0;
+}
+
+int supports_queued_native_launch_ctx(DeviceContextHandle ctx) {
+    if (ctx == nullptr) return 0;
+    return static_cast<DeviceRunnerBase *>(ctx)->native_launch_depth() > 1 ? 1 : 0;
 }
 
 static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
@@ -941,6 +972,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         drain_rc = PTO_RUNTIME_ERR_INTERNAL;
         LOG_ERROR("simpler_wait_run: drain threw (%s)", state->trace_attrs);
     }
+    drain_rc = completed_execution_rc(state, drain_rc);
     if (state->completion_rc == 0) state->completion_rc = drain_rc;
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     emit_native_run_runner_wall(state);
@@ -989,6 +1021,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
                 LOG_ERROR("simpler_finalize_run: drain_execution threw (%s)", state->trace_attrs);
             }
         }
+        drain_rc = completed_execution_rc(state, drain_rc);
         if (execution_rc == 0) execution_rc = drain_rc;
         state->completion_rc = execution_rc;
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
@@ -1036,9 +1069,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     // the provider/session.
     state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
     if (state->runner_claimed) {
-        // The point a successor's launch becomes admissible. Ordering a
-        // successor's device work against this boundary is what separates a
-        // pipelined launch from a reordered one, and no other span marks it.
+        // This run no longer occupies one slot in the submitted-run owner set.
         STRACE("chip.run.claim_release");
         state->runner->release_native_run(state);
         state->runner_claimed = false;

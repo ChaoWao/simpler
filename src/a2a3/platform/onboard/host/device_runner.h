@@ -24,6 +24,7 @@
 #include <runtime/rt.h>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -103,6 +104,7 @@ public:
     int poll_execution(const ActiveExecution &active) override;
     int drain_execution(ActiveExecution &active) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
+    size_t native_launch_depth() const override { return PTO_PIPELINE_MAX_DEPTH; }
     // provision/abandon_native_run_resources keep the base no-op: preparation
     // owns no stream, so there is nothing for a prepared run to provision or
     // hand back. launch_run() readies the pair under the execution claim.
@@ -224,11 +226,10 @@ private:
         rtStream_t aicore{nullptr};
     };
 
-    // One pair carries every run: the execution claim is exclusive, so runs
-    // reach the device one at a time and the stream orders them. Pipeline slots
-    // index resources that preparation mutates, and preparing a run writes
-    // nothing to a stream. Stream lifetimes live in RunStreamPair so
-    // publication and failed-destroy states are testable without a device.
+    // One pair carries every run. Up to two owners may submit consecutive work;
+    // the stream order serializes it while per-slot events expose each run's
+    // completion point. Stream lifetimes live in RunStreamPair so publication
+    // and failed-destroy states are testable without a device.
     RunStreamPair run_streams_{
         [this](void **out) {
             return create_run_stream(out);
@@ -247,6 +248,20 @@ private:
     int retire_run_aicore_stream(const void *owner, RunStreamPair::CompletionStatus completion_status);
     int destroy_run_streams();
 
+    struct RunCompletionEvents {
+        void *aicpu{nullptr};
+        void *aicore{nullptr};
+        bool recorded{false};
+    };
+    std::array<RunCompletionEvents, PTO_PIPELINE_MAX_DEPTH> run_completion_events_{};
+    int ensure_run_completion_events(uint32_t pipeline_slot);
+    int record_run_completion_events(const PreparedExecution &prepared);
+    int query_run_completion_events(const PreparedExecution &prepared);
+    int wait_run_completion_events(const PreparedExecution &prepared);
+    void reset_run_completion_events(uint32_t pipeline_slot) noexcept;
+    int destroy_run_completion_events();
+    void abandon_run_completion_events() noexcept;
+
     // Release execution-owned resources in collector, runtime-argument,
     // register-buffer, then stream order. The collectors this releases were
     // initialized by prepare_execution() for this run alone; an overlapping
@@ -257,7 +272,7 @@ private:
     // The kernel submission boundary is separate from the stream wait and
     // post-run teardown: launch_run() submits and drain_execution() reaps.
     LaunchTransactionResult launch_run(PreparedExecution &prepared, LaunchPermit permit);
-    int reap_run();
+    int reap_run(PreparedExecution &prepared);
 
     // On an AICore launch/sync error, best-effort drain the device so a later
     // enqueue on the same DeviceRunner can recover in place; if the drain itself

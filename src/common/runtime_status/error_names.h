@@ -196,4 +196,36 @@ static inline const char *latched_error_field(int32_t orch_error_code, int32_t s
     return orch_error_code != SIMPLER_ERROR_NONE ? "orch_error_code" : "sched_error_code";
 }
 
+// A completed event pair proves both stream prefixes retired. Only timeout
+// classifications may have reached that point through STARS reaping or a
+// stalled producer that leaves the device generation unsafe to reuse. Unknown
+// codes stay conservative so a new runtime failure cannot silently skip reset.
+static inline bool latched_error_may_poison_device(int32_t code) {
+    switch (code) {
+    case SIMPLER_ERROR_NONE:
+        return false;
+    case SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT:
+    case SIMPLER_ERROR_SCHEDULER_TIMEOUT:
+        return true;
+    case SIMPLER_ERROR_SCOPE_DEADLOCK:
+    case SIMPLER_ERROR_HEAP_RING_DEADLOCK:
+    case SIMPLER_ERROR_FLOW_CONTROL_DEADLOCK:
+    case SIMPLER_ERROR_FANIN_CAPACITY_EXCEEDED:
+    case SIMPLER_ERROR_INVALID_ARGS:
+    case SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID:
+    case SIMPLER_ERROR_EXPLICIT_ORCH_FATAL:
+    case SIMPLER_ERROR_SCOPE_TASKS_OVERFLOW:
+    case SIMPLER_ERROR_TENSORMAP_OVERFLOW:
+    case SIMPLER_ERROR_ASYNC_COMPLETION_INVALID:
+    case SIMPLER_ERROR_ASYNC_WAIT_OVERFLOW:
+    case SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED:
+#ifdef SIMPLER_ERROR_READY_QUEUE_OVERFLOW
+    case SIMPLER_ERROR_READY_QUEUE_OVERFLOW:
+#endif
+        return false;
+    default:
+        return true;
+    }
+}
+
 #endif  // SRC_COMMON_RUNTIME_STATUS_ERROR_NAMES_H_
