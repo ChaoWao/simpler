@@ -740,7 +740,7 @@ public:
     const simpler::dfx::HostPhaseRecordStore &host_phase_records() const { return host_phase_records_; }
     /** Hand this pass's records to the swimlane reader, just before its export. */
     void publish_host_phase_records_to_swimlane();
-    /** Start the level-4 Host/Device clock correlation once per run. */
+    /** Start the Host/Device clock correlation once per swimlane run. */
     void begin_clock_correlation_session_if_needed() noexcept;
     /**
      * Write this pass's per-event host phase records to `output_prefix_`.
@@ -751,7 +751,7 @@ public:
      * every path that can end a run may call this unconditionally.
      */
     void write_host_phase_records_artifact();
-    void finish_clock_correlation_session(bool capture_device_complete, bool abandon_device_resources) noexcept;
+    void finish_clock_correlation_session(bool abandon_device_resources) noexcept;
     void set_dump_args_enabled(int level) {
         dump_args_level_ = static_cast<DumpArgsLevel>(level);
         enable_dump_args_ = (dump_args_level_ != DumpArgsLevel::OFF);
@@ -979,7 +979,7 @@ protected:
      * `dep_gen_collector_` + its `dep_gen_replay_emit_deps_json` export)
      * inline their own teardown after calling this helper.
      */
-    void teardown_shared_collectors_after_run(bool device_execution_complete);
+    void teardown_shared_collectors_after_run();
 
     /**
      * Shared body of `finalize()`. Each arch subclass's `finalize()`
@@ -1301,6 +1301,7 @@ protected:
     bool enable_scope_stats_{false};
     ChipSwimlaneLevel chip_swimlane_level_{ChipSwimlaneLevel::DISABLED};  // resolved from set_chip_swimlane_enabled()
     PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};         // resolved from set_pmu_enabled()
-    bool capture_clock_anchors_{false};                                   // from CallConfig::capture_clock_anchors
-    std::string output_prefix_{};                                         // diagnostic artifact root directory
+    // Set by CallConfig::capture_clock_anchors or by the swimlane being enabled.
+    bool capture_clock_anchors_{false};
+    std::string output_prefix_{};  // diagnostic artifact root directory
 };

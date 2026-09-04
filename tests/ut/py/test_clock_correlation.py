@@ -32,7 +32,7 @@ def _anchors(samples, raw_unit="syscnt_cycles"):
     }
 
 
-def test_alignment_selects_minimum_rtt_and_interpolates_offset_with_integer_math():
+def test_alignment_selects_minimum_rtt_and_offsets_at_the_nominal_frequency():
     anchors = _anchors(
         [
             _sample("pre_host_orchestration", 0, 900, 100, 1_100),
@@ -42,75 +42,90 @@ def test_alignment_selects_minimum_rtt_and_interpolates_offset_with_integer_math
         ]
     )
 
-    alignment = build_clock_alignment(anchors, 1_000_000_000, [100, 2_100, 4_100])
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
 
     assert alignment.status == "calibrated"
-    assert alignment.metadata()["selected_sample_idx"] == {
-        "pre_host_orchestration": 1,
-        "post_device_execution": 1,
-    }
-    assert alignment.max_uncertainty_ns == 20
-    assert alignment.metadata()["anchor_group_duration_ns"] == {
-        "pre_host_orchestration": 200,
-        "post_device_execution": 400,
-    }
+    assert alignment.metadata()["selected_sample_idx"] == {"pre_host_orchestration": 1}
+    assert alignment.max_uncertainty_ns == 10
+    assert alignment.metadata()["anchor_group_duration_ns"] == {"pre_host_orchestration": 200}
+    # A closing anchor from an older capture is ignored.
     assert alignment.map_cycles_to_host_ns(100) == 1_000
-    assert alignment.map_cycles_to_host_ns(2_100) == 3_050
-    assert alignment.map_cycles_to_host_ns(4_100) == 5_100
+    assert alignment.map_cycles_to_host_ns(2_100) == 3_000
+    assert alignment.map_cycles_to_host_ns(4_100) == 5_000
+
+
+def test_mapping_needs_only_one_anchor():
+    anchors = _anchors([_sample("pre_host_orchestration", 0, 990, 100, 1_010)])
+
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
+
+    assert alignment.status == "calibrated"
+    assert alignment.map_cycles_to_host_ns(9_100) == 10_000
+
+
+def test_the_anchor_is_a_pin_and_extrapolates_equally_either_side():
+    # The single reading supplies an offset, not the bound of a calibrated
+    # interval, so a cycle count below the anchor maps by the same arithmetic
+    # as one above it. host_mid_ns = 999_900 + 200 // 2.
+    anchors = _anchors([_sample("pre_host_orchestration", 0, 999_900, 5_000, 1_000_100)])
+
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
+
+    assert alignment.map_cycles_to_host_ns(5_000) == 1_000_000
+    assert alignment.map_cycles_to_host_ns(6_500) == 1_001_500
+    assert alignment.map_cycles_to_host_ns(3_500) == 998_500
+
+
+def test_mapping_rounds_toward_zero_on_both_sides_of_the_anchor():
+    # 3 GHz: one cycle is 1/3 ns, so a 5-cycle delta is 1.67 ns and has to be
+    # truncated. Truncation is toward zero, which keeps the two directions
+    # symmetric; floor division alone would bias the pre-anchor side away.
+    anchors = _anchors([_sample("pre_host_orchestration", 0, 999_900, 5_000, 1_000_100)])
+
+    alignment = build_clock_alignment(anchors, 3_000_000_000)
+
+    assert alignment.map_cycles_to_host_ns(5_005) == 1_000_001
+    assert alignment.map_cycles_to_host_ns(4_995) == 999_999
 
 
 def test_alignment_preserves_low_bits_for_large_cycle_values():
     ref = 10**18
-    anchors = _anchors(
-        [
-            _sample("pre_host_orchestration", 0, 9_999_999_990, ref, 10_000_000_010),
-            _sample("post_device_execution", 0, 10_000_003_990, ref + 4_000, 10_000_004_010),
-        ]
-    )
+    anchors = _anchors([_sample("pre_host_orchestration", 0, 9_999_999_990, ref, 10_000_000_010)])
 
-    alignment = build_clock_alignment(anchors, 1_000_000_000, [ref + 1])
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
 
     assert alignment.map_cycles_to_host_ns(ref + 1) == 10_000_000_001
 
 
 def test_acl_event_microsecond_quantization_is_included_in_uncertainty():
     anchors = _anchors(
-        [
-            _sample("pre_host_orchestration", 0, 990, 100, 1_010),
-            _sample("post_device_execution", 0, 4_990, 4_100, 5_010),
-        ],
+        [_sample("pre_host_orchestration", 0, 990, 100, 1_010)],
         raw_unit="device_uptime_us",
     )
 
-    alignment = build_clock_alignment(anchors, 1_000_000_000, [100, 4_100])
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
 
     assert alignment.max_uncertainty_ns == 1_010
 
 
 def test_host_record_quantization_is_included_in_cross_domain_uncertainty():
-    anchors = _anchors(
-        [
-            _sample("pre_host_orchestration", 0, 990, 100, 1_010),
-            _sample("post_device_execution", 0, 4_980, 4_100, 5_020),
-        ]
-    )
+    anchors = _anchors([_sample("pre_host_orchestration", 0, 990, 100, 1_010)])
 
     alignment = build_clock_alignment(
         anchors,
         50_000_000,
-        [100, 4_100],
         host_timestamp_quantization_ns=20,
     )
 
-    assert alignment.anchor_uncertainty_ns == 20
-    assert alignment.max_uncertainty_ns == 40
+    assert alignment.anchor_uncertainty_ns == 10
+    assert alignment.max_uncertainty_ns == 30
     assert alignment.metadata()["host_timestamp_quantization_ns"] == 20
 
 
 @pytest.mark.parametrize(
-    ("anchors", "timestamps", "reason"),
+    ("anchors", "reason"),
     [
-        ({}, [], "missing_clock_anchor_samples"),
+        ({}, "missing_clock_anchor_samples"),
         (
             _anchors(
                 [
@@ -118,23 +133,12 @@ def test_host_record_quantization_is_included_in_cross_domain_uncertainty():
                     _sample("post_device_execution", 0, 4_990, 4_100, 5_010),
                 ]
             ),
-            [],
-            "no_valid_pre_host_orchestration_anchor",
-        ),
-        (
-            _anchors(
-                [
-                    _sample("pre_host_orchestration", 0, 990, 100, 1_010),
-                    _sample("post_device_execution", 0, 4_990, 4_100, 5_010),
-                ]
-            ),
-            [99],
-            "device_timestamps_outside_anchor_coverage",
+            "no_valid_anchor",
         ),
     ],
 )
-def test_alignment_fails_closed(anchors, timestamps, reason):
-    alignment = build_clock_alignment(anchors, 1_000_000_000, timestamps)
+def test_alignment_fails_closed(anchors, reason):
+    alignment = build_clock_alignment(anchors, 1_000_000_000)
 
     assert alignment.status == "unaligned"
     assert alignment.reason == reason

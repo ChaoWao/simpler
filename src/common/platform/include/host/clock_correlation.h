@@ -21,22 +21,17 @@ namespace simpler::dfx {
 
 constexpr std::size_t kClockAnchorSamplesPerPosition = 3;
 
-// The two ends of the calibrated interval. Device timestamps outside
-// [HostOrchestrationBegin, DeviceExecutionComplete] cannot be mapped to the
-// Host clock, so the opening anchor is taken at whatever point in a runtime's
-// sequence precedes every device timestamp it will record:
+// Where in a run the paired reading is taken. It supplies the offset that maps
+// this device's timestamps onto the Host clock; the scale comes from the
+// platform's counter frequency, so one reading is enough and it pins the two
+// domains rather than bounding an interval they must fall inside. A timestamp
+// either side of it maps by the same arithmetic.
 //
-//   host_build_graph            before Host orchestration (host_phase_pool_arm),
-//                               so the interval also spans bind and H2D
-//   tensormap_and_ringbuffer    before kernel launch (start_shared_collectors_
-//                               for_run), the earliest point it has
-//
-// The serialized name "pre_host_orchestration" predates the second case and is
-// kept because it is an on-wire value in every existing capture; read it as
-// "start of the calibrated interval", not as a claim about Host orchestration.
+// The serialized name stays "pre_host_orchestration": it is an on-wire value in
+// every existing capture. It names a position in one runtime's sequence, which
+// both runtimes no longer share — read it as the offset reading.
 enum class ClockAnchorPosition : uint32_t {
-    HostOrchestrationBegin = 0,
-    DeviceExecutionComplete = 1,
+    HostOffset = 0,
 };
 
 enum class ClockAnchorErrorStage : uint32_t {
@@ -49,7 +44,7 @@ enum class ClockAnchorErrorStage : uint32_t {
 };
 
 struct ClockAnchorSample {
-    ClockAnchorPosition position{ClockAnchorPosition::HostOrchestrationBegin};
+    ClockAnchorPosition position{ClockAnchorPosition::HostOffset};
     uint32_t sample_idx{0};
     uint64_t host_before_ns{0};
     // Exact backend value plus the same instant normalized to the platform

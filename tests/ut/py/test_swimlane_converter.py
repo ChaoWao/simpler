@@ -212,7 +212,7 @@ def test_l3_directory_merge_uses_common_host_origin_and_rank_namespaces(tmp_path
     trace = json.loads(output.read_text())
     assert trace["metadata"]["global_origin_ns"] == 1_500
     assert trace["metadata"]["host_clock_domain_id"] == "same-boot"
-    assert trace["metadata"]["cross_rank_uncertainty_ns"] == 40
+    assert trace["metadata"]["cross_rank_uncertainty_ns"] == 20
     assert trace["metadata"]["pre_anchor_group_duration_spread_ns"] == 0
     assert trace["metadata"]["pre_anchor_group_duration_max_ns"] == 20
     assert trace["metadata"]["dispatch_pairing"] == "local_capture_index"
@@ -475,7 +475,7 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
         "relation": "host_orchestration_precedes_device",
         "clock_alignment": {
             "status": "unaligned",
-            "method": "nominal_frequency_offset_interp_v1",
+            "method": "nominal_frequency_offset_v1",
             "anchor_uncertainty_ns": None,
             "host_timestamp_quantization_ns": 0,
             "max_uncertainty_ns": None,
@@ -569,7 +569,7 @@ def test_aicpu_orchestrator_uses_host_timeline_when_clock_anchors_exist(tmp_path
     data = sc.read_perf_data(raw)
 
     assert data["orchestrator_source"] == "aicpu"
-    assert data["tasks"][0]["start_time_us"] == 2.05
+    assert data["tasks"][0]["start_time_us"] == 2.0
     assert data["timeline_metadata"]["layout"] == "clock_aligned"
     assert data["timeline_metadata"]["clock_alignment"]["status"] == "calibrated"
     assert data["timeline_metadata"]["host_clock_domain_id"] == "same-boot"
@@ -687,26 +687,20 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
 
     assert data["aicpu_orchestrator_phases"][0][0]["start_time_us"] == 0.0
     assert data["aicpu_orchestrator_phases"][0][0]["end_time_us"] == 0.3
-    assert data["tasks"][0]["dispatch_time_us"] == 1.447
-    assert data["tasks"][0]["start_time_us"] == 1.55
+    assert data["tasks"][0]["dispatch_time_us"] == 1.4
+    assert data["tasks"][0]["start_time_us"] == 1.5
     assert data["timeline_metadata"] == {
         "layout": "clock_aligned",
         "trace_status": "complete",
         "relation": "host_orchestration_precedes_device",
         "clock_alignment": {
             "status": "calibrated",
-            "method": "nominal_frequency_offset_interp_v1",
-            "anchor_uncertainty_ns": 20,
+            "method": "nominal_frequency_offset_v1",
+            "anchor_uncertainty_ns": 10,
             "host_timestamp_quantization_ns": 0,
-            "max_uncertainty_ns": 20,
-            "selected_sample_idx": {
-                "pre_host_orchestration": 0,
-                "post_device_execution": 0,
-            },
-            "anchor_group_duration_ns": {
-                "pre_host_orchestration": 20,
-                "post_device_execution": 40,
-            },
+            "max_uncertainty_ns": 10,
+            "selected_sample_idx": {"pre_host_orchestration": 0},
+            "anchor_group_duration_ns": {"pre_host_orchestration": 20},
         },
         "host_capture": {
             "status": "complete",

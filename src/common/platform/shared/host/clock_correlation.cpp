@@ -18,10 +18,8 @@ namespace simpler::dfx {
 
 const char *clock_anchor_position_name(ClockAnchorPosition position) {
     switch (position) {
-    case ClockAnchorPosition::HostOrchestrationBegin:
+    case ClockAnchorPosition::HostOffset:
         return "pre_host_orchestration";
-    case ClockAnchorPosition::DeviceExecutionComplete:
-        return "post_device_execution";
     }
     return "unknown";
 }

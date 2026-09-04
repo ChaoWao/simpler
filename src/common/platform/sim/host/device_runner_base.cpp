@@ -721,15 +721,12 @@ void SimDeviceRunnerBase::apply_call_config(const CallConfig &config) {
     // a2a3 and a5 override set_dep_gen_enabled; an arch without dep_gen no-ops.
     set_dep_gen_enabled(config.enable_dep_gen != 0);
     set_scope_stats_enabled(config.enable_scope_stats != 0);
-    capture_clock_anchors_ = config.capture_clock_anchors != 0;
+    // Every swimlane artifact carries Host/Device clock correlation.
+    capture_clock_anchors_ = config.capture_clock_anchors != 0 || config.enable_chip_swimlane != 0;
     set_output_prefix(config.output_prefix);
 }
 
 HostPhaseRecordPool *SimDeviceRunnerBase::host_phase_pool_arm(bool producer_wants_records) noexcept {
-    if (clock_correlation_provider_ != nullptr) {
-        clock_correlation_provider_->release(false);
-        clock_correlation_provider_.reset();
-    }
     const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
     const bool artifact_wants_records = producer_wants_records && !output_prefix_.empty();
     chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
@@ -742,14 +739,11 @@ HostPhaseRecordPool *SimDeviceRunnerBase::host_phase_pool_arm(bool producer_want
     } catch (...) {
         LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
     }
-    if (!swimlane_wants_records) return pool;
-
-    begin_clock_correlation_session_if_needed();
     return pool;
 }
 
 void SimDeviceRunnerBase::begin_clock_correlation_session_if_needed() noexcept {
-    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES || chip_swimlane_collector_.clock_correlation_active()) {
+    if (!capture_clock_anchors_ || chip_swimlane_collector_.clock_correlation_active()) {
         return;
     }
     try {
@@ -759,7 +753,7 @@ void SimDeviceRunnerBase::begin_clock_correlation_session_if_needed() noexcept {
         );
         chip_swimlane_collector_.record_clock_anchor_samples(
             simpler::dfx::capture_clock_anchor_group(
-                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOffset
             )
         );
     } catch (...) {
@@ -783,20 +777,11 @@ void SimDeviceRunnerBase::publish_host_phase_records_to_swimlane() {
     );
 }
 
-void SimDeviceRunnerBase::finish_clock_correlation_session(bool capture_device_complete) noexcept {
+void SimDeviceRunnerBase::finish_clock_correlation_session() noexcept {
     if (!chip_swimlane_collector_.clock_correlation_active()) {
         if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);
         clock_correlation_provider_.reset();
         return;
-    }
-    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
-        try {
-            chip_swimlane_collector_.record_clock_anchor_samples(
-                simpler::dfx::capture_clock_anchor_group(
-                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
-                )
-            );
-        } catch (...) {}
     }
     chip_swimlane_collector_.finish_clock_correlation_session();
     if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);

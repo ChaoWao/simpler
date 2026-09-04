@@ -1060,7 +1060,7 @@ int ChipSwimlaneCollector::export_swimlane_json() {
     if (clock_correlation_session_.started()) {
         uint64_t host_timeline_origin_ns = 0;
         for (const auto &sample : clock_correlation_session_.samples()) {
-            if (sample.position != simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin || !sample.valid()) {
+            if (sample.position != simpler::dfx::ClockAnchorPosition::HostOffset || !sample.valid()) {
                 continue;
             }
             const uint64_t midpoint = sample.host_before_ns + (sample.host_after_ns - sample.host_before_ns) / 2;

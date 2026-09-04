@@ -424,28 +424,15 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
     if base_time_cycles is None:
         base_time_cycles = 0
 
-    device_timestamps = []
-    for row in aicore_rows:
-        start_cycles = int(row[3])
-        receive_to_start_cycles = int(row[5]) if len(row) > 5 else 0
-        device_timestamps.extend((start_cycles - receive_to_start_cycles, start_cycles, int(row[4])))
-    for _, _, dispatch_cycles, finish_cycles in aicpu_rows:
-        device_timestamps.extend((int(dispatch_cycles), int(finish_cycles)))
-    for phase_threads in (sched_phases_raw, orch_phases_raw):
-        for thread_records in phase_threads:
-            for phase in thread_records:
-                device_timestamps.extend((int(phase.get("start_cycles", 0)), int(phase.get("end_cycles", 0))))
-
     clock_alignment = None
     if host_mode or clock_anchor_mode:
         clock_alignment = build_clock_alignment(
             metadata.get("clock_anchors"),
             clock_freq_hz,
-            device_timestamps,
             metadata.get("host_timestamp_quantization_ns", 0),
         )
-        if host_origin_ns == 0 and clock_alignment.start is not None:
-            host_origin_ns = clock_alignment.start.host_mid_ns
+        if host_origin_ns == 0 and clock_alignment.anchor is not None:
+            host_origin_ns = clock_alignment.anchor.host_mid_ns
 
     source_host_origin_ns = host_origin_ns
     if timeline_origin_ns is not None:

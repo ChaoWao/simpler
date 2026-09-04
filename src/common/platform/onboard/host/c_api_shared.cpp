@@ -663,7 +663,7 @@ static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_
     char trace_attrs[sizeof(state->trace_attrs)];
     std::memcpy(trace_attrs, state->trace_attrs, sizeof(trace_attrs));
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
-    state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
+    state->runner->finish_clock_correlation_session(!state->runner->can_accept_run());
     int validation_rc = PTO_RUNTIME_ERR_INTERNAL;
     try {
         validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, execution_rc);
@@ -1034,7 +1034,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     // Correlation state is runner-wide. Finish it before releasing either
     // ownership token, after which a successor may begin capture and replace
     // the provider/session.
-    state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
+    state->runner->finish_clock_correlation_session(!state->runner->can_accept_run());
     if (state->runner_claimed) {
         // The point a successor's launch becomes admissible. Ordering a
         // successor's device work against this boundary is what separates a

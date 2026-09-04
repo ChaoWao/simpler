@@ -197,10 +197,12 @@ rejected until the layout also carries a node namespace. Every Rank must expose
 the same complete set of local capture indexes; the postprocessor refuses
 asymmetric sets instead of guessing pairings.
 
-Cross-Rank merging needs `--enable-chip-swimlane 4` on every Rank, because the
-Host/Device clock anchors that level 4 collects are what put the Ranks on a
-common timeline. A lower level still captures per Rank; the postprocessor then
-converts each `rankN/dN` capture on its own relative timeline and says so.
+Cross-Rank merging needs `--enable-chip-swimlane 4` on every Rank, because
+`_validate_l3_rank_data` requires the level outright: only level 4 carries the
+orchestrator phase records the merge is built around. The Host/Device clock
+anchors no longer gate it — every enabled level collects them, so a lower level
+is converted onto the Host timeline too, and it is the merge alone that
+refuses it.
 
 `chip_swimlane_records.json` carries the raw records. **There are two
 layers to be aware of:**
@@ -399,38 +401,44 @@ remains the compatibility selector for old captures and for independently
 submitted per-Rank tasks; it fails if available sidecars show that the selected
 paths belong to different parent groups.
 
-Host-orchestrated level-4 runs retain their existing clock anchors. For
-Device/AICPU orchestration, anchors are additionally enabled only when the
-ChipWorker marks the capture with `CallConfig.capture_clock_anchors`, which it
-does for an L3 chip-swimlane capture, at the common launch boundary before
-collectors and kernels start. Both modes sample again after AICPU/AICore
-execution completes. Existing single-card Device/AICPU level-4 captures
-therefore keep their prior relative timeline and do not pay the new anchor cost.
+A swimlane capture places its device records on the Host clock, so enabling the
+swimlane enables the anchor. `CallConfig.capture_clock_anchors` remains an
+internal marker set by a ChipWorker child; it does not produce a standalone
+artifact without the swimlane.
 
-`capture_clock_anchors` says only *what the runtime does* — sample the two
-clocks — never why. Rank, group and merge are concepts of the layer above: the
-platform runner that reads this flag has no notion of a Rank, and no runtime or
-platform code parses the `rankN/dN` path. The two are deliberately separate
-switches, because the directory is artifact separation that every diagnostic
-needs while the anchors are consumed only by the swimlane reader. An L3 run with
-`--enable-dep-gen` alone therefore gets its own `rankN/dN` directory and pays no
-anchor cost.
+Rank, group and merge are concepts of the layer above: the platform runner has
+no notion of a Rank, and no runtime or platform code parses the `rankN/dN`
+path. The marker and the `rankN/dN` directory are separate because the
+directory provides artifact separation for every diagnostic. An L3 run with
+`--enable-dep-gen` alone therefore gets its own `rankN/dN` directory and pays
+no anchor cost.
 
-**The opening anchor sits at a different point in each runtime**, because each
-takes it at the earliest point preceding every device timestamp it records:
+**Both runtimes take one reading, at the same point** — the launch boundary,
+before collectors and kernels start. Onboard reaches it through
+`start_shared_collectors_for_run()`; the sim platform has no such function and
+calls `begin_clock_correlation_session_if_needed()` inline in
+`launch_execution`. For `host_build_graph` this moved the reading from bind
+(`host_phase_pool_arm`) to launch, so it no longer precedes that runtime's Host
+orchestration phases — which a single offset reading does not require.
 
-| Runtime | Opening anchor | Calibrated interval covers |
-| ------- | -------------- | -------------------------- |
-| `host_build_graph` | before Host orchestration (`host_phase_pool_arm`) | bind, H2D, and execution |
-| `tensormap_and_ringbuffer` | before kernel launch (`start_shared_collectors_for_run`) | execution only |
+One reading is sufficient because it supplies an **offset** and nothing else:
+the scale is the platform's counter frequency. It therefore pins the two clock
+domains rather than bounding an interval the records must fall inside, and a
+timestamp either side of it maps by the same arithmetic — which is why the
+placement no longer has to precede every device timestamp a runtime records.
 
-Both close on `post_device_execution`. So the two runtimes' calibrated intervals
-are not comparable in length, and a `host_build_graph` interpolation spans work
-a `tensormap_and_ringbuffer` one does not. This does not affect
-`max_uncertainty_ns`, which depends only on each anchor group's own sampling
-RTT. The serialized position name `pre_host_orchestration` predates the
-Device/AICPU case — read it as "start of the calibrated interval", not as a
-claim about Host orchestration.
+```text
+host_ns(cycles) = anchor.host_mid_ns + (cycles - anchor.device_cycles) × 1e9 / clock_freq_hz
+```
+
+`max_uncertainty_ns` is half the selected sample's Host bracket round trip,
+plus Device and Host timestamp quantization; comparing two devices costs the
+sum of their two. The serialized position name `pre_host_orchestration` is an
+on-wire value in every existing capture — read it as the offset reading.
+
+Captures written before this shape can also carry a `post_device_execution`
+group. The reader ignores it; only the offset reading participates in the
+mapping.
 
 The default output depends on which input form was used, and `-o` overrides
 either:

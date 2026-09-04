@@ -694,7 +694,7 @@ int DeviceRunner::reap_run() {
         // JSON manifest, i.e. unusable for triage. reconcile/export are not
         // idempotent, so this runs only on the error return; the success path
         // still exports exactly once below.
-        teardown_shared_collectors_after_run(false);
+        teardown_shared_collectors_after_run();
         return rc;
     }
 
@@ -702,7 +702,7 @@ int DeviceRunner::reap_run() {
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
-    teardown_shared_collectors_after_run(true);
+    teardown_shared_collectors_after_run();
 
     // a2a3-only dep_gen teardown: host-orch emits the graph its orchestration
     // built on this same thread; device-orch stops the collector, reconciles the
