@@ -173,8 +173,8 @@ python -m simpler_setup.tools.deps_viewer \
 
 Each test case writes its diagnostic artifacts under
 `CallConfig::output_prefix` (chosen by
-`scene_test.py::_build_output_prefix` as
-`outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>/`). Filenames are fixed —
+`scene_test.py::build_output_prefix` as
+`outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>_<unique>/`). Filenames are fixed —
 the per-case directory is the uniqueness boundary, so parallel runs
 cannot collide.
 

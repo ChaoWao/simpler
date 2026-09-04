@@ -237,7 +237,7 @@ def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> 
 
     monkeypatch.setattr(scene_test_module, "build_output_prefix", lambda _case_label: output_prefix)
 
-    run_class_cases(
+    prefixes = run_class_cases(
         object(),
         FakeScene(),
         [{"name": "overhead"}],
@@ -254,6 +254,19 @@ def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> 
     )
 
     assert captured["output_prefix"] == str(output_prefix)
+    assert prefixes == {"overhead": output_prefix}
+
+
+def test_diagnostic_output_prefix_is_unique_per_invocation(monkeypatch, tmp_path) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    monkeypatch.setattr(scene_test_module, "_outputs_dir", lambda: tmp_path)
+
+    first = scene_test_module.build_output_prefix("same_case")
+    second = scene_test_module.build_output_prefix("same_case")
+
+    assert first != second
+    assert first.is_dir()
+    assert second.is_dir()
 
 
 def test_run_class_cases_reports_the_failing_case_name() -> None:

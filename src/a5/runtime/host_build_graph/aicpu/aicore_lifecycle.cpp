@@ -69,10 +69,9 @@ int32_t AicoreLifecycle::pre_handshake_init(Runtime *runtime, int32_t aicpu_thre
     handshake_failed_.store(false, std::memory_order_release);
 
     const bool chip_swimlane_enabled = is_chip_swimlane_enabled();
-    if (chip_swimlane_enabled || is_pmu_enabled() || is_dump_args_enabled()) {
+    if (is_pmu_enabled() || is_dump_args_enabled()) {
         LOG_WARN(
-            "A5 HBG AICore Scheduler diagnostics are best-effort: artifacts may be absent or incomplete and do not "
-            "yet describe Scheduler scheduling"
+            "A5 HBG AICore Scheduler PMU/argument diagnostics are best-effort: artifacts may be absent or incomplete"
         );
     }
     if (chip_swimlane_enabled) chip_swimlane_aicpu_init(core_count_);

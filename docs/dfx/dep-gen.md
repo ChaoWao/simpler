@@ -134,7 +134,7 @@ runs that the converter joins back to that captured graph.
 When `--enable-dep-gen` is on with any other diagnostic flag, an
 `output_prefix` directory must be set (the runtime throws otherwise).
 The standard SceneTest path
-(`outputs/<TestName>_<case>_<timestamp>/`) handles that automatically.
+(`outputs/<TestName>_<case>_<timestamp>_<unique>/`) handles that automatically.
 
 ---
 

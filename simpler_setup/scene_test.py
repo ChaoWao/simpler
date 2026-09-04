@@ -29,6 +29,7 @@ import logging
 import os
 import platform as host_platform
 import sys
+import tempfile
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1019,11 +1020,9 @@ def _outputs_dir() -> Path:
 def build_output_prefix(case_label: str) -> Path:
     """Per-case directory for diagnostic artifacts.
 
-    Each case gets its own ``outputs/<case_label>_<timestamp>/`` directory; the
+    Each invocation gets its own ``outputs/<case_label>_<timestamp>_<suffix>/`` directory; the
     runtime writes ``chip_swimlane_records.json``, ``args_dump/``, and ``pmu.csv``
-    under that root with fixed filenames. Two cases of the same name run in
-    the same second is not a contemplated scenario (parallel xdist runs differ
-    by class+method).
+    under that root with fixed filenames.
 
     The directory is created here: the dep_gen host replay (and any other
     writer) ``fopen``s ``<prefix>/<file>`` directly without an mkdir of its
@@ -1033,9 +1032,9 @@ def build_output_prefix(case_label: str) -> Path:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_label = _sanitize_for_filename(case_label)
-    prefix = _outputs_dir() / f"{safe_label}_{timestamp}"
-    prefix.mkdir(parents=True, exist_ok=True)
-    return prefix
+    outputs = _outputs_dir()
+    outputs.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"{safe_label}_{timestamp}_", dir=outputs))
 
 
 def _run_swimlane_converter(
@@ -1400,7 +1399,8 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     Caller is responsible for platform/selector/manual filtering. Profiling
     snapshots wrap each case. Execution failures carry the class and case name,
     with the original exception preserved as their cause; the caller decides
-    fail-fast vs collect semantics.
+    fail-fast vs collect semantics. Returns diagnostic output prefixes keyed by
+    case name.
     """
     cls_name = type(cls_inst).__name__
     callable_spec = getattr(type(cls_inst), "CALLABLE", None)
@@ -1412,6 +1412,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
         or enable_scope_stats
         or enable_swimlane_overhead
     )
+    output_prefixes = {}
     for case in cases:
         case_label = f"{cls_name}_{case['name']}"
         # Per-case directory the runtime writes into. Required (non-empty) when
@@ -1419,6 +1420,8 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
         # scope_stats writes below the per-case output prefix, so it uses the
         # same output-prefix allocation as the other diagnostics.
         prefix = build_output_prefix(case_label) if diagnostics_on else Path("")
+        if diagnostics_on:
+            output_prefixes[case["name"]] = prefix
         try:
             cls_inst._run_and_validate(
                 worker,
@@ -1447,6 +1450,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 scope_stats=enable_scope_stats,
                 swimlane_overhead=enable_swimlane_overhead,
             )
+    return output_prefixes
 
 
 def _compare_outputs(test_args, golden_args, output_names, rtol, atol):
@@ -2107,7 +2111,7 @@ class SceneTestCase:
         if self._st_level == 3 and chip_handles:
             callable_obj = {**chip_handles}
 
-        run_class_cases(
+        self._diagnostic_output_prefixes = run_class_cases(
             st_worker,
             self,
             matched,

@@ -194,8 +194,8 @@ collector receives no records and exports no manifest — that is the deliberate
 
 The dump artifacts land under the per-task output prefix
 (`CallConfig::output_prefix`, set by
-`scene_test.py::_build_output_prefix` to
-`outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>/` for SceneTest runs):
+`scene_test.py::build_output_prefix` to
+`outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>_<unique>/` for SceneTest runs):
 
 ```text
 <output_prefix>/

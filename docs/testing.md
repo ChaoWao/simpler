@@ -380,7 +380,7 @@ A single file can declare both L2 and L3 classes; they're grouped by `(runtime, 
 
 ### Profiling under parallelism
 
-Each test case sets its own `CallConfig.output_prefix` (chosen by `scene_test.py::_build_output_prefix` as `outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>/`). The C++ runtime writes all diagnostic artifacts under that prefix with fixed filenames:
+Each test case sets its own `CallConfig.output_prefix` (chosen by `scene_test.py::build_output_prefix` as `outputs/<ClassName>_<case>_<YYYYMMDD_HHMMSS>_<unique>/`). The C++ runtime writes all diagnostic artifacts under that prefix with fixed filenames:
 
 - `outputs/<case>_<ts>/chip_swimlane_records.json` — swimlane (`--enable-chip-swimlane`)
 - `outputs/<case>_<ts>/args_dump/` — args dump (`--dump-args`)
