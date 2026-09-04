@@ -17,4 +17,5 @@ Invoke via ``python -m simpler_setup.tools.<name>``:
 - ``dump_viewer``           : inspect args dumps
 - ``strace_timing``         : per-stage / per-round timing from [STRACE] log markers
 - ``hbg_bind_phases``       : per-phase host_build_graph bind statistics from `bind phase=` markers
+- ``rtt_die_preflight``     : A5 affinity preflight → allowed_cpus plan (uses aicpu_device_query)
 """

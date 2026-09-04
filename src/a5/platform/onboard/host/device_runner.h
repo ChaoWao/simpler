@@ -280,16 +280,41 @@ private:
     bool enable_dep_gen_{false};
 
     int query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out);
-    int query_aicpu_topology(pto::a5::AicpuTopology &out);
-    void clear_aicpu_topology_cache();
-    // Device-side occupancy and the merged Host topology are immutable during
-    // one DeviceRunner attach/reset lifetime. Cache successful probes only;
-    // allowed CPU selection still runs per call because the requested active
-    // count may change. Recovery, reset, and finalize clear both values.
+    bool load_cached_affinity_plan(const char *soc_name);
+    // Clears OCCUPY + affinity side-file memo (not AICore/ELF/arena caches).
+    void clear_aicpu_caches();
+    // Device-side occupancy is immutable during one DeviceRunner attach/reset
+    // lifetime. AffinityPlanCache memos side-file hits/misses for one exact
+    // (soc, device_id) key. Preflight is owned by Python ChipWorker.init;
+    // prepare falls back to OCCUPY contiguous when the .cpus file is absent.
+    // Recovery, reset, and finalize call clear_aicpu_caches().
     bool aicpu_device_occupancy_cached_{false};
     pto::a5::AicpuDeviceOccupancy aicpu_device_occupancy_{};
-    bool aicpu_topology_cached_{false};
-    pto::a5::AicpuTopology aicpu_topology_{};
+
+    struct AffinityPlanCache {
+        bool checked{false};
+        std::string soc;
+        int32_t device_id{-1};
+        bool valid{false};
+        bool pool_too_small{false};
+        std::string source;
+        std::vector<int32_t> allowed_cpus;
+
+        void reset() {
+            checked = false;
+            soc.clear();
+            device_id = -1;
+            valid = false;
+            pool_too_small = false;
+            source.clear();
+            allowed_cpus.clear();
+        }
+
+        bool matches(const std::string &soc_name, int32_t id) const {
+            return checked && soc == soc_name && device_id == id;
+        }
+    };
+    AffinityPlanCache affinity_plan_cache_{};
 
     int init_pmu(
         int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id,

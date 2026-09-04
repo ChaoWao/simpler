@@ -264,34 +264,31 @@ Scenario A (OCCUPY=0x1f8, 6 user cpus):
   the failure as `aclrtSynchronizeStream rc=507000` (runtime internal)
   after the launch.
 
-The runtime implements the safe choice: a one-thread preflight AICPU query
-reads device-side OCCUPY, then the host topology probe sets
-`runtime->aicpu_launch_count = popcount(OCCUPY)`. The host's `rtsLaunchCpuKernel` is called with
-that exact value. `PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH = 14`
-remains a compile-time **upper bound** (array sizes, headroom), not the
-actual launch count. See:
+The runtime implements the safe choice: its one-thread topology query reads
+device-side OCCUPY, then the host sets
+`runtime->aicpu_launch_count = popcount(OCCUPY)`. The host's `rtsLaunchCpuKernel`
+is called with that exact value.
+`PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH = 14` remains a compile-time
+**upper bound** (array sizes, headroom), not the actual launch count.
 
-- `src/a5/platform/onboard/host/aicpu_topology_probe.{h,cpp}` — probe +
-  cluster-first packing
-- `src/a5/platform/onboard/host/device_runner.cpp` — fills
-  `aicpu_allowed_cpus[]` + `aicpu_launch_count` in Runtime, launches
-  with that count
-- `src/common/platform/onboard/aicpu/platform_aicpu_affinity.cpp` —
-  `platform_aicpu_affinity_gate_filter()` (the post-hoc classifier)
+### AICPU affinity preflight (authoritative ALLOWED_CPUS)
 
-If CPU_TOPO does not match FG, PG1, or PG2 by **surviving cluster/die
-layout** (logical CPU count is not a gate), the runtime uses a deterministic
-fallback: valid metadata is sorted by `(die, cluster,
-physical CPU, hyperthread, logical CPU)`; OCCUPY-only metadata reduces this to
-logical CPU ID order. Automatic mode keeps at most five and may shrink to the
-available count. A manual request from 2 through 5 must be satisfied exactly.
-The last selection is the Orchestrator and preceding selections are
-Schedulers. The launch count remains the full device-side OCCUPY population
-required by the filter gate and may therefore exceed the active cap. On
-`Ascend950PR_9599`, a measured 9-logical layout with four clusters classifies
-as FG. Scheduler SMT availability is recorded separately and does not define
-another scenario. When live CPU_TOPO was unavailable, the JSON or OCCUPY-only
-source independently triggers the required warning.
+Core selection for production `ALLOWED_CPUS` is owned by an explicit preflight
+tool, not by FG/PG packing inside `DeviceRunner`. Design, layering, plan
+artifacts, and runtime contract:
+
+→ **[aicpu-affinity-preflight.md](aicpu-affinity-preflight.md)**
+
+Short summary: the tool elects orch (atomic-flag handshake) and packs
+schedulers from COND die scores into logical `[S0,S1,S2,S3,O]`
+(S0/S1→die0, S2/S3→die1), writes `aicpu_affinity_plan.json` plus a
+line-oriented `.cpus` companion; Python `ChipWorker.init` ensures the
+companion exists before attach. Runtime only reads that companion and
+sets launch_count from OCCUPY (OCCUPY contiguous if the file is missing).
+Contiguous AICore ownership still follows logical S0–S3.
+
+FG/PG helpers in `aicpu_topology_probe` remain for
+`aicpu-device-query --json` / UT only.
 
 The 0x7ffe SKU's dispatch behavior at `aicpu_num=14` has **not yet
 been measured** — once an a5 0x7ffe device runs an a5 onboard test,

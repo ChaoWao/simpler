@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import os
+import subprocess
 import sys
 import threading
 import uuid
@@ -1274,6 +1276,84 @@ def _initialize_host_log(log_level: int | None = None, *, defer_writer: bool = F
     _log.attach_unified_log_handler(_native_emit_host_log, _native_host_log_directory)
 
 
+def _is_a5_onboard_bins(bins: Any) -> bool:
+    """True when binaries look like a5 onboard (dispatcher + host under .../a5/...)."""
+    dispatcher = getattr(bins, "dispatcher_path", None)
+    if dispatcher is None or str(dispatcher) == "":
+        return False
+    host = getattr(bins, "host_path", None)
+    if host is None:
+        return False
+    return "a5" in Path(host).parts
+
+
+def _affinity_cpus_side_path(device_id: int) -> Path:
+    env = os.environ.get("SIMPLER_AICPU_AFFINITY_PLAN", "").strip()
+    plan = Path(env) if env else Path("build/config/aicpu_affinity_plan.json")
+    stem = plan.name[: -len(".json")] if plan.name.endswith(".json") else plan.name
+    return plan.with_name(f"{stem}.{int(device_id)}.cpus")
+
+
+def _ensure_a5_affinity_cpus(device_id: int, bins: Any) -> None:
+    """If a5 onboard and .cpus side file is missing, run rtt_die_preflight --probe.
+
+    Never raises into ChipWorker.init: probe failure leaves prepare to use
+    OCCUPY contiguous fallback. Prints start / skip / done / fail for operators.
+    """
+    if not _is_a5_onboard_bins(bins):
+        return
+
+    side = _affinity_cpus_side_path(device_id)
+    if side.is_file():
+        print(f"[affinity-preflight] device={device_id} skip, using existing {side}", flush=True)
+        return
+
+    print(
+        f"[affinity-preflight] device={device_id} start → {side} missing; probing…",
+        flush=True,
+    )
+    cmd = [
+        sys.executable,
+        "-m",
+        "simpler_setup.tools.rtt_die_preflight",
+        "--device",
+        str(int(device_id)),
+        "--probe",
+        "--plan-source",
+        "auto-first-run",
+    ]
+    try:
+        completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        print(
+            f"[affinity-preflight] device={device_id} failed to spawn preflight ({exc}); "
+            "runtime will use OCCUPY contiguous fallback",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+        if not completed.stdout.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    if completed.returncode != 0 or not side.is_file():
+        err = (completed.stderr or "").strip() or f"exit={completed.returncode}"
+        last = err.splitlines()[-1] if err else "unknown"
+        print(
+            f"[affinity-preflight] device={device_id} failed ({last}); runtime will use OCCUPY contiguous fallback",
+            file=sys.stderr,
+            flush=True,
+        )
+        if completed.stderr:
+            sys.stderr.write(completed.stderr)
+            if not completed.stderr.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+        return
+    print(f"[affinity-preflight] device={device_id} done → wrote {side}", flush=True)
+
+
 def _start_host_log_writer() -> None:
     """Start the process-owned writer after the process's final local fork."""
     if not _native_start_host_log_writer():
@@ -1405,6 +1485,7 @@ class ChipWorker:
 
         try:
             _initialize_host_log(log_level)
+            _ensure_a5_affinity_cpus(int(device_id), bins)
 
             # C++ retains libcpu_sim_context.so in the sim process registry,
             # loads host_runtime.so, and binds both private logger copies.
