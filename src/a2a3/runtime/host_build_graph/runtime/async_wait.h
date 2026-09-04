@@ -153,6 +153,17 @@ struct AsyncWaitList {
     // Read by scheduler shutdown / l2 perf summary; not on the hot path.
     std::atomic<uint64_t> mpsc_skipped_count{0};
 
+    // Empty state of a wait list sitting on the arena's device-only zone, whose
+    // bytes are whatever the pooled allocation last held. `count` bounds every
+    // read of entries[], and a drain assigns an entry in full before raising the
+    // count that admits it, so clearing the three scalars is the whole reset —
+    // the 190 KB entries[] region needs no per-bind sweep.
+    void reset_for_reuse() {
+        busy.store(0, std::memory_order_relaxed);
+        count = 0;
+        mpsc_skipped_count.store(0, std::memory_order_relaxed);
+    }
+
     bool try_lock() {
         int32_t expected = 0;
         return busy.compare_exchange_strong(expected, 1, std::memory_order_acquire, std::memory_order_relaxed);

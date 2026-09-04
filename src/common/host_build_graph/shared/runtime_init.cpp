@@ -132,6 +132,12 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     ready_queue_init_data_from_layout(&sched->early_sync_start_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     ready_queue_init_data_from_layout(&sched->ed_publish_drain_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
 
+    // The wait list shares the queues' device-only zone, so its bytes are the
+    // pooled allocation's previous generation too. A residual `count` is what
+    // the resolution thread's poll walks entries[] by, so it has to be reset
+    // here even though nothing in the list travels with the image.
+    sched->async_wait_list.reset_for_reuse();
+
     // Polling: no dep_pool arena region to initialize.
     (void)arena;
     (void)layout;
