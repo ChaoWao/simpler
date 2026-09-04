@@ -133,6 +133,15 @@ of it, dominated by `AsyncWaitList::entries` — for the device to receive and n
 read. `RuntimeContext` therefore holds a *pointer* to it, wired from
 `off_scheduler` on each side, and the AICPU calls `init_data_from_layout` at boot.
 
+"Never read" holds for `entries` itself, not for the scalars that index it. The
+region arrives holding the pooled allocation's previous generation, so every
+field the dispatch loop reads before anything writes it needs a value from
+`init_data_from_layout`: the queue headers, and `AsyncWaitList`'s `busy` and
+`count`. A residual `count` is the length the resolution thread's poll walks
+`entries` by, so it reads past the region and faults on an address that belongs
+to no mapping (issue #2121); a residual `busy` is the same miss inverted, making
+every drain a no-op and stranding deferred completions.
+
 **Why the queue slots are device-written.** `push` claims `slots[pos & mask]` only
 when that slot's `sequence` already equals `pos`, so an empty queue is a
 `0..capacity-1` ramp, not zeroed memory: on zeroed slots position 0 happens to
