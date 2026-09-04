@@ -567,6 +567,10 @@ int DeviceRunnerBase::ensure_aicpu_init_launched() {
 
     InitArgs init_args{};
     init_args.device_id = static_cast<uint32_t>(device_id_);
+    // The device threshold is set here and never again: this entry launches once
+    // per Worker, so a later host-side set_level does not reach the AICPU. That is
+    // the intended contract, not a missing refresh — recreate the Worker to change
+    // it. docs/logging.md records why.
     init_args.log_level = static_cast<uint32_t>(HostLogger::get_instance().level());
     // Per-device scheduler watchdog override, resolved once at attach into
     // timeout_config_. 0 -> the AICPU scheduler keeps its compile-time default.

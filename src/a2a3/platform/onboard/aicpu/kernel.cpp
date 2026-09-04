@@ -139,6 +139,8 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
     }
 
     InitArgs *init_args = reinterpret_cast<InitArgs *>(arg);
+    // One-shot for the Worker's life: this entry runs once and no host-side
+    // set_level reaches here afterwards. Deliberate — see docs/logging.md.
     set_log_level(static_cast<int>(init_args->log_level));
     set_orch_device_id(static_cast<int>(init_args->device_id));
     set_scheduler_timeout_ms(static_cast<int>(init_args->scheduler_timeout_ms));
