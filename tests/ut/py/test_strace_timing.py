@@ -1039,10 +1039,10 @@ def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_pa
         }
     ]
 
-    out, orphaned, covered = host_record_spans(spans, passes)
+    out, orphaned, skipped = host_record_spans(spans, passes)
 
     assert orphaned == 0
-    assert covered == frozenset({(9, 5)})
+    assert skipped == 0
     by_name = {span.name: span for span in out}
     bind_depth = spans[0].depth
     assert by_name["chip.run.bind.args"].depth == bind_depth + 1
@@ -1126,11 +1126,67 @@ def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):
     spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=1_000, dur=500)]))
     passes = [{"pid": 9, "inv": 999, "records": [{"phase": "args", "start_ns": 1_000, "end_ns": 1_100}]}]
 
-    out, orphaned, covered = host_record_spans(spans, passes)
+    out, orphaned, skipped = host_record_spans(spans, passes)
 
     assert out == []
     assert orphaned == 1
-    assert covered == frozenset()
+    assert skipped == 0
+
+
+def test_a_bind_segment_the_log_already_carries_is_not_drawn_twice(tmp_path):
+    """Both channels describe the same segment, and the log's copy is the one kept.
+
+    The runtime emits each bind segment as a span, and that span carries the
+    segment's own attributes — byte counts, fault and CPU counters — where the
+    artifact record carries only `detail`. Drawing both would put two bars on one
+    interval, and keeping the artifact's would lose the attributes.
+    """
+    spans = list(
+        parse_spans(
+            [
+                _span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=1_000, dur=500),
+                _span_record(
+                    pid=9, tid=9, inv=5, name="chip.run.bind.args", ts=1_000, dur=100, depth=2, attrs="bytes=4096"
+                ),
+            ]
+        )
+    )
+    passes = [
+        {
+            "pid": 9,
+            "inv": 5,
+            "records": [
+                {"phase": "args", "start_ns": 1_000, "end_ns": 1_100, "detail": 4096, "tid": 9},
+                {"phase": "graph_submit", "start_ns": 1_200, "end_ns": 1_250, "detail": 77, "tid": 9},
+            ],
+        }
+    ]
+
+    out, orphaned, skipped = host_record_spans(spans, passes)
+
+    assert orphaned == 0
+    assert skipped == 1
+    assert [span.name for span in out] == ["chip.run.bind.host_orch.graph_submit"]
+
+    drawn = [span for span in spans + out if span.name == "chip.run.bind.args"]
+    assert len(drawn) == 1
+    assert "bytes=4096" in drawn[0].attrs
+
+
+def test_a_bind_segment_only_the_artifact_has_is_still_drawn():
+    """A run may collect records without emitting the segments' spans.
+
+    The breakdown switch and the record pool are separate conditions, so a
+    chip-swimlane capture arms the pool with the switch off. Then the artifact is
+    the only source for the segments and must still be admitted.
+    """
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=1_000, dur=500)]))
+    passes = [{"pid": 9, "inv": 5, "records": [{"phase": "args", "start_ns": 1_000, "end_ns": 1_100, "tid": 9}]}]
+
+    out, orphaned, skipped = host_record_spans(spans, passes)
+
+    assert (orphaned, skipped) == (0, 0)
+    assert [span.name for span in out] == ["chip.run.bind.args"]
 
 
 # ---------------------------------------------------------------------------

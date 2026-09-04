@@ -35,7 +35,7 @@ configure, and the runtime never derives the path itself.
 
 **The destination belongs to the logger, not to a record.** Everything that logger
 writes follows it: `LOG_*` records, `[STRACE]` spans, `[CLOCK_ANCHOR]`, the
-`bind phase=` summaries, and the spans Python emits through
+`host-orch phase=` cost-share summaries, and the spans Python emits through
 `unified_log_host_span`. Nothing declares an intent and no record kind is treated
 specially, so there is no state in which part of a run's log is in one place and
 part in another. The first non-empty directory in a process wins, and it is the
@@ -153,7 +153,10 @@ output sees the original text; a consumer reading the raw log does not.
 chip.run                                      (= host_wall)
 ├─ chip.run.bind
 │  ├─ chip.run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
-│  └─ chip.run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
+│  ├─ chip.run.bind.prebuilt    (TMR: prebuilt runtime-arena cache hit or build + upload)
+│  └─ .{arena_build,static_arena,gm_heap,shared_mem,runtime_init,host_orch,
+│       graph_upload,arena_h2d,host_view_close}
+│           HBG host prepare-path segments, with SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1
 ├─ chip.run.runner_run          (device enqueue + completion drain)
 │  └─ chip.run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
@@ -188,7 +191,7 @@ including time the caller spends polling or doing other host work; blocking
 | ----- | ---------- |
 | 0 | `chip.run` |
 | 1 | `chip.run.bind`, `chip.run.runner_run`, `chip.run.claim_release`, `chip.run.validate` |
-| 2 | `chip.run.bind.args`, `chip.run.bind.prebuilt`, `chip.run.runner_run.device_wall` |
+| 2 | `chip.run.bind.args`, `chip.run.bind.prebuilt`, the other HBG `chip.run.bind.*` segments, `chip.run.runner_run.device_wall` |
 | 3 | TMR phase spans `chip.run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
 ## Host scheduler spans
@@ -314,14 +317,24 @@ per-invocation lane, so each call renders as an isolated nested tree in
 `--swimlane` is a separate view. Host slices keep their real OS pid/tid, and
 task submission-to-dispatch handoffs render as flow arrows.
 
-A runtime may subdivide a stage it owns, which the markers deliberately do not
-describe — the marker grammar is a fixed per-run-stage contract, and a runtime's
-internal breakdown of one stage does not belong in it. `--host-phase-records`
-takes such a breakdown from the artifact the runtime wrote and draws each record
-inside its `chip.run.bind`, matched on `(pid, inv)`. Both sides are the same
-`CLOCK_MONOTONIC` axis, so nothing is converted. Without the artifact the tool
-still recovers the stage's own segments from the runtime's timing log lines; where
-both are present the artifact wins, so a segment is not drawn twice. See
+**A runtime subdivides a stage it owns with these same markers.** `[STRACE]` is
+the one timeline format: an interval a reader can place on a timeline is a span,
+whoever measured it and however it was captured. `chip.run.bind.args` and
+`chip.run.bind.prebuilt` come from the tensormap runtime rather than the
+platform; the device sub-phases are the TMR AICPU's own breakdown, read back from
+a cycle buffer and re-emitted as spans; and `ext.` (below) admits producers
+outside this repository entirely. So the grammar was never a fixed per-run-stage
+set, and a stage's segments do not need a second format.
+
+What the collection mechanism may be, on the other hand, is open: an RAII scope,
+a fixed-slot device buffer, or a host record pool are all ways to *measure*, and
+each one ends by emitting a span. `--host-phase-records` reads such a pool from
+the artifact the runtime wrote and draws the per-event operations inside their
+`chip.run.bind`, matched on `(pid, inv)`. Both sides are the same
+`CLOCK_MONOTONIC` axis, so nothing is converted. A bind segment the log already
+carries as a span is skipped rather than drawn twice, and the log's copy is the
+one kept — it carries the segment's attributes, where an artifact record carries
+only `detail`. See
 [host_build_graph's profiling levels](../../src/a2a3/runtime/host_build_graph/docs/profiling_levels.md)
 for what that runtime records, and
 [hbg-bind-phases.md](hbg-bind-phases.md) for what those segments are and

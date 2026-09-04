@@ -165,6 +165,14 @@ void drain_in_flight_records(TraceState &s) {
 
 bool is_bind_kind(uint32_t kind) { return kind < static_cast<uint32_t>(HostPhaseKind::OrchSubmitTask); }
 
+// The stage these segments subdivide, and their level in the span tree. The
+// platform opens `chip.run.bind` at depth 1 (src/common/platform/{onboard,sim}/
+// host/c_api_shared.cpp) and the flush below runs inside that scope on the same
+// thread, so a segment of it is depth 2 — the level a lexical STRACE scope there
+// would print, and the one the tensormap runtime's own chip.run.bind.args uses.
+constexpr const char *kBindSpanName = "chip.run.bind";
+constexpr int kBindSegmentSpanDepth = 2;
+
 // Opt-in spelling shared by this runtime's switches, matching the runtime's
 // other default-off switch, SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE, so that
 // `=false` / `=off` / `=no` read as off rather than as a non-zero string.
@@ -395,13 +403,22 @@ void host_phase_trace_end() {
         const char *name = host_phase_kind_name(static_cast<HostPhaseKind>(kind));
         if (is_bind_kind(kind)) {
             // One occurrence per bind, so the summed time is the segment's own
-            // duration and the twelve of them partition the bind stage. The line
-            // carries its own start because every line is written at the end of
-            // the bind, off the path being measured — the write time says nothing
-            // about when the segment ran.
-            LOG_TIMING(
-                "bind phase=%s start_ns=%llu dur_ns=%llu %s", name, static_cast<unsigned long long>(first_start_ns),
-                static_cast<unsigned long long>(total_ns), s.bind_attrs[kind].data()
+            // duration. The span carries its own start because it is emitted at
+            // the end of the bind, off the path being measured — the emit time
+            // says nothing about when the segment ran. STRACE_HOST_SPAN_AT_A is
+            // the form for exactly that; `chip.run` itself is emitted this way.
+            if (count != 1) {
+                LOG_WARN(
+                    "bind segment %s recorded %llu times in one bind; its span reports their sum from the "
+                    "earliest start",
+                    name, static_cast<unsigned long long>(count)
+                );
+            }
+            char span_name[SIMPLER_HOST_SPAN_NAME_CAPACITY];
+            snprintf(span_name, sizeof(span_name), "%s.%s", kBindSpanName, name);
+            STRACE_HOST_SPAN_AT_A(
+                span_name, static_cast<long long>(first_start_ns), static_cast<long long>(total_ns),
+                kBindSegmentSpanDepth, s.bind_attrs[kind].data()
             );
             continue;
         }

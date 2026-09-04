@@ -7,11 +7,15 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Per-phase statistics from a `bind phase=` LOG_TIMING breakdown.
+"""Per-phase statistics from the `chip.run.bind.*` spans of a host_build_graph run.
 
 Reads the log a `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 --rounds N` run leaves
-behind and reports each bind phase's minimum, median and maximum across the warm
-binds, plus the control-plane total.
+behind and reports each bind segment's minimum, median and maximum across the
+warm binds, plus the control-plane total.
+
+The spread is the point: a change smaller than the range beside it cannot be
+demonstrated. `strace_timing --tree` gives the median alone, and its default
+table a mean, so neither answers "is this difference real".
 
 What the phases are, and how to compare two runs:
 docs/dfx/hbg-bind-phases.md.
@@ -21,8 +25,16 @@ import argparse
 import re
 import statistics
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 
-PHASE_LINE = re.compile(r"bind phase=(\w+) start_ns=(\d+) dur_ns=(\d+)")
+from simpler_setup.tools.strace_timing import expand_log_source, parse_spans
+
+# The stage the segments subdivide. A span one level below it is a segment; one
+# two levels below (`chip.run.bind.host_orch.<op>`) is an orchestrator operation
+# from the per-event artifact, which is not a segment of the stage.
+BIND_SPAN = "chip.run.bind"
+
 # The recipe's first log line, recording the command and the commit the run used.
 # Two runs are comparable only if it matches, so it is echoed above the table.
 STAMP_LINE = re.compile(r"^\[stamp\] (.*)$")
@@ -36,7 +48,7 @@ TORCH_AUTOLOAD_LINE = re.compile(
 # The segments between "the caller's data is in place" and "the device can run".
 # `args` is a per-byte staging cost. `host_view_close` remains excluded for
 # comparison with historical mapped-view logs; current binds close no mappings.
-CONTROL_PLANE = ("host_orch", "graph_upload", "relocate", "sm_h2d", "arena_h2d")
+CONTROL_PLANE = ("host_orch", "graph_upload", "arena_h2d")
 
 # Display order: the bind stage's own sequence, so a reader can follow it down.
 PHASE_ORDER = (
@@ -48,163 +60,140 @@ PHASE_ORDER = (
     "static_arena",
     "shared_mem",
     "gm_heap",
-    "relocate",
-    "sm_h2d",
     "arena_h2d",
     "host_view_close",
 )
 
 
-def parse_binds(path: str) -> list[dict[str, float]]:
-    """Group `bind phase=` lines into binds, in milliseconds.
+def parse_binds(paths: Sequence[Path]) -> list[dict]:
+    """Group bind-segment spans into binds, in milliseconds.
 
-    A bind emits every segment it has once, so a repeated segment name is the
-    first line of the next bind. Grouping on the repeat rather than on a named
-    closing segment survives a bind that omits a segment, a change to the
-    emission order, and a new segment being added; the segments are not
-    contiguous in time, so timestamp order does not group them.
+    A span carries `pid` and `inv`, so a bind is exactly the segments sharing one
+    `(pid, inv)` — the run epoch the enclosing `chip.run.bind` allocated. Nothing
+    is inferred from emission order or from which segment came last, and
+    concurrent ranks writing one stream cannot be confused for each other.
 
-    This assumes each bind's burst reaches the log uninterrupted, and **nothing
-    enforces that**. Ranks write one stream through no lock, the line prefix
-    carries no pid, and its thread id is identical across ranks — measured as one
-    value over all 400 bind lines of a two-rank run — so there is no field to
-    group by instead.
-
-    It also assumes no bind omits a segment its successor emits *before* any they
-    share, which would put that segment in the earlier bind. `args` is emitted
-    unconditionally and first, so today nothing can precede a shared segment.
-
-    Both assumptions fail the same visible way — a bind whose segment set differs
-    from its neighbours' — which `warn_on_ragged_binds` names. That is why the
-    boundary stays free of any knowledge about segment order: an order constant
-    gone stale would split every bind at the same point, leaving the sets uniform
-    and the mis-grouping undetectable.
+    Each bind is `{"pid", "inv", "ts", <segment>: ms, ...}`; `ts` is its earliest
+    segment start, which orders the binds a rank ran.
     """
-    binds: list[dict[str, float]] = []
-    current: dict[str, float] = {}
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            match = PHASE_LINE.search(line)
-            if match is None:
-                continue
-            phase, _start_ns, dur_ns = match.group(1), int(match.group(2)), int(match.group(3))
-            if phase in current:
-                binds.append(current)
-                current = {}
-            current[phase] = dur_ns / 1e6
-    if current:
-        binds.append(current)
+    prefix = f"{BIND_SPAN}."
+    binds: dict[tuple, dict] = {}
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for span in parse_spans(handle):
+                if span.is_device or not span.name.startswith(prefix):
+                    continue
+                phase = span.name[len(prefix) :]
+                if "." in phase:
+                    # An orchestrator operation inside host_orch, not a segment.
+                    continue
+                bind = binds.setdefault((span.pid, span.inv), {"pid": span.pid, "inv": span.inv, "ts": span.ts})
+                bind[phase] = span.dur / 1e6
+                bind["ts"] = min(bind["ts"], span.ts)
+    ordered = sorted(binds.values(), key=lambda b: (b["pid"], b["ts"]))
     # A group without `host_orch` is not a bind.
-    return [b for b in binds if "host_orch" in b]
+    return [b for b in ordered if "host_orch" in b]
 
 
-def parse_stamp(path: str) -> str:
+def cold_binds(binds: Sequence[dict]) -> set[tuple]:
+    """The `(pid, inv)` of each rank's first bind, which is warm-up.
+
+    One per pid, and exactly the first one that rank ran — where the old
+    line-based tool had to be told a rank count and drop that many from the
+    front of a single interleaved stream.
+    """
+    first: dict[int, dict] = {}
+    for bind in binds:
+        current = first.get(bind["pid"])
+        if current is None or bind["ts"] < current["ts"]:
+            first[bind["pid"]] = bind
+    return {(b["pid"], b["inv"]) for b in first.values()}
+
+
+def parse_stamp(paths: Sequence[Path]) -> str:
     """The run's environment stamp, or "" for a log this script did not produce."""
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            match = STAMP_LINE.match(line.rstrip("\n"))
-            if match is not None:
-                return match.group(1)
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = STAMP_LINE.match(line.rstrip("\n"))
+                if match is not None:
+                    return match.group(1)
     return ""
 
 
-def parse_torch_autoload(path: str) -> list[str]:
+def parse_torch_autoload(paths: Sequence[Path]) -> list[str]:
     """Unique torch backend autoload records in log order."""
     records: list[str] = []
     seen: set[str] = set()
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            match = TORCH_AUTOLOAD_LINE.search(line)
-            if match is None:
-                continue
-            record = match.group(1)
-            if record not in seen:
-                seen.add(record)
-                records.append(record)
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = TORCH_AUTOLOAD_LINE.search(line)
+                if match is None:
+                    continue
+                record = match.group(1)
+                if record not in seen:
+                    seen.add(record)
+                    records.append(record)
     return records
 
 
-def spread(values: list[float]) -> tuple[float, float, float]:
+def spread(values: Sequence[float]) -> tuple[float, float, float]:
     """Minimum, median and maximum. The median averages the two central values."""
     return min(values), statistics.median(values), max(values)
 
 
-def warn_on_ragged_binds(binds: list[dict[str, float]]) -> None:
-    """Report binds whose segment set differs from their neighbours'.
-
-    `parse_binds` assumes each bind's segments reach the log as an uninterrupted
-    burst, and nothing enforces that. A rank whose burst was split by another
-    rank's, and a truncated log, both leave a bind short of segments its
-    neighbours have; either way the rows below are not all describing the same
-    thing, so name it rather than print a clean table over it.
-    """
-    everywhere = {k for k in binds[0] if all(k in b for b in binds)}
-    ragged = sorted({k for b in binds for k in b} - everywhere)
-    if not ragged:
-        return
-    verb = "is" if len(ragged) == 1 else "are"
-    print(f"\n  WARNING: not every bind has the same segments; {', '.join(ragged)}")
-    print(f"  {verb} missing from some. A bind is grouped by its first repeated segment")
-    print("  name, so a rank whose burst was split by another rank's, and a truncated")
-    print("  log, both land here -- read the counts column before quoting a duration.")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("log", help="run log carrying the `bind phase=` lines")
     parser.add_argument(
-        "--ranks",
-        type=int,
-        default=None,
-        help="ranks in the run; the first bind of each is warm-up and is dropped. "
-        "Default: inferred as the number of binds divided by the round count when "
-        "--rounds is given, else 1.",
+        "log",
+        nargs="+",
+        help="run log(s) carrying the `chip.run.bind.*` spans, or a directory of host.*.log files",
     )
-    parser.add_argument("--rounds", type=int, default=None, help="rounds the run was given, to infer --ranks")
-    parser.add_argument("--keep-first", action="store_true", help="keep the cold bind in the statistics")
+    parser.add_argument("--keep-first", action="store_true", help="keep each rank's cold bind in the statistics")
     args = parser.parse_args()
 
-    binds = parse_binds(args.log)
+    paths = [path for source in args.log for path in expand_log_source(source)]
+
+    binds = parse_binds(paths)
     if not binds:
         print(
-            f"{args.log}: no `bind phase=` lines. Either SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 "
-            "was not set, or a diagnostic flag made CallConfig.output_prefix non-empty and "
-            "moved the whole host log to outputs/<case>_<ts>/host.<pid>.log -- parse those "
-            "instead. The log level is not a cause: TIMING is the default. "
-            "See docs/dfx/hbg-bind-phases.md.",
+            f"{' '.join(args.log)}: no `chip.run.bind.<segment>` spans. Either "
+            "SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 was not set, or a diagnostic flag made "
+            "CallConfig.output_prefix non-empty and moved the whole host log to "
+            "outputs/<case>_<ts>/host.<pid>.log -- parse those instead. The log level is not a "
+            "cause: TIMING is the default. See docs/dfx/hbg-bind-phases.md.",
             file=sys.stderr,
         )
         return 1
 
-    ranks = args.ranks
-    if ranks is None:
-        ranks = max(1, len(binds) // args.rounds) if args.rounds else 1
-    dropped = 0 if args.keep_first else min(ranks, len(binds))
-    warm = binds[dropped:]
+    cold = set() if args.keep_first else cold_binds(binds)
+    warm = [b for b in binds if (b["pid"], b["inv"]) not in cold]
+    ranks = len({b["pid"] for b in binds})
     if not warm:
         print(
-            f"{args.log}: {len(binds)} bind(s) over {ranks} rank(s), all of them cold. The first "
-            "bind of each rank is warm-up, so a warm bind needs --rounds 2 or more; --keep-first "
-            "reports the cold binds instead.",
+            f"{' '.join(args.log)}: {len(binds)} bind(s) over {ranks} rank(s), all of them cold. The "
+            "first bind of each rank is warm-up, so a warm bind needs --rounds 2 or more on the run; "
+            "--keep-first reports the cold binds instead.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"{args.log}")
-    stamp = parse_stamp(args.log)
+    print(f"{' '.join(args.log)}")
+    stamp = parse_stamp(paths)
     if stamp:
         print(f"  {stamp}")
     else:
         print("  (no `[stamp]` line: the command and commit behind these numbers have")
         print("   to be established by hand before comparing them to anything)")
-    torch_autoload = parse_torch_autoload(args.log)
+    torch_autoload = parse_torch_autoload(paths)
     if torch_autoload:
         for record in torch_autoload:
             print(f"  {record}")
     else:
         print("  (no `torch_backend_autoload` record: backend-autoload state")
         print("   must be established before comparing this log)")
-    print(f"  {len(binds)} binds, {len(warm)} warm ({dropped} cold dropped, ranks={ranks})\n")
+    print(f"  {len(binds)} binds, {len(warm)} warm ({len(cold)} cold dropped, ranks={ranks})\n")
     print(f"  {'phase':<18}{'min':>10}{'median':>10}{'max':>10}   n")
     for phase in PHASE_ORDER:
         values = [b[phase] for b in warm if phase in b]
@@ -214,18 +203,16 @@ def main() -> int:
         mark = "*" if phase in CONTROL_PLANE else " "
         print(f" {mark}{phase:<18}{low:>10.3f}{mid:>10.3f}{high:>10.3f}  {len(values):3d}")
 
-    unknown = sorted({k for b in warm for k in b} - set(PHASE_ORDER))
+    known = set(PHASE_ORDER) | {"pid", "inv", "ts"}
+    unknown = sorted({k for b in warm for k in b} - known)
     if unknown:
-        print(f"\n  phases this tool does not know about: {', '.join(unknown)}")
+        print(f"\n  segments this tool does not know about: {', '.join(unknown)}")
         print("  (add them to PHASE_ORDER, and to CONTROL_PLANE if a dispatch change can move them)")
 
-    warn_on_ragged_binds(warm)
-
-    # The control-plane set is not fixed: a change can retire a phase outright, so
-    # the total covers the phases this run has and names the ones absent from every
-    # bind. Absent from only some binds is a truncated log rather than a retired
-    # phase, and would understate a bind, so those binds are excluded and warned
-    # about.
+    # The control-plane set is not fixed: a change can retire a segment outright,
+    # so the total covers the segments this run has and names the ones absent from
+    # every bind. Absent from only some binds means those binds lost records, and
+    # would understate the total, so they are excluded and warned about.
     present = [k for k in CONTROL_PLANE if any(k in b for b in warm)]
     partial = [k for k in present if not all(k in b for b in warm)]
     retired = [k for k in CONTROL_PLANE if k not in present]
@@ -236,12 +223,12 @@ def main() -> int:
         print("\n  * = control plane, summed within each bind and then:")
         print(f"    total{'':<13}{low:>10.3f}{mid:>10.3f}{high:>10.3f}  {len(totals):3d}   (ms)")
         if retired:
-            print(f"    over {len(present)} of {len(CONTROL_PLANE)} phases; absent from every")
+            print(f"    over {len(present)} of {len(CONTROL_PLANE)} segments; absent from every")
             print(f"    bind: {', '.join(retired)}")
         if partial:
             print(f"    WARNING: {', '.join(partial)} is missing from some binds but not all;")
             print("    those binds are excluded, and the total may not describe the run")
-        print("\n  Compare by min, over the same phase set, against a log with the same")
+        print("\n  Compare by min, over the same segment set, against a log with the same")
         print("  stamp and torch autoload state; see docs/dfx/hbg-bind-phases.md 'Comparing two branches'.")
     else:
         print(f"\n  no bind carries any of {CONTROL_PLANE}; the control-plane total is not computable")

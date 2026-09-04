@@ -240,12 +240,12 @@ appear.
 
 ### What is recorded
 
-Sixteen kinds, all on the host monotonic clock the `[STRACE]` host spans use,
+Twenty-one kinds, all on the host monotonic clock the `[STRACE]` host spans use,
 so records and spans read against each other with no alignment step.
 
 | Group | Kinds |
 | ----- | ----- |
-| Bind segments (partition the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `sm_h2d`, `arena_h2d`, `host_view_close` |
+| Bind segments (one interval each, inside the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `arena_h2d`, `host_view_close` |
 | Orchestrator operations (inside `host_orch`) | `submit_task`, `alloc_tensors`, `record_in_graph_task`, `graph_submit`, `build_definition`, `graph_begin`, `recording_wait`, `graph_commit`, `submit_admit`, `record_handoff`, `generated_args` |
 
 Three of the orchestrator kinds end with a task submitted — `submit_task`,
@@ -270,7 +270,11 @@ the wrong one produces a number that reads as data and is not:
   count). That is the whole contract.
 - **A quantity about a segment is an attribute** — `bytes=`, `heap_used=`,
   `spilled=`, `minflt=`, `nvcsw=`. It goes in the segment's attribute string,
-  which is what the `bind phase=` line prints.
+  which is what the segment's span carries. That string is capped at the span
+  attribute field's width (`SIMPLER_HOST_SPAN_ATTRIBUTES_CAPACITY`), and the
+  kernel counters are formatted first, so an overlong one loses a caller quantity
+  the artifact's `detail` can still supply rather than a counter nothing else
+  carries.
 
 So: **a new interval to name earns a new kind; a new quantity about an interval
 that already exists is an attribute on it.** Adding a kind to carry a statistic
@@ -286,7 +290,7 @@ printed as `detail_sum` for as long as the column was unconditional.
 
 | Switch | Turns on |
 | ------ | -------- |
-| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` (env, off unless it starts with `1`, `t` or `T`) | the `LOG_TIMING` breakdown; needs no records, no rebuild, and works at any `--rounds` |
+| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` (env, off unless it starts with `1`, `t` or `T`) | the breakdown in the log — segment spans plus the `host-orch` cost-share lines; needs no records, no rebuild, and works at any `--rounds` |
 | `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE` (env, same spelling) | per-event collection into the pool, which reaches `host_phase_records.jsonl` when the run has an output directory |
 | `--enable-chip-swimlane 4` (CallConfig `chip_swimlane_level`) | per-event collection *and* the host lane in `chip_swimlane_records.json`, with its records clock-aligned against the device timeline |
 
@@ -319,11 +323,15 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
 
 ### The three views
 
-- **`LOG_TIMING` lines**, at the default log threshold, gated by
-  `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE`. One `bind phase=<p> start_ns=<n>
-  dur_ns=<n> <attrs>` line per segment, plus one `host-orch phase=<p>
-  total_ns=<n> count=<k> detail_sum=<n> dropped=<n>` line per orchestrator kind.
-  They come from per-kind counters, not from the record pool. The counters use
+- **The log**, at the default threshold, gated by
+  `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE`. Two shapes, because a segment and a cost
+  share are different things: one `[STRACE]` span named
+  `chip.run.bind.<segment>` per segment, carrying `ts` / `dur` / `<attrs>` at
+  depth 2 inside the `chip.run.bind` span; and one `host-orch phase=<p>
+  total_ns=<n> count=<k> detail_sum=<n> dropped=<n>` `LOG_TIMING` line per
+  orchestrator kind, which stays a line because those kinds nest inside each
+  other and a total over them is not an interval.
+  Both come from per-kind counters, not from the record pool. The counters use
   lock-free atomic additions across the main and recording-worker lanes, with
   every phase isolated on its own cache line so concurrent `graph_submit` and
   `record_in_graph_task` updates do not false-share. The per-event pool is armed when the
@@ -334,9 +342,11 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   makes this the channel for steady state, where `--rounds > 1` switches every
   artifact collector off.
 
-  Every line is written at the end of the bind, keeping the log write off the path
-  being measured. The line therefore carries its own `start_ns`; the log prefix
-  timestamps the write, not the segment.
+  Both are written at the end of the bind, keeping the write off the path being
+  measured. The span therefore carries its own `ts`, taken when the segment
+  opened, rather than leaving its start to be inferred from when the record was
+  written — `STRACE_HOST_SPAN_AT_A` exists for that, and `chip.run` itself is
+  emitted the same way.
 
 - **`host_phase_records.jsonl`** in the per-case output directory, when a
   collecting bind has one. One JSON Lines object per bind carrying `pid` / `inv`
@@ -355,7 +365,7 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   | Key | Kinds | Rendered as |
   | --- | ----- | ----------- |
   | `host_orchestrator_phases` | the task-submitting kinds | `Host Orchestrator` process |
-  | `host_device_uploads` | `graph_upload`, `sm_h2d`, `arena_h2d`, with byte counts | `Host Prepare` / `H2D` lane |
+  | `host_device_uploads` | `graph_upload`, `arena_h2d`, with byte counts | `Host Prepare` / `H2D` lane |
 
   The upload lane is the one place the whole question — orchestration plus H2D
   inside a millisecond — is visible against the device execution it precedes; the
@@ -365,13 +375,15 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   against `recorded_records` (the submit projection), plus `pool_records` for the
   whole population — a pool count above the projection is normal, not incomplete.
 
-The stage's *duration* is already published as the `chip.run.bind` `[STRACE]`
-marker, so the marker and this breakdown are a total and its parts rather than two
-spellings of one number. The parts are not markers themselves: the marker grammar
-is the platform's public per-run-stage contract (see `runtime_c_api.h` and
-[docs/dfx/host-trace.md](../../../../../docs/dfx/host-trace.md)), whose consumers
-key off a fixed stage set, and a runtime's internal breakdown of one stage does
-not belong in it.
+The stage's *duration* is the `chip.run.bind` `[STRACE]` span, and its segments
+are `[STRACE]` spans one level below it, so the two are a stage and its parts in
+one format. A runtime subdividing a stage it owns is ordinary: the tensormap
+runtime's `chip.run.bind.args` and `chip.run.bind.prebuilt` do it, and the device
+sub-phases are that runtime's own AICPU breakdown, read back from a cycle buffer
+and re-emitted as spans (see `runtime_c_api.h` and
+[docs/dfx/host-trace.md](../../../../../docs/dfx/host-trace.md)). What is *not*
+a span is a summed cost share over kinds that nest inside each other — those have
+no honest position on a timeline, and they are the `host-orch phase=` lines.
 
 ### Cost and capacity
 

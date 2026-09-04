@@ -64,11 +64,10 @@ std::atomic<void (*)(size_t)> g_after_queue_claim_hook{nullptr};
 std::atomic<void (*)()> g_before_gap_wait_hook{nullptr};
 #endif
 
-// POSIX guarantees atomic pipe writes up to _POSIX_PIPE_BUF (512 bytes). A
-// conservative bound for the logger prefix, fixed-width STRACE fields, and
-// newline is 256 bytes, leaving the other half for the encoded text fields.
-constexpr size_t kHostSpanNameCapacity = 64;
-constexpr size_t kHostSpanAttributesCapacity = 192;
+// The two text-field widths live in common/host_span.h, where a producer that
+// formats a field can size its buffer to the same number.
+constexpr size_t kHostSpanNameCapacity = SIMPLER_HOST_SPAN_NAME_CAPACITY;
+constexpr size_t kHostSpanAttributesCapacity = SIMPLER_HOST_SPAN_ATTRIBUTES_CAPACITY;
 static_assert(kHostSpanNameCapacity + kHostSpanAttributesCapacity <= _POSIX_PIPE_BUF - 256);
 static_assert(kRecordCapacity >= 2);
 

@@ -7,10 +7,10 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Split a bind phase's wall time into running and waiting, per phase and per thread.
+"""Split a bind segment's wall time into running and waiting, per segment and per thread.
 
-Reads the `bind phase=` markers a run emits under
-`SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1`. A phase's duration alone cannot say whether it
+Reads the `chip.run.bind.*` spans a run emits under
+`SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1`. A segment's duration alone cannot say whether it
 was computing or blocked, and that decides where to look next:
 
   on-CPU dominates   -> it is running. Split it by the fault count and by the syscalls
@@ -38,22 +38,59 @@ import re
 import statistics
 import sys
 
+from simpler_setup.tools.strace_timing import expand_log_source, parse_spans
+
 FIELDS = ("minflt", "tminflt", "nivcsw", "nvcsw", "cpu_ns", "rec_cpu_ns")
-MARKER = re.compile(r"bind phase=(?P<phase>[a-z_]+) start_ns=\d+ dur_ns=(?P<dur>\d+)(?P<rest>.*)")
+# The stage the segments subdivide. A name one level below it is a segment; two
+# levels below is an orchestrator operation, which carries none of these counters.
+BIND_SPAN = "chip.run.bind"
 
 
-def parse(path):
+def parse(paths):
+    """One row per bind segment, with the counters its attributes carry.
+
+    A counter is `None` when the attribute string was truncated before it — the
+    logger marks such a field with `~` — so a caller can report the row as
+    incomplete instead of computing over a missing number.
+    """
+    prefix = f"{BIND_SPAN}."
     rows = []
-    for line in open(path, errors="replace"):
-        marker = MARKER.search(line)
-        if not marker:
-            continue
-        row = {"phase": marker.group("phase"), "dur_us": int(marker.group("dur")) / 1000.0}
-        for field in FIELDS:
-            hit = re.search(rf"\b{field}=(\d+)", marker.group("rest"))
-            row[field] = int(hit.group(1)) if hit else None
-        rows.append(row)
+    for path in paths:
+        with open(path, errors="replace") as handle:
+            for span in parse_spans(handle):
+                if span.is_device or not span.name.startswith(prefix):
+                    continue
+                phase = span.name[len(prefix) :]
+                if "." in phase:
+                    continue
+                row = {
+                    "phase": phase,
+                    "pid": span.pid,
+                    "inv": span.inv,
+                    "ts": span.ts,
+                    "dur_us": span.dur / 1000.0,
+                }
+                for field in FIELDS:
+                    hit = re.search(rf"\b{field}=(\d+)", span.attrs)
+                    row[field] = int(hit.group(1)) if hit else None
+                rows.append(row)
     return rows
+
+
+def cold_keys(rows):
+    """The `(pid, inv)` of each rank's first bind, which is warm-up.
+
+    A span carries the run epoch its bind was allocated, so the cold bind is the
+    earliest one that pid ran rather than a count of leading rows the caller has
+    to supply.
+    """
+    earliest = {}
+    for row in rows:
+        key = (row["pid"], row["inv"])
+        current = earliest.get(row["pid"])
+        if current is None or row["ts"] < current[1]:
+            earliest[row["pid"]] = (key, row["ts"])
+    return {key for key, _ in earliest.values()}
 
 
 def summarise(group):
@@ -87,16 +124,36 @@ def summarise(group):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("log", help="run log carrying `bind phase=` markers")
-    parser.add_argument("--ranks", type=int, default=2, help="binds to treat as cold, one per rank (default 2)")
-    parser.add_argument("--phase", default=None, help="only this phase")
+    parser.add_argument(
+        "log", nargs="+", help="run log(s) carrying `chip.run.bind.*` spans, or a directory of host.*.log files"
+    )
+    parser.add_argument("--phase", default=None, help="only this segment")
     args = parser.parse_args()
 
-    rows = parse(args.log)
+    paths = [path for source in args.log for path in expand_log_source(source)]
+    rows = parse(paths)
     if not rows:
-        sys.exit(f"{args.log}: no `bind phase=` markers — was SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 set?")
-    if rows[0]["cpu_ns"] is None:
-        sys.exit(f"{args.log}: markers carry no cpu_ns — this log predates the per-thread CPU clocks")
+        sys.exit(
+            f"{' '.join(args.log)}: no `chip.run.bind.<segment>` spans — was SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 set?"
+        )
+    if all(row["cpu_ns"] is None for row in rows):
+        sys.exit(f"{' '.join(args.log)}: spans carry no cpu_ns — this log predates the per-thread CPU clocks")
+
+    # Warm-up is decided over every bind the log holds, before any row is
+    # dropped: a bind whose attributes were truncated is still a bind that ran,
+    # and dropping it first would promote its successor to cold and move a warm
+    # bind's numbers into the cold row.
+    # Warm-up is decided over every bind the log holds, before any row is
+    # dropped: a bind whose attributes were truncated is still a bind that ran,
+    # and dropping it first would promote its successor to cold and move a warm
+    # bind's numbers into the cold row.
+    cold = cold_keys(rows)
+
+    # A row missing a counter had its attribute string truncated, so every figure
+    # derived from that counter would be a guess. Report how many rather than
+    # compute over them or abort the whole table.
+    incomplete = [row for row in rows if any(row[field] is None for field in FIELDS)]
+    rows = [row for row in rows if row not in incomplete]
 
     phases = {}
     for row in rows:
@@ -112,7 +169,11 @@ def main():
     for phase, group in phases.items():
         if args.phase and phase != args.phase:
             continue
-        for label, part in (("cold", group[: args.ranks]), ("warm", group[args.ranks :])):
+        by_warmth = {
+            "cold": [row for row in group if (row["pid"], row["inv"]) in cold],
+            "warm": [row for row in group if (row["pid"], row["inv"]) not in cold],
+        }
+        for label, part in by_warmth.items():
             if not part:
                 continue
             stats = summarise(part)
@@ -126,6 +187,10 @@ def main():
             )
     print("\nmedians over the binds in each group; times in us. cpu/offcpu are the bind")
     print("thread's own, reccpu is every recording worker's, so rec/dur is concurrency.")
+    if incomplete:
+        print(f"{len(incomplete)} span(s) had a truncated attribute string and are excluded: a")
+        print("  counter the logger cut is missing entirely, and every figure over it would")
+        print("  be a guess. The attribute field is 192 bytes; see docs/dfx/hbg-bind-phases.md.")
     if flagged:
         print("! at least one bind reported more CPU than the segment's own wall, so its")
         print("  counter mark covers a different span than its duration: that row's")

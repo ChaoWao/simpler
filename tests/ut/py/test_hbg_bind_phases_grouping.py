@@ -6,128 +6,93 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Grouping of `bind phase=` lines into binds."""
+"""Grouping bind-segment spans into binds.
+
+A bind is the set of segments sharing one `(pid, inv)`. The tests below pin that
+key, and in particular the case the previous line-based grouping could not
+express: two ranks writing one stream, whose segment bursts interleave.
+"""
 
 from __future__ import annotations
 
-import sys
+from simpler_setup.tools.hbg_bind_phases import cold_binds, parse_binds
 
-from simpler_setup.tools import hbg_bind_phases
-
-# A bind emits its segments in one contiguous burst, in this order. `arena_h2d`
-# is second to last, so it does not close a bind; `host_view_close` does.
-EMISSION_ORDER = (
-    "args",
-    "arena_build",
-    "static_arena",
-    "gm_heap",
-    "shared_mem",
-    "runtime_init",
-    "host_orch",
-    "graph_upload",
-    "arena_h2d",
-    "host_view_close",
-)
+SEGMENTS = ("args", "host_orch", "graph_upload", "arena_h2d")
 
 
-def _write_binds(path, count: int, *, order=EMISSION_ORDER, omit: tuple[str, ...] = ()) -> None:
-    """One line per segment per bind, each duration encoding its own bind index."""
-    lines = ["[stamp] command commit=abc"]
-    clock = 0
-    for bind_index in range(count):
-        for phase in order:
-            if phase in omit:
-                continue
-            clock += 1
-            # dur_ns = (bind_index + 1) ms, so a misattributed segment is visible.
-            lines.append(f"bind phase={phase} start_ns={clock} dur_ns={(bind_index + 1) * 1000000}")
+def _span(pid: int, inv: int, phase: str, ts: int, dur_ns: int) -> str:
+    return f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=2 name=chip.run.bind.{phase} ts={ts} dur={dur_ns}"
+
+
+def _write(path, lines: list[str]):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return [path]
 
 
-def test_each_segment_lands_in_its_own_bind(tmp_path):
-    log = tmp_path / "run.log"
-    _write_binds(log, 3)
+def test_two_ranks_writing_one_stream_are_not_confused_for_each_other(tmp_path):
+    """The case the old grouping could not see.
 
-    binds = hbg_bind_phases.parse_binds(str(log))
-
-    assert len(binds) == 3
-    for index, bind in enumerate(binds):
-        assert sorted(bind) == sorted(EMISSION_ORDER), f"bind {index} is not whole"
-        for phase, duration in bind.items():
-            assert duration == index + 1, f"bind {index} carries another bind's {phase}"
-
-
-def test_a_bind_missing_its_closing_segment_does_not_swallow_the_next(tmp_path):
-    """An interrupted bind stays one bind rather than merging with its successor."""
-    log = tmp_path / "partial.log"
-    _write_binds(log, 1)
-    with log.open("a", encoding="utf-8") as handle:
-        for phase in ("args", "host_orch", "arena_h2d"):
-            handle.write(f"bind phase={phase} start_ns=999 dur_ns=2000000\n")
-
-    binds = hbg_bind_phases.parse_binds(str(log))
-
-    assert len(binds) == 2
-    assert binds[0]["host_view_close"] == 1
-    assert binds[1]["host_orch"] == 2
-    assert "host_view_close" not in binds[1]
-
-
-def test_a_bind_omitting_a_leading_segment_is_reported(tmp_path, monkeypatch, capsys):
-    """A bind short of a leading segment absorbs the next bind's copy of it.
-
-    Grouping closes on a repeated name, so a segment the previous bind lacks and
-    the next one emits before any they share lands in the previous bind. `args`
-    is emitted unconditionally and first, so no current bind can omit it — this
-    pins what happens if that ever changes, and that the reader is told.
+    Ranks share the capture fd and their bursts interleave, and the log prefix's
+    thread id is identical across them. `inv` is allocated per run per process,
+    so `(pid, inv)` separates them with nothing inferred from order.
     """
-    log = tmp_path / "no_args.log"
-    _write_binds(log, 1, order=EMISSION_ORDER[1:])
-    with log.open("a", encoding="utf-8") as handle:
-        for phase in EMISSION_ORDER:
-            handle.write(f"bind phase={phase} start_ns=999 dur_ns=2000000\n")
+    lines = []
+    for index, phase in enumerate(SEGMENTS):
+        # One segment from each rank, alternating, for two binds per rank.
+        lines.append(_span(11, 1, phase, 1_000 + index, 1_000_000))
+        lines.append(_span(22, 1, phase, 1_500 + index, 2_000_000))
+        lines.append(_span(11, 2, phase, 9_000 + index, 3_000_000))
+        lines.append(_span(22, 2, phase, 9_500 + index, 4_000_000))
 
-    binds = hbg_bind_phases.parse_binds(str(log))
+    binds = parse_binds(_write(tmp_path / "run.log", lines))
 
-    assert [len(bind) for bind in binds] == [10, 9]
-    assert binds[0]["args"] == 2, "the second bind's args landed in the first"
-    assert "args" not in binds[1]
+    assert len(binds) == 4
+    assert {(b["pid"], b["inv"]) for b in binds} == {(11, 1), (11, 2), (22, 1), (22, 2)}
+    for bind in binds:
+        assert sorted(k for k in bind if k in SEGMENTS) == sorted(SEGMENTS)
+    by_key = {(b["pid"], b["inv"]): b for b in binds}
+    assert by_key[(11, 1)]["host_orch"] == 1.0
+    assert by_key[(22, 2)]["host_orch"] == 4.0
 
-    monkeypatch.setattr(sys, "argv", ["hbg_bind_phases", str(log), "--keep-first"])
-    assert hbg_bind_phases.main() == 0
-    out = capsys.readouterr().out
-    assert "not every bind has the same segments; args" in out
+
+def test_each_rank_contributes_exactly_one_cold_bind(tmp_path):
+    """Warm-up is per rank and is the earliest bind that rank ran, not a count."""
+    lines = []
+    for pid, base in ((11, 1_000), (22, 500)):
+        for inv, offset in ((1, 0), (2, 10_000), (3, 20_000)):
+            for index, phase in enumerate(SEGMENTS):
+                lines.append(_span(pid, inv, phase, base + offset + index, 1_000_000))
+
+    binds = parse_binds(_write(tmp_path / "run.log", lines))
+
+    assert cold_binds(binds) == {(11, 1), (22, 1)}
 
 
-def test_a_split_burst_is_reported_rather_than_passed_off_as_a_bind(tmp_path, monkeypatch, capsys):
-    """Grouping assumes uninterrupted bursts, and nothing enforces that.
+def test_a_group_without_host_orch_is_not_a_bind(tmp_path):
+    """`host_orch` is the segment that makes a bind a bind; without it the
+    records describe something else that happened to share the key."""
+    lines = [
+        _span(11, 1, "args", 1_000, 1_000_000),
+        _span(11, 1, "arena_h2d", 1_100, 1_000_000),
+        _span(11, 2, "args", 2_000, 1_000_000),
+        _span(11, 2, "host_orch", 2_100, 1_000_000),
+    ]
 
-    Ranks share one stream through no lock and the line prefix carries no pid, so
-    one rank's burst can land inside another's. The result is binds whose segment
-    sets differ, which has to reach the reader.
-    """
-    log = tmp_path / "split_burst.log"
-    lines = ["[stamp] command commit=abc"]
+    binds = parse_binds(_write(tmp_path / "run.log", lines))
 
-    def emit(phase: str, rank: int) -> None:
-        lines.append(f"bind phase={phase} start_ns={len(lines)} dur_ns={rank * 1000000}")
+    assert [(b["pid"], b["inv"]) for b in binds] == [(11, 2)]
 
-    for phase in EMISSION_ORDER[:4]:  # rank 1 starts
-        emit(phase, 1)
-    for phase in EMISSION_ORDER:  # rank 2 lands whole, inside it
-        emit(phase, 2)
-    for phase in EMISSION_ORDER[4:]:  # rank 1 finishes
-        emit(phase, 1)
-    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    binds = hbg_bind_phases.parse_binds(str(log))
-    assert [len(bind) for bind in binds] == [10, 6], "the split burst is not silently made whole"
+def test_orchestrator_operations_are_not_segments(tmp_path):
+    """`chip.run.bind.host_orch.<op>` sits a level deeper and is not a segment of
+    the stage, so it must not become a column."""
+    lines = [
+        _span(11, 1, "host_orch", 1_000, 1_000_000),
+        _span(11, 1, "host_orch.graph_submit", 1_100, 50_000),
+        _span(11, 1, "host_orch.build_definition", 1_200, 60_000),
+    ]
 
-    # --keep-first so both binds are reported; dropping the cold one would leave a
-    # single bind, whose segment set is trivially uniform with itself.
-    monkeypatch.setattr(sys, "argv", ["hbg_bind_phases", str(log), "--keep-first"])
-    assert hbg_bind_phases.main() == 0
-    out = capsys.readouterr().out
-    assert "not every bind has the same segments" in out
-    for phase in ("args", "arena_build", "static_arena", "gm_heap"):
-        assert phase in out
+    binds = parse_binds(_write(tmp_path / "run.log", lines))
+
+    assert len(binds) == 1
+    assert sorted(k for k in binds[0] if k not in ("pid", "inv", "ts")) == ["host_orch"]
