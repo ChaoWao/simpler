@@ -25,12 +25,14 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
+#include "common/chip_swimlane_extension.h"
 #include "common/chip_swimlane_profiling.h"
 #include "host/clock_correlation.h"
 #include "common/memory_barrier.h"
@@ -399,6 +401,8 @@ public:
         chip_swimlane_level_ = chip_swimlane_level;
     }
 
+    bool set_json_extension(ChipSwimlaneExtensionSection section, const std::string &json_value);
+
     /**
      * Per-buffer callback invoked by ProfilerBase's poll loop. Dispatches on
      * info.type to copy either an ChipSwimlaneAicpuTaskBuffer (PERF_RECORD) into the per-core
@@ -569,6 +573,7 @@ private:
     // Per-task output directory captured at initialize() time. Consumed by
     // export_swimlane_json() to build <prefix>/chip_swimlane_records.json.
     std::string output_prefix_;
+    std::array<std::string, static_cast<size_t>(ChipSwimlaneExtensionSection::Count)> json_extensions_{};
 
     // Merged data, populated from per-collector shards after collector threads join.
     std::vector<std::vector<ChipSwimlaneAicpuTaskRecord>> collected_perf_records_;
