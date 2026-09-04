@@ -168,6 +168,7 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->sync_task_seen.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -232,6 +233,7 @@ void SchedulerState::reset_for_reuse(const SchedulerLayout &layout, void *sm_dev
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->sync_task_seen.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
