@@ -1,0 +1,42 @@
+{
+  "schema": "simpler-qwen3-14b-standalone-decode-baseline-v2",
+  "software": {
+    "simpler": "56511f80f469458b6103b0d25e11fb800bc1d8a5",
+    "simpler_patch": "TaskTensor shim from compare1_compat",
+    "pypto": "f1a2f35f0fe36248f9302f60b56b2865adbf92ed",
+    "pypto_lib": "7f8d7ea816d2817cef5962e56dccc66fbbaa3c44",
+    "python": "3.10",
+    "torch": "2.6.0",
+    "torch_npu": "2.6.0",
+    "cann": "9.0.0",
+    "ptoas": "0.57"
+  },
+  "workload": {
+    "model": "Qwen3-14B",
+    "dtype": "bfloat16",
+    "prompt_tokens": 3338,
+    "batch_size": 16,
+    "output_tokens": 128,
+    "consumed_decode_dispatches": 127,
+    "pure_warmup_runs": 0,
+    "pure_measured_runs": 1,
+    "steady_skip_dispatches": 5,
+    "runtime_slots": [0, 1],
+    "kv_backing_page_count": 691,
+    "ring_task_window": 131072,
+    "ring_dep_pool": 131072,
+    "ring_heap_bytes": [1073741824, 1073741824, 1073741824, 8589934592]
+  },
+  "runtime_dependency": {
+    "pypto_serving_required": false,
+    "prefill_required": false,
+    "fixture_kind": "frozen post-prefill KV snapshot"
+  },
+  "input_digests": {
+    "fixture_manifest": "provided-by-caller",
+    "fixture_sha256sums": "provided-by-caller",
+    "artifact_manifest": "provided-by-caller",
+    "artifact_sha256sums": "provided-by-caller",
+    "golden_manifest": "provided-by-caller"
+  }
+}
