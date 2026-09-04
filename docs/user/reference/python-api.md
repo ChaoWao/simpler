@@ -140,7 +140,7 @@ takes a device pointer; `DataType` carries the element types.
 | `enable_pmu` | `0` | `0` off; `>0` selects the event type |
 | `enable_dep_gen` | `0` | Emit the dependency graph |
 | `enable_scope_stats` | `0` | Writes `<output_prefix>/scope_stats/scope_stats.jsonl` |
-| `capture_clock_anchors` | `False` | Anchors the Host and Device clocks so device timestamps land on an absolute Host timeline. Set by the ChipWorker child for an L3 chip-swimlane capture; not a caller knob |
+| `capture_clock_anchors` | `False` | Internal marker set by a ChipWorker child for an L3 chip-swimlane capture; not a caller knob. Enabling the chip swimlane anchors its Host and Device clocks |
 | `output_prefix` | `""` | **Required whenever any diagnostic is enabled** |
 | `runtime_env` | — | `ring_task_window`, `ring_heap`, `ring_dep_pool`; `tensormap_and_ringbuffer` only |
 

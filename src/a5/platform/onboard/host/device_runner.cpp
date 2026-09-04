@@ -615,12 +615,12 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         recover_device_or_mark_unusable(rc);
         // Emergency shutdown may already have flushed diagnostics. Export the
         // manifest on the error path exactly once.
-        teardown_shared_collectors_after_run(false);
+        teardown_shared_collectors_after_run();
         return rc;
     }
 
     read_device_wall_ns();
-    teardown_shared_collectors_after_run(true);
+    teardown_shared_collectors_after_run();
 
     // a5-specific dep_gen teardown: host-orch emits the graph its orchestration
     // built on this same thread; device-orch stops the collector, reconciles the

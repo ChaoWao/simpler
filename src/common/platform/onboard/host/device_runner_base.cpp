@@ -1281,15 +1281,12 @@ void DeviceRunnerBase::apply_call_config(const CallConfig &config) {
     // without dep_gen falls through to the base no-op.
     set_dep_gen_enabled(config.enable_dep_gen != 0);
     set_scope_stats_enabled(config.enable_scope_stats != 0);
-    capture_clock_anchors_ = config.capture_clock_anchors != 0;
+    // Every swimlane artifact carries Host/Device clock correlation.
+    capture_clock_anchors_ = config.capture_clock_anchors != 0 || config.enable_chip_swimlane != 0;
     set_output_prefix(config.output_prefix);
 }
 
 HostPhaseRecordPool *DeviceRunnerBase::host_phase_pool_arm(bool producer_wants_records) noexcept {
-    if (clock_correlation_provider_ != nullptr) {
-        clock_correlation_provider_->release(false);
-        clock_correlation_provider_.reset();
-    }
     const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
     const bool artifact_wants_records = producer_wants_records && !output_prefix_.empty();
     chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
@@ -1302,14 +1299,11 @@ HostPhaseRecordPool *DeviceRunnerBase::host_phase_pool_arm(bool producer_wants_r
     } catch (...) {
         LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
     }
-    if (!swimlane_wants_records) return pool;
-
-    begin_clock_correlation_session_if_needed();
     return pool;
 }
 
 void DeviceRunnerBase::begin_clock_correlation_session_if_needed() noexcept {
-    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES || chip_swimlane_collector_.clock_correlation_active()) {
+    if (!capture_clock_anchors_ || chip_swimlane_collector_.clock_correlation_active()) {
         return;
     }
     try {
@@ -1319,7 +1313,7 @@ void DeviceRunnerBase::begin_clock_correlation_session_if_needed() noexcept {
         );
         chip_swimlane_collector_.record_clock_anchor_samples(
             simpler::dfx::capture_clock_anchor_group(
-                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOffset
             )
         );
     } catch (...) {
@@ -1343,25 +1337,13 @@ void DeviceRunnerBase::publish_host_phase_records_to_swimlane() {
     );
 }
 
-void DeviceRunnerBase::finish_clock_correlation_session(
-    bool capture_device_complete, bool abandon_device_resources
-) noexcept {
+void DeviceRunnerBase::finish_clock_correlation_session(bool abandon_device_resources) noexcept {
     if (!chip_swimlane_collector_.clock_correlation_active()) {
         if (clock_correlation_provider_ != nullptr) {
             clock_correlation_provider_->release(abandon_device_resources);
             clock_correlation_provider_.reset();
         }
         return;
-    }
-
-    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
-        try {
-            chip_swimlane_collector_.record_clock_anchor_samples(
-                simpler::dfx::capture_clock_anchor_group(
-                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
-                )
-            );
-        } catch (...) {}
     }
     chip_swimlane_collector_.finish_clock_correlation_session();
     if (clock_correlation_provider_ != nullptr) {
@@ -1400,7 +1382,7 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
         if (err != 0 && rc == 0) rc = err;
     };
 
-    finish_clock_correlation_session(false, abandon_device_resources);
+    finish_clock_correlation_session(abandon_device_resources);
 
     // Teardown invariant: finalize_common() is the single place that releases
     // every RTS/device-owning resource, and the subclass runs it BEFORE its
@@ -1893,7 +1875,7 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
         return create_thread(std::move(fn));
     };
     if (enable_chip_swimlane_) {
-        if (capture_clock_anchors_) begin_clock_correlation_session_if_needed();
+        begin_clock_correlation_session_if_needed();
         chip_swimlane_collector_.start(thread_factory);
     }
     if (enable_dump_args_) {
@@ -1921,12 +1903,12 @@ void DeviceRunnerBase::write_host_phase_records_artifact() {
     }
 }
 
-void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_execution_complete) {
+void DeviceRunnerBase::teardown_shared_collectors_after_run() {
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     // Diagnostic exports use the per-task `output_prefix_` directory the user
     // set on CallConfig (CallConfig::validate() enforces non-empty upstream).
-    finish_clock_correlation_session(device_execution_complete, !can_accept_run());
+    finish_clock_correlation_session(!can_accept_run());
     if (enable_chip_swimlane_) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();

@@ -117,10 +117,11 @@ struct CallConfig {
     int32_t enable_pmu = 0;  // 0 = disabled; >0 = enabled, value selects event type
     int32_t enable_dep_gen = 0;
     int32_t enable_scope_stats = 0;  // writes <output_prefix>/scope_stats/scope_stats.jsonl
-    // Anchor the Host and Device clocks for this capture even when no Host
-    // orchestration records exist, which is what places its device timestamps on
-    // an absolute Host timeline. Independent of why a caller wants that timeline:
-    // the runtime samples the anchors and never learns who consumes them.
+    // Internal ChipWorker marker, not a caller knob. A ChipWorker child sets it
+    // alongside enable_chip_swimlane and it stays on the wire for that, but it
+    // no longer gates anything on its own: the runtime anchors the clocks
+    // whenever the chip swimlane is enabled, so setting this without the
+    // swimlane samples no anchors and produces no standalone artifact.
     int32_t capture_clock_anchors = 0;
     RuntimeEnv runtime_env;  // per-task ring sizing
     char output_prefix[1024] = {};
