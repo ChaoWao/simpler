@@ -359,8 +359,8 @@ public:
      *
      * @param num_aicore               Number of AICore instances
      * @param device_id                Device ID (forwarded to register_cb)
-     * @param chip_swimlane_level   Collection granularity (DISABLED / AICORE_TIMING
-     *                                 / AICPU_TIMING / SCHED_PHASES / ORCH_PHASES).
+     * @param chip_swimlane_level   Collection granularity (DISABLED / TASK_TIMING
+     *                                 / SCHEDULE_TIMING / SCHED_PHASES / ORCH_PHASES).
      *                                 Written into
      *                                 `ChipSwimlaneDataHeader::chip_swimlane_level`
      *                                 so AICPU can promote it in
@@ -410,7 +410,7 @@ public:
     /**
      * Publish per-core core_type (AIC/AIV/...) so the host emit path can
      * resolve the lane label without consulting an AICPU task record. Required
-     * for AICORE_TIMING (level=1) where complete_task is bypassed and the
+     * for TASK_TIMING (level=1) where complete_task is bypassed and the
      * AICore record alone is on disk. Caller is the device_runner — sim sets
      * it from `runtime.workers[i].core_type` (rule-based), onboard sets it
      * from the handshake-discovered table.

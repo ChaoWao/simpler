@@ -226,7 +226,7 @@ mirrors the PMU pattern — two independent channels (one binary, one int):
   (shared memory). Host writes it in `ChipSwimlaneCollector::initialize`; AICPU
   promotes it from the header in `chip_swimlane_aicpu_init` and exposes it via
   `get_chip_swimlane_level()` (typed `ChipSwimlaneLevel`) for
-  `>= AICPU_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
+  `>= SCHEDULE_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
 
 On sim, the binary on/off travels via the dlsym'd `set_chip_swimlane_enabled`
 entry point; the granular level still goes through the shared-memory
@@ -236,7 +236,7 @@ header just like on onboard.
 | ----- | -------- |
 | 0 | Nothing (disabled) |
 | 1 | AICore timing only (start/end/task_token_raw) — AICPU `complete_task` is bypassed |
-| 2 | + dispatch_time, finish_time |
+| 2 | + Scheduler per-task dispatch_time, finish_time |
 | 3 | + Scheduler phases (`SCHED_*`) |
 | 4 | + Orchestrator phases (full) |
 
@@ -286,10 +286,10 @@ content it depends on instead of relying on magic numbers:
 // Cheap binary check, available immediately after kernel entry.
 if (is_chip_swimlane_enabled()) { ... }
 
-// AICPU dispatch/finish timestamps.
+// Scheduler per-task dispatch/finish timestamps (AICPU-produced in this runtime).
 // Granular checks below require chip_swimlane_aicpu_init to have already run
 // (so the level has been promoted from the shared-memory header).
-if (get_chip_swimlane_level() >= ChipSwimlaneLevel::AICPU_TIMING) { ... }
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::SCHEDULE_TIMING) { ... }
 
 // Scheduler main-loop phase records (SCHED_*)
 if (get_chip_swimlane_level() >= ChipSwimlaneLevel::SCHED_PHASES) { ... }
@@ -305,8 +305,8 @@ shared-memory field and mirrors `PmuEventType : uint32_t`):
 | Enumerator | Underlying value |
 | ---------- | ---------------- |
 | `DISABLED` | 0 |
-| `AICORE_TIMING` | 1 |
-| `AICPU_TIMING` | 2 |
+| `TASK_TIMING` | 1 |
+| `SCHEDULE_TIMING` | 2 |
 | `SCHED_PHASES` | 3 |
 | `ORCH_PHASES` | 4 |
 

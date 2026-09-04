@@ -625,12 +625,11 @@ inline constexpr uint32_t SCHEDULER_PENDING_SLOT_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_CALLABLE_CAPACITY = 1024;
 inline constexpr uint32_t SCHEDULER_CORE_TYPE_COUNT = 2;
 inline constexpr uint32_t SCHEDULER_CLUSTER_CAPACITY = SCHEDULER_WORKER_CAPACITY / 3;
-inline constexpr uint32_t SCHEDULER_RESOLVER_CAPACITY = SCHEDULER_CLUSTER_CAPACITY;
+inline constexpr uint32_t SCHEDULER_CAPACITY = SCHEDULER_CLUSTER_CAPACITY;
 inline constexpr uint32_t SCHEDULER_GANG_COHORT_COUNT = 2;
-inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD = 7;
+inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD = 7;
 inline constexpr uint32_t SCHEDULER_READY_DIRECTORY_SHARD_COUNT =
-    (SCHEDULER_RESOLVER_CAPACITY + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD - 1) /
-    SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
+    (SCHEDULER_CAPACITY + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD - 1) / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
 inline constexpr int64_t SCHEDULER_TASK_ID_INVALID = -1;
 inline constexpr int64_t SCHEDULER_WAKE_LIST_OPEN = -1;
 inline constexpr int64_t SCHEDULER_WAKE_LIST_CLOSED = -2;
@@ -740,7 +739,7 @@ struct alignas(128) SchedulerTaskControl {
     uint64_t completion_resolve_start_cycles;
     uint64_t completion_resolve_end_cycles;
     uint64_t ready_publish_cycles;
-    uint64_t resolver_worker_id;
+    uint64_t scheduler_worker_id;
     uint8_t scheduler_line_padding[16];
 };
 
@@ -784,7 +783,7 @@ struct alignas(128) SchedulerGangCoordinator {
     uint64_t next_generation;
     uint64_t scan_cursor;
     uint64_t gang_task_count;
-    uint64_t resolver_count;
+    uint64_t scheduler_count;
     uint64_t cohort_count;
     uint64_t reserved0;
     uint64_t owner_reserved;
@@ -814,8 +813,8 @@ struct alignas(128) SchedulerGangCohort {
     uint64_t reserved[3];
 };
 
-// One Resolver owns one participant cell. The second line contains generation
-// tokens observed only by its parent in the binary Resolver tree.
+// One Scheduler owns one participant cell. The second line contains generation
+// tokens observed only by its parent in the binary Scheduler tree.
 struct alignas(128) SchedulerGangParticipant {
     volatile uint64_t config_generation;
     int64_t task_id;
@@ -840,7 +839,7 @@ struct alignas(128) SchedulerGangParticipant {
     volatile uint64_t completion_subtree_token;
 };
 
-// Each Resolver polls its own command line. Resolver0 seeds the root and every
+// Each Scheduler polls its own command line. Scheduler0 seeds the root and every
 // parent forwards transitions to two children, avoiding a globally contended
 // cohort line and bounding sync-start release skew by the tree depth.
 struct alignas(128) SchedulerGangCommand {
@@ -859,7 +858,7 @@ struct alignas(128) SchedulerReadyDirectory {
     volatile uint64_t bootstrap_ready_types[SCHEDULER_WORKER_CAPACITY];
 };
 
-// Resolver-owned metadata occupies the first line. The Executor polls only
+// Scheduler-owned metadata occupies the first line. The Executor polls only
 // publication in the second line.
 struct alignas(128) SchedulerDispatchSlot {
     int64_t task_id;
@@ -940,7 +939,7 @@ struct alignas(128) SchedulerRunControl {
     uint64_t aiv_worker_demand;
     uint64_t gang_coordinator_offset;
     uint64_t gang_cohorts_offset;
-    uint64_t resolver_count;
+    uint64_t scheduler_count;
 
     volatile uint64_t executed_task_count;
     volatile uint64_t resolved_task_count;
@@ -1055,12 +1054,12 @@ struct alignas(128) SchedulerWorkerContext {
     volatile uint64_t gang_cohorts_offset;
     volatile uint64_t gang_participants_offset;
     volatile uint64_t gang_commands_offset;
-    volatile uint64_t resolver_count;
+    volatile uint64_t scheduler_count;
     volatile uint64_t cluster_count;
     volatile uint64_t cluster_index;
-    volatile uint64_t resolver_index;
-    volatile uint64_t resolver_worker_id;
-    volatile uint64_t is_resolver;
+    volatile uint64_t scheduler_index;
+    volatile uint64_t scheduler_worker_id;
+    volatile uint64_t is_scheduler;
     volatile uint64_t cluster_worker_ids[3];
     uint64_t topology_reserved[3];
 
@@ -1139,7 +1138,7 @@ struct alignas(128) SchedulerTaskTrace {
     uint64_t register_release_cycles;
     uint64_t descriptor_cache_observed_cycles;
     uint64_t completion_prepare_start_cycles;
-    uint64_t refill_resolver_worker_id;
+    uint64_t refill_scheduler_worker_id;
     uint64_t refill_start_cycles;
     uint64_t refill_end_cycles;
     uint64_t refill_task_id;
@@ -1190,11 +1189,10 @@ static_assert(sizeof(SchedulerGangCommand) == 128, "gang command layout changed"
 static_assert(alignof(SchedulerGangCommand) == 128, "gang command alignment changed");
 static_assert(sizeof(SchedulerReadyDirectoryShard) == 64, "ready directory shard must occupy one cache line");
 static_assert(alignof(SchedulerReadyDirectoryShard) == 64, "ready directory shard alignment changed");
-static_assert(SCHEDULER_RESOLVER_CAPACITY <= SCHEDULER_WORKER_CAPACITY, "resolver capacity exceeds worker storage");
+static_assert(SCHEDULER_CAPACITY <= SCHEDULER_WORKER_CAPACITY, "scheduler capacity exceeds worker storage");
 static_assert(
-    SCHEDULER_READY_DIRECTORY_SHARD_COUNT * SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD >=
-        SCHEDULER_RESOLVER_CAPACITY,
-    "ready directory does not cover every resolver"
+    SCHEDULER_READY_DIRECTORY_SHARD_COUNT * SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD >= SCHEDULER_CAPACITY,
+    "ready directory does not cover every scheduler"
 );
 static_assert(
     offsetof(SchedulerReadyDirectory, bootstrap_ready_types) ==
@@ -1328,7 +1326,7 @@ inline bool scheduler_plan_layout(
         !SCHEDULER_RESERVE_ARRAY(
             SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_WORKER_CAPACITY, SchedulerReadyInbox, ready_inboxes_offset
         ) ||
-        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_RESOLVER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) ||
+        !SCHEDULER_RESERVE_ARRAY(SCHEDULER_CAPACITY, SchedulerReadyOwnerState, ready_owner_states_offset) ||
         !scheduler_layout_reserve(
             &cursor, sizeof(SchedulerReadyDirectory), alignof(SchedulerReadyDirectory), &next.ready_directory_offset
         ) ||
@@ -1369,7 +1367,7 @@ inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLay
     for (uint64_t i = 0; i < SCHEDULER_CORE_TYPE_COUNT * SCHEDULER_WORKER_CAPACITY; ++i)
         ready[i].head = SCHEDULER_INBOX_EMPTY;
     auto *ready_owners = scheduler_state_at<SchedulerReadyOwnerState>(base, layout.ready_owner_states_offset);
-    for (uint64_t owner = 0; owner < SCHEDULER_RESOLVER_CAPACITY; ++owner) {
+    for (uint64_t owner = 0; owner < SCHEDULER_CAPACITY; ++owner) {
         for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT; ++type)
             ready_owners[owner].queues[type].pending_endpoints = SCHEDULER_READY_PENDING_EMPTY;
     }
@@ -1377,8 +1375,8 @@ inline bool scheduler_init_data_from_layout(void *base, const AicoreSchedulerLay
     for (uint64_t worker = 0; worker < SCHEDULER_WORKER_CAPACITY; ++worker) {
         contexts[worker].physical_core_id = -1;
         contexts[worker].cluster_index = UINT64_MAX;
-        contexts[worker].resolver_index = UINT64_MAX;
-        contexts[worker].resolver_worker_id = UINT64_MAX;
+        contexts[worker].scheduler_index = UINT64_MAX;
+        contexts[worker].scheduler_worker_id = UINT64_MAX;
         contexts[worker].cluster_worker_ids[0] = UINT64_MAX;
         contexts[worker].cluster_worker_ids[1] = UINT64_MAX;
         contexts[worker].cluster_worker_ids[2] = UINT64_MAX;

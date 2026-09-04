@@ -101,7 +101,7 @@ static int s_orch_thread_idx = -1;
 //   - g_enable_chip_swimlane (bool) — set at kernel entry from the bitmask bit
 //   - g_chip_swimlane_level (ChipSwimlaneLevel) — promoted in
 //     chip_swimlane_aicpu_init from the shared-memory header so
-//     `>= AICPU_TIMING / SCHED_PHASES / ORCH_PHASES` gates have the granular
+//     `>= SCHEDULE_TIMING / SCHED_PHASES / ORCH_PHASES` gates have the granular
 //     value (exposed via get_chip_swimlane_level()).
 static uint64_t g_platform_chip_swimlane_base = 0;
 static bool g_enable_chip_swimlane = false;
@@ -549,7 +549,7 @@ static void aicore_rotate(int core_id, int thread_idx, uint32_t new_buf_first_re
 //
 // total_record_count accounting also lives here: one AICore record == one
 // dispatch, so the dispatch count IS the AICore-side total. Bumping here
-// (instead of inside complete_task) means level=1 (AICORE_TIMING-only) gets
+// (instead of inside complete_task) means level=1 (TASK_TIMING-only) gets
 // accurate reconcile counts even when complete_task is bypassed.
 void chip_swimlane_aicpu_on_aicore_dispatch(int core_id, int thread_idx, uint32_t reg_task_id) {
     if (!g_enable_chip_swimlane) {
@@ -724,15 +724,15 @@ void chip_swimlane_aicpu_flush(int thread_idx, const int *cur_thread_cores, int 
         uint64_t ac_buf_ptr = ac_state->head.current_buf_ptr;
         if (ac_buf_ptr == 0) continue;
 
-        // At AICPU_TIMING+, `total_record_count` is bumped on every complete
+        // At SCHEDULE_TIMING+, `total_record_count` is bumped on every complete
         // and gives an accurate live count for the current buffer. At
-        // AICORE_TIMING (level=1) complete_task is skipped, so that counter
+        // TASK_TIMING (level=1) complete_task is skipped, so that counter
         // stays 0 and the formula bails even when AICore has filled records.
         // Fall back to the buffer's full capacity in that case; the host-side
         // copy_aicore_buffer skips trailing slots whose start_time is still 0,
         // so over-stating count costs only a scan pass — never spurious records.
         uint32_t ac_mark;
-        if (g_chip_swimlane_level >= ChipSwimlaneLevel::AICPU_TIMING) {
+        if (g_chip_swimlane_level >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
             uint32_t live = ac_state->head.total_record_count -
                             ac_state->head.current_buf_seq * static_cast<uint32_t>(PLATFORM_AICORE_BUFFER_SIZE);
             if (live == 0) {

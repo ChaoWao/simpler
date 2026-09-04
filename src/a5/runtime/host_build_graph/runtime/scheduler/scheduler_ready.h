@@ -491,7 +491,7 @@ inline __aicore__ bool scheduler_bootstrap_ready_batch_publish(
     uint64_t inbox_index, SchedulerReadyBatch *batch, SchedulerReadyStats *stats, uint64_t *ready_types
 ) {
     if (batch == nullptr || batch->head == SCHEDULER_INBOX_EMPTY) return true;
-    if (core_type_index >= SCHEDULER_CORE_TYPE_COUNT || inbox_index >= SCHEDULER_RESOLVER_CAPACITY || batch->tail < 0 ||
+    if (core_type_index >= SCHEDULER_CORE_TYPE_COUNT || inbox_index >= SCHEDULER_CAPACITY || batch->tail < 0 ||
         ready_types == nullptr)
         return false;
     __gm__ SchedulerReadyInbox *inbox =
@@ -505,23 +505,22 @@ inline __aicore__ bool scheduler_bootstrap_ready_batch_publish(
 }
 
 inline __aicore__ bool scheduler_bootstrap_ready_directory_publish(
-    __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *context, uint64_t resolver_count
+    __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *context, uint64_t scheduler_count
 ) {
-    if (resolver_count == 0 || resolver_count > SCHEDULER_RESOLVER_CAPACITY) return false;
+    if (scheduler_count == 0 || scheduler_count > SCHEDULER_CAPACITY) return false;
     __gm__ SchedulerReadyDirectory *directory = scheduler_ready_directory_at(scheduler_state_base, context);
-    for (uint64_t inbox_index = 0; inbox_index < resolver_count; inbox_index += 8)
+    for (uint64_t inbox_index = 0; inbox_index < scheduler_count; inbox_index += 8)
         scheduler_invalidate_cache_line(&directory->bootstrap_ready_types[inbox_index]);
     scheduler_cache_barrier();
     uint32_t shard_count = static_cast<uint32_t>(
-        (resolver_count + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD - 1) /
-        SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD
+        (scheduler_count + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD - 1) / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD
     );
     for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT; ++type) {
         for (uint32_t shard = 0; shard < shard_count; ++shard) {
             uint64_t bits = 0;
-            uint64_t shard_begin = static_cast<uint64_t>(shard) * SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-            uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-            if (shard_end > resolver_count) shard_end = resolver_count;
+            uint64_t shard_begin = static_cast<uint64_t>(shard) * SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+            uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+            if (shard_end > scheduler_count) shard_end = scheduler_count;
             for (uint64_t inbox_index = shard_begin; inbox_index < shard_end; ++inbox_index) {
                 uint64_t ready_types = directory->bootstrap_ready_types[inbox_index];
                 if ((ready_types & (UINT64_C(1) << type)) != 0) bits |= UINT64_C(1) << (inbox_index - shard_begin);
@@ -568,16 +567,16 @@ inline __aicore__ bool scheduler_ready_batch_append(
 inline __aicore__ void scheduler_ready_directory_set(
     __gm__ SchedulerReadyDirectory *directory, uint32_t core_type_index, uint64_t inbox_index
 ) {
-    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    uint64_t bit = UINT64_C(1) << (inbox_index % SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD);
+    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    uint64_t bit = UINT64_C(1) << (inbox_index % SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD);
     scheduler_gm_fetch_or(directory->core_types[core_type_index][shard].bits, bit);
 }
 
 inline __aicore__ void scheduler_ready_directory_clear(
     __gm__ SchedulerReadyDirectory *directory, uint32_t core_type_index, uint64_t inbox_index
 ) {
-    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    uint64_t bit = UINT64_C(1) << (inbox_index % SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD);
+    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    uint64_t bit = UINT64_C(1) << (inbox_index % SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD);
     scheduler_gm_fetch_and(directory->core_types[core_type_index][shard].bits, ~bit);
 }
 
@@ -633,7 +632,7 @@ inline __aicore__ bool scheduler_ready_owner_maintain_type(
     __gm__ SchedulerReadyOwnerState *owner_state
 ) {
     if (owner_state == nullptr || core_type_index >= SCHEDULER_CORE_TYPE_COUNT ||
-        context->inbox_index >= SCHEDULER_RESOLVER_CAPACITY)
+        context->inbox_index >= SCHEDULER_CAPACITY)
         return false;
     __gm__ SchedulerReadyOwnerQueue *owner_queue = &owner_state->queues[core_type_index];
     __gm__ SchedulerReadyInbox *inbox =
@@ -688,7 +687,7 @@ inline __aicore__ bool scheduler_ready_batch_push(
     __gm__ SchedulerReadyOwnerState *owner_state
 ) {
     if (batch == nullptr || owner_state == nullptr || core_type_index >= SCHEDULER_CORE_TYPE_COUNT ||
-        inbox_index >= SCHEDULER_RESOLVER_CAPACITY || inbox_index != context->inbox_index)
+        inbox_index >= SCHEDULER_CAPACITY || inbox_index != context->inbox_index)
         return false;
     if (batch->head == SCHEDULER_INBOX_EMPTY) return true;
     if (batch->tail < 0) return false;
@@ -783,12 +782,12 @@ inline __aicore__ bool scheduler_ready_pop_from_inbox(
 }
 
 inline __aicore__ uint64_t scheduler_load_ready_directory_shard(
-    __gm__ SchedulerReadyDirectory *directory, uint64_t resolver_count, uint32_t core_type_index, uint64_t inbox_index
+    __gm__ SchedulerReadyDirectory *directory, uint64_t scheduler_count, uint32_t core_type_index, uint64_t inbox_index
 ) {
-    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    uint64_t shard_begin = shard * SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    if (shard_end > resolver_count) shard_end = resolver_count;
+    uint64_t shard = inbox_index / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    uint64_t shard_begin = shard * SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    if (shard_end > scheduler_count) shard_end = scheduler_count;
     uint64_t valid_bits = shard_end > shard_begin ? (UINT64_C(1) << (shard_end - shard_begin)) - 1 : 0;
     return scheduler_gm_query(directory->core_types[core_type_index][shard].bits) & valid_bits;
 }
@@ -830,12 +829,12 @@ inline __aicore__ bool scheduler_steal_ready_from_shard(
 
 inline __aicore__ bool scheduler_claim_ready_for_slot(
     const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *context,
-    __gm__ SchedulerRunControl *run_control, uint64_t resolver_count, uint32_t core_type_index, uint64_t *victim_cursor,
-    SchedulerReadyStats *stats, SchedulerReadyClaim *claim, __gm__ SchedulerReadyOwnerState *owner_state,
-    bool trace_enabled = false
+    __gm__ SchedulerRunControl *run_control, uint64_t scheduler_count, uint32_t core_type_index,
+    uint64_t *victim_cursor, SchedulerReadyStats *stats, SchedulerReadyClaim *claim,
+    __gm__ SchedulerReadyOwnerState *owner_state, bool trace_enabled = false
 ) {
-    if (victim_cursor == nullptr || claim == nullptr || owner_state == nullptr || resolver_count == 0 ||
-        resolver_count > SCHEDULER_RESOLVER_CAPACITY || context->inbox_index >= resolver_count ||
+    if (victim_cursor == nullptr || claim == nullptr || owner_state == nullptr || scheduler_count == 0 ||
+        scheduler_count > SCHEDULER_CAPACITY || context->inbox_index >= scheduler_count ||
         core_type_index >= SCHEDULER_CORE_TYPE_COUNT)
         return false;
     *claim = {};
@@ -854,14 +853,14 @@ inline __aicore__ bool scheduler_claim_ready_for_slot(
     }
 
     __gm__ SchedulerReadyDirectory *directory = scheduler_ready_directory_at(scheduler_state_base, context);
-    uint64_t shard_begin = context->inbox_index / SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD *
-                           SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_RESOLVERS_PER_SHARD;
-    if (shard_end > resolver_count) shard_end = resolver_count;
+    uint64_t shard_begin =
+        context->inbox_index / SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD * SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    uint64_t shard_end = shard_begin + SCHEDULER_READY_DIRECTORY_OWNERS_PER_SHARD;
+    if (shard_end > scheduler_count) shard_end = scheduler_count;
     uint64_t start = *victim_cursor;
     if (start < shard_begin || start >= shard_end) start = shard_begin;
     uint64_t bits =
-        scheduler_load_ready_directory_shard(directory, resolver_count, core_type_index, context->inbox_index);
+        scheduler_load_ready_directory_shard(directory, scheduler_count, core_type_index, context->inbox_index);
     if (bits != 0 && !scheduler_steal_ready_from_shard(
                          graph, scheduler_state_base, context, run_control, core_type_index, shard_begin, shard_end,
                          start, bits, stats, claim, trace_enabled
@@ -875,14 +874,14 @@ inline __aicore__ bool scheduler_claim_ready_for_slot(
 }
 
 inline __aicore__ bool scheduler_ready_directory_nonempty(
-    __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *context, uint64_t resolver_count,
+    __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *context, uint64_t scheduler_count,
     uint32_t core_type_index
 ) {
-    if (resolver_count == 0 || resolver_count > SCHEDULER_RESOLVER_CAPACITY || context->inbox_index >= resolver_count ||
+    if (scheduler_count == 0 || scheduler_count > SCHEDULER_CAPACITY || context->inbox_index >= scheduler_count ||
         core_type_index >= SCHEDULER_CORE_TYPE_COUNT)
         return false;
     __gm__ SchedulerReadyDirectory *directory = scheduler_ready_directory_at(scheduler_state_base, context);
-    return scheduler_load_ready_directory_shard(directory, resolver_count, core_type_index, context->inbox_index) != 0;
+    return scheduler_load_ready_directory_shard(directory, scheduler_count, core_type_index, context->inbox_index) != 0;
 }
 
 inline __aicore__ void scheduler_initialize_free_slot(__gm__ SchedulerDispatchSlot *slot) {
@@ -897,17 +896,18 @@ inline __aicore__ void scheduler_initialize_free_slot(__gm__ SchedulerDispatchSl
 }
 
 inline __aicore__ bool scheduler_fill_dispatch_slot(
-    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *resolver,
+    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *scheduler,
     __gm__ SchedulerRunControl *run_control, const SchedulerFreeSlotClaim &slot_claim,
     const SchedulerReadyClaim &ready_claim, bool trace_enabled = false, SchedulerDispatchFillTiming *timing = nullptr
 ) {
     if (ready_claim.task_id < 0 || static_cast<uint64_t>(ready_claim.task_id) >= graph.task_count ||
-        slot_claim.worker_id >= resolver->runtime_worker_count || slot_claim.slot_index >= SCHEDULER_PENDING_SLOT_COUNT)
+        slot_claim.worker_id >= scheduler->runtime_worker_count ||
+        slot_claim.slot_index >= SCHEDULER_PENDING_SLOT_COUNT)
         return false;
     const bool record_timeline = timing != nullptr;
     uint64_t operation_start = record_timeline ? scheduler_cycles() : 0;
     __gm__ SchedulerTaskMetadata *metadata_source =
-        scheduler_task_metadata_at(scheduler_state_base, resolver, ready_claim.task_id);
+        scheduler_task_metadata_at(scheduler_state_base, scheduler, ready_claim.task_id);
     scheduler_observe_cache_line(metadata_source);
     SchedulerTaskMetadata metadata{};
     metadata.kernel_ids[0] = metadata_source->kernel_ids[0];
@@ -920,7 +920,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
     metadata.timing_slot = metadata_source->timing_slot;
     const uint8_t subtask_slot = scheduler_metadata_single_subtask_slot(metadata.active_mask);
     __gm__ SchedulerWorkerContext *target =
-        scheduler_worker_context_at(scheduler_state_base, resolver, slot_claim.worker_id);
+        scheduler_worker_context_at(scheduler_state_base, scheduler, slot_claim.worker_id);
     scheduler_observe_cache_line(target);
     if (subtask_slot == UINT8_MAX ||
         (target->core_type != static_cast<int32_t>(CoreType::AIC) &&
@@ -928,23 +928,23 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
         !scheduler_task_is_executable(metadata.flags) || scheduler_task_is_gang(metadata.flags) ||
         scheduler_metadata_core_type_index(subtask_slot) != scheduler_core_type_index(target->core_type)) {
         scheduler_record_error(
-            run_control, ready_claim.task_id, SchedulerGraphResult::UNSUPPORTED_SHAPE, &graph, resolver,
+            run_control, ready_claim.task_id, SchedulerGraphResult::UNSUPPORTED_SHAPE, &graph, scheduler,
             SchedulerErrorSite::DISPATCH_INVALID_SHAPE
         );
         return false;
     }
     const uint16_t kernel_id = metadata.kernel_ids[subtask_slot];
     __gm__ SchedulerDispatchSlot *slot =
-        scheduler_dispatch_slot_at(scheduler_state_base, resolver, slot_claim.worker_id, slot_claim.slot_index);
+        scheduler_dispatch_slot_at(scheduler_state_base, scheduler, slot_claim.worker_id, slot_claim.slot_index);
     uint32_t generation = slot_claim.generation + 1;
     if (generation == 0) generation = 1;
     __gm__ uint64_t *callable_addresses =
-        scheduler_state_at<uint64_t>(scheduler_state_base, resolver->callable_addresses_offset);
+        scheduler_state_at<uint64_t>(scheduler_state_base, scheduler->callable_addresses_offset);
     const bool inline_task = scheduler_task_is_inline(metadata.flags);
     uint64_t callable_address = UINT64_C(1);
     if (!inline_task && !scheduler_lookup_callable_address(callable_addresses, kernel_id, &callable_address)) {
         scheduler_record_error(
-            run_control, ready_claim.task_id, SchedulerGraphResult::INVALID_CALLABLE, &graph, resolver,
+            run_control, ready_claim.task_id, SchedulerGraphResult::INVALID_CALLABLE, &graph, scheduler,
             SchedulerErrorSite::DISPATCH_INVALID_CALLABLE
         );
         return false;
@@ -954,7 +954,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
     slot->ready_inbox_index = ready_claim.inbox_index;
     slot->claim_start_cycles = ready_claim.claim_start_cycles;
     slot->claim_end_cycles = ready_claim.claim_end_cycles;
-    slot->claim_worker_id = resolver->worker_index;
+    slot->claim_worker_id = scheduler->worker_index;
     slot->kernel_id = kernel_id;
     slot->subtask_slot = subtask_slot;
     slot->has_fanin = scheduler_task_has_fanin(metadata.flags) ? 1 : 0;
@@ -992,7 +992,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
             const SchedulerPredicateResult predicate = scheduler_evaluate_task_predicate(graph, ready_claim.task_id);
             if (predicate == SchedulerPredicateResult::MALFORMED) {
                 scheduler_record_error(
-                    run_control, ready_claim.task_id, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, resolver,
+                    run_control, ready_claim.task_id, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, scheduler,
                     SchedulerErrorSite::DISPATCH_INVALID_PREDICATE
                 );
                 return false;
@@ -1002,7 +1002,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
     }
     if (status != SchedulerGraphResult::OK) {
         scheduler_record_error(
-            run_control, ready_claim.task_id, status, &graph, resolver, SchedulerErrorSite::DISPATCH_MATERIALIZE_FAILED
+            run_control, ready_claim.task_id, status, &graph, scheduler, SchedulerErrorSite::DISPATCH_MATERIALIZE_FAILED
         );
         return false;
     }
@@ -1010,7 +1010,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
     if (timing != nullptr) timing->materialize_cycles += materialize_end - operation_end;
     scheduler_publish_dispatch_payload(payload);
     __gm__ SchedulerTaskControl *control =
-        scheduler_task_control_at(scheduler_state_base, resolver, ready_claim.task_id);
+        scheduler_task_control_at(scheduler_state_base, scheduler, ready_claim.task_id);
     if (trace_enabled) {
         scheduler_observe_cache_line(&control->next_waiter);
         control->ready_publish_cycles = scheduler_cycles();
@@ -1044,7 +1044,7 @@ inline __aicore__ bool scheduler_resolve_completion(
     if (trace_enabled) {
         scheduler_observe_cache_line(&control->next_waiter);
         control->completion_resolve_start_cycles = resolve_start;
-        control->resolver_worker_id = context->worker_index;
+        control->scheduler_worker_id = context->worker_index;
     }
     int64_t waiter = scheduler_gm_exchange(control->wake_list_head, SCHEDULER_WAKE_LIST_CLOSED);
     if (waiter == SCHEDULER_WAKE_LIST_CLOSED) {

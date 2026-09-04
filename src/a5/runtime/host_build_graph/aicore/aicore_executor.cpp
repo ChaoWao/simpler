@@ -249,33 +249,33 @@ __aicore__ __attribute__((always_inline)) void commit_task_timing_trace(
 }
 
 __aicore__ bool bootstrap_ready_graph(
-    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *resolver,
-    __gm__ SchedulerRunControl *run_control, uint64_t resolver_count, SchedulerWorkerStats *stats, bool trace_enabled,
+    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, __gm__ SchedulerWorkerContext *scheduler,
+    __gm__ SchedulerRunControl *run_control, uint64_t scheduler_count, SchedulerWorkerStats *stats, bool trace_enabled,
     SchedulerDeferredAivQueue *deferred_aiv, __gm__ SchedulerReadyOwnerState *ready_owner
 ) {
-    if (resolver_count == 0 || resolver->inbox_index >= resolver_count || ready_owner == nullptr) return false;
+    if (scheduler_count == 0 || scheduler->inbox_index >= scheduler_count || ready_owner == nullptr) return false;
     if (trace_enabled) stats->bootstrap_start_cycles = scheduler_cycles();
     SchedulerReadyBatch batches[SCHEDULER_CORE_TYPE_COUNT]{};
-    uint64_t tasks_per_resolver = graph.task_count / resolver_count;
-    uint64_t remainder = graph.task_count % resolver_count;
-    uint64_t task_begin = resolver->inbox_index * tasks_per_resolver +
-                          (resolver->inbox_index < remainder ? resolver->inbox_index : remainder);
-    uint64_t task_end = task_begin + tasks_per_resolver + (resolver->inbox_index < remainder ? 1 : 0);
+    uint64_t tasks_per_scheduler = graph.task_count / scheduler_count;
+    uint64_t remainder = graph.task_count % scheduler_count;
+    uint64_t task_begin = scheduler->inbox_index * tasks_per_scheduler +
+                          (scheduler->inbox_index < remainder ? scheduler->inbox_index : remainder);
+    uint64_t task_end = task_begin + tasks_per_scheduler + (scheduler->inbox_index < remainder ? 1 : 0);
     for (uint64_t task_id = task_begin; task_id < task_end; ++task_id) {
         __gm__ SchedulerTaskMetadata *metadata =
-            scheduler_task_metadata_at(scheduler_state_base, resolver, static_cast<int64_t>(task_id));
+            scheduler_task_metadata_at(scheduler_state_base, scheduler, static_cast<int64_t>(task_id));
         scheduler_observe_cache_line(metadata);
         if (!scheduler_task_is_executable(metadata->flags)) continue;
         SchedulerRouteResult route =
             scheduler_task_has_fanin(metadata->flags) ?
                 scheduler_bootstrap_route_task(
-                    graph, scheduler_state_base, resolver, run_control, static_cast<int64_t>(task_id), &stats->wake
+                    graph, scheduler_state_base, scheduler, run_control, static_cast<int64_t>(task_id), &stats->wake
                 ) :
                 SchedulerRouteResult::READY_TO_ENQUEUE;
         if (route == SchedulerRouteResult::ERROR) return false;
         if (route == SchedulerRouteResult::READY_TO_ENQUEUE &&
             !scheduler_bootstrap_ready_batch_append(
-                scheduler_state_base, resolver, static_cast<int64_t>(task_id),
+                scheduler_state_base, scheduler, static_cast<int64_t>(task_id),
                 &batches[scheduler_metadata_core_type_index(scheduler_metadata_single_subtask_slot(metadata
                                                                                                        ->active_mask))],
                 &stats->ready, trace_enabled
@@ -288,17 +288,18 @@ __aicore__ bool bootstrap_ready_graph(
     uint64_t ready_types = 0;
     for (uint32_t type = 0; type < SCHEDULER_CORE_TYPE_COUNT; ++type) {
         if (!scheduler_bootstrap_ready_batch_publish(
-                scheduler_state_base, resolver, type, resolver->inbox_index, &batches[type], &stats->ready, &ready_types
+                scheduler_state_base, scheduler, type, scheduler->inbox_index, &batches[type], &stats->ready,
+                &ready_types
             ))
             return false;
     }
-    __gm__ SchedulerReadyDirectory *ready_directory = scheduler_ready_directory_at(scheduler_state_base, resolver);
-    scheduler_gm_store(ready_directory->bootstrap_ready_types[resolver->inbox_index], ready_types);
+    __gm__ SchedulerReadyDirectory *ready_directory = scheduler_ready_directory_at(scheduler_state_base, scheduler);
+    scheduler_gm_store(ready_directory->bootstrap_ready_types[scheduler->inbox_index], ready_types);
     if (trace_enabled) stats->bootstrap_scan_end_cycles = scheduler_cycles();
 
     uint64_t arrived = scheduler_gm_fetch_add(run_control->bootstrap_scan_arrived_count, UINT64_C(1)) + 1;
-    if (arrived == resolver_count) {
-        scheduler_bootstrap_ready_directory_publish(scheduler_state_base, resolver, resolver_count);
+    if (arrived == scheduler_count) {
+        scheduler_bootstrap_ready_directory_publish(scheduler_state_base, scheduler, scheduler_count);
         scheduler_gm_publish(run_control->bootstrap_scan_complete, UINT64_C(1));
     } else {
         uint32_t barrier_backoff = kInitialBackoffIterations;
@@ -309,7 +310,7 @@ __aicore__ bool bootstrap_ready_graph(
                     barrier_start, scheduler_cycles(), scheduler_gm_query(run_control->scheduler_timeout_cycles)
                 )) {
                 scheduler_record_error(
-                    run_control, SCHEDULER_TASK_ID_INVALID, SchedulerGraphResult::TIMEOUT, &graph, resolver,
+                    run_control, SCHEDULER_TASK_ID_INVALID, SchedulerGraphResult::TIMEOUT, &graph, scheduler,
                     SchedulerErrorSite::BOOTSTRAP_SCAN_TIMEOUT
                 );
                 return false;
@@ -326,16 +327,16 @@ __aicore__ bool bootstrap_ready_graph(
     if (trace_enabled) stats->target_bootstrap_start_cycles = scheduler_cycles();
 
     for (uint32_t cluster_lane = 0; cluster_lane < PLATFORM_CORES_PER_BLOCKDIM; ++cluster_lane) {
-        const uint64_t worker_id = resolver->cluster_worker_ids[cluster_lane];
+        const uint64_t worker_id = scheduler->cluster_worker_ids[cluster_lane];
         uint64_t target_start = trace_enabled ? scheduler_cycles() : 0;
-        __gm__ SchedulerWorkerContext *target = scheduler_worker_context_at(scheduler_state_base, resolver, worker_id);
+        __gm__ SchedulerWorkerContext *target = scheduler_worker_context_at(scheduler_state_base, scheduler, worker_id);
         scheduler_observe_cache_line(target);
         scheduler_observe_cache_line(&target->task_metadata_offset);
         if (target->active == 0) continue;
         uint32_t type = scheduler_core_type_index(target->core_type);
         for (uint32_t slot_index = 0; slot_index < SCHEDULER_PENDING_SLOT_COUNT; ++slot_index) {
             __gm__ SchedulerDispatchSlot *slot =
-                scheduler_dispatch_slot_at(scheduler_state_base, resolver, worker_id, slot_index);
+                scheduler_dispatch_slot_at(scheduler_state_base, scheduler, worker_id, slot_index);
             scheduler_observe_cache_line(slot);
             scheduler_initialize_free_slot(slot);
         }
@@ -347,29 +348,29 @@ __aicore__ bool bootstrap_ready_graph(
     // Prepare the first executable wave while the sole DMB launch gate is
     // still closed.
     uint64_t ready_victim_cursors[SCHEDULER_CORE_TYPE_COUNT]{
-        (resolver->inbox_index + 1) % resolver_count,
-        (resolver->inbox_index + 1) % resolver_count,
+        (scheduler->inbox_index + 1) % scheduler_count,
+        (scheduler->inbox_index + 1) % scheduler_count,
     };
     bool fill_failed = false;
     (void)scheduler_fill_cluster_normal_slots(
-        graph, scheduler_state_base, resolver, run_control, ready_victim_cursors, &stats->ready, trace_enabled, 0,
+        graph, scheduler_state_base, scheduler, run_control, ready_victim_cursors, &stats->ready, trace_enabled, 0,
         nullptr, deferred_aiv, ready_owner, &fill_failed
     );
     if (fill_failed) return false;
     // No peer can make progress while the launch gate is closed. Materialize
-    // every Resolver reservation now so local deferred state and FILLING slots
+    // every Scheduler reservation now so local deferred state and FILLING slots
     // never cross the bootstrap boundary.
     while (deferred_aiv != nullptr && deferred_aiv->count != 0) {
-        if (!scheduler_publish_deferred_aiv_to_resolver(
-                graph, scheduler_state_base, resolver, run_control, deferred_aiv, trace_enabled, nullptr
+        if (!scheduler_publish_deferred_aiv_local(
+                graph, scheduler_state_base, scheduler, run_control, deferred_aiv, trace_enabled, nullptr
             ))
             return false;
     }
 
     // This completion publication is observed by AICPU before it emits the
-    // one and only DMB release. Resolvers do not wait on another barrier.
+    // one and only DMB release. Schedulers do not wait on another barrier.
     arrived = scheduler_gm_fetch_add(run_control->bootstrap_arrived_count, UINT64_C(1)) + 1;
-    if (arrived == resolver_count) scheduler_gm_publish(run_control->bootstrap_complete, UINT64_C(1));
+    if (arrived == scheduler_count) scheduler_gm_publish(run_control->bootstrap_complete, UINT64_C(1));
     if (trace_enabled) stats->bootstrap_end_cycles = scheduler_cycles();
     return true;
 }
@@ -380,16 +381,16 @@ __aicore__ bool run_ready_dispatch_loop(
     uint64_t aicore_entry_cycles, uint64_t handshake_publish_cycles, uint64_t register_release_cycles,
     uint64_t descriptor_cache_observed_cycles, SchedulerDeferredAivQueue *deferred_aiv
 ) {
-    uint64_t resolver_count = scheduler_gm_query(run_control->resolver_count);
-    bool resolver_worker = context->is_resolver != 0;
-    if (resolver_count == 0) return false;
+    uint64_t scheduler_count = scheduler_gm_query(run_control->scheduler_count);
+    bool scheduler_worker = context->is_scheduler != 0;
+    if (scheduler_count == 0) return false;
     __gm__ SchedulerReadyOwnerState *ready_owner = nullptr;
-    if (resolver_worker) {
+    if (scheduler_worker) {
         ready_owner = scheduler_ready_owner_state_at(scheduler_state_base, context);
     }
     uint64_t ready_victim_cursors[SCHEDULER_CORE_TYPE_COUNT]{
-        resolver_worker ? (context->inbox_index + 1) % resolver_count : 0,
-        resolver_worker ? (context->inbox_index + 1) % resolver_count : 0,
+        scheduler_worker ? (context->inbox_index + 1) % scheduler_count : 0,
+        scheduler_worker ? (context->inbox_index + 1) % scheduler_count : 0,
     };
     uint64_t seen_publication[SCHEDULER_PENDING_SLOT_COUNT]{};
     uint64_t previous_trace_commit_end = 0;
@@ -414,7 +415,7 @@ __aicore__ bool run_ready_dispatch_loop(
         }
 
         bool scheduler_progress = false;
-        if (resolver_worker && !scheduler_ready_owner_maintain(scheduler_state_base, context, ready_owner)) {
+        if (scheduler_worker && !scheduler_ready_owner_maintain(scheduler_state_base, context, ready_owner)) {
             scheduler_record_error(
                 run_control, SCHEDULER_TASK_ID_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
                 SchedulerErrorSite::READY_OWNER_MAINTENANCE_FAILED
@@ -422,7 +423,7 @@ __aicore__ bool run_ready_dispatch_loop(
             return false;
         }
         uint32_t preferred_ready_slot = UINT32_MAX;
-        if (resolver_worker && deferred_aiv != nullptr && deferred_aiv->count != 0) {
+        if (scheduler_worker && deferred_aiv != nullptr && deferred_aiv->count != 0) {
             const uint32_t deferred_before = deferred_aiv->count;
             if (!scheduler_drain_deferred_aiv_to_peer(
                     graph, scheduler_state_base, context, run_control, deferred_aiv, &stats->wake, &stats->ready,
@@ -430,13 +431,13 @@ __aicore__ bool run_ready_dispatch_loop(
                 ))
                 return false;
             scheduler_progress = deferred_aiv->count != deferred_before;
-            if (deferred_aiv->count != 0 && !scheduler_publish_deferred_aiv_to_resolver(
+            if (deferred_aiv->count != 0 && !scheduler_publish_deferred_aiv_local(
                                                 graph, scheduler_state_base, context, run_control, deferred_aiv,
                                                 trace_enabled, &preferred_ready_slot
                                             ))
                 return false;
         }
-        if (resolver_worker && preferred_ready_slot == UINT32_MAX) {
+        if (scheduler_worker && preferred_ready_slot == UINT32_MAX) {
             uint64_t operation_start = trace_enabled ? get_sys_cnt_aicore() : 0;
             uint64_t direct_refilled_slot_mask = 0;
             SchedulerCompletionServiceTiming completion_timing{};
@@ -489,7 +490,7 @@ __aicore__ bool run_ready_dispatch_loop(
                     ))
                     return false;
                 scheduler_progress = scheduler_progress || deferred_aiv->count != deferred_before;
-                if (deferred_aiv->count != 0 && !scheduler_publish_deferred_aiv_to_resolver(
+                if (deferred_aiv->count != 0 && !scheduler_publish_deferred_aiv_local(
                                                     graph, scheduler_state_base, context, run_control, deferred_aiv,
                                                     trace_enabled, &preferred_ready_slot
                                                 ))
@@ -589,7 +590,7 @@ __aicore__ bool run_ready_dispatch_loop(
             uint64_t completion_start = get_sys_cnt_aicore();
             uint64_t local_completion_index = stats->completion.enqueue_count;
             uint64_t completion_id = scheduler_completion_id(context, local_completion_index);
-            uint64_t completion_inbox_index = context->resolver_index;
+            uint64_t completion_inbox_index = context->scheduler_index;
             __gm__ SchedulerCompletionInbox *completion_line =
                 scheduler_completion_inbox_at(scheduler_state_base, context, context->worker_index);
             scheduler_gm_store(completion_line->completed_generations[slot_index], slot->generation);
@@ -720,13 +721,13 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     if (context->active != 0) {
         scheduler_observe_data_cache(reinterpret_cast<__gm__ void *>(graph.storage_address));
         descriptor_cache_observed_cycles = trace_enabled ? get_sys_cnt_aicore() : 0;
-        if (context->is_resolver != 0) {
+        if (context->is_scheduler != 0) {
             ready_owner = scheduler_ready_owner_state_at(scheduler_state_base, context);
             scheduler_ready_owner_init(ready_owner);
         }
-        if (context->is_resolver != 0 &&
+        if (context->is_scheduler != 0 &&
             !bootstrap_ready_graph(
-                graph, scheduler_state_base, context, run_control, scheduler_gm_query(run_control->resolver_count),
+                graph, scheduler_state_base, context, run_control, scheduler_gm_query(run_control->scheduler_count),
                 &stats, trace_enabled, &deferred_aiv, ready_owner
             )) {
             scheduler_record_error(

@@ -219,12 +219,12 @@ void SchedulerContext::complete_slot_task(
     }
 
 #if SIMPLER_DFX
-    // Level gate: at AICORE_TIMING (level=1) the AICore record alone carries
+    // Level gate: at TASK_TIMING (level=1) the AICore record alone carries
     // {start, end, task_token_raw}, host resolves func_id/core_type from
     // dep_gen / per-core mapping, and AICPU has nothing to write. Only at
-    // AICPU_TIMING (level=2) and above does AICPU contribute dispatch/finish
+    // SCHEDULE_TIMING (level=2) and above does AICPU contribute dispatch/finish
     // timestamps via complete_task.
-    if (chip_swimlane.chip_swimlane_enabled && chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
+    if (chip_swimlane.chip_swimlane_enabled && chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
 #if SIMPLER_SCHED_PROFILING
         uint64_t t_perf_start = get_sys_cnt_aicpu();
 #endif
@@ -347,7 +347,7 @@ void SchedulerContext::check_running_cores_for_completion(
         // BEFORE any fanin / deferred-release work. Anything later would
         // charge AICPU completion-processing cost to (end → finish).
         uint64_t finish_ts = 0;
-        if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING && (t.pending_done || t.running_done)) {
+        if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING && (t.pending_done || t.running_done)) {
             finish_ts = get_sys_cnt_aicpu();
         }
 #endif
@@ -533,7 +533,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                     sched_chip_swimlane_[thread_idx].sched_loop_count, static_cast<uint32_t>(handle_count)
                 );
             }
-            if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
+            if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
                 dispatch_ts = pub_t0 != 0 ? pub_t0 : get_sys_cnt_aicpu();
             }
 #endif

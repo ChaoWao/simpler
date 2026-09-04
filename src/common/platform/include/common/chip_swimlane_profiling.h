@@ -78,11 +78,11 @@
 // enum is the canonical in-code type used for comparisons.
 // =============================================================================
 enum class ChipSwimlaneLevel : uint32_t {
-    DISABLED = 0,       // No collection at all
-    AICORE_TIMING = 1,  // AICore per-task start/end timestamps + task record buffer
-    AICPU_TIMING = 2,   // + AICPU dispatch/finish timestamps
-    SCHED_PHASES = 3,   // + scheduler main-loop phase records (SCHED_COMPLETE/DISPATCH/IDLE_WAIT)
-    ORCH_PHASES = 4,    // + orchestrator phase records
+    DISABLED = 0,         // No collection at all
+    TASK_TIMING = 1,      // AICore per-task start/end timestamps + task record buffer
+    SCHEDULE_TIMING = 2,  // + Scheduler per-task dispatch/finish timestamps
+    SCHED_PHASES = 3,     // + scheduler main-loop phase records (SCHED_COMPLETE/DISPATCH/IDLE_WAIT)
+    ORCH_PHASES = 4,      // + orchestrator phase records
 };
 
 // =============================================================================
@@ -90,11 +90,12 @@ enum class ChipSwimlaneLevel : uint32_t {
 // =============================================================================
 
 /**
- * AICPU-side timing record. The minimal AICPU-only payload after the
+ * AICPU Scheduler timing record. The minimal AICPU-only payload after the
  * AICore-as-producer split: identity (task_token_raw, core_type) and
  * AICore-side timing (start/end) all live in ChipSwimlaneAicoreTaskRecord; the
- * AICPU record only carries the two timestamps the AICore side cannot
- * produce, plus the host-side join key against the AICore stream.
+ * AICPU record carries only the two timestamps the AICore side cannot produce
+ * (the scheduler's dispatch/finish), plus the host-side join key against the
+ * AICore stream.
  *
  *   - dispatch_time : AICPU timestamp when DATA_MAIN_BASE was written.
  *   - finish_time   : AICPU timestamp when AICPU observed FIN.
@@ -105,7 +106,7 @@ enum class ChipSwimlaneLevel : uint32_t {
  * the matched AICore record, derives core_type from the per-core static
  * table published via ChipSwimlaneCollector::set_core_types, and emits
  * func_id = -1 (resolved post-process by `swimlane_converter.py` from
- * deps.json's `kernel_ids[]`). Same path AICORE_TIMING (level=1) uses.
+ * deps.json's `kernel_ids[]`). Same path TASK_TIMING (level=1) uses.
  *
  * Fanout edges live in the static DAG (deps.json from dep_gen) — not in
  * this record. Keeping fanout out of the hot AICPU commit path avoids a
@@ -133,8 +134,9 @@ static_assert(sizeof(ChipSwimlaneAicpuTaskRecord) == 32, "ChipSwimlaneAicpuTaskR
 /**
  * Slim per-task record written by AICore directly into its own per-core
  * output buffer (no staging slot, no AICPU read). AICPU never touches this
- * record at AICORE_TIMING (level=1); at AICPU_TIMING+ the host joins it
- * against the AICPU record stream on `reg_task_id` (NOT `task_token_raw`).
+ * record at TASK_TIMING (level=1); at SCHEDULE_TIMING+ the host joins it
+ * against the active Scheduler producer's record stream on `reg_task_id`
+ * (NOT `task_token_raw`).
  *
  * Two identity fields with different roles:
  *
@@ -420,7 +422,7 @@ struct ChipSwimlaneDataHeader {
 
     // Metadata (Host initializes, Device read-only)
     uint32_t num_cores;            // Actual number of cores launched
-    uint32_t chip_swimlane_level;  // 0=off, 1=AICore timing, 2=+dispatch/fanout,
+    uint32_t chip_swimlane_level;  // 0=off, 1=AICore timing, 2=+Scheduler task timing,
                                    // 3=+sched phases, 4=+orch phases. Host writes
                                    // at init; AICPU reads in chip_swimlane_aicpu_init.
 

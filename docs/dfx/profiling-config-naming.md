@@ -87,7 +87,7 @@ by **independent layers**:
 | Compile-time (does the code exist?) | macros (`SIMPLER_DFX`, `SIMPLER_HOST_STRACE`, `SIMPLER_*_PROFILING`) | umbrella on, sub-tiers off |
 | Per-run (does this run collect X?) | `SIMPLER_DFX_FLAG_*` bitmask via `CallConfig` | none selected |
 | Runtime emission (does it actually emit?) | env (`SIMPLER_DEVICE_STRACE_ENABLE`, log level) | on |
-| Runtime detail tier | `get_chip_swimlane_level()` | AICPU_TIMING |
+| Runtime detail tier | `get_chip_swimlane_level()` | SCHEDULE_TIMING |
 
 `SIMPLER_HOST_STRACE` (compile) gates whether `[STRACE]` markers exist at all;
 `SIMPLER_DEVICE_STRACE_ENABLE` (runtime env) independently gates device-domain

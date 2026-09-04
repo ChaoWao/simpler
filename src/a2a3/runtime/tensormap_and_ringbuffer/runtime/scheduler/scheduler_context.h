@@ -264,7 +264,7 @@ private:
     //
     // dispatch_timestamp_slot points to the CoreExecState slot
     // (pending_dispatch_timestamp / running_dispatch_timestamp) selected at
-    // prepare time, or nullptr when chip swimlane is below AICPU_TIMING and no
+    // prepare time, or nullptr when chip swimlane is below SCHEDULE_TIMING and no
     // dispatch timestamp is being recorded.
     struct PublishHandle {
         uint64_t reg_addr;

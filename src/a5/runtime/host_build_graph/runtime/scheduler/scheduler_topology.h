@@ -22,7 +22,7 @@ struct SchedulerClusterCoordinate {
 // AIC indices occupy [0, cluster_count), followed by the two AIV subblocks of
 // every Cluster. Real A5 physical_core_id values are sparse and are only valid
 // for register addressing, so they must not be treated as a dense topology.
-// Resolver selection remains dynamic and is performed after discovery.
+// Scheduler selection remains dynamic and is performed after discovery.
 inline bool scheduler_cluster_coordinate_from_worker(
     int32_t worker_id, bool is_aic, int32_t cluster_count, int32_t aiv_per_cluster,
     SchedulerClusterCoordinate *coordinate
