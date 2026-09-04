@@ -235,6 +235,65 @@ def test_l3_directory_merge_uses_common_host_origin_and_rank_namespaces(tmp_path
     assert worker_events[8]["ts"] == 10.5
 
 
+def test_l3_directory_merge_keeps_scheduler_streams_and_lifecycle_records(tmp_path):
+    root = tmp_path / "dfx_outputs"
+    for rank in (0, 1):
+        capture_dir = _write_l3_rank(root, rank, host_shift_ns=rank * 10_000, task_id=rank + 7)
+        records_path = capture_dir / "chip_swimlane_records.json"
+        records = json.loads(records_path.read_text())
+        device_base = records["aicore_tasks"][0][3] - 1_000
+        records["scheduler_records"] = {
+            "schema_version": 1,
+            "streams": [
+                {
+                    "platform": "a5",
+                    "runtime": "host_build_graph",
+                    "producer": "aicore",
+                    "scheduler_id": rank + 2,
+                    "worker_id": rank + 4,
+                    "core_type": "aiv",
+                    "physical_core_id": rank,
+                    "capture": {"committed": 1, "dropped": 0, "truncated": False},
+                    "records": [
+                        {
+                            "start_cycles": device_base + 700,
+                            "end_cycles": device_base + 750,
+                            "loop_iter": 0,
+                            "kind": "ready_claim",
+                            "tasks_processed": 1,
+                            "task_id": rank + 7,
+                        }
+                    ],
+                    "metrics": [],
+                }
+            ],
+        }
+        records["aicpu_lifecycle_records"] = [
+            {
+                "worker_id": rank + 4,
+                "aicpu_thread_id": rank,
+                "core_type": "aiv",
+                "physical_core_id": rank,
+                "register_release_cycles": device_base + 600,
+            }
+        ]
+        records_path.write_text(json.dumps(records))
+
+    output = tmp_path / "l3.json"
+    args = sc._build_parser().parse_args([str(root), "--dispatch", "d0", "-o", str(output)])
+
+    sc._generate_l3_trace(args, root)
+
+    events = json.loads(output.read_text())["traceEvents"]
+    process_names = {
+        event["args"]["name"] for event in events if event.get("ph") == "M" and event.get("name") == "process_name"
+    }
+    assert "rank0 / AICore Scheduler" in process_names
+    assert "rank1 / AICore Scheduler" in process_names
+    register_releases = [event for event in events if event.get("name") == "register_release"]
+    assert {event["args"]["rank"] for event in register_releases} == {0, 1}
+
+
 def test_l3_parent_dispatch_identity_pairs_different_local_capture_indexes(tmp_path):
     root = tmp_path / "dfx_outputs"
     rank0 = _write_l3_rank(root, 0, host_shift_ns=0, task_id=7, dispatch="d0")
@@ -723,6 +782,60 @@ def test_level_two_accepts_task_timing_from_either_scheduler_producer(tmp_path, 
     assert data["tasks"][0]["finish_time_us"] == pytest.approx(0.075)
 
 
+@pytest.mark.parametrize("dispatch_cycles,finish_cycles", [(125, 185), (115, 175)])
+def test_level_two_accepts_cross_producer_clock_skew(tmp_path, dispatch_cycles, finish_cycles):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+                "scheduler_tasks": {
+                    "schema_version": 1,
+                    "producer": "aicpu",
+                    "records": [[0, 7, dispatch_cycles, finish_cycles]],
+                },
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert data["tasks"][0]["task_id"] == 7
+
+
+@pytest.mark.parametrize(
+    "aicore_timing,scheduler_timing,error",
+    [
+        ((180, 120, 10), (115, 185), "expected 0 < start_cycles <= end_cycles"),
+        ((120, 180, 120), (115, 185), "expected 0 <= receive_to_start_cycles < start_cycles"),
+        ((120, 180, 10), (185, 115), "expected 0 < dispatch_cycles <= finish_cycles"),
+    ],
+)
+def test_level_two_rejects_invalid_same_producer_timing(tmp_path, aicore_timing, scheduler_timing, error):
+    start_cycles, end_cycles, receive_to_start_cycles = aicore_timing
+    dispatch_cycles, finish_cycles = scheduler_timing
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 2,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, start_cycles, end_cycles, receive_to_start_cycles]],
+                "scheduler_tasks": {
+                    "schema_version": 1,
+                    "producer": "aicpu",
+                    "records": [[0, 7, dispatch_cycles, finish_cycles]],
+                },
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=error):
+        sc.read_perf_data(raw)
+
+
 def test_level_one_accepts_aicore_only_timing(tmp_path):
     raw = tmp_path / "chip_swimlane_records.json"
     raw.write_text(
@@ -741,6 +854,31 @@ def test_level_one_accepts_aicore_only_timing(tmp_path):
     assert "dispatch_time_us" not in data["tasks"][0]
     assert "finish_time_us" not in data["tasks"][0]
     assert "scheduler_task_producer" not in data
+
+
+def test_level_one_skips_overhead_counters_without_scheduler_timing(tmp_path):
+    trace_path = tmp_path / "merged_swimlane.json"
+    sc.generate_chrome_trace_json(
+        [
+            {
+                "task_id": 7,
+                "func_id": -1,
+                "core_id": 0,
+                "core_type": "aiv",
+                "start_time_us": 1.0,
+                "end_time_us": 2.0,
+                "duration_us": 1.0,
+                "receive_time_us": 0.5,
+                "local_setup_us": 0.5,
+            }
+        ],
+        str(trace_path),
+        deps_edges={7: [8]},
+        emit_overhead=True,
+    )
+
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    assert not any(event.get("cat") == "overhead" for event in events)
 
 
 @pytest.mark.parametrize(
@@ -857,6 +995,46 @@ def test_lifecycle_interval_can_start_at_relative_time_origin(tmp_path):
     interval = next(event for event in events if event.get("name") == "handshake_partition")
     assert interval["ts"] == 0.0
     assert interval["dur"] == 2.0
+
+
+def test_lifecycle_register_release_can_be_at_relative_time_origin(tmp_path):
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 1,
+                "metadata": {"clock_freq_hz": 1_000_000_000, "num_cores": 1, "core_types": ["aiv"]},
+                "aicore_tasks": [[0, 7, 7, 120, 180, 10]],
+                "aicpu_lifecycle_records": [{"worker_id": 0, "register_release_cycles": 90}],
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+    assert data["aicpu_lifecycle_records"][0]["register_release_time_us"] == 0.0
+
+    trace_path = tmp_path / "merged_swimlane.json"
+    sc.generate_chrome_trace_json(
+        data["tasks"],
+        str(trace_path),
+        aicpu_lifecycle_records=data["aicpu_lifecycle_records"],
+    )
+
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    register_release = next(event for event in events if event.get("name") == "register_release")
+    assert register_release["ts"] == 0.0
+
+
+def test_lifecycle_omits_missing_register_release(tmp_path):
+    trace_path = tmp_path / "merged_swimlane.json"
+    sc.generate_chrome_trace_json(
+        [],
+        str(trace_path),
+        aicpu_lifecycle_records=[{"worker_id": 0}],
+    )
+
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    assert not any(event.get("name") == "register_release" for event in events)
 
 
 def test_host_capture_is_complete_when_the_pool_holds_more_than_the_submit_projection(tmp_path):

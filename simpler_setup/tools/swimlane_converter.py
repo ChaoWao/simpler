@@ -495,20 +495,37 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
         if not isinstance(row, list) or len(row) not in (5, 6):
             raise ValueError(f"aicore_tasks[{row_index}] must contain five or six columns")
         core_id, task_token_raw, reg_task_id, start_cycles, end_cycles, *rest = row
+        start_cycles = int(start_cycles)
+        end_cycles = int(end_cycles)
+        r2s_cycles = int(rest[0]) if rest else 0
+        if not (0 < start_cycles <= end_cycles):
+            raise ValueError(f"aicore_tasks[{row_index}] has invalid timing: expected 0 < start_cycles <= end_cycles")
+        if not (0 <= r2s_cycles < start_cycles):
+            raise ValueError(
+                f"aicore_tasks[{row_index}] has invalid receive_to_start_cycles: "
+                "expected 0 <= receive_to_start_cycles < start_cycles"
+            )
         key = (int(core_id), int(reg_task_id))
         if key in aicore_lookup:
             raise ValueError(f"duplicate aicore_tasks join key: {key}")
-        r2s_cycles = int(rest[0]) if rest else 0
         aicore_lookup[key] = (
             int(task_token_raw),
-            int(start_cycles),
-            int(end_cycles),
+            start_cycles,
+            end_cycles,
             r2s_cycles,
         )
 
     scheduler_task_keys = [(int(row[0]), int(row[1])) for row in scheduler_task_rows]
     if len(scheduler_task_keys) != len(set(scheduler_task_keys)):
         raise ValueError("scheduler_tasks contains duplicate (core_id, reg_task_id) join keys")
+    for row_index, row in enumerate(scheduler_task_rows):
+        dispatch_cycles = int(row[2])
+        finish_cycles = int(row[3])
+        if not (0 < dispatch_cycles <= finish_cycles):
+            raise ValueError(
+                f"scheduler_tasks.records[{row_index}] has invalid timing: "
+                "expected 0 < dispatch_cycles <= finish_cycles"
+            )
     if level >= 2:
         missing_scheduler_keys = sorted(set(aicore_lookup) - set(scheduler_task_keys))
         if missing_scheduler_keys:
@@ -636,12 +653,6 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
             task_token_raw, start_cycles, end_cycles, r2s_cycles = ac
             dispatch_cycles = int(dispatch_cycles)
             finish_cycles = int(finish_cycles)
-            if not (0 < dispatch_cycles <= start_cycles <= end_cycles <= finish_cycles):
-                raise ValueError(
-                    "invalid Scheduler/AICore task timestamp order for "
-                    f"(core_id, reg_task_id)=({core_id}, {reg_task_id}): expected "
-                    "0 < dispatch <= start <= end <= finish"
-                )
             start_us = _to_us(start_cycles)
             end_us = _to_us(end_cycles)
             dispatch_us = _to_us(dispatch_cycles)
@@ -742,8 +753,11 @@ def _decode_perf_data(data, *, timeline_origin_ns=None):  # noqa: PLR0912, PLR09
     for record_index, record in enumerate(lifecycle_raw):
         converted = dict(record)
         for field in lifecycle_cycle_fields:
-            cycles = int(converted.pop(field, 0))
-            converted[field.removesuffix("_cycles") + "_time_us"] = _to_us(cycles)
+            if field not in converted:
+                continue
+            cycles = int(converted.pop(field))
+            if cycles > 0:
+                converted[field.removesuffix("_cycles") + "_time_us"] = _to_us(cycles)
         converted["record_index"] = record_index
         aicpu_lifecycle_records.append(converted)
 
@@ -1435,7 +1449,7 @@ def build_overhead_counter_events(tasks, deps_edges, pid=2):  # noqa: PLR0912
     absent from the perf set falls back to its own dispatch (no unverifiable
     early readiness). Needs ``deps_edges`` (pred -> [succ]); returns [] without it.
     """
-    if not deps_edges or not tasks:
+    if not deps_edges or not tasks or any(task.get("dispatch_time_us") is None for task in tasks):
         return []
 
     def _u64(x):
@@ -1682,8 +1696,8 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         "dur": end - start,
                     }
                 )
-            register_release = float(record.get("register_release_time_us", 0.0))
-            if register_release > 0:
+            if "register_release_time_us" in record:
+                register_release = float(record["register_release_time_us"])
                 events.append(
                     {
                         "args": identity,
@@ -3669,11 +3683,13 @@ def _generate_l3_trace(args, root):  # noqa: PLR0912
             args.verbose,
             orchestrator_name=artifacts["orchestrator_name"],
             scheduler_phases=data.get("aicpu_scheduler_phases"),
+            scheduler_streams=data.get("scheduler_streams"),
             orchestrator_phases=data.get("aicpu_orchestrator_phases"),
             orchestrator_source=data.get("orchestrator_source"),
             timeline_metadata=data.get("timeline_metadata"),
             core_to_thread=data.get("core_to_thread"),
             host_device_uploads=data.get("host_device_uploads"),
+            aicpu_lifecycle_records=data.get("aicpu_lifecycle_records"),
             deps_edges=artifacts["deps_edges"],
             deps_kernel_map=artifacts["deps_kernel_map"],
             deps_block_map=artifacts["deps_block_map"],

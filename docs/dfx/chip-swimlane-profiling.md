@@ -517,12 +517,9 @@ whether a `deps.json` is present** (see
   prints a one-line hint). Re-run with `--enable-dep-gen` (or join an
   existing `deps.json`) to recover names and arrows.
 
-When the run also emitted a device log (`device-*` file under
-`outputs/`), `swimlane_converter` resolves the nearest log by
-mtime and runs `sched_overhead_analysis` automatically. The
-report is printed to stdout; it correlates AICPU phase records
-with the device log to attribute each scheduler iteration to a
-specific overhead source.
+`swimlane_converter` does not run the scheduler-overhead deep-dive. Capture
+`deps.json` and `chip_swimlane_records.json` in separate runs, then invoke
+`sched_overhead_analysis` explicitly as described in §3.5.
 
 The scheduler-budget parser counts every mutually exclusive outer phase and
 standalone HBG P-thread `resolve` bars. It excludes only `resolve` records whose
@@ -585,7 +582,7 @@ Two artifacts, one join:
 | `chip_swimlane_records.json` | `--enable-chip-swimlane` | Per-task / per-phase timing for one run |
 | `merged_swimlane.json` | `swimlane_converter` | Perfetto trace = timing joined to the graph |
 
-**Default workflow (paired flags, recommended for most runs):**
+**Co-capture workflow (functional debugging and CI smoke):**
 
 ```bash
 python test_my_case.py --platform a2a3 \
@@ -594,10 +591,11 @@ python test_my_case.py --platform a2a3 \
 
 Both artifacts land under the same `<output_prefix>/`; the
 converter auto-detects `deps.json` and emits flow arrows. This is the
-right default for CI smoke, single debugging runs, and small/medium
-workloads.
+convenient path for CI smoke and one-off functional debugging. Do not use
+co-captured timing for strict scheduler-overhead measurement because dep_gen
+adds per-submit work to the measured run.
 
-**Split workflow (two launches, recommended for strict perf
+**Split workflow (two launches, required for strict scheduler-overhead
 measurement):**
 
 ```bash
@@ -615,9 +613,8 @@ python -m simpler_setup.tools.swimlane_converter \
 
 Use this when:
 
-- You're measuring overhead at the µs level and want each profiler in
-  isolation (combined per-round overhead is still well under 10 µs on
-  measured workloads, but if you need certainty, split).
+- You're measuring scheduler overhead and need the swimlane timing run free
+  from dep_gen instrumentation.
 - The same topology is being measured under several configurations
   (one `dep_gen` capture amortizes across N swimlane runs).
 - A workload is so large that the dep_gen replay validation gate
@@ -1272,11 +1269,9 @@ overwrites `task_id` with the full encoding on FIN
 wrote the WIP slot but AICPU never committed.
 
 **Scheduler-overhead deep-dive missing from converter output.**
-The converter runs `sched_overhead_analysis` only when a device
-log is resolvable. Pass `-d <device-id>` or place a `device-*`
-log under `outputs/` close in time to the `chip_swimlane_records.json`
-mtime; see `simpler_setup/tools/README.md` for the resolver
-rules.
+This is expected: the converter does not run `sched_overhead_analysis`.
+Capture `deps.json` and `chip_swimlane_records.json` in separate runs, then
+pass both paths to the analysis CLI; see `simpler_setup/tools/README.md`.
 
 ## 9. Related docs
 
