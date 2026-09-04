@@ -193,6 +193,23 @@ public:
     );
 
     /**
+     * Start a run's collection window. Clears what the previous run left in the
+     * in-memory record set and its counter, and zeroes the device-side record
+     * counters reconcile compares against.
+     *
+     * The collector initializes once and serves every run, so this is the only
+     * point at which they are cleared; init() clears none of them, and nothing on
+     * the device clears the record counters — they are documented as monotonic.
+     * Skip it and the second run's deps.json carries the first run's edges, and
+     * reconcile compares one run's collected count against a device total
+     * accumulated over both, which suppresses the export.
+     *
+     * Called with the device quiesced, so the AICPU is not writing these and the
+     * collector threads are idle.
+     */
+    void begin_run();
+
+    /**
      * Device pointer to the DepGenDataHeader. Set kernel_args.dep_gen_data_base
      * to this after init() so AICPU can find the shared memory via
      * set_platform_dep_gen_base().

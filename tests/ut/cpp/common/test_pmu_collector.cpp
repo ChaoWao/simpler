@@ -42,7 +42,7 @@ TEST(PmuCollectorTest, PreservesShardFilesWhenFinalCsvCannotBeOpened) {
     ASSERT_TRUE(std::filesystem::create_directories(csv_path));
 
     PmuCollector collector;
-    collector.set_run_output(csv_path.string(), PmuEventType::PIPE_UTILIZATION);
+    collector.begin_run(csv_path.string(), PmuEventType::PIPE_UTILIZATION);
     ASSERT_EQ(collector.init(1, 1, test_alloc, nullptr, test_free, 0), 0);
 
     PmuBuffer buffer{};
@@ -75,7 +75,7 @@ TEST(PmuCollectorTest, MergesConcurrentShardWritesIntoFinalCsv) {
     constexpr int kRecordsPerShard = 64;
     constexpr int kShardCount = PmuModule::kMaxCollectorThreads;
     PmuCollector collector;
-    collector.set_run_output(csv_path.string(), PmuEventType::PIPE_UTILIZATION);
+    collector.begin_run(csv_path.string(), PmuEventType::PIPE_UTILIZATION);
     ASSERT_EQ(collector.init(1, kShardCount, test_alloc, nullptr, test_free, 0), 0);
 
     std::atomic<int> ready_workers{0};

@@ -48,7 +48,7 @@ TEST(ArgsDumpCollectorTest, MergesConcurrentShardRecordsIntoManifest) {
     constexpr int kRecordsPerShard = 32;
     constexpr int kShardCount = DumpModule::kMaxCollectorThreads;
     ArgsDumpCollector collector;
-    collector.set_run_output(test_dir.string(), DumpArgsLevel::HYBRID);
+    collector.begin_run(test_dir.string(), DumpArgsLevel::HYBRID);
     ASSERT_EQ(collector.initialize(kShardCount, 0, test_alloc, nullptr, test_free), 0);
 
     std::vector<DumpMetaBuffer> buffers(kShardCount);
@@ -109,7 +109,7 @@ TEST(ArgsDumpCollectorTest, BackpressureReleaseWaitsForAllPublishedPayloads) {
     constexpr int kArenaCount = 2;
     constexpr uint64_t kPayloadSize = sizeof(uint64_t);
     TestArgsDumpCollector collector;
-    collector.set_run_output(test_dir.string(), DumpArgsLevel::FULL);
+    collector.begin_run(test_dir.string(), DumpArgsLevel::FULL);
     ASSERT_EQ(collector.initialize(kArenaCount, 0, test_alloc, nullptr, test_free), 0);
 
     auto *device_base = collector.get_dump_shm_device_ptr();
@@ -175,7 +175,7 @@ TEST(ArgsDumpCollectorTest, BackpressureReleaseDoesNotOffsetPayloadsAcrossThread
     ASSERT_TRUE(std::filesystem::create_directories(test_dir));
 
     TestArgsDumpCollector collector;
-    collector.set_run_output(test_dir.string(), DumpArgsLevel::FULL);
+    collector.begin_run(test_dir.string(), DumpArgsLevel::FULL);
     ASSERT_EQ(collector.initialize(2, 0, test_alloc, nullptr, test_free), 0);
 
     auto *device_base = collector.get_dump_shm_device_ptr();

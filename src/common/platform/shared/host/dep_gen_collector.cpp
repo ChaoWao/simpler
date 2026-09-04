@@ -47,8 +47,10 @@ int DepGenCollector::init(
     const DepGenFreeCallback &free_cb, int device_id
 ) {
     if (initialized_) {
-        LOG_ERROR("DepGenCollector already initialized");
-        return PTO_RUNTIME_ERR_INTERNAL;
+        // Already holding this run's device resources. They are not per-run:
+        // configuration arrives via begin_run() and the layout is fixed at
+        // compile time, so there is nothing here left to re-apply.
+        return 0;
     }
     if (num_threads <= 0 || num_threads > PLATFORM_MAX_AICPU_THREADS || alloc_cb == nullptr || free_cb == nullptr) {
         LOG_ERROR(
@@ -153,6 +155,34 @@ int DepGenCollector::init(
 // ---------------------------------------------------------------------------
 // Record accumulation (in-memory — no disk hop)
 // ---------------------------------------------------------------------------
+
+void DepGenCollector::begin_run() {
+    {
+        std::scoped_lock lock(records_mutex_);
+        records_.clear();
+    }
+    total_collected_ = 0;
+
+    // Nothing on the device yet before the first init(); its memset covers this.
+    if (shm_host_ == nullptr) return;
+
+    // The device's record counters are monotonic by contract (see dep_gen.h), so
+    // they carry the previous run's totals into this one's reconcile. Zeroing
+    // them is safe here and only here: the caller has quiesced the device, so
+    // the AICPU is not writing them concurrently.
+    DepGenBufferState *state = get_dep_gen_buffer_state(shm_host_, 0);
+    state->total_record_count = 0;
+    state->dropped_record_count = 0;
+    state->total_overflow_record_count = 0;
+    wmb();
+    // Narrow write-backs, not the region: a bulk push would clobber the
+    // device-owned fields next to these (current_buf_ptr, free_queue.head).
+    (void)manager_.write_range_to_device(&state->total_record_count, sizeof(state->total_record_count));
+    (void)manager_.write_range_to_device(&state->dropped_record_count, sizeof(state->dropped_record_count));
+    (void)manager_.write_range_to_device(
+        &state->total_overflow_record_count, sizeof(state->total_overflow_record_count)
+    );
+}
 
 void DepGenCollector::append_buffer_records(const void *buf_host_ptr) {
     const DepGenBuffer *buf = reinterpret_cast<const DepGenBuffer *>(buf_host_ptr);

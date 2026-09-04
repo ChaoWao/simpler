@@ -99,8 +99,10 @@ int ChipSwimlaneCollector::initialize(
     ChipSwimlaneRegisterCallback register_cb, const ChipSwimlaneFreeCallback &free_cb
 ) {
     if (shm_host_ != nullptr) {
-        LOG_ERROR("ChipSwimlaneCollector already initialized");
-        return PTO_RUNTIME_ERR_INTERNAL;
+        // Already holding this run's device resources. They are not per-run:
+        // configuration arrives via begin_run() and the layout is fixed at
+        // compile time, so there is nothing here left to re-apply.
+        return 0;
     }
     if (num_aicore <= 0 || num_aicore > PLATFORM_MAX_CORES) {
         LOG_ERROR("Invalid number of AICores: %d (max=%d)", num_aicore, PLATFORM_MAX_CORES);
@@ -831,6 +833,52 @@ void ChipSwimlaneCollector::reconcile_counters() {
         },
         sizeof(ChipSwimlaneAicpuOrchPhaseBuffer), total_orch_phase_collected_, /*optional=*/true
     );
+}
+
+void ChipSwimlaneCollector::publish_run_config() {
+    // Nothing to publish before the region exists; initialize() writes the level
+    // from the member begin_run() just set.
+    if (shm_host_ == nullptr) return;
+
+    ChipSwimlaneDataHeader *header = get_chip_swimlane_header(shm_host_);
+    header->chip_swimlane_level = static_cast<uint32_t>(chip_swimlane_level_);
+    wmb();
+    // One field, not the region: a bulk write-back would race the AICPU's own
+    // header fields (phase thread counts, core_to_thread) — see
+    // buffer_pool_manager.h's note on narrow write_range_to_device calls. On SVM
+    // platforms copy_to_device is null and this is a no-op, because the store
+    // above already landed in device-visible memory.
+    (void)manager_.write_range_to_device(&header->chip_swimlane_level, sizeof(header->chip_swimlane_level));
+
+    // The pools' record counters are producer-side and never reset by the
+    // device, so they carry the previous run's totals into this run's reconcile
+    // unless cleared here.
+    //
+    // total_record_count and dropped_record_count are adjacent, so one narrow
+    // write covers both and leaves the device-owned fields in the same cache
+    // line (current_buf_ptr, current_buf_seq) untouched.
+    auto reset_head = [this](ChipSwimlaneActiveHead *head) {
+        head->total_record_count = 0;
+        head->dropped_record_count = 0;
+        wmb();
+        static_assert(
+            offsetof(ChipSwimlaneActiveHead, dropped_record_count) ==
+                offsetof(ChipSwimlaneActiveHead, total_record_count) + sizeof(uint32_t),
+            "the two counters must stay adjacent for this single write-back to cover both"
+        );
+        (void)manager_.write_range_to_device(&head->total_record_count, 2 * sizeof(uint32_t));
+    };
+
+    // Every slot, not just this run's: the grid is dimensioned by the platform
+    // maximum and a later run may use more cores than the one that dirtied them.
+    for (int i = 0; i < PLATFORM_MAX_CORES; i++) {
+        reset_head(&get_perf_buffer_state(shm_host_, i)->head);
+        reset_head(&get_aicore_buffer_state(shm_host_, i)->head);
+    }
+    for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
+        reset_head(&get_sched_phase_buffer_state(shm_host_, t)->head);
+        reset_head(&get_orch_phase_buffer_state(shm_host_, t)->head);
+    }
 }
 
 void ChipSwimlaneCollector::read_phase_header_metadata() {

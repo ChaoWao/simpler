@@ -870,6 +870,11 @@ public:
      */
     void start(const ThreadFactory &thread_factory) {
         if (shm_host_ == nullptr) return;
+        // Idempotent, like Derived::init(): the collector is resident across
+        // runs, so every run's arming reaches this and only the first should
+        // spawn. Without the guard each run would append another full set of
+        // threads to the same collector.
+        if (!collector_threads_.empty()) return;
 
         if (!thread_num_set_) {
             LOG_WARN(

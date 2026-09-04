@@ -982,6 +982,40 @@ protected:
     void teardown_shared_collectors_after_run(bool device_execution_complete);
 
     /**
+     * The core and AICPU-thread counts a resident collector's pools were built
+     * for.
+     *
+     * Collector pool topology is derived from those counts: buffer seeding
+     * covers pools [0, aicpu_thread_num), and a core's recycled lane is
+     * `(core / PLATFORM_CORES_PER_BLOCKDIM) % aicpu_thread_num`. A collector
+     * that stays initialized across runs therefore holds pools shaped for the
+     * run that built them, so a later run with different counts must rebuild
+     * them rather than reuse pools whose lanes it maps differently.
+     */
+    struct CollectorShape {
+        bool latched{false};
+        int num_aicore{0};
+        int aicpu_thread_num{0};
+        int launch_aicpu_num{0};
+    };
+
+    /** True once collectors are built and this run's counts differ from theirs. */
+    bool collector_shape_is_stale(int num_aicore, int aicpu_thread_num, int launch_aicpu_num) const {
+        return collector_shape_.latched &&
+               (collector_shape_.num_aicore != num_aicore || collector_shape_.aicpu_thread_num != aicpu_thread_num ||
+                collector_shape_.launch_aicpu_num != launch_aicpu_num);
+    }
+
+    void latch_collector_shape(int num_aicore, int aicpu_thread_num, int launch_aicpu_num) {
+        collector_shape_ = CollectorShape{true, num_aicore, aicpu_thread_num, launch_aicpu_num};
+    }
+
+    /** Called by the subclass's finalize_collectors(): no pools are built now. */
+    void clear_collector_shape() { collector_shape_ = CollectorShape{}; }
+
+    CollectorShape collector_shape_{};
+
+    /**
      * Shared body of `finalize()`. Each arch subclass's `finalize()`
      * handles: (a) the early-return + thread attach prologue, (b) any
      * arch-specific collector teardown (e.g. a2a3's `dep_gen_collector_`),

@@ -1928,7 +1928,7 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_executio
     // set on CallConfig (CallConfig::validate() enforces non-empty upstream).
     finish_clock_correlation_session(device_execution_complete, !can_accept_run());
     if (enable_chip_swimlane_) {
-        chip_swimlane_collector_.stop();
+        chip_swimlane_collector_.quiesce();
         chip_swimlane_collector_.read_phase_header_metadata();
         chip_swimlane_collector_.reconcile_counters();
         publish_host_phase_records_to_swimlane();
@@ -1938,18 +1938,18 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_executio
     write_host_phase_records_artifact();
 
     if (enable_dump_args_) {
-        dump_collector_.stop();
+        dump_collector_.quiesce();
         dump_collector_.reconcile_counters();
         dump_collector_.export_dump_files();
     }
 
     if (enable_pmu_) {
-        pmu_collector_.stop();
+        pmu_collector_.quiesce();
         pmu_collector_.reconcile_counters();
     }
 
     if (enable_scope_stats_) {
-        scope_stats_collector_.stop();
+        scope_stats_collector_.quiesce();
         scope_stats_collector_.reconcile_counters();
         scope_stats_collector_.write_jsonl(output_prefix_);
     }

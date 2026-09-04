@@ -165,6 +165,16 @@ public:
         const ScopeStatsFreeCallback &free_cb, int device_id
     );
 
+    // Start a run's collection window: drop the previous run's records, its
+    // counter, and the recovered-buffer bookkeeping reconcile_counters() leaves
+    // behind. execution_complete_ is re-armed because it is what tells the
+    // collector loop a run is still producing.
+    //
+    // The collector initializes once and serves every run, so this is the only
+    // point at which they are cleared; init() clears none of them, and left
+    // alone they accumulate across runs.
+    void begin_run();
+
     // Device pointer to the ScopeStatsDataHeader. Set
     // kernel_args.scope_stats_data_base to this after init().
     void *get_scope_stats_shm_device_ptr() const { return shm_dev_; }
