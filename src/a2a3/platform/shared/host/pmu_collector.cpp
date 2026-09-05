@@ -83,6 +83,12 @@ int PmuCollector::init(
         );
         return PTO_RUNTIME_ERR_INTERNAL;
     }
+    if (initialized_) {
+        // Already holding this run's device resources. They are not per-run:
+        // configuration arrives via begin_run() and the layout is fixed at
+        // compile time, so there is nothing here left to re-apply.
+        return 0;
+    }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
     // shard argument modulo the manager's shard count.
@@ -178,24 +184,7 @@ int PmuCollector::init(
         }
     }
 
-    // ---- Build CSV header string ----
-    {
-        std::string header = "thread_id,core_id,task_id,func_id,core_type,pmu_total_cycles";
-        const PmuEventConfig *evt = pmu_resolve_event_config_a2a3(event_type_);
-        if (evt == nullptr) {
-            evt = &PMU_EVENTS_A2A3_PIPE_UTIL;
-        }
-        for (int i = 0; i < PMU_COUNTER_COUNT_A2A3; i++) {
-            const char *name = evt->counter_names[i];
-            if (name == nullptr || name[0] == '\0') {
-                continue;
-            }
-            header += ',';
-            header += name;
-        }
-        header += ",event_type\n";
-        csv_header_ = std::move(header);
-    }
+    rebuild_csv_header();
 
     initialized_ = true;
     // Hand the memory context to the base. start(tf) (inherited) will assemble
@@ -262,6 +251,73 @@ void PmuCollector::cleanup_csv_shards() {
         if (path.empty()) continue;
         std::error_code ec;
         std::filesystem::remove(path, ec);
+    }
+}
+
+void PmuCollector::rebuild_csv_header() {
+    // Columns are named by the event config, so this is per-run state: a run
+    // that selects a different event type needs different column names.
+    std::string header = "thread_id,core_id,task_id,func_id,core_type,pmu_total_cycles";
+    const PmuEventConfig *evt = pmu_resolve_event_config_a2a3(event_type_);
+    if (evt == nullptr) {
+        evt = &PMU_EVENTS_A2A3_PIPE_UTIL;
+    }
+    for (int i = 0; i < PMU_COUNTER_COUNT_A2A3; i++) {
+        const char *name = evt->counter_names[i];
+        if (name == nullptr || name[0] == '\0') {
+            continue;
+        }
+        header += ',';
+        header += name;
+    }
+    header += ",event_type\n";
+    csv_header_ = std::move(header);
+}
+
+void PmuCollector::begin_run(const std::string &csv_path, PmuEventType event_type) {
+    // Before reset_collector_shards(): it rebuilds the shard paths from csv_path_.
+    csv_path_ = csv_path;
+    event_type_ = event_type;
+
+    reset_collector_shards();
+    if (csv_file_.is_open()) {
+        csv_file_.close();
+    }
+    execution_complete_.store(false, std::memory_order_release);
+    rebuild_csv_header();
+
+    // Before the first init() there is no region; init() writes the event type
+    // from the member just set. Afterwards the device needs the new value by
+    // another route — one narrow field, not a bulk write-back, so it cannot race
+    // the AICPU's own header fields.
+    if (shm_host_ != nullptr) {
+        PmuDataHeader *hdr = get_pmu_header(shm_host_);
+        hdr->event_type = static_cast<uint32_t>(event_type_);
+        wmb();
+        (void)manager_.write_range_to_device(&hdr->event_type, sizeof(hdr->event_type));
+
+        // The per-core record counters are producer-side and never reset by the
+        // device, so they carry the previous run's totals into this run's
+        // reconcile. The two are adjacent, so one write-back per core covers
+        // them and leaves the device-owned fields beside them alone.
+        // a2a3 orders these dropped-then-total and has no mismatch counter;
+        // a5's layout differs, so neither the order nor the span is shared.
+        static_assert(
+            offsetof(PmuBufferState, total_record_count) ==
+                offsetof(PmuBufferState, dropped_record_count) + sizeof(uint32_t),
+            "the two counters must stay adjacent for this single write-back to cover both"
+        );
+        // The region holds num_cores_ states (calc_pmu_data_size), so that is
+        // the bound — a wider loop writes past its end. The runner rebuilds this
+        // collector when a run's core count changes, so a resident one is never
+        // asked to reset a state it does not own.
+        for (int c = 0; c < num_cores_; c++) {
+            PmuBufferState *state = get_pmu_buffer_state(shm_host_, c);
+            state->dropped_record_count = 0;
+            state->total_record_count = 0;
+            wmb();
+            (void)manager_.write_range_to_device(&state->dropped_record_count, 2 * sizeof(uint32_t));
+        }
     }
 }
 

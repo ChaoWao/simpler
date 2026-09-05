@@ -381,22 +381,42 @@ public:
      */
     // Allocates the device-side resources.
     //
-    // num_aicore defines the shared-memory layout: every pool array after the
-    // first starts at an offset computed from it, and the AICPU side computes
-    // the same offsets from its own worker count. The two must agree, so this
-    // takes the run's dimension rather than a platform maximum.
+    // The pool-array offsets are fixed at compile time from PLATFORM_MAX_CORES,
+    // so the host and AICPU sides cannot disagree about them. num_aicore and
+    // aicpu_thread_num decide which of those fixed slots get buffers, and a
+    // core's recycled lane is assigned modulo aicpu_thread_num — so a collector
+    // that outlives a run holds pools shaped for those two counts, and the
+    // caller rebuilds it when a later run changes them.
     //
     // Per-run configuration (artifact prefix, level) is bound separately by
-    // set_run_output(), which must be called before initialize(): the level
-    // reaches the device header and selects the orch phase pool here.
+    // begin_run(), which must run before this on the first run: the level
+    // selects the orch phase pool here.
     int initialize(
         int num_aicore, int aicpu_thread_num, int device_id, const ChipSwimlaneAllocCallback &alloc_cb,
         ChipSwimlaneRegisterCallback register_cb, const ChipSwimlaneFreeCallback &free_cb
     );
 
-    void set_run_output(const std::string &output_prefix, ChipSwimlaneLevel chip_swimlane_level) {
+    /**
+     * Start a run's collection window: bind its artifact configuration, drop the
+     * previous run's records and counters, and — once the region exists —
+     * republish the level the device reads.
+     *
+     * The collector initializes once and serves every run, so this is the only
+     * point at which a run's records, counters and device level are established;
+     * initialize() establishes none of them. Skip it and this run's artifact
+     * carries the records every earlier run collected, reconcile compares an
+     * accumulated collected count against one run's device total, and the device
+     * stays on whichever level the first run asked for.
+     *
+     * Before the first initialize() there is no region and no shard storage yet;
+     * reset_collector_shards() is then a no-op over empty extents, and
+     * initialize() picks the level up from the member this sets.
+     */
+    void begin_run(const std::string &output_prefix, ChipSwimlaneLevel chip_swimlane_level) {
         output_prefix_ = output_prefix;
         chip_swimlane_level_ = chip_swimlane_level;
+        reset_collector_shards();
+        publish_run_config();
     }
 
     /**
@@ -510,6 +530,10 @@ public:
      * called after stop() so the shm region has settled.
      */
     void read_phase_header_metadata();
+
+    // Push the run's level into the device-visible header. A no-op before the
+    // region exists, and a single narrow field write once it does.
+    void publish_run_config();
 
     /**
      * Sum per-core / per-thread total_record_count and dropped_record_count

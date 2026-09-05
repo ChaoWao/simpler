@@ -62,6 +62,54 @@ size_t ArgsDumpCollector::normalize_collector_shard(int collector_shard) const {
     return static_cast<size_t>(collector_shard);
 }
 
+void ArgsDumpCollector::begin_run(const std::string &output_prefix, DumpArgsLevel dump_args_level) {
+    output_prefix_ = output_prefix;
+    dump_args_level_ = dump_args_level;
+    reset_collector_shards();
+    total_dropped_record_count_.store(0, std::memory_order_relaxed);
+    total_truncated_count_.store(0, std::memory_order_relaxed);
+    last_progress_ms_.store(0, std::memory_order_relaxed);
+    for (auto &count : written_payload_counts_) {
+        count.store(0, std::memory_order_relaxed);
+    }
+
+    // Before the first initialize() there is no region; initialize() writes the
+    // level from the member just set. Afterwards the device needs the new value
+    // by another route, and it is one narrow field rather than a bulk write-back
+    // so it cannot race the AICPU's own header fields.
+    if (shm_host_ != nullptr) {
+        DumpDataHeader *header = get_dump_header(shm_host_);
+        header->dump_args_level = static_cast<uint32_t>(dump_args_level_);
+        wmb();
+        (void)manager_.write_range_to_device(&header->dump_args_level, sizeof(header->dump_args_level));
+
+        // The per-thread payload counters are what reconcile compares against,
+        // and nothing on the device resets them. published/completed/dropped are
+        // contiguous, so one write-back per thread covers them.
+        //
+        // arena_write_offset is deliberately NOT reset: it is a monotonic cursor
+        // the host reads modulo arena_size, so it stays correct across runs.
+        static_assert(
+            offsetof(DumpBufferState, dropped_record_count) ==
+                offsetof(DumpBufferState, published_payload_count) + 2 * sizeof(uint64_t),
+            "the payload counters must stay contiguous for this single write-back to cover them"
+        );
+        constexpr size_t kCounterSpan = 2 * sizeof(uint64_t) + sizeof(uint32_t);
+        // The region holds num_dump_threads_ states (calc_dump_data_size), so
+        // that is the bound — a wider loop writes past its end. The runner
+        // rebuilds this collector when a run's thread count changes, so a
+        // resident one is never asked to reset a state it does not own.
+        for (int t = 0; t < num_dump_threads_; t++) {
+            DumpBufferState *state = get_dump_buffer_state(shm_host_, t);
+            state->published_payload_count = 0;
+            state->completed_payload_count = 0;
+            state->dropped_record_count = 0;
+            wmb();
+            (void)manager_.write_range_to_device(&state->published_payload_count, kCounterSpan);
+        }
+    }
+}
+
 void ArgsDumpCollector::reset_collector_shards() {
     const size_t shard_count = static_cast<size_t>(manager_.shard_count());
     collected_.clear();
@@ -94,8 +142,10 @@ int ArgsDumpCollector::initialize(
     const DumpFreeCallback &free_cb
 ) {
     if (shm_host_ != nullptr) {
-        LOG_ERROR("ArgsDumpCollector already initialized");
-        return PTO_RUNTIME_ERR_INTERNAL;
+        // Already holding this run's device resources. They are not per-run:
+        // configuration arrives via begin_run() and the layout is fixed at
+        // compile time, so there is nothing here left to re-apply.
+        return 0;
     }
     if (num_dump_threads <= 0 || num_dump_threads > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(

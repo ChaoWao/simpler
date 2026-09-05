@@ -60,8 +60,10 @@ int ScopeStatsCollector::init(
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (initialized_) {
-        LOG_ERROR("ScopeStatsCollector already initialized");
-        return PTO_RUNTIME_ERR_INTERNAL;
+        // Already holding this run's device resources. They are not per-run:
+        // configuration arrives via begin_run() and the layout is fixed at
+        // compile time, so there is nothing here left to re-apply.
+        return 0;
     }
 
     // Must precede the recycled-lane seeding below: push_recycled() folds its
@@ -151,6 +153,35 @@ int ScopeStatsCollector::init(
 // ---------------------------------------------------------------------------
 // Record accumulation (in-memory)
 // ---------------------------------------------------------------------------
+
+void ScopeStatsCollector::begin_run() {
+    {
+        std::scoped_lock lock(records_mutex_);
+        records_.clear();
+    }
+    total_collected_ = 0;
+    recovered_current_buf_ = 0;
+    recovered_current_total_ = 0;
+    execution_complete_.store(false, std::memory_order_release);
+
+    if (shm_host_ == nullptr) return;
+
+    // The device's record counters are producer-side and never reset by it, so
+    // they carry the previous run's totals into this run's reconcile. The old
+    // finalize/init cycle cleared them implicitly by memsetting a fresh region.
+    // The two are adjacent, so one write-back covers both and leaves the
+    // device-owned fields in the same line alone.
+    ScopeStatsBufferState *state = get_scope_stats_buffer_state(shm_host_, 0);
+    state->dropped_record_count = 0;
+    state->total_record_count = 0;
+    wmb();
+    static_assert(
+        offsetof(ScopeStatsBufferState, total_record_count) ==
+            offsetof(ScopeStatsBufferState, dropped_record_count) + sizeof(uint32_t),
+        "the two counters must stay adjacent for this single write-back to cover both"
+    );
+    (void)manager_.write_range_to_device(&state->dropped_record_count, 2 * sizeof(uint32_t));
+}
 
 void ScopeStatsCollector::append_buffer_records(const void *buf_host_ptr) {
     const ScopeStatsBuffer *buf = reinterpret_cast<const ScopeStatsBuffer *>(buf_host_ptr);
