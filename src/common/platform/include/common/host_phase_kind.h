@@ -34,10 +34,12 @@
 /**
  * What one HostPhaseRecord measured.
  *
- * The bind kinds partition the bind stage: their durations sum to the
- * `chip.run.bind` span. The orchestrator kinds are nested inside BindHostOrch
- * and do not partition it — some are sub-operations of others. Each orchestrator
- * kind is recorded at exactly one site, named beside it.
+ * The bind kinds cover segments of the bind stage: each is one interval inside
+ * the `chip.run.bind` span, and their durations do not sum to it — the gap
+ * between one segment closing and the next opening belongs to neither. The
+ * orchestrator kinds are nested inside BindHostOrch and overlap each other, some
+ * being sub-operations of others. Each kind is recorded at exactly one site,
+ * named beside it.
  */
 enum class HostPhaseKind : uint32_t {
     BindArgs = 0,
@@ -48,8 +50,6 @@ enum class HostPhaseKind : uint32_t {
     BindRuntimeInit,
     BindHostOrch,
     BindGraphUpload,
-    BindRelocate,
-    BindSmH2d,
     BindArenaH2d,
     BindHostViewClose,
     // Recorded by the host orchestrator (host_build_graph/host/orchestrator.cpp).

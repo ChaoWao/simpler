@@ -677,8 +677,7 @@ inline bool host_phase_kind_submits_task(HostPhaseKind kind) {
  * stage is host-only setup with no device counterpart.
  */
 inline bool host_phase_kind_is_device_upload(HostPhaseKind kind) {
-    return kind == HostPhaseKind::BindGraphUpload || kind == HostPhaseKind::BindSmH2d ||
-           kind == HostPhaseKind::BindArenaH2d;
+    return kind == HostPhaseKind::BindGraphUpload || kind == HostPhaseKind::BindArenaH2d;
 }
 
 /**
@@ -712,10 +711,6 @@ inline const char *host_phase_kind_name(HostPhaseKind kind) {
         return "host_orch";
     case HostPhaseKind::BindGraphUpload:
         return "graph_upload";
-    case HostPhaseKind::BindRelocate:
-        return "relocate";
-    case HostPhaseKind::BindSmH2d:
-        return "sm_h2d";
     case HostPhaseKind::BindArenaH2d:
         return "arena_h2d";
     case HostPhaseKind::BindHostViewClose:

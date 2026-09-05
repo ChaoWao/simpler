@@ -244,16 +244,28 @@ record_bind_phase(HostPhaseKind kind, const BindPhaseMark &mark, const char *att
     auto since = [](uint64_t current, uint64_t mark) {
         return current >= mark ? current - mark : 0;
     };
+    // Counters first, caller attributes after. The buffer is the span attribute
+    // field's own width, so an overlong segment loses its tail: a caller's
+    // quantity is recoverable from the artifact's `detail` or the run's own
+    // sizing, while the counters are this record's only copy and phase_time_split
+    // has nothing to fall back on.
     char with_counters[kBindAttrsCapacity];
-    snprintf(
+    const int formatted = snprintf(
         with_counters, sizeof(with_counters),
-        "%s%sminflt=%" PRIu64 " tminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64 " cpu_ns=%" PRIu64
-        " rec_cpu_ns=%" PRIu64,
-        attrs, *attrs == '\0' ? "" : " ", since(now.minflt, mark.counters.minflt),
-        since(now.thread_minflt, mark.counters.thread_minflt), since(now.nivcsw, mark.counters.nivcsw),
-        since(now.nvcsw, mark.counters.nvcsw), since(now.cpu_ns, mark.counters.cpu_ns),
-        since(now.recorder_cpu_ns, mark.counters.recorder_cpu_ns)
+        "minflt=%" PRIu64 " tminflt=%" PRIu64 " nivcsw=%" PRIu64 " nvcsw=%" PRIu64 " cpu_ns=%" PRIu64
+        " rec_cpu_ns=%" PRIu64 "%s%s",
+        since(now.minflt, mark.counters.minflt), since(now.thread_minflt, mark.counters.thread_minflt),
+        since(now.nivcsw, mark.counters.nivcsw), since(now.nvcsw, mark.counters.nvcsw),
+        since(now.cpu_ns, mark.counters.cpu_ns), since(now.recorder_cpu_ns, mark.counters.recorder_cpu_ns),
+        *attrs == '\0' ? "" : " ", attrs
     );
+    // Mark the cut here, because nothing downstream can: this buffer is exactly
+    // as wide as the span's attribute field, so the value the logger receives
+    // already fits and its own `~` marker never fires. An unmarked truncation
+    // reads as a complete attribute list that is one field short.
+    if (formatted >= static_cast<int>(sizeof(with_counters))) {
+        with_counters[sizeof(with_counters) - 2] = '~';
+    }
     host_phase_record_bind(
         static_cast<uint32_t>(kind), static_cast<uint64_t>(start_ns), with_counters, payload,
         static_cast<uint64_t>(end_ns)
@@ -1305,7 +1317,8 @@ int32_t run_host_orchestration(
     }
     {
         // The widest attribute string a segment formats: eight uint64 fields plus
-        // their labels, which is what sets kBindAttrsCapacity's margin.
+        // their labels. With the counters ahead of it in the recorded string, this
+        // is the tail a truncation eats first.
         char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs),

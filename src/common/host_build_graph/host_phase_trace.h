@@ -14,22 +14,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common/host_span.h"
+
 /**
  * One bind segment's attribute string, for every buffer on the path from the
- * caller that formats it to the store that holds it until flush.
+ * caller that formats it to the span field it ends up in.
  *
- * It is one number rather than a size per buffer because the two ends have to
- * agree: a caller formats its own attributes and then `record_bind_phase`
- * appends this thread's fault and context-switch deltas, and the store copies
- * the result in with `snprintf`, which truncates in silence. Nine separate
- * literals cannot state that relationship, and the widest of them was already
- * larger than the store.
+ * It is one number rather than a size per buffer because the ends have to agree:
+ * a caller formats its own attributes, `record_bind_phase` appends this thread's
+ * fault and context-switch deltas, the store copies the result in with
+ * `snprintf`, and the logger copies it once more into the span's attribute
+ * field — every one of those truncates in silence. Nine separate literals cannot
+ * state that relationship, and the widest of them was already larger than the
+ * store.
  *
- * The margin is deliberate: the widest segment formats about 100 bytes today
- * (`arena_h2d`'s itemized upload plus the counters), so a workload whose counts
- * grow a digit does not start dropping a trailing attribute.
+ * It is the span field's own width, so the value the logger receives always
+ * fits and its own `~` marker never fires. `record_bind_phase` therefore marks
+ * its own truncation: without that, an overlong attribute list would arrive
+ * looking complete and one field short.
  */
-constexpr size_t kBindAttrsCapacity = 256;
+constexpr size_t kBindAttrsCapacity = SIMPLER_HOST_SPAN_ATTRIBUTES_CAPACITY;
 
 /**
  * Timing of this runtime's prepare path: the bind stage's segments and the host

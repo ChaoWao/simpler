@@ -1,6 +1,6 @@
 ---
 name: hbg-bind-phases
-description: Measure host_build_graph's `bind` phases — the host-side stage between "caller data in place" and "device can start" (orchestration, Definition upload, H2D), also called the bind path or control plane — on the dsv4 and qwen decode cases, and compare two branches. Use when the user asks how long bind or the control plane takes, whether a change moved host_orch / graph_upload / sm_h2d / arena_h2d, or to A/B a host-side change. This is the HOST stage with the device run skipped — for on-device latency use `benchmark` or `perf-example-device` instead.
+description: Measure host_build_graph's `bind` phases — the host-side stage between "caller data in place" and "device can start" (orchestration, Definition upload, H2D), also called the bind path or control plane — on the dsv4 and qwen decode cases, and compare two branches. Use when the user asks how long bind or the control plane takes, whether a change moved host_orch / graph_upload / arena_h2d, or to A/B a host-side change. This is the HOST stage with the device run skipped — for on-device latency use `benchmark` or `perf-example-device` instead.
 ---
 
 # Measuring the `host_build_graph` bind phases
@@ -37,7 +37,7 @@ TAIL="--rounds 6 --log-level timing"                                 # per mode
 echo "[stamp] $HEAD_SHA env $ENVS python $CASE $TAIL" >"$LOG"
 task-submit --device auto --device-num "$DEVICES" --timeout "$TIMEOUT" --max-time "$TIMEOUT" \
   --run "env $ENVS python $CASE $TAIL -d \$TASK_DEVICE" >>"$LOG" 2>&1
-grep -c 'bind phase=' "$LOG"          # numbers mode: must be > 0
+grep -c 'name=chip.run.bind\.' "$LOG"   # numbers mode: must be > 0
 ```
 
 `env` prefixes the assignments so they survive coming from a variable, and the
@@ -55,7 +55,7 @@ destroys an earlier log, and its own output looks entirely normal.
 **`--log-level timing` pins a condition rather than enabling anything.**
 `python/simpler/_log.py` puts the `simpler` logger at TIMING on import and
 `Worker` snapshots that one logger for the host log and for every forked chip
-child, so the `bind phase=` records are already on without it. What passing it
+child, so the segment spans are already on without it. What passing it
 buys is the `[stamp]` line: the level is the one measurement condition with no
 record of its own in the log — unlike `torch_backend_autoload` — so a run that
 omits the flag leaves it implicit in whatever that commit's default happens to
@@ -64,7 +64,7 @@ stamp showing it.
 
 **In timeline mode that last check reports 0 on a run that worked.** A diagnostic
 flag makes `CallConfig.output_prefix` non-empty, and a non-empty prefix moves
-every host-log record — `bind phase=` lines and `[STRACE]` spans alike — out of
+every host-log record — every `[STRACE]` span included — out of
 `$LOG` into `outputs/<case>_<ts>/host.<pid>.log`, one file per process. Grep those
 instead, and feed the finisher both (see the timeline command below).
 
@@ -83,7 +83,7 @@ instead, and feed the finisher both (see the timeline command below).
 Neither case needs a `--level`: each driver runs its `Worker` in this process,
 so its chip children write straight to the log the `task-submit --run` command
 is redirected into. (Under the scene-test module runner they did not: it
-captured the child's stdout and the log ended up with zero `bind phase=` lines
+captured the child's stdout and the log ended up with zero segment spans
 while the run still passed.)
 
 ## The two modes
@@ -102,15 +102,15 @@ per-event artifact a directory; `--enable-chip-swimlane` raises
 `NotImplementedError` at level 3.
 
 ```bash
-# numbers — the bind lines are in $LOG, since no diagnostic flag is on
-python -m simpler_setup.tools.hbg_bind_phases "$LOG" --rounds 6
+# numbers — the segment spans are in $LOG, since no diagnostic flag is on
+python -m simpler_setup.tools.hbg_bind_phases "$LOG"
 
 # timeline — only an artifact newer than this run's own marker counts
 RECORDS=$(find outputs -name host_phase_records.jsonl -newer "$MARK")
 echo "$RECORDS"          # must name exactly one file; empty ⇒ this run wrote none,
                          # so stop rather than reading a previous run's artifact
 D=$(dirname "$RECORDS")
-grep -c 'bind phase=' "$D"/host.*.log    # must be > 0; $LOG has none in this mode
+grep -c 'name=chip.run.bind\.' "$D"/host.*.log   # must be > 0; $LOG has none in this mode
 # The clock anchors are split — the invoking process wrote its own to $LOG, each
 # chip child wrote its own under $D — so parse the concatenation, not either half.
 cat "$LOG" "$D"/host.*.log > "$D/bind_timeline.log"
@@ -121,7 +121,7 @@ python -m simpler_setup.tools.strace_timing "$D/bind_timeline.log" \
 
 ## Before reporting a number
 
-- `grep -c 'bind phase='` was `> 0` — in `$LOG` for numbers mode, in
+- `grep -c 'name=chip.run.bind\.'` was `> 0` — in `$LOG` for numbers mode, in
   `$D/host.*.log` for timeline mode — and the table shows a `[stamp]` line.
 - Quote the stamp with the number. A number without the command and commit that
   produced it cannot be compared to anything.

@@ -16,5 +16,6 @@ Invoke via ``python -m simpler_setup.tools.<name>``:
 - ``deps_viewer``           : deps.json -> text or pan/zoom HTML dependency graph
 - ``dump_viewer``           : inspect args dumps
 - ``strace_timing``         : per-stage / per-round timing from [STRACE] log markers
-- ``hbg_bind_phases``       : per-phase host_build_graph bind statistics from `bind phase=` markers
+- ``hbg_bind_phases``       : per-segment host_build_graph bind statistics from the chip.run.bind.* spans
+- ``phase_time_split``      : the same segments split into on-CPU and off-CPU, from per-thread CPU clocks
 """

@@ -4,8 +4,8 @@
 executes anything, so the host-side **`bind` stage** — argument staging,
 orchestration, the Graph Definition, and every H2D copy — is a first-class cost.
 `bind` is the `chip.run.bind` `[STRACE]` span both runtimes emit; only this one
-subdivides it into **phases**, one `bind phase=<p>` line each. This page is what
-those phases are, how to measure them on the two decode networks that exercise
+subdivides it into **segments**, one `chip.run.bind.<segment>` span each. This
+page is what those segments are, how to measure them on the two decode networks that exercise
 them, and the traps that make a measurement wrong rather than merely noisy.
 
 For the marker grammar and the tool's other views, see
@@ -20,8 +20,9 @@ only once the lesson is an invariant its code depends on.
 
 ## What the segments are
 
-`SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` makes the runtime emit one `bind phase=`
-line per segment per bind at `LOG_TIMING`:
+`SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` makes the runtime emit one
+`chip.run.bind.<segment>` `[STRACE]` span per segment per bind, at depth 2 inside
+the `chip.run.bind` span:
 
 | Segment | What it covers |
 | ------- | -------------- |
@@ -32,40 +33,39 @@ line per segment per bind at `LOG_TIMING`:
 | `arena_h2d` | one H2D of the arena's copied zone and the shared-memory image |
 | `host_view_close` | closing per-run tensor-access regions and any optional device mappings; the current bind path installs none (`count=0 bytes=0`) |
 
-The **control plane** is `host_orch + graph_upload + relocate + sm_h2d +
-arena_h2d`: everything between "the caller's data is in place" and "the device
-can start". It is what the < 1 ms target applies to. `args` is excluded because
-it scales with the caller's tensor bytes, not with the graph. `host_view_close`
-stays excluded so current reports remain comparable with older logs, although
-the current bind path has no device mappings to close.
+The **control plane** is `host_orch + graph_upload + arena_h2d`: everything
+between "the caller's data is in place" and "the device can start". It is what
+the < 1 ms target applies to. `args` is excluded because it scales with the
+caller's tensor bytes, not with the graph. `host_view_close` stays excluded so
+current reports remain comparable with older logs, although the current bind path
+has no device mappings to close.
 
-**Two of those five are retired kinds a current run does not emit.** `relocate`
-and `sm_h2d` date from when the shared-memory image was relocated and copied on
+**Two kinds were retired from the set, not merely from the output.** `relocate`
+and `sm_h2d` dated from when the shared-memory image was relocated and copied on
 its own; it now travels inside the single `arena_h2d` copy as that segment's
-`sm=`. `hbg_bind_phases` keeps both in its control-plane set so a log that
-predates the change still totals correctly, and names them under its `total` row
-as absent from every bind. The table above is what a current run emits: ten
-segments, three of them control plane.
+`sm=`. Neither had a recording site for as long as the change has been in, so
+both were removed from `HostPhaseKind` — a log that predates the change still
+carries their lines, but no current tool totals them. The table above is what a
+current run emits: ten segments, three of them control plane.
 
 **The control plane is a sum of costs, not an interval.** Its three segments are
 not adjacent: `static_arena`, `shared_mem` and `gm_heap` run between
 `graph_upload` and `arena_h2d`, so the segments do not form one contiguous
 window. Sum the ones the bind has; do not subtract two timestamps.
 
-**A bind runs its segments in one order and prints them in another**, and the
-two are easy to confuse because only the second is visible in a log.
+**A bind runs its segments in one order and emits them in another.** Execution is
+the sequence `runtime_maker.cpp` calls them in, which each span's `ts` records:
 
-| order | segments |
-| ----- | -------- |
-| **execution** — the sequence `runtime_maker.cpp` calls them in, and what `start_ns` shows | `args`, `arena_build`, `runtime_init`, `host_orch`, `graph_upload`, `static_arena`, `shared_mem`, `gm_heap`, `arena_h2d`, `host_view_close` |
-| **emission** — `HostPhaseKind` order, printed as one burst when the bind ends | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `arena_h2d`, `host_view_close` |
+```text
+args, arena_build, runtime_init, host_orch, graph_upload,
+static_arena, shared_mem, gm_heap, arena_h2d, host_view_close
+```
 
-The execution order is what puts `static_arena`, `shared_mem` and `gm_heap`
-between `graph_upload` and `arena_h2d`, which is why the control plane is a sum
-and not an interval. The emission order is what a line-by-line reader of the log
-sees; `host_view_close` is last in both, and `arena_h2d` second to last, so
-reading `arena_h2d` as the segment that closes a bind shifts every
-`host_view_close` into the following bind.
+That order is what puts `static_arena`, `shared_mem` and `gm_heap` between
+`graph_upload` and `arena_h2d`, which is why the control plane is a sum and not an
+interval. Emission is `HostPhaseKind` order, all of it at the end of the bind —
+which matters to nothing, because each span carries its own `ts` and its own
+`(pid, inv)`. Reading a log by line order is not how the segments are grouped.
 
 ## Prerequisites
 
@@ -102,14 +102,14 @@ of the cases and the cases get edited.** They read 47 / 129 tasks and 40 / 86
 submissions on `4d31f482`; they previously read 1131 tasks and 20 replays for
 DeepSeek-V4, from before its orchestration moved most task submission onto the
 recording threads. Re-read them from a current log rather than trusting this
-table — a bind's `host_orch` and `graph_upload` lines carry both.
+table — a bind's `host_orch` and `graph_upload` spans carry both.
 
 ## Recipe A — stable numbers, many rounds
 
 The ready-made invocation for either case lives in the
 [`hbg-bind-phases`](../../.claude/skills/hbg-bind-phases/SKILL.md) skill;
-`python -m simpler_setup.tools.hbg_bind_phases <log> --rounds N` turns its log into
-per-phase statistics. This section is what the switches mean and why the traps
+`python -m simpler_setup.tools.hbg_bind_phases <log>` turns its log into
+per-segment statistics. This section is what the switches mean and why the traps
 below exist.
 
 Six rounds is the working minimum: this box is shared, and a single bind has been
@@ -123,7 +123,7 @@ Four switches and one flag make the measurement, and each is load-bearing:
 
 | Switch | Why |
 | ------ | --- |
-| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` | emits the `bind phase=` lines at all |
+| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` | emits the segment spans at all |
 | `--log-level timing` | pins the level the report is read at, and is the only way it reaches the `[stamp]` line; TIMING is already the default, so this records a condition rather than enabling one |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | keeps CPU golden imports from loading `torch_npu`; the `torch_backend_autoload` timing record confirms the effective setting and observed module state |
 | `SIMPLER_SKIP_DEVICE_RUN=1` | returns at `simpler_launch_run`, so the host path is measured without a working device run |
@@ -170,7 +170,7 @@ once that case's device execution works.
 
 Both cases now run through standalone `main.py` drivers. Qwen owns its L2
 `Worker` in the invoked process, while dsv4 owns its L3 `Worker`; neither needs
-module-runner `--runtime` / `--level` forwarding to expose `bind phase=` lines.
+module-runner `--runtime` / `--level` forwarding to expose the segment spans.
 
 A 2-rank case emits one bind per rank per round, so six rounds is twelve binds.
 Pass `--rounds` to the parser so it infers the rank count and drops one cold bind
@@ -188,24 +188,21 @@ not report. The log lands in `outputs/hbg_bind_stats_<sha>.log` unless `-o` name
 it:
 
 ```bash
-grep -oE 'bind phase=[a-z0-9_]+ start_ns=[0-9]+ dur_ns=[0-9]+[^[]*' outputs/hbg_bind_stats_<sha>.log
+grep -oE 'name=chip\.run\.bind\.[a-z0-9_]+ ts=[0-9]+ dur=[0-9]+[^[]*' outputs/hbg_bind_stats_<sha>.log
 ```
 
-The character class has to admit digits. `[a-z_]+` matches no segment whose name
-carries one, so it silently drops every `arena_h2d` line — the only H2D
-left, and the one that itemizes the whole upload. On a two-bind log that is 18
-lines where 20 exist, with nothing to say a segment went missing.
+The character class has to admit digits, or it drops every `arena_h2d` — the only
+H2D left, and the one that itemizes the whole upload.
 
-Each line carries `start_ns` (a `CLOCK_MONOTONIC` timestamp) plus the segment's
-own attributes — `tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=`,
-`submissions=` and `spilled=` on `graph_upload`, and `arena_h2d`'s itemized upload.
-Group the
-lines into binds — a bind prints each segment it has once, so a segment name you
-have already seen is the first line of the next bind; do **not** close on
-`arena_h2d`, which is second to last — then sum the control-plane segments
-**within each bind** and take the minimum of those sums. Never sum
-minima taken across binds; that total belongs to no bind and can point the wrong
-way (see below).
+Each span carries `ts` (a `CLOCK_MONOTONIC` timestamp), `dur`, `pid` and `inv`,
+plus the segment's own attributes — the six kernel counters on all of them, then
+`tasks=` and `heap_used=` on `host_orch`, `defs=`, `bytes=`, `submissions=` and
+`spilled=` on `graph_upload`, and `arena_h2d`'s itemized upload. **A bind is one
+`(pid, inv)`**, so grouping needs no inference from order: `inv` is the run epoch
+the enclosing `chip.run.bind` allocated, and two ranks writing one stream cannot
+be confused for each other. Sum the control-plane segments **within each bind**
+and take the minimum of those sums. Never sum minima taken across binds; that
+total belongs to no bind and can point the wrong way (see below).
 
 **`spilled=` should be 0 on every bind but the first.** It counts the Definition
 objects the recorders could not build inside the retained staging, which
@@ -316,7 +313,7 @@ binds, and compare those. A min of sums is not a sum of mins and the two can
 disagree in sign — each segment's minimum comes from whichever bind was quietest
 *for that segment*, so summing per-segment minima produces a total no bind
 achieved. On one dsv4 comparison the sum-of-minima moved −0.30 ms while the
-minimum-of-sums moved +0.16 ms, from the same log. `hbg_phase_stats` reports the
+minimum-of-sums moved +0.16 ms, from the same log. `hbg_bind_phases` reports the
 minimum-of-sums as its `total` row; never assemble a total by hand from the
 per-phase `min` column.
 
@@ -334,7 +331,7 @@ work answers in one run what a duration comparison cannot answer in ten.
 
 ## Recipe B — one round with a swimlane
 
-The summed `bind phase=` lines cannot be placed on a timeline inside
+The summed `host-orch phase=` lines cannot be placed on a timeline inside
 `host_orch`: they are cost shares. The per-event view comes from the runtime's
 per-producer record pool, written to `outputs/<case>_<ts>/host_phase_records.jsonl` —
 one record per orchestrator operation, each with its own interval.
@@ -344,7 +341,7 @@ silently:
 
 1. **`SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1`**, which is what arms the pool.
    `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` does not: it gates the summed
-   `bind phase=` lines alone, so Recipe A's environment collects no records.
+   the segment spans alone, so Recipe A's environment collects no records.
 2. **A diagnostic flag must be on**, because that is what makes
    `CallConfig.output_prefix` non-empty. `--enable-scope-stats` is the cheapest
    choice when only Host phase records are needed. `--enable-chip-swimlane` is
@@ -363,12 +360,12 @@ swimlane for a case that hangs on device is cheaper to take with the variable se
 than to take by waiting out the stall.
 
 **The flag that satisfies condition 2 also moves the log.** A non-empty
-`CallConfig.output_prefix` redirects every host-log record — `bind phase=` lines
+`CallConfig.output_prefix` redirects every host-log record — segment spans
 and `[STRACE]` spans alike — from stderr into `outputs/<case>_<ts>/host.<pid>.log`,
 one file per process ([`python/simpler/worker.py`](../../python/simpler/worker.py)
 sets the directory on the L3 submit path and in the forked chip child;
 [`src/common/log/host_log.cpp`](../../src/common/log/host_log.cpp) opens the file).
-So Recipe A's `grep -c 'bind phase=' "$LOG"` reports **0** for a Recipe B run that
+So Recipe A's `grep -c 'name=chip.run.bind\.' "$LOG"` reports **0** for a Recipe B run that
 worked perfectly, and the finisher must read the prefix's own logs. Measured on a
 2-rank dsv4 run: `$LOG` alone yields `No [STRACE] markers found` and drops every
 phase record, while `$LOG` plus the prefix's logs attaches all 4186 of them.
@@ -418,11 +415,11 @@ signal than any duration on a shared box.
 
 | Trap | Symptom | What to do |
 | ---- | ------- | ---------- |
-| Any diagnostic flag on (so, every Recipe B run) | `$LOG` has zero `bind phase=` lines and no `[STRACE]` markers, run passes | the non-empty `output_prefix` moved the host log to `outputs/<case>_<ts>/host.<pid>.log`; grep and parse those too |
-| A `SceneTestCase` with `device_count > 1` run through the module runner | log has zero `bind phase=` lines, test passes | give the child command `--runtime <rt> --level 3`; a standalone `main.py` case needs nothing |
+| Any diagnostic flag on (so, every Recipe B run) | `$LOG` has no `[STRACE]` markers at all, run passes | the non-empty `output_prefix` moved the host log to `outputs/<case>_<ts>/host.<pid>.log`; grep and parse those too |
+| A `SceneTestCase` with `device_count > 1` run through the module runner | log has zero segment spans, test passes | give the child command `--runtime <rt> --level 3`; a standalone `main.py` case needs nothing |
 | `SIMPLER_SKIP_DEVICE_RUN=0` | run still skips the device, "PASSED" means nothing ran | `unset` the variable |
 | `--rounds 6` with `--enable-scope-stats` | no `outputs/<case>_<ts>/` artifacts, plus a `disabled: --rounds > 1` warning | one round for artifacts, many rounds for numbers |
-| Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | `bind phase=` lines present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
+| Only `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` set for Recipe B | segment spans present, no `host_phase_records.jsonl` | the records are a separate switch: also export `SIMPLER_HBG_HOST_PHASE_RECORDS_ENABLE=1` |
 | Comparing a log with no `[stamp]` first line | the parser says so above the table | re-run it through the recipe; conditions cannot be recovered from memory |
 | Subtracting timestamps for the control plane | ~300 ms instead of ~3 ms | sum the segments; `arena_h2d` is not adjacent |
 | Summing per-segment minima by hand | a total no bind achieved; can invert the sign | read the tool's `total` row — the minimum of the per-bind sums |
@@ -471,8 +468,8 @@ meant to outlive it.
 † The three upload rows are the markers as they read at that commit, before the
 upload was restructured: `graph_upload`'s `bytes=` then also counted the Graph
 submission block, `sm_h2d` was still a copy of its own, and `arena_h2d` was the
-copied zone alone. A run today emits no `sm_h2d`, counts only the Definition
-objects in `graph_upload`, carries no submission block at all, and ships both
+copied zone alone. A run today has no `sm_h2d` kind at all, counts only the
+Definition objects in `graph_upload`, carries no submission block, and ships both
 remaining regions in `arena_h2d` — so the same case reports different figures for
 the same work.
 

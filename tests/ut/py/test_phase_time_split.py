@@ -13,23 +13,33 @@ import pytest
 from simpler_setup.tools import phase_time_split
 
 
-def _marker(phase, dur_ns, cpu_ns, rec_cpu_ns, minflt=0, tminflt=0, nvcsw=0, nivcsw=0):
+def _span(phase, dur_ns, cpu_ns, rec_cpu_ns, *, faults=None, pid=7, inv=1, ts=1000):
+    counters = {"minflt": 0, "tminflt": 0, "nivcsw": 0, "nvcsw": 0, **(faults or {})}
     return (
-        f"[TIMING] host_phase_trace_end: bind phase={phase} start_ns=1000 dur_ns={dur_ns} "
-        f"minflt={minflt} tminflt={tminflt} nivcsw={nivcsw} nvcsw={nvcsw} "
+        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=2 "
+        f"name=chip.run.bind.{phase} ts={ts} dur={dur_ns} "
+        f"minflt={counters['minflt']} tminflt={counters['tminflt']} "
+        f"nivcsw={counters['nivcsw']} nvcsw={counters['nvcsw']} "
         f"cpu_ns={cpu_ns} rec_cpu_ns={rec_cpu_ns}\n"
     )
 
 
 def test_parse_reads_every_counter(tmp_path):
     log = tmp_path / "run.log"
-    log.write_text(_marker("host_orch", 2_000_000, 1_500_000, 8_000_000, minflt=99, tminflt=7, nvcsw=3, nivcsw=1))
+    log.write_text(
+        _span(
+            "host_orch", 2_000_000, 1_500_000, 8_000_000, faults={"minflt": 99, "tminflt": 7, "nvcsw": 3, "nivcsw": 1}
+        )
+    )
 
-    rows = phase_time_split.parse(str(log))
+    rows = phase_time_split.parse([log])
 
     assert len(rows) == 1
     assert rows[0] == {
         "phase": "host_orch",
+        "pid": 7,
+        "inv": 1,
+        "ts": 1000,
         "dur_us": 2000.0,
         "minflt": 99,
         "tminflt": 7,
@@ -40,11 +50,68 @@ def test_parse_reads_every_counter(tmp_path):
     }
 
 
-def test_parse_ignores_lines_without_a_marker(tmp_path):
+def test_parse_ignores_records_that_are_not_bind_segments(tmp_path):
+    """Only a segment of the stage counts: not another span, and not an
+    orchestrator operation one level deeper, which carries none of the counters."""
     log = tmp_path / "run.log"
-    log.write_text("some other TIMING line\n" + _marker("graph_upload", 1000, 1000, 0))
+    log.write_text(
+        "some other TIMING line\n"
+        + "[STRACE] v=1 pid=7 tid=7 inv=1 hid=abc depth=1 name=chip.run.bind ts=1 dur=9\n"
+        + "[STRACE] v=1 pid=7 tid=7 inv=1 hid=abc depth=3 name=chip.run.bind.host_orch.graph_submit ts=2 dur=3\n"
+        + _span("graph_upload", 1000, 1000, 0)
+    )
 
-    assert [row["phase"] for row in phase_time_split.parse(str(log))] == ["graph_upload"]
+    assert [row["phase"] for row in phase_time_split.parse([log])] == ["graph_upload"]
+
+
+def test_a_truncated_cold_bind_does_not_promote_its_successor(tmp_path, monkeypatch, capsys):
+    """Warm-up is decided before any row is dropped.
+
+    A bind whose attribute string was cut is still a bind that ran. Excluding it
+    from the statistics first would make the *next* bind the earliest one left,
+    and that bind's numbers — genuinely warm — would be reported as the cold row.
+    """
+    log = tmp_path / "run.log"
+    log.write_text(
+        # The rank's first bind, truncated: no rec_cpu_ns.
+        "[STRACE] v=1 pid=7 tid=7 inv=1 hid=abc depth=2 name=chip.run.bind.host_orch ts=1000 dur=9000000 "
+        "minflt=1 tminflt=1 nivcsw=0 nvcsw=0 cpu_ns=9000000 rec_cpu~\n"
+        + _span("host_orch", 2_000_000, 1_500_000, 0, pid=7, inv=2, ts=20_000)
+        + _span("host_orch", 2_100_000, 1_600_000, 0, pid=7, inv=3, ts=30_000)
+    )
+    monkeypatch.setattr("sys.argv", ["phase_time_split", str(log)])
+
+    phase_time_split.main()
+
+    rows = [line for line in capsys.readouterr().out.splitlines() if line.startswith("host_orch")]
+    # The cold bind is the truncated one, which no row describes, so the two
+    # intact binds are both warm rather than one of them standing in for it.
+    assert len(rows) == 1
+    assert "warm" in rows[0]
+    assert "2100.0" not in rows[0]  # median of 2000 and 2100, not one of them alone
+
+
+def test_a_truncated_attribute_string_is_reported_rather_than_computed_over(tmp_path, monkeypatch, capsys):
+    """The logger caps the attribute field and marks a cut with `~`.
+
+    A counter it cut is absent, not zero, so the row is excluded and counted — a
+    figure derived from a missing counter would be a guess, and treating the
+    absence as 0 would read as a segment that took no CPU.
+    """
+    log = tmp_path / "run.log"
+    log.write_text(
+        _span("host_orch", 2_000_000, 1_500_000, 0, pid=7, inv=1)
+        + _span("host_orch", 2_000_000, 1_400_000, 0, pid=7, inv=2)
+        + "[STRACE] v=1 pid=7 tid=7 inv=3 hid=abc depth=2 name=chip.run.bind.host_orch ts=9000 dur=2000000 "
+        "minflt=1 tminflt=1 nivcsw=0 nvcsw=0 cpu_ns=1500000 rec_cpu~\n"
+    )
+    monkeypatch.setattr("sys.argv", ["phase_time_split", str(log)])
+
+    phase_time_split.main()
+
+    output = capsys.readouterr().out
+    assert "1 span(s) had a truncated attribute string" in output
+    assert len([line for line in output.splitlines() if "host_orch" in line]) == 2
 
 
 def test_off_cpu_is_the_wall_the_bind_thread_did_not_run():
@@ -151,7 +218,10 @@ def test_medians_are_taken_per_bind_not_across_columns():
 def test_a_log_without_the_cpu_counters_is_refused(tmp_path, monkeypatch):
     """Refusing beats printing zeros: a pre-counters log would read as all-on-CPU."""
     log = tmp_path / "run.log"
-    log.write_text("[TIMING] bind phase=host_orch start_ns=1000 dur_ns=2000 minflt=1 nivcsw=0 nvcsw=0\n")
+    log.write_text(
+        "[STRACE] v=1 pid=7 tid=7 inv=1 hid=abc depth=2 name=chip.run.bind.host_orch ts=1000 dur=2000 "
+        "minflt=1 nivcsw=0 nvcsw=0\n"
+    )
     monkeypatch.setattr("sys.argv", ["phase_time_split", str(log)])
 
     with pytest.raises(SystemExit) as exit_info:
@@ -174,10 +244,11 @@ def test_a_log_with_no_markers_at_all_is_refused(tmp_path, monkeypatch):
 def test_cold_and_warm_are_reported_separately(tmp_path, monkeypatch, capsys):
     log = tmp_path / "run.log"
     log.write_text(
-        _marker("host_orch", 4_000_000, 3_000_000, 0)  # cold, one per rank
-        + _marker("host_orch", 4_000_000, 3_000_000, 0)
-        + _marker("host_orch", 1_000_000, 900_000, 0)
-        + _marker("host_orch", 1_000_000, 900_000, 0)
+        # Two ranks; each rank's earliest bind is its warm-up.
+        _span("host_orch", 4_000_000, 3_000_000, 0, pid=7, inv=1, ts=1_000)
+        + _span("host_orch", 4_000_000, 3_000_000, 0, pid=8, inv=1, ts=1_100)
+        + _span("host_orch", 1_000_000, 900_000, 0, pid=7, inv=2, ts=9_000)
+        + _span("host_orch", 1_000_000, 900_000, 0, pid=8, inv=2, ts=9_100)
     )
     monkeypatch.setattr("sys.argv", ["phase_time_split", str(log)])
 

@@ -14,8 +14,8 @@ no repo checkout required.
 - **[sched_overhead_analysis](#sched_overhead_analysis)** — scheduler overhead / Tail OH breakdown
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
 - **[strace_timing](#strace_timing)** — per-stage `chip.run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
-- **[hbg_bind_phases](#hbg_bind_phases)** — `host_build_graph` `bind`-stage phases from `bind phase=` log markers → per-phase min/median/max plus the control-plane total
-- **[phase_time_split](#phase_time_split)** — the same `bind phase=` markers split into on-CPU and off-CPU per phase, from per-thread CPU clocks, with cold and warm binds reported separately
+- **[hbg_bind_phases](#hbg_bind_phases)** — `host_build_graph` `bind`-stage segments from the `chip.run.bind.*` spans → per-segment min/median/max plus the control-plane total
+- **[phase_time_split](#phase_time_split)** — the same segment spans split into on-CPU and off-CPU per segment, from per-thread CPU clocks, with cold and warm binds reported separately
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
 
@@ -420,41 +420,35 @@ The swimlane is the only view that renders `ext.` spans: every table and
 
 ## hbg_bind_phases
 
-Per-phase statistics for `host_build_graph`'s **`bind` stage** from the
-`bind phase=` markers a run emits under `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1` at
-`LOG_TIMING`. One line per segment per bind pass; see
+Per-segment statistics for `host_build_graph`'s **`bind` stage** from the
+`chip.run.bind.<segment>` `[STRACE]` spans a run emits under
+`SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1`. One span per segment per bind; see
 [docs/dfx/hbg-bind-phases.md](../../docs/dfx/hbg-bind-phases.md) for
 what the segments are, the invocation that produces them, and how to compare two
 runs.
 
 ```bash
-# min / median / max per phase over the warm passes, plus the control-plane total
-python -m simpler_setup.tools.hbg_bind_phases path/to/log --rounds 6
+# min / median / max per segment over the warm binds, plus the control-plane total
+python -m simpler_setup.tools.hbg_bind_phases path/to/log
+python -m simpler_setup.tools.hbg_bind_phases outputs/<case>_<ts>/    # a directory of host.*.log
 ```
 
-Passing `--rounds` is what lets it infer the rank count, so it drops one cold
-warm-up pass **per rank** rather than one in total; `--ranks` sets that directly
-and `--keep-first` keeps the cold passes. A run whose every pass is a rank's
-warm-up — `--rounds 1` — is refused rather than reported, since the one number it
-could print is the cold one. Three grouping rules are encoded rather than left to
-the caller, because each silently produces a wrong number: a repeated segment
-name opens the next pass (the segments are not contiguous in time, so timestamp
-order does not group them, and no single segment reliably closes a pass — reading
-`arena_h2d` as the closing one shifted every `host_view_close` by a pass), the
-control-plane total is summed **within** a pass before any minimum is taken, and
-the first pass of each rank is warm-up.
+**A bind is one `(pid, inv)`.** A span carries both, so grouping needs no rank
+count, no round count and no inference from emission order — concurrent ranks
+writing one stream separate by pid, and each bind by the run epoch its
+`chip.run.bind` allocated. `--keep-first` keeps the cold binds; by default the
+earliest bind of each pid is dropped as warm-up, which is exactly one per rank.
+A run whose every bind is a rank's warm-up is refused rather than reported, since
+the one number it could print is the cold one.
 
-Grouping on the repeat assumes each pass prints its segments as an uninterrupted
-burst. That holds on every log measured so far, but nothing enforces it: ranks
-share one stream and the line prefix carries no pid, and the thread id it does
-carry is identical across ranks. A burst split by another rank's is therefore
-reported as a pass whose segment set differs from its neighbours', which the
-non-uniform-segment warning names rather than passing off as a number.
+Two rules stay encoded rather than left to the caller, because each silently
+produces a wrong number: the control-plane total is summed **within** a bind
+before any minimum is taken, and the first bind of each rank is warm-up.
 
-A run whose control plane is missing a phase entirely — a change can retire one —
-is still totalled, over the phases it has, with the absent ones named. A phase
-missing from only *some* passes is a truncated log instead, and those passes are
-excluded with a warning. If the log's first line is a `[stamp]` line naming the
+A run whose control plane is missing a segment entirely — a change can retire one
+— is still totalled, over the segments it has, with the absent ones named. A
+segment missing from only *some* binds means those binds lost records, and they
+are excluded with a warning. If the log's first line is a `[stamp]` line naming the
 command and commit, it is echoed above the table. Distinct
 `torch_backend_autoload` records are printed alongside it. Missing stamps or
 autoload records produce an explicit comparison warning.
@@ -463,7 +457,7 @@ autoload records produce an explicit comparison warning.
 
 ## phase_time_split
 
-The same `bind phase=` markers, read for a different question: was a segment
+The same segment spans, read for a different question: was a segment
 **running** or **waiting**? A duration cannot say, and the answer decides where to
 look next — an on-CPU segment is split further by its fault count and by the
 syscalls inside its window, while an off-CPU one is a wait, and `nvcsw` versus
