@@ -23,8 +23,7 @@
  * Implementation: src/platform/shared/aicpu/platform_regs.cpp (shared across all platforms)
  */
 
-#ifndef PLATFORM_AICPU_PLATFORM_REGS_H_
-#define PLATFORM_AICPU_PLATFORM_REGS_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -173,6 +172,19 @@ int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline);
  */
 int32_t platform_deinit_aicore_regs(uint64_t reg_addr);
 
+struct AicoreTeardownControl;
+
+struct AicoreExitTarget {
+    uint64_t reg_addr;
+    AicoreTeardownControl *teardown;
+};
+
+// One caller owns the group after dispatch has stopped. Signal every core,
+// collect every ACK, close every responsive window, then release the workers.
+// Unacknowledged cores retain a closed return gate for host recovery.
+// Returns 0 on success, -1 on timeout or invalid targets; uses one deadline.
+int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline);
+
 /**
  * Variant-specific AICore deinit wait timeout, in ticks of get_sys_cnt_aicpu.
  *
@@ -199,5 +211,3 @@ uint64_t inner_get_deinit_timeout_ticks();
  * @return Physical core count (exclusive upper bound)
  */
 uint32_t platform_get_physical_cores_count();
-
-#endif  // PLATFORM_AICPU_PLATFORM_REGS_H_

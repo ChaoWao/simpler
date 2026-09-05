@@ -17,8 +17,7 @@
  * running in host-based simulation environment.
  */
 
-#ifndef PLATFORM_A2A3SIM_AICORE_INNER_KERNEL_H_
-#define PLATFORM_A2A3SIM_AICORE_INNER_KERNEL_H_
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -26,6 +25,7 @@
 
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
+#include "aicore_teardown.h"
 
 // AICore function attribute - no-op in simulation
 #ifndef __aicore__
@@ -113,6 +113,12 @@ typedef int mem_dsb_t;
 // Equivalent to dmb ish (aarch64) / mfence (x86).
 #define OUT_OF_ORDER_FULL_BARRIER() __sync_synchronize()
 
+inline void wait_for_post_close_release(uint32_t *release) {
+    while (__atomic_load_n(release, __ATOMIC_ACQUIRE) != AICORE_POST_CLOSE_RELEASE) {
+        SPIN_WAIT_HINT();
+    }
+}
+
 // =============================================================================
 // System Counter Simulation
 // =============================================================================
@@ -187,5 +193,3 @@ inline void write_reg(RegId reg, uint64_t value) {
  * @return Physical core ID for the current simulated core
  */
 inline uint32_t get_physical_core_id() { return sim_get_physical_core_id(); }
-
-#endif  // PLATFORM_A2A3SIM_AICORE_INNER_KERNEL_H_

@@ -34,6 +34,8 @@
 #include "aicpu/platform_regs.h"
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
+#include "common/memory_barrier.h"
+#include "aicore_teardown.h"
 
 static uint64_t g_platform_regs = 0;
 static uint64_t g_platform_pmu_reg_addrs = 0;
@@ -80,12 +82,51 @@ int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
     // Close fast path control
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
+    // Complete the posted MMIO close before a caller publishes a Normal-memory
+    // return gate. A release store alone is not a device-write completion fence.
+    (void)read_reg(reg_addr, RegId::FAST_PATH_ENABLE);
+    rmb();
     return 0;
 }
 
 int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
     platform_signal_aicore_exit(reg_addr);
     return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline());
+}
+
+int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline) {
+    if (count > PLATFORM_MAX_CORES || (count != 0 && targets == nullptr)) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        if (targets[i].reg_addr == 0 || targets[i].teardown == nullptr) return -1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        platform_signal_aicore_exit(targets[i].reg_addr);
+    }
+    wmb();
+
+    bool acknowledged[PLATFORM_MAX_CORES] = {};
+    int32_t rc = 0;
+    for (size_t i = 0; i < count; ++i) {
+        while (read_reg(targets[i].reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
+            if (get_sys_cnt_aicpu() > deadline) {
+                rc = -1;
+                break;
+            }
+        }
+        acknowledged[i] = read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (acknowledged[i]) {
+            acknowledged[i] = platform_finish_aicore_exit(targets[i].reg_addr, deadline) == 0;
+            if (!acknowledged[i]) rc = -1;
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (acknowledged[i]) {
+            __atomic_store_n(&targets[i].teardown->post_close_release, AICORE_POST_CLOSE_RELEASE, __ATOMIC_RELEASE);
+        }
+    }
+    return rc;
 }
 
 uint32_t platform_get_physical_cores_count() {

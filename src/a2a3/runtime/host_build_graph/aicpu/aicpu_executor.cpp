@@ -352,16 +352,12 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
     }
 
-    // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
-    // platform_deinit_aicore_regs is idempotent.
-    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
-    if (shutdown_rc != 0 && run_rc == 0) {
-        run_rc = shutdown_rc;
-    }
-
     LOG_INFO("Thread %d: Completed", thread_idx);
 
     completion_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
+        // No participant can still dispatch when the group begins retirement.
+        const int32_t shutdown_rc = sched_ctx_.shutdown(runtime);
+        if (shutdown_rc != 0 && run_rc == 0) run_rc = shutdown_rc;
         aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.

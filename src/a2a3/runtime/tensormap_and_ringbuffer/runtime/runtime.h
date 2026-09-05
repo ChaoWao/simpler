@@ -26,8 +26,7 @@
  * signals AICore via DATA_MAIN_BASE.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
+#pragma once
 
 #include <stddef.h>  // for offsetof
 #include <stdbool.h>
@@ -45,6 +44,7 @@
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
 #include "task_args.h"
+#include "aicore_teardown.h"
 #include "tensormap_and_ringbuffer/entry_args.h"  // EntryArgsStorage
 
 // =============================================================================
@@ -103,7 +103,12 @@ struct Handshake {
     volatile uint64_t task;         // DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
     volatile uint32_t physical_core_id;  // Physical core ID (reported by AICore with aicore_done)
+    AicoreTeardownControl teardown;      // Separate from the AICore's cached report line
 } __attribute__((aligned(64)));
+
+static_assert(offsetof(Handshake, teardown) == 64);
+static_assert(sizeof(Handshake) == 128);
+static_assert(std::is_standard_layout_v<Handshake> && std::is_trivially_copyable_v<Handshake>);
 
 enum class TensorReleaseKind {
     Free,
@@ -355,5 +360,3 @@ static_assert(
 // object). Defined per-runtime so the shared device_runner_helpers.cpp copy
 // path stays runtime-agnostic.
 size_t runtime_device_copy_size(const Runtime &rt);
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
