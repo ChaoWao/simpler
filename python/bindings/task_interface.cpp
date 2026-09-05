@@ -62,6 +62,7 @@
 #include "chip_worker.h"
 #include "common/host_span_names.h"
 #include "common/host_span_scope.h"
+#include "common/log_clock.h"
 #include "host_log.h"
 #include "data_type.h"
 #include "worker_chip_orch_comm.h"
@@ -1711,6 +1712,14 @@ NB_MODULE(_task_interface, m) {
             return simpler::host_trace::enabled();
         },
         "Return whether this extension currently emits TIMING-level host spans."
+    );
+    m.def(
+        "_monotonic_now_ns",
+        [] {
+            return simpler::log::monotonic_now_ns();
+        },
+        "Read the clock every host record is stamped with, so a Python-timed span shares one clock with the C++ "
+        "spans by construction rather than by both platforms happening to map their monotonic clock the same way."
     );
     m.def(
         "_host_log_directory",

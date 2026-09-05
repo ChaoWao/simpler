@@ -16,10 +16,11 @@ shared state; each host module contains its own logger implementation and binds
 to that state immediately after it is loaded. Onboard `simpler_init` also maps
 the threshold onto CANN's coarser dlog ladder.
 
-`Worker` and the `task_interface` submodule resolve on first attribute access
-rather than at import time: both pull in the `_task_interface` extension, so
-eager imports here would make `import simpler` fail wherever that extension is
-missing or stale, including for callers that only want the logging helpers.
+`Worker` and the `task_interface` and `trace` submodules resolve on first
+attribute access rather than at import time: they pull in the `_task_interface`
+extension, so eager imports here would make `import simpler` fail wherever that
+extension is missing or stale, including for callers that only want the logging
+helpers.
 """
 
 import importlib
@@ -43,11 +44,12 @@ __all__ = [
     "get_logger",
     "comm_endpoints",
     "task_interface",
+    "trace",
 ]
 
 # name -> (module, attribute). Resolved by __getattr__ on first access.
 _LAZY_ATTRS = {"Worker": (f"{__name__}.worker", "Worker")}
-_LAZY_SUBMODULES = ("comm_endpoints", "task_interface")
+_LAZY_SUBMODULES = ("comm_endpoints", "task_interface", "trace")
 
 
 def __getattr__(name: str) -> Any:

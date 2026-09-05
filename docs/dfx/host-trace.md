@@ -291,6 +291,82 @@ above under the `ext.` heading near the end of the file. A repository adapting t
 this namespace can read those tests as the specification and mirror them against
 its own emitter.
 
+## Emitting your own spans with `simpler.trace`
+
+A caller puts its own phases on this timeline through `simpler.trace`
+([`python/simpler/trace.py`](../../python/simpler/trace.py)), rather than
+formatting records itself. One producer, one span, one gate is the whole surface:
+
+```python
+from simpler import trace
+
+with trace.span("my_phase", batch=16, layer=3):
+    ...
+
+@trace.span("my_func")
+def f(): ...
+
+with trace.span("checkpoint", token=17):   # a marker is a span of no work
+    pass
+
+if trace.enabled():                        # only then build costly attributes
+    with trace.span("expensive", **compute_attrs()):
+        ...
+```
+
+A library names itself, so its spans attribute to it wherever it is imported; a
+caller that names nothing writes under `ext.app.`:
+
+```python
+tracer = trace.producer("pypto")          # -> ext.pypto.<span>
+with tracer.span("decode_layer", layer=3):
+    ...
+```
+
+There is deliberately **no separate instant/marker call**. A zero-duration event
+would be a second event concept, and `dur=0` is already what our own emitting
+side writes for a phase that was never stamped — `c_api_shared.cpp` skips a device
+phase whose duration reads back 0 — so a public API producing it would put two
+meanings on one value. A marker is a span whose body does no work, which records a
+real short interval instead.
+
+Three properties hold by construction, which is the reason to call this rather
+than the seven-argument `_emit_host_span` underneath it:
+
+| Property | How |
+| -------- | --- |
+| **One clock** | the wrapper reads `_monotonic_now_ns`, the extension's binding for the `steady_clock` every host record's prefix and every C++ span is stamped with. A caller never handles a timestamp, so this does not rest on Python's `time.monotonic` mapping to the same clock as C++'s on the platform in hand. |
+| **One namespace** | every name is prefixed `ext.<producer>.`, so `trace.span("node.dispatch")` emits `ext.pypto.node.dispatch` — one of our level words is only ever a leaf. Nothing validates the name against them, because nothing a caller passes can reach them. |
+| **One gate** | `trace.enabled()` is `unified_log_host_span_enabled()`, the same runtime query the C++ emit sites read, and it is false in a build with host spans compiled out. Every producer asks that one query. |
+
+`inv`, `hid` and `depth` are our correlation keys and stay off this surface — a
+caller has no value for them and no external span reaches the views that read
+them, so each record carries 0. Correlation goes in an attribute like any other
+field. A producer name is one dot-free word (attribution splits on dots); a span
+name may be dotted to nest, and both are percent-encoded by the record writer, so
+neither can inject the record grammar. The default producer is the constant `app`
+rather than a name derived from the running program: every such derivation is a
+heuristic with its own special cases, and one `trace.producer(...)` call names an
+application better than any of them.
+
+Cost of one `with trace.span(name, k=v, k2=v2)` attempt, measured on this repo's
+aarch64 dev box (median of 7 batches, 200k iterations each): **995 ns with the
+gate closed** against **8998 ns emitting**. The closed-gate figure is dominated by
+Python itself — an empty pure-Python `with` block costs 272 ns there and the gate
+query 166 ns — so a genuinely hot loop should ask `trace.enabled()` once rather
+than open a span per iteration. That is what the query is public for.
+
+**This API does not make the record format a supported external contract.** The
+`v=1` field exists for that decision; making it is separate from offering the
+emitter.
+
+**It is also not a side channel for callers.** `[STRACE]` is the one timeline
+format (see *Reading the markers* below), and a caller's interval is a span for
+the same reason a runtime's own bind segment is. What the reserved namespace
+separates is *whose* span it is, not which format it uses — a producer outside
+this repository writes the same records, on the same clock, through the same
+gate, and they render on the same lanes.
+
 ## Reading the markers — `strace_timing.py`
 
 ```bash
@@ -322,7 +398,7 @@ the one timeline format: an interval a reader can place on a timeline is a span,
 whoever measured it and however it was captured. `chip.run.bind.args` and
 `chip.run.bind.prebuilt` come from the tensormap runtime rather than the
 platform; the device sub-phases are the TMR AICPU's own breakdown, read back from
-a cycle buffer and re-emitted as spans; and `ext.` (below) admits producers
+a cycle buffer and re-emitted as spans; and `ext.` (above) admits producers
 outside this repository entirely. So the grammar was never a fixed per-run-stage
 set, and a stage's segments do not need a second format.
 
