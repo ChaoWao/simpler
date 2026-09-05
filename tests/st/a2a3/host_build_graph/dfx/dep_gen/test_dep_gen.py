@@ -21,7 +21,6 @@ case re-uses the orchestration purely to keep coverage on the capture pipeline.
 """
 
 import json
-import time
 
 import torch
 from simpler.task_interface import ArgDirection as D
@@ -34,16 +33,26 @@ from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 PREDICATED_KERNELS = "../../predicated_dispatch/kernels"
 
 
-def _load_deps(test_cls_name, case_name, run_marker):
-    """Locate this invocation's output dir and parse its deps.json."""
+def _output_dirs(test_cls_name, case_name):
+    """Every output dir this case has ever produced, newest run included."""
     safe_label = _sanitize_for_filename(f"{test_cls_name}_{case_name}")
-    outputs = _outputs_dir()
-    matches = [p for p in outputs.glob(f"{safe_label}_*") if p.stat().st_mtime >= run_marker]
-    assert matches, (
+    return set(_outputs_dir().glob(f"{safe_label}_*"))
+
+
+def _load_deps(test_cls_name, case_name, dirs_before_run):
+    """Parse the deps.json under the output dir this invocation created.
+
+    Identified by set difference against a pre-run snapshot rather than by
+    timestamp: an mtime comparison floors to whole seconds, so a leftover dir
+    from an earlier run in the same second also matches, and a run that emitted
+    nothing would silently validate that stale deps.json.
+    """
+    fresh = _output_dirs(test_cls_name, case_name) - dirs_before_run
+    assert fresh, (
         f"--enable-dep-gen is on and case {case_name!r} ran, but no output dir "
         f"was created this run — capture pipeline regression"
     )
-    out_dir = max(matches, key=lambda p: p.stat().st_mtime)
+    out_dir = max(fresh, key=lambda p: p.stat().st_mtime)
     deps_path = out_dir / "deps.json"
     assert deps_path.exists(), (
         f"--enable-dep-gen is on and {out_dir} exists, but deps.json was not produced — host-direct capture regression"
@@ -141,18 +150,22 @@ class TestDepGenHostBuildGraph(SceneTestCase):
     def test_run(self, st_platform, st_worker, request):
         # Run the standard scene-test loop, then assert the captured graph for
         # the cases that ran on this platform. Without the override the pytest
-        # path would pass while capture produced nothing. Marker taken before
-        # the run so _post_validate binds to this invocation's output dir.
-        run_marker = int(time.time())  # floor to whole seconds: safe on a coarse-mtime fs
+        # path would pass while capture produced nothing. The snapshot is taken
+        # before the run so _post_validate binds to a directory this invocation
+        # created rather than a leftover from an earlier one.
+        dirs_before_run = {
+            case["name"]: _output_dirs("TestDepGenHostBuildGraph", case["name"])
+            for case in self._matching_cases(st_platform, request)
+        }
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
         for case in self._matching_cases(st_platform, request):
-            self._post_validate(case, run_marker)
+            self._post_validate(case, dirs_before_run[case["name"]])
 
-    def _post_validate(self, case, run_marker):
+    def _post_validate(self, case, dirs_before_run):
         """Assert deps.json holds the 6 edges of example_orchestration.cpp."""
-        deps = _load_deps("TestDepGenHostBuildGraph", case["name"], run_marker)
+        deps = _load_deps("TestDepGenHostBuildGraph", case["name"], dirs_before_run)
 
         tasks = deps.get("tasks", [])
         assert len(tasks) == 5, f"expected 5 submitted tasks, got {len(tasks)}: {[t.get('task_id') for t in tasks]}"
@@ -257,15 +270,18 @@ class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
         args.y[0] = 999.0
 
     def test_run(self, st_platform, st_worker, request):
-        run_marker = int(time.time())
+        dirs_before_run = {
+            case["name"]: _output_dirs("TestDepGenHostBuildGraphEdgeSources", case["name"])
+            for case in self._matching_cases(st_platform, request)
+        }
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
         for case in self._matching_cases(st_platform, request):
-            self._post_validate(case, run_marker)
+            self._post_validate(case, dirs_before_run[case["name"]])
 
-    def _post_validate(self, case, run_marker):
-        deps = _load_deps("TestDepGenHostBuildGraphEdgeSources", case["name"], run_marker)
+    def _post_validate(self, case, dirs_before_run):
+        deps = _load_deps("TestDepGenHostBuildGraphEdgeSources", case["name"], dirs_before_run)
 
         tasks = deps.get("tasks", [])
         assert len(tasks) == 4, f"expected 4 submitted tasks, got {len(tasks)}: {[t.get('task_id') for t in tasks]}"
