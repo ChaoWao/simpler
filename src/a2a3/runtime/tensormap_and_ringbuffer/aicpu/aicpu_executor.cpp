@@ -869,21 +869,14 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
     }
 
-    // Shutdown AICore even when sched_ctx_.completed_ was already true:
-    // platform_deinit_aicore_regs is idempotent, and orchestrator threads have
-    // core_trackers_[thread_idx].core_num() == 0 so they skip the loop harmlessly.
-    // A fatal run is the exception — shutdown() returns immediately there,
-    // because emergency_shutdown() has already quiesced every core.
-    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
-    if (shutdown_rc != 0 && run_rc == 0) {
-        run_rc = shutdown_rc;
-    }
-
     LOG_INFO("Thread %d: Completed", thread_idx);
 
     // Check if this is the last thread to finish
     int32_t prev_finished = finished_count_.fetch_add(1, std::memory_order_acq_rel);
     if (prev_finished + 1 == aicpu_thread_num_) {
+        // No participant can still dispatch when the group begins retirement.
+        const int32_t shutdown_rc = sched_ctx_.shutdown(runtime);
+        if (shutdown_rc != 0 && run_rc == 0) run_rc = shutdown_rc;
         aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         finished_.store(true, std::memory_order_release);
         // Destroy the runtime context. sm_handle / rt are recreated every run so we

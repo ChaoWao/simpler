@@ -37,6 +37,7 @@
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "task_args.h"
+#include "aicore_teardown.h"
 #include "host_build_graph/entry_args.h"  // EntryArgsStorage
 
 // =============================================================================
@@ -69,7 +70,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * 4. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
  * 5. Task Execution: AICore reads the cached DispatchPayload and executes
  * 6. Task Completion: AICore writes FIN to COND; AICPU observes completion
- * 7. Shutdown: AICPU writes the exit signal to DATA_MAIN_BASE; AICore exits
+ * 7. Shutdown (A2/A3): EXIT -> EXITED -> window-close -> GM release -> AICore returns
  *
  * Each AICore instance has its own handshake buffer to enable concurrent
  * task execution across multiple cores.
@@ -96,7 +97,12 @@ struct Handshake {
     volatile uint64_t task;         // DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
     volatile uint32_t physical_core_id;  // Physical core ID (reported by AICore with aicore_done)
+    AicoreTeardownControl teardown;      // A2/A3 post-close release; unused on A5
 } __attribute__((aligned(64)));
+
+static_assert(offsetof(Handshake, teardown) == 64);
+static_assert(sizeof(Handshake) == 128);
+static_assert(std::is_standard_layout_v<Handshake> && std::is_trivially_copyable_v<Handshake>);
 
 /**
  * simpler::hbg::Tensor pair for tracking host-device memory mappings.

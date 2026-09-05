@@ -8,8 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#ifndef SCHEDULER_CONTEXT_H
-#define SCHEDULER_CONTEXT_H
+#pragma once
 
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/platform_regs.h"
@@ -103,10 +102,8 @@ public:
     // Main scheduler thread entry: poll completion + dispatch ready tasks.
     int32_t resolve_and_dispatch(Runtime *runtime, int32_t thread_idx);
 
-    // Shutdown AICore registers for this thread's assigned cores.
-    // Also runs PMU finalize (SIMPLER_DFX) before deinit when enabled.
-    // Orchestrator threads (core_trackers_[thread_idx].core_num() == 0) are a no-op.
-    int32_t shutdown(int32_t thread_idx);
+    // Retire all cores after every AICPU participant has stopped dispatching.
+    int32_t shutdown(Runtime *runtime);
 
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
@@ -180,6 +177,7 @@ private:
     std::atomic<bool> orchestrator_done_{false};
     std::atomic<bool> completed_{false};
     std::atomic<bool> fatal_shutdown_started_{false};
+    std::atomic<bool> retirement_started_{false};
     uint64_t *func_id_to_addr_{nullptr};
 
     // --- Thread/core configuration ---
@@ -225,6 +223,7 @@ private:
     // exit to every handshake'd core. Idempotent.
     bool begin_emergency_shutdown();
     void signal_emergency_shutdown(Runtime *runtime);
+    int32_t retire_cores(Runtime *runtime);
     void emergency_shutdown(Runtime *runtime);
 
     // =========================================================================
@@ -552,5 +551,3 @@ private:
         return func_id_to_addr_[func_id];
     }
 };
-
-#endif  // SCHEDULER_CONTEXT_H

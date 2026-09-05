@@ -526,36 +526,39 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, int32_t cur
 #endif
 
 // =============================================================================
-// Shutdown: deinit AICore regs for this thread's cores (and PMU finalize if enabled).
-// Orchestrator threads have core_trackers_[thread_idx].core_num() == 0 -> no-op.
-// platform_deinit_aicore_regs is idempotent; safe to call after early completion.
+// Shutdown: one group-wide retirement after the AICPU thread rendezvous.
+// Emergency shutdown owns the same handoff once; normal finalization must not
+// touch registers of workers it has already released.
 // =============================================================================
-int32_t SchedulerContext::shutdown(int32_t thread_idx) {
-    const int32_t *cores = core_trackers_[thread_idx].core_ids();
-    int32_t core_num = core_trackers_[thread_idx].core_num();
-    if (core_num == 0) return 0;
+int32_t SchedulerContext::shutdown(Runtime *runtime) {
+    if (retirement_started_.load(std::memory_order_acquire)) return 0;
 
 #if SIMPLER_DFX
     if (is_pmu_enabled()) {
-        pmu_aicpu_finalize(cores, core_num);
+        int32_t cores[RUNTIME_MAX_WORKER];
+        int32_t count = 0;
+        for (int32_t i = 0; i < cores_total_num_; ++i) {
+            if (core_exec_states_[i].reg_addr != 0) cores[count++] = i;
+        }
+        if (count != 0) pmu_aicpu_finalize(cores, count);
     }
 #endif
+    return retire_cores(runtime);
+}
 
-    LOG_INFO("Thread %d: Shutting down %d cores", thread_idx, core_num);
-    int32_t rc = 0;
-    for (int32_t i = 0; i < core_num; i++) {
-        int32_t core_id = cores[i];
-        uint64_t reg_addr = core_exec_states_[core_id].reg_addr;
-        if (reg_addr != 0) {
-            // Timeout means AICore is unresponsive. Log and continue deiniting remaining cores.
-            if (platform_deinit_aicore_regs(reg_addr) != 0) {
-                LOG_ERROR("Thread %d: Core %d deinit timed out", thread_idx, core_id);
-                rc = -1;
-            }
-        } else {
-            LOG_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
+int32_t SchedulerContext::retire_cores(Runtime *runtime) {
+    // Normal shutdown runs at the all-thread rendezvous. Emergency shutdown
+    // elects one owner before touching the same register windows.
+    if (retirement_started_.exchange(true, std::memory_order_acq_rel)) return 0;
+    AicoreExitTarget targets[RUNTIME_MAX_WORKER];
+    size_t count = 0;
+    for (int32_t i = 0; i < cores_total_num_; ++i) {
+        if (core_exec_states_[i].reg_addr != 0) {
+            targets[count++] = {core_exec_states_[i].reg_addr, &runtime->get_workers()[i].teardown};
         }
     }
+    const int32_t rc = platform_retire_aicore_group(targets, count, platform_aicore_exit_deadline());
+    if (rc != 0) LOG_ERROR("AICore group retirement timed out");
     return rc;
 }
 
@@ -768,23 +771,10 @@ bool SchedulerContext::assign_cores_to_threads() {
 // deinit their AICore register blocks. Idempotent.
 // =============================================================================
 void SchedulerContext::emergency_shutdown(Runtime *runtime) {
-    (void)runtime;  // exit is now delivered via each core's register block, not GM
-    LOG_WARN("Emergency shutdown: sending exit signal to all initialized cores");
-    int32_t timeout_count = 0;
-    for (int32_t i = 0; i < cores_total_num_; i++) {
-        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which both
-        // releases a core still polling for its window to open and signals it to
-        // exit. Cores never opened (reg_addr==0) are reaped by the host device
-        // reset that follows a handshake failure.
-        if (core_exec_states_[i].reg_addr != 0) {
-            if (platform_deinit_aicore_regs(core_exec_states_[i].reg_addr) != 0) {
-                timeout_count++;
-            }
-        }
-    }
-    if (timeout_count > 0) {
-        LOG_ERROR("Emergency shutdown: %d cores did not acknowledge exit", timeout_count);
-    }
+    // Cores whose register windows never opened remain the host recovery
+    // path's responsibility. Responsive cores use the same return handoff.
+    LOG_WARN("Emergency shutdown: retiring all initialized AICores");
+    (void)retire_cores(runtime);
 }
 
 // =============================================================================
@@ -795,6 +785,7 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
 
     // Zero all per-core execution state before handshake
     memset(core_exec_states_, 0, sizeof(core_exec_states_));
+    retirement_started_.store(false, std::memory_order_relaxed);
 
     // Wire thread configuration that handshake/assign need to read.
     aicpu_thread_num_ = aicpu_thread_num;
@@ -837,6 +828,12 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
         LOG_ERROR("Invalid cores_total_num %d (expected 1-%d)", cores_total_num_, RUNTIME_MAX_WORKER);
         return -1;
     }
+    // The prior launch may have left RELEASE=1. Reset through the same atomic
+    // path before publishing hs_setup_done_ and opening any register window.
+    for (int32_t i = 0; i < cores_total_num_; ++i) {
+        __atomic_store_n(&runtime->get_workers()[i].teardown.post_close_release, 0U, __ATOMIC_RELEASE);
+    }
+    wmb();
     aic_count_ = 0;
     aiv_count_ = 0;
     handshake_failed_.store(false, std::memory_order_release);

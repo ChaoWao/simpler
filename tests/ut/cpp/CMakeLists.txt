@@ -408,6 +408,34 @@ endfunction()
 
 enable_testing()
 
+foreach(runtime tensormap_and_ringbuffer host_build_graph)
+    set(retirement_test test_a2a3_${runtime}_retirement)
+    add_executable(${retirement_test}
+        a2a3/test_aicore_retirement.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/${runtime}/aicore/aicore_executor.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/shared/aicpu/platform_regs.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/sim/aicpu/inner_platform_regs.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu/device_time.cpp
+    )
+    target_include_directories(${retirement_test} PRIVATE
+        ${GTEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/${runtime}/runtime
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/${runtime}/common
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/${runtime}/orchestration
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/sim/aicore
+        ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+        ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common/host_build_graph
+        ${CMAKE_SOURCE_DIR}/../../../src/common
+    )
+    target_link_libraries(${retirement_test} PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+    add_test(NAME ${retirement_test} COMMAND ${retirement_test})
+    set_tests_properties(${retirement_test} PROPERTIES LABELS "no_hardware" TIMEOUT 20)
+endforeach()
+
 # ---------------------------------------------------------------------------
 # Hierarchical runtime tests (src/common/hierarchical/)
 # ---------------------------------------------------------------------------
