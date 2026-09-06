@@ -96,9 +96,13 @@ nothing to capture-then-reconstruct.
   shared-memory ring, and the drain thread are all skipped
   (`dep_gen_host_graph_active()` tells the runner). Nothing is dropped under
   back-pressure because nothing is streamed.
-- **Output.** The same `deps.json`, written during the device-runner drain.
-  The graph is thread-local, and prepare's host orchestration and the drain that
-  emits it both run on the child progress loop's single thread.
+- **Output.** The same `deps.json`, written at the end of the run's own `bind` —
+  the point where host orchestration completes and the graph is final. The graph
+  is thread-local, so it is written on the thread that captured it rather than
+  waiting for the drain, which the run lane does not pin to that thread: it
+  serializes with a mutex, which gives mutual exclusion but not thread affinity.
+  A consequence worth knowing: a run whose device execution later fails still
+  leaves its `deps.json`, because its orchestration did happen.
 
 ---
 

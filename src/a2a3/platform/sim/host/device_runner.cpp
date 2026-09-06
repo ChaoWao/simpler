@@ -718,23 +718,17 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
         pmu_collector_.reconcile_counters();
     }
 
-    // Host-orch emits the graph its orchestration built on this same thread;
-    // device-orch stops the collector, reconciles the ring, and replays.
-    if (enable_dep_gen_) {
-        const std::string deps = make_deps_json_path(output_prefix_);
-        if (dep_gen_host_graph_active()) {
-            int rc = dep_gen_host_graph_emit(deps.c_str());
+    // Device-orch shape: the collector stops, the ring reconciles, and the
+    // records replay. The host-orch shape emits at the end of bind instead, where
+    // its capture window closes — see `emit_host_dep_gen_graph` in c_api_shared.cpp.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+        dep_gen_collector_.quiesce();
+        if (dep_gen_collector_.reconcile_counters()) {
+            const std::string deps = make_deps_json_path(output_prefix_);
+            const auto &records = dep_gen_collector_.records();
+            int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
             if (rc != 0) {
-                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", rc);
-            }
-        } else {
-            dep_gen_collector_.quiesce();
-            if (dep_gen_collector_.reconcile_counters()) {
-                const auto &records = dep_gen_collector_.records();
-                int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
-                if (rc != 0) {
-                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
-                }
+                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
             }
         }
     }

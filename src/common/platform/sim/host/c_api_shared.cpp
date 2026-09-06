@@ -26,6 +26,7 @@
 #include "callable.h"
 #include "call_config.h"
 #include "device_runner_base.h"
+#include "host/dep_gen_collector.h"  // make_deps_json_path
 #include "prepare_callable_common.h"
 #include "task_args_wire.h"
 #include "native_run_context.h"
@@ -49,6 +50,37 @@ using SimNativeRunContext = NativeRunContext<SimDeviceRunnerBase>;
 // Phase entry points validate raw caller storage before beginning object
 // lifetime, so the on-storage magic must remain the leading bytes.
 static_assert(__builtin_offsetof(SimNativeRunContext, magic) == 0, "native-run magic must lead runtime storage");
+
+// Forward-declared rather than including the host_build_graph header, whose
+// types belong to that runtime .so. Each platform .so carries weak `false` /
+// `-1` fallbacks for the runtimes that capture on the device instead — see each
+// arch's device_runner.cpp.
+extern "C" bool dep_gen_host_graph_active();
+extern "C" int dep_gen_host_graph_emit(const char *deps_json_path);
+
+/**
+ * Write a host-orchestrated run's dependency graph, at the point its capture
+ * window closes.
+ *
+ * The graph is complete when bind returns — host_build_graph runs its
+ * orchestrator there — and it lives in state private to the thread that ran it.
+ * Writing it here keeps the write on that thread and ahead of any later capture,
+ * which is what the alternative (writing at drain) cannot promise: a drain may
+ * land on another thread, and a successor's bind resets the capture state.
+ *
+ * The destination comes from this run's own config rather than the runner's.
+ *
+ * A no-op for runtimes that capture on the device: their `dep_gen_host_graph_active`
+ * is the weak `false`, and their graph is emitted from the collector at drain.
+ */
+static void emit_host_dep_gen_graph(const CallConfig &config, const char *trace_attrs) {
+    if (config.enable_dep_gen == 0 || !dep_gen_host_graph_active()) return;
+    const std::string deps_path = make_deps_json_path(config.output_prefix);
+    const int emit_rc = dep_gen_host_graph_emit(deps_path.c_str());
+    if (emit_rc != 0) {
+        LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced (%s)", emit_rc, trace_attrs);
+    }
+}
 
 extern "C" {
 
@@ -709,6 +741,7 @@ int simpler_prepare_run(
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        emit_host_dep_gen_graph(state->config, state->trace_attrs);
         rc = runner->prepare_execution(
             state->runtime, state->config, state->descriptor.pipeline_slot, state->identity(),
             &state->prepared_execution
