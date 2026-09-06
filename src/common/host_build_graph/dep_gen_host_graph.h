@@ -37,11 +37,14 @@
  * without it resolves to the no-ops in tests/ut/cpp/stubs/hbg_orch_stubs.cpp.
  *
  * The graph lives in thread-local state, so capture is lock-free and two
- * prepared contexts on different threads cannot overwrite one another. Emit
- * reads the calling thread's state, so a run's orchestration (which builds the
- * graph) and its drain (which emits it) must land on the same thread. The child
- * progress loop satisfies this by being single-threaded; emit returns -3 if the
- * invariant is ever broken.
+ * prepared contexts on different threads cannot overwrite one another. Emit reads
+ * the calling thread's state, and the caller keeps that read on the capturing
+ * thread by emitting at the end of the orchestration's own bind — see
+ * `emit_host_dep_gen_graph` in each platform's c_api_shared.cpp. Emitting later
+ * would not be safe: the run lane serializes with a mutex, which guarantees
+ * mutual exclusion but not thread affinity, so a drain can land on another
+ * thread, and a successor's bind resets the state. Emit returns -3 if a caller
+ * ever reads a thread that did not capture.
  *
  * Per-task producer dedup mirrors append_fanin_or_fail, which keys on the producer's
  * local id; this keys on producer task id. The two agree only because
